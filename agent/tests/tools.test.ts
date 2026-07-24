@@ -11,6 +11,7 @@ import {
   rememberHandler, recallHandler, manageAccessHandler,
   allowDirHandler, revokeDirHandler, listDirsHandler,
   dbSchemaHandler, dbQueryHandler, runtimeInfoHandler,
+  characterFactHandler, CHARACTER_FACT_MAX_LEN,
   allowedToolsFor, type ToolCtx,
 } from "../src/core/tools.js";
 
@@ -244,9 +245,9 @@ describe("allowedToolsFor — 능력 계층(§7.1)", () => {
     expect(tools).toContain("mcp__asahi__list_dirs");
   });
 
-  it("손님 DM 은 remember/recall 만(파일·manage_access·Bash·dir 도구 없음)", () => {
+  it("손님 DM 은 remember/recall/character_fact 만(파일·manage_access·Bash·dir 도구 없음)", () => {
     const tools = allowedToolsFor("allowed", true, false);
-    expect(tools).toEqual(["mcp__asahi__remember", "mcp__asahi__recall"]);
+    expect(tools).toEqual(["mcp__asahi__remember", "mcp__asahi__recall", "mcp__asahi__character_fact"]);
     expect(tools).not.toContain("Read");
     expect(tools).not.toContain("Bash");
     expect(tools).not.toContain("mcp__asahi__manage_access");
@@ -264,11 +265,12 @@ describe("allowedToolsFor — 능력 계층(§7.1)", () => {
     expect(allowedToolsFor("owner", false, false)).toEqual(allowedToolsFor("owner", false, false, "local"));
   });
 
-  it("deployTarget='cloud' + 소유자 DM 이면 PC 도구(파일·Bash·dir 관리)를 빼고 remember/recall/manage_access/db_schema/db_query/runtime_info 만 남는다", () => {
+  it("deployTarget='cloud' + 소유자 DM 이면 PC 도구(파일·Bash·dir 관리)를 빼고 remember/recall/character_fact/manage_access/db_schema/db_query/runtime_info 만 남는다", () => {
     const tools = allowedToolsFor("owner", true, true, "cloud");
     expect(tools).toEqual([
       "mcp__asahi__remember",
       "mcp__asahi__recall",
+      "mcp__asahi__character_fact",
       "mcp__asahi__manage_access",
       "mcp__asahi__db_schema",
       "mcp__asahi__db_query",
@@ -283,7 +285,7 @@ describe("allowedToolsFor — 능력 계층(§7.1)", () => {
   });
 
   it("deployTarget='cloud' 라도 손님 DM·서버는 로컬과 동일(영향 없음)", () => {
-    expect(allowedToolsFor("allowed", true, false, "cloud")).toEqual(["mcp__asahi__remember", "mcp__asahi__recall"]);
+    expect(allowedToolsFor("allowed", true, false, "cloud")).toEqual(["mcp__asahi__remember", "mcp__asahi__recall", "mcp__asahi__character_fact"]);
     expect(allowedToolsFor("owner", false, false, "cloud")).toEqual(["mcp__asahi__recall"]);
     expect(allowedToolsFor("allowed", false, false, "cloud")).toEqual(["mcp__asahi__recall"]);
   });
@@ -320,7 +322,7 @@ describe("allowedToolsFor — 능력 계층(§7.1)", () => {
 
     it("deployTarget='cloud' 이면 ownWorkstation 이 true 여도 PC 도구가 열리지 않는다(워커가 아니므로)", () => {
       const tools = allowedToolsFor("allowed", true, false, "cloud", true);
-      expect(tools).toEqual(["mcp__asahi__remember", "mcp__asahi__recall"]);
+      expect(tools).toEqual(["mcp__asahi__remember", "mcp__asahi__recall", "mcp__asahi__character_fact"]);
       expect(tools).not.toContain("Read");
       expect(tools).not.toContain("Bash");
     });
@@ -386,5 +388,43 @@ describe("allowedToolsFor — db 도구 노출", () => {
     expect(allowedToolsFor("allowed", true, false, "local")).not.toContain("mcp__asahi__db_query");
     expect(allowedToolsFor("allowed", false, false, "local")).not.toContain("mcp__asahi__db_query");
     expect(allowedToolsFor("allowed", true, false, "local", true)).not.toContain("mcp__asahi__db_query");
+  });
+});
+
+describe("character_fact — 캐릭터 확정 설정 저장", () => {
+  it("scope='character' 로 저장한다(실제 기억과 분리)", async () => {
+    const c = await ctx({ userId: "owner", isPrivate: true, isOwner: true });
+
+    await characterFactHandler(c, { title: "학년", content: "2학년" });
+
+    const facts = await c.repos.memories.characterFacts(40);
+    expect(facts.map((f) => f.title)).toEqual(["학년"]);
+    expect(facts[0].scope).toBe("character");
+    expect(await c.repos.memories.forUser("owner")).toEqual([]); // 실제 기억에는 안 들어간다
+    expect(await c.repos.memories.all()).toEqual([]);            // recall 풀에도 안 들어간다
+  });
+
+  it("content 를 상한 길이로 자른다", async () => {
+    const c = await ctx({ userId: "owner", isPrivate: true, isOwner: true });
+
+    await characterFactHandler(c, { title: "긴설정", content: "가".repeat(CHARACTER_FACT_MAX_LEN + 50) });
+
+    expect((await c.repos.memories.characterFacts(40))[0].content).toHaveLength(CHARACTER_FACT_MAX_LEN);
+  });
+});
+
+describe("allowedToolsFor — character_fact 노출 계층", () => {
+  const CF = "mcp__asahi__character_fact";
+
+  it("DM 계열 네 분기 전부에 노출한다", () => {
+    expect(allowedToolsFor("owner", true, true, "local")).toContain(CF);
+    expect(allowedToolsFor("owner", true, true, "cloud")).toContain(CF);
+    expect(allowedToolsFor("allowed", true, false, "local", true)).toContain(CF); // ownWorkstation
+    expect(allowedToolsFor("allowed", true, false, "local")).toContain(CF);       // 일반 손님 DM
+  });
+
+  it("공개 서버 채널에는 노출하지 않는다", () => {
+    expect(allowedToolsFor("allowed", false, false, "local")).not.toContain(CF);
+    expect(allowedToolsFor("owner", false, true, "local")).not.toContain(CF);
   });
 });

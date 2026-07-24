@@ -45,6 +45,17 @@ export async function rememberHandler(ctx: ToolCtx, args: { title: string; conte
   return `기억했어요: "${args.title}"`;
 }
 
+// 캐릭터 설정 1건의 최대 길이. 신상 한 줄에는 충분하고, 프롬프트 무한 증식을 막는다.
+export const CHARACTER_FACT_MAX_LEN = 200;
+
+// 캐릭터가 대화 중 지어낸 자기 신상을 확정 설정으로 고정한다. 항상 scope='character' —
+// 실제 기억(user/shared)과 물리적으로 분리해, 지어낸 설정이 recall 결과에 섞이지 않게 한다.
+export async function characterFactHandler(ctx: ToolCtx, args: { title: string; content: string }): Promise<string> {
+  const content = (args.content ?? "").slice(0, CHARACTER_FACT_MAX_LEN);
+  await ctx.repos.memories.insert({ userId: ctx.userId, scope: "character", title: args.title, content, sourceConversationId: ctx.conversationId });
+  return `설정 고정: "${args.title}"`;
+}
+
 export async function recallHandler(ctx: ToolCtx, args: { query: string }): Promise<string> {
   // 프라이버시 스코프: 소유자 DM=전원, 손님 DM=본인+공용, 서버=공용만.
   let pool: Memory[];
@@ -150,11 +161,11 @@ export function allowedToolsFor(
 ): string[] {
   if (isOwner && isPrivate) {
     if (deployTarget === "cloud") {
-      return [t("remember"), t("recall"), t("manage_access"), t("db_schema"), t("db_query"), t("runtime_info")];
+      return [t("remember"), t("recall"), t("character_fact"), t("manage_access"), t("db_schema"), t("db_query"), t("runtime_info")];
     }
     return [
       ...FILE_TOOLS, "Bash",
-      t("remember"), t("recall"), t("manage_access"),
+      t("remember"), t("recall"), t("character_fact"), t("manage_access"),
       t("allow_dir"), t("revoke_dir"), t("list_dirs"),
       t("db_schema"), t("db_query"), t("runtime_info"),
     ];
@@ -162,11 +173,11 @@ export function allowedToolsFor(
   if (ownWorkstation && isPrivate && deployTarget !== "cloud") {
     return [
       ...FILE_TOOLS, "Bash",
-      t("remember"), t("recall"),
+      t("remember"), t("recall"), t("character_fact"),
       t("allow_dir"), t("revoke_dir"), t("list_dirs"),
     ];
   }
-  if (isPrivate && (role === "owner" || role === "allowed")) return [t("remember"), t("recall")];
+  if (isPrivate && (role === "owner" || role === "allowed")) return [t("remember"), t("recall"), t("character_fact")];
   return [t("recall")];
 }
 
@@ -189,6 +200,12 @@ export function buildTools(ctx: ToolCtx) {
         "저장된 기억에서 관련 내용을 찾습니다.",
         { query: z.string().describe("찾을 키워드") },
         async (args) => textResult(await recallHandler(ctx, args)),
+      ),
+      tool(
+        "character_fact",
+        "대화 중 즉흥으로 지어낸 너 자신의 신상 설정을 확정해 고정합니다. 처음 말한 그 턴에만 저장하세요. 이미 저장된 설정과 충돌하는 내용은 저장하지 마세요.",
+        { title: z.string().describe("짧은 제목(예: 학년, 동아리부장)"), content: z.string().describe("확정할 설정 내용") },
+        async (args) => textResult(await characterFactHandler(ctx, args)),
       ),
       tool(
         "manage_access",
