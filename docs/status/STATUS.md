@@ -1,6 +1,6 @@
 ---
 title: 프로젝트 현재 상태
-lastReviewed: 2026-07-13
+lastReviewed: 2026-07-25
 ---
 
 # 현재 상태
