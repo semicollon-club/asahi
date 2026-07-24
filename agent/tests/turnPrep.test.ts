@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { openTestDb, type Db } from "../src/store/db.js";
 import { MemoriesRepo } from "../src/store/memoriesRepo.js";
 import { SummariesRepo } from "../src/store/summariesRepo.js";
@@ -65,8 +65,34 @@ describe("buildContextBlock — 캐릭터 확정 설정 주입", () => {
     for (let i = 0; i < CHARACTER_FACT_LIMIT + 5; i++) {
       await memories.insert({ userId: "u", scope: "character", title: `설정${i}`, content: `내용${i}` });
     }
-    const block = await build();
-    expect(block).toMatch(/\[설정0\] 내용0/);
-    expect(block).not.toMatch(/\[설정41\]/);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const block = await build();
+      expect(block).toMatch(/\[설정0\] 내용0/);
+      expect(block).not.toMatch(/\[설정41\]/);
+      // 조용히 잘리면 "설정을 다 기억한다"고 오해하게 된다 — 경고가 실제로 찍히는지까지 확인한다.
+      expect(warnSpy).toHaveBeenCalled();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+});
+
+describe("buildContextBlock — 캐릭터 설정의 DM→공개 채널 전파(§FIX9)", () => {
+  it("비공개가 아닌(서버) 대화에도 캐릭터 설정은 주입되지만, 실제 유저 기억은 주입되지 않는다", async () => {
+    const db = await openTestDb();
+    const convs = new ConversationsRepo(db);
+    await convs.create({ kind: "thread", discordChannelId: "server-c", primaryUserId: "u", isPrivate: false, lastActiveTs: 1 });
+    const conv = (await convs.getByChannelId("server-c"))!;
+    const memories = new MemoriesRepo(db);
+    // 캐릭터 설정은 전역 스코프라 손님 DM 에서 만들어졌어도 이 대화의 userId 와 무관하게 존재한다.
+    await memories.insert({ userId: "u", scope: "character", title: "학년", content: "2학년" });
+    await memories.insert({ userId: "u", scope: "user", title: "고양이", content: "두 마리" });
+    const repos = { memories, summaries: new SummariesRepo(db), messages: new MessagesRepo(db) };
+
+    const block = await buildContextBlock(repos, conv, -1);
+
+    expect(block).toMatch(/\[학년\] 2학년/); // 캐릭터 설정: 비공개 여부와 무관하게 항상 주입된다(전역 스코프, §FIX9).
+    expect(block).not.toMatch(/고양이/);     // 실제 유저 기억: 비공개가 아니면 주입되지 않는다(공용만).
   });
 });

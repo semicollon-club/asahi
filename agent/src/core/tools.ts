@@ -8,6 +8,7 @@ import type { MemoriesRepo, Memory } from "../store/memoriesRepo.js";
 import type { AllowedDirsRepo } from "../store/allowedDirsRepo.js";
 import type { IntrospectRepo } from "../store/introspectRepo.js";
 import { assertReadOnlySql, formatQueryResult } from "./sqlGuard.js";
+import { CHARACTER_FACT_LIMIT } from "./turnPrep.js";
 
 // 도구 서버 이름 → 모델에는 mcp__asahi__<tool> 로 노출된다.
 export const TOOL_SERVER = "asahi";
@@ -47,13 +48,26 @@ export async function rememberHandler(ctx: ToolCtx, args: { title: string; conte
 
 // 캐릭터 설정 1건의 최대 길이. 신상 한 줄에는 충분하고, 프롬프트 무한 증식을 막는다.
 export const CHARACTER_FACT_MAX_LEN = 200;
+// 제목 상한. 제목은 "짧은 제목"으로 쓰도록 안내하지만, 손님이 쓸 수 있는 전역 저장소라 실제로 강제한다.
+export const CHARACTER_FACT_TITLE_MAX_LEN = 40;
+
+// 코드포인트 단위로 자른다. slice() 는 UTF-16 코드유닛 기준이라 이모지가 경계에 걸리면 서로게이트 쌍이 쪼개진다.
+const truncateChars = (s: string, max: number): string => [...(s ?? "")].slice(0, max).join("");
 
 // 캐릭터가 대화 중 지어낸 자기 신상을 확정 설정으로 고정한다. 항상 scope='character' —
 // 실제 기억(user/shared)과 물리적으로 분리해, 지어낸 설정이 recall 결과에 섞이지 않게 한다.
 export async function characterFactHandler(ctx: ToolCtx, args: { title: string; content: string }): Promise<string> {
-  const content = (args.content ?? "").slice(0, CHARACTER_FACT_MAX_LEN);
-  await ctx.repos.memories.insert({ userId: ctx.userId, scope: "character", title: args.title, content, sourceConversationId: ctx.conversationId });
-  return `설정 고정: "${args.title}"`;
+  // 상한에 도달하면 저장하지 않고 그 사실을 그대로 알린다. 저장은 됐지만 주입되지 않는 행을 만들면
+  // 도구가 "고정했다"고 거짓 보고하게 되고, 모델은 그걸 사실로 사용자에게 전달한다 — 이 기능이
+  // 막으려는 실패(도구 결과 조작) 그 자체다.
+  const existing = await ctx.repos.memories.characterFacts(CHARACTER_FACT_LIMIT);
+  if (existing.length >= CHARACTER_FACT_LIMIT) {
+    return `설정이 가득 차서(${CHARACTER_FACT_LIMIT}개) 고정하지 못했어. 이미 정해진 설정 안에서 답해.`;
+  }
+  const title = truncateChars(args.title, CHARACTER_FACT_TITLE_MAX_LEN);
+  const content = truncateChars(args.content, CHARACTER_FACT_MAX_LEN);
+  await ctx.repos.memories.insert({ userId: ctx.userId, scope: "character", title, content, sourceConversationId: ctx.conversationId });
+  return `설정 고정: "${title}"`;
 }
 
 export async function recallHandler(ctx: ToolCtx, args: { query: string }): Promise<string> {
@@ -204,7 +218,7 @@ export function buildTools(ctx: ToolCtx) {
       tool(
         "character_fact",
         "대화 중 즉흥으로 지어낸 너 자신의 신상 설정을 확정해 고정합니다. 처음 말한 그 턴에만 저장하세요. 이미 저장된 설정과 충돌하는 내용은 저장하지 마세요.",
-        { title: z.string().describe("짧은 제목(예: 학년, 동아리부장)"), content: z.string().describe("확정할 설정 내용") },
+        { title: z.string().max(CHARACTER_FACT_TITLE_MAX_LEN).describe("짧은 제목(예: 학년, 동아리부장)"), content: z.string().max(CHARACTER_FACT_MAX_LEN).describe("확정할 설정 내용") },
         async (args) => textResult(await characterFactHandler(ctx, args)),
       ),
       tool(

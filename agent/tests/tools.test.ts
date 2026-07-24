@@ -11,9 +11,10 @@ import {
   rememberHandler, recallHandler, manageAccessHandler,
   allowDirHandler, revokeDirHandler, listDirsHandler,
   dbSchemaHandler, dbQueryHandler, runtimeInfoHandler,
-  characterFactHandler, CHARACTER_FACT_MAX_LEN,
+  characterFactHandler, CHARACTER_FACT_MAX_LEN, CHARACTER_FACT_TITLE_MAX_LEN,
   allowedToolsFor, type ToolCtx,
 } from "../src/core/tools.js";
+import { CHARACTER_FACT_LIMIT } from "../src/core/turnPrep.js";
 
 async function ctx(over: Partial<ToolCtx> = {}): Promise<ToolCtx> {
   const db = await openTestDb();
@@ -410,6 +411,30 @@ describe("character_fact — 캐릭터 확정 설정 저장", () => {
     await characterFactHandler(c, { title: "긴설정", content: "가".repeat(CHARACTER_FACT_MAX_LEN + 50) });
 
     expect((await c.repos.memories.characterFacts(40))[0].content).toHaveLength(CHARACTER_FACT_MAX_LEN);
+  });
+
+  it("title 을 상한 길이(40)로 자른다 — 손님이 쓸 수 있는 전역 저장소라 실제로 강제해야 한다", async () => {
+    const c = await ctx({ userId: "owner", isPrivate: true, isOwner: true });
+
+    await characterFactHandler(c, { title: "제".repeat(CHARACTER_FACT_TITLE_MAX_LEN + 10), content: "내용" });
+
+    expect((await c.repos.memories.characterFacts(40))[0].title).toHaveLength(CHARACTER_FACT_TITLE_MAX_LEN);
+  });
+
+  it("상한(40개)에 도달하면 저장을 거부하고 그 사실을 알린다 — 죽은 행을 만들어 거짓 성공을 보고하지 않는다", async () => {
+    const c = await ctx({ userId: "owner", isPrivate: true, isOwner: true });
+    for (let i = 0; i < CHARACTER_FACT_LIMIT; i++) {
+      await c.repos.memories.insert({ userId: c.userId, scope: "character", title: `설정${i}`, content: `내용${i}` });
+    }
+
+    const out = await characterFactHandler(c, { title: "새설정", content: "새내용" });
+
+    expect(out).toMatch(/가득 차/);
+    expect(out).not.toMatch(/설정 고정/);
+    // 행 수가 그대로다 — 41번째(주입되지 않을 죽은 행)가 실제로 저장되지 않았다.
+    const facts = await c.repos.memories.characterFacts(CHARACTER_FACT_LIMIT + 1);
+    expect(facts).toHaveLength(CHARACTER_FACT_LIMIT);
+    expect(facts.map((f) => f.title)).not.toContain("새설정");
   });
 });
 

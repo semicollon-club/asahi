@@ -41,11 +41,12 @@ export class MemoriesRepo {
   // 캐릭터가 대화 중 지어내 확정한 자기 설정(픽션). 유저 스코프가 아니라 캐릭터 전역이다 —
   // 소유자에게 한 말이 손님에게도 동일해야 하므로 user_id 로 거르지 않는다.
   // id ASC: 먼저 말한 설정이 먼저 온다. 상한에 걸려 잘려도 초기 canon 이 안정적으로 남는다.
-  // LIMIT 을 SQL 파라미터로 넘기지 않고 JS 에서 자르는 이유: pg-mem 의 LIMIT $n 지원이 불안정하고,
-  // character 행은 설계상 소량이라 전량 조회 비용이 무시할 수준이다.
   async characterFacts(limit: number): Promise<Memory[]> {
-    const r = await this.db.query("SELECT id, user_id, scope, title, content FROM memories WHERE scope = 'character' ORDER BY id");
-    return (r.rows as Row[]).map(toMemory).slice(0, Math.max(0, limit));
+    const r = await this.db.query(
+      "SELECT id, user_id, scope, title, content FROM memories WHERE scope = 'character' ORDER BY id LIMIT $1",
+      [Math.max(0, limit)],
+    );
+    return (r.rows as Row[]).map(toMemory);
   }
 
   // FTS5 대체: 제목/본문 대소문자 무시 부분 문자열 검색. ILIKE '%...%' 대신

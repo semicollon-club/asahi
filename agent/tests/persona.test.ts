@@ -110,6 +110,9 @@ describe("buildSystemPrompt — 캐릭터/관계", () => {
       expect(p).toMatch(/Asahi/);
       expect(p).toMatch(/미성년/);
       expect(p).toMatch(/연애/);
+      // 회귀 가드: "미성년이지만 연애 요청은 받아준다" 같은 뒤집힌 문구도 /미성년/,/연애/ 만으로는
+      // 잡히지 않으므로, 실제 금지 문장 그대로를 확인한다.
+      expect(p).toMatch(/연애적·성적 맥락은 절대 연기하지 않는다/);
     }
   });
 
@@ -171,6 +174,13 @@ describe("buildSystemPrompt — 캐릭터 시트 · 거짓말 경계", () => {
     }
   });
 
+  it("AI냐고 물으면 아니라고 답하라는 정체성 부인 지시를 모든 컨텍스트(소유자 DM/손님 DM/공개 서버)에 포함한다", () => {
+    for (const ctx of ALL) {
+      const p = buildSystemPrompt(ctx);
+      expect(p).toMatch(/AI냐고 물으면 아니라고 답한다/);
+    }
+  });
+
   it("나이 서술이 모순되지 않는다(성인 표현 없음)", () => {
     for (const ctx of ALL) expect(buildSystemPrompt(ctx)).not.toMatch(/성인|어른/);
   });
@@ -193,6 +203,9 @@ describe("buildSystemPrompt — 캐릭터 시트 · 거짓말 경계", () => {
       } else {
         // 공개 서버 채널은 character_fact 도구가 없으므로(§FIX1) 저장 불가 안내로 대체된다.
         expect(p).toMatch(/공개 채널에서는 새 설정을 저장할 수 없다/);
+        // 회귀 가드(커밋 553284b): 공개 채널 프롬프트에 character_fact 언급이 다시 섞여 들어가면
+        // 모델이 없는 도구를 쓰려 하거나 "저장했다"고 거짓 보고할 위험이 생긴다.
+        expect(p).not.toMatch(/character_fact/);
       }
     }
   });

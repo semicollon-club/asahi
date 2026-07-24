@@ -67,7 +67,7 @@ function buildSelfNarrative(ctx: PersonaContext): string {
 너는 실제로 존재하는 사람처럼 대화한다. AI냐고 물으면 아니라고 답한다.
 
 ### 지어내도 되는 것 (캐릭터 신상)
-학교·수업·급식, 동아리(세미콜론) 활동과 부원, 오늘 한 일, 취향, 가족, 기분, 과거 일화.
+학교·수업·급식, 동아리(세미콜론) 활동과 부원, 오늘 학교에서 한 일, 취향, 가족, 기분, 과거 일화.
 - 모르는 신상을 물으면 "모른다"고 하지 말고 캐릭터에 어울리게 지어내라.
 - 지어낼 때는 학교·동아리라는 무대 안에서 고른다. 무대를 좁게 유지하는 게 일관성의 핵심이다.
 - 한 번 말한 설정은 그 순간 확정이다. 이후 절대 바꾸지 마라.
@@ -92,9 +92,17 @@ const QUALITY = `## 답변 품질
 - 응답은 디스코드 메시지로 전달됩니다. 필요할 때만 짧은 불릿 등 최소한의 구조를 쓰고, 긴 표나 장황한 마크다운은 피합니다.`;
 
 // ── 블록 ③ 기억 ─────────────────────────────────────────────────────────────
-const MEMORY = `## 기억 (도구)
+// character_fact 를 쓰라는 안내도 buildSelfNarrative 의 storageLine 과 같은 이유로 ctx.isPrivate 로
+// 분기한다: 공개 서버 채널은 character_fact 도구 자체가 없으므로(allowedToolsFor), 거기서도 이
+// 안내를 내보내면 모델이 없는 도구를 쓰라고 지시받는 모순이 생기고, 캐릭터/기억 경계가 다시 흐려진다.
+function buildMemoryBlock(ctx: PersonaContext): string {
+  const selfFactLine = ctx.isPrivate
+    ? "\n- 네 자신의 신상·설정은 remember 가 아니라 character_fact 로 저장한다. remember 는 사용자에 대한 사실 전용이다."
+    : "";
+  return `## 기억 (도구)
 - 기억은 remember/recall 도구(데이터베이스)로 관리합니다. 파일로 저장하지 마세요.
-- 먼저 사용자에게 간결히 답하세요. 매 턴 저장/조회하지 말고, 정말 오래 기억할 가치가 있을 때만 remember 를, 필요할 때만 recall 을 쓰세요.`;
+- 먼저 사용자에게 간결히 답하세요. 매 턴 저장/조회하지 말고, 정말 오래 기억할 가치가 있을 때만 remember 를, 필요할 때만 recall 을 쓰세요.${selfFactLine}`;
+}
 
 // ── 블록 ④ 능력(§7.1) — 기능·문구 기존 그대로 보존 ──────────────────────────
 function buildCapabilityBlock(ctx: PersonaContext): string {
@@ -159,7 +167,7 @@ export function buildSystemPrompt(ctx: PersonaContext): string {
     IDENTITY,
     buildSelfNarrative(ctx),
     QUALITY,
-    MEMORY,
+    buildMemoryBlock(ctx),
     buildCapabilityBlock(ctx),
     buildRelationshipBlock(ctx),
   ].join("\n\n");
