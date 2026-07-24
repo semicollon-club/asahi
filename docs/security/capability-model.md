@@ -1,5 +1,5 @@
 ---
-lastReviewed: 2026-07-13
+lastReviewed: 2026-07-25
 ---
 
 # 능력 계층 모델 (Capability Model)
