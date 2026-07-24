@@ -663,6 +663,7 @@ git commit -m "feat(persona): 캐릭터 시트 재작성 + 픽션/사실 경계 
 
 **Files:**
 - Create: `image/README.md`
+- Modify: `docs/security/capability-model.md`
 - Modify: `docs/status/STATUS.md`
 
 **Interfaces:**
@@ -689,7 +690,27 @@ Asahi 캐릭터의 시각 참조 원본이다. `공유용__00740_.png` ~ `공유
 캐릭터 외형을 바꾸려면 이미지 → 설계 문서 §3 → `persona.ts` 순으로 함께 갱신한다.
 ```
 
-- [ ] **Step 2: `docs/status/STATUS.md` 의 캐릭터/페르소나 항목 갱신**
+- [ ] **Step 2: `docs/security/capability-model.md` 의 계층별 도구 표 갱신**
+
+이 문서의 §"계층" 표(22–28행)는 계층별로 열리는 도구를 **정확히 열거하는 정본**이다(105행이 그렇게 명시한다).
+Task 4가 DM 계열 네 계층에 `character_fact` 를 추가했으므로 표가 지금 틀린 상태다. 아래 네 행에
+`character_fact` 를 추가한다. **서버/스레드(공개) 행은 건드리지 않는다** — 그 계층에는 노출되지 않는다.
+
+| 갱신할 행 | 추가 위치 |
+|---|---|
+| 소유자 DM · local | `remember`/`recall`(전원) 다음 |
+| 소유자 DM · cloud | `remember`/`recall`(전원) 다음 |
+| 손님 자기 PC(ownWorkstation) · DM · local | `remember`/`recall`(본인) 다음 |
+| 손님 DM(자기 PC 아님) | `remember`/`recall`(본인 스코프만) 다음 |
+
+표 아래에 한 줄을 덧붙인다.
+
+```markdown
+`character_fact`(캐릭터가 지어낸 자기 설정 고정)는 DM 계열 네 계층에만 열린다. 공개 서버 채널에서는
+조작으로 설정을 오염시킬 여지가 크고 얻는 값이 작아 읽기(`recall`)만 남긴다.
+```
+
+- [ ] **Step 3: `docs/status/STATUS.md` 의 캐릭터/페르소나 항목 갱신**
 
 `## 병합된 주요 기능 (main)` 절의 `**캐릭터/페르소나**` 불릿을 아래로 교체한다.
 
@@ -703,7 +724,7 @@ Asahi 캐릭터의 시각 참조 원본이다. `공유용__00740_.png` ~ `공유
 
 같은 파일 `## 테스트` 절의 테스트 수치는 Step 3의 실제 출력으로 갱신한다.
 
-- [ ] **Step 3: 실제 테스트 수치 확인**
+- [ ] **Step 4: 실제 테스트 수치 확인**
 
 ```bash
 cd agent && npm test
@@ -711,7 +732,7 @@ cd agent && npm test
 
 출력의 `Tests  N passed | 1 skipped`, `Test Files  M passed` 값을 STATUS.md 에 반영한다.
 
-- [ ] **Step 4: 문서 검사**
+- [ ] **Step 5: 문서 검사**
 
 ```bash
 node scripts/check-docs.mjs
@@ -719,7 +740,7 @@ node scripts/check-docs.mjs
 
 기대: `문서 검사 통과`
 
-- [ ] **Step 5: 커밋**
+- [ ] **Step 6: 커밋**
 
 ```bash
 git add image/README.md docs/status/STATUS.md
