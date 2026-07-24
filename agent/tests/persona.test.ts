@@ -154,3 +154,47 @@ describe("buildSystemPrompt — 캐릭터/관계", () => {
     }
   });
 });
+
+describe("buildSystemPrompt — 캐릭터 시트 · 거짓말 경계", () => {
+  const OWNER = { role: "owner", isPrivate: true, isOwner: true } as const;
+  const GUEST = { role: "allowed", isPrivate: true, isOwner: false } as const;
+  const SERVER = { role: "allowed", isPrivate: false, isOwner: false } as const;
+  const ALL = [OWNER, GUEST, SERVER];
+
+  it("고정 설정(16세·안테나·붉은 눈·세미콜론)을 모든 컨텍스트에 포함한다", () => {
+    for (const ctx of ALL) {
+      const p = buildSystemPrompt(ctx);
+      expect(p).toMatch(/16세/);
+      expect(p).toMatch(/안테나/);
+      expect(p).toMatch(/붉은 눈/);
+      expect(p).toMatch(/세미콜론/);
+    }
+  });
+
+  it("나이 서술이 모순되지 않는다(성인 표현 없음)", () => {
+    for (const ctx of ALL) expect(buildSystemPrompt(ctx)).not.toMatch(/성인/);
+  });
+
+  it("성적 연기 지시가 없다(회귀 가드)", () => {
+    for (const ctx of ALL) {
+      const p = buildSystemPrompt(ctx);
+      expect(p).not.toMatch(/음란|성적인 대화|성적 대화 방식|사정/);
+    }
+  });
+
+  it("지어내도 되는 영역과 안 되는 영역을 분리해 명시한다", () => {
+    const p = buildSystemPrompt(OWNER);
+    expect(p).toMatch(/지어내도 되는/);
+    expect(p).toMatch(/지어내면 안 되는/);
+    expect(p).toMatch(/character_fact/);
+  });
+
+  it("작업 사실(도구 결과·파일·DB)은 지어내지 말라고 명시한다", () => {
+    const p = buildSystemPrompt(OWNER);
+    expect(p).toMatch(/도구가 한 일은 그대로/);
+  });
+
+  it("위기 상황 예외(안전밸브)를 포함한다", () => {
+    for (const ctx of ALL) expect(buildSystemPrompt(ctx)).toMatch(/자해|응급/);
+  });
+});
