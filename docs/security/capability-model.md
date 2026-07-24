@@ -21,11 +21,14 @@ PC/데이터에 영향을 주는 도구는 발화자의 **신원과 대화 위�
 
 | 계층 | 조건 | 열리는 도구 |
 | --- | --- | --- |
-| 소유자 DM · local | `isOwner && isPrivate`, `deployTarget="local"` | 파일 도구(Read/Write/Edit/Glob/Grep) + Bash + `remember`/`recall`(전원) + `manage_access` + `allow_dir`/`revoke_dir`/`list_dirs` + `db_schema`/`db_query`/`runtime_info` |
-| 소유자 DM · cloud | `isOwner && isPrivate`, `deployTarget="cloud"` | `remember`/`recall`(전원) + `manage_access` + `db_schema`/`db_query`/`runtime_info` — 파일/Bash/폴더관리 등 PC 도구는 전부 제외 |
-| 손님 자기 PC(ownWorkstation) · DM · local | `ownWorkstation && isPrivate`, `deployTarget≠"cloud"` | 파일 도구 + Bash + `remember`/`recall`(본인) + `allow_dir`/`revoke_dir`/`list_dirs` — `manage_access`·DB 조회 도구는 **제외**(신원 특권이 아니므로) |
-| 손님 DM(자기 PC 아님) | `isPrivate && role in {allowed, owner}`, 그 외 | `remember`/`recall`(본인 스코프만) |
+| 소유자 DM · local | `isOwner && isPrivate`, `deployTarget="local"` | 파일 도구(Read/Write/Edit/Glob/Grep) + Bash + `remember`/`recall`(전원) + `character_fact` + `manage_access` + `allow_dir`/`revoke_dir`/`list_dirs` + `db_schema`/`db_query`/`runtime_info` |
+| 소유자 DM · cloud | `isOwner && isPrivate`, `deployTarget="cloud"` | `remember`/`recall`(전원) + `character_fact` + `manage_access` + `db_schema`/`db_query`/`runtime_info` — 파일/Bash/폴더관리 등 PC 도구는 전부 제외 |
+| 손님 자기 PC(ownWorkstation) · DM · local | `ownWorkstation && isPrivate`, `deployTarget≠"cloud"` | 파일 도구 + Bash + `remember`/`recall`(본인) + `character_fact` + `allow_dir`/`revoke_dir`/`list_dirs` — `manage_access`·DB 조회 도구는 **제외**(신원 특권이 아니므로) |
+| 손님 DM(자기 PC 아님) | `isPrivate && role in {allowed, owner}`, 그 외 | `remember`/`recall`(본인 스코프만) + `character_fact` |
 | 서버/스레드(공개) | `!isPrivate` — 소유자여도 동일 | `recall`(공용 스코프만) |
+
+`character_fact`(캐릭터가 지어낸 자기 설정 고정)는 DM 계열 네 계층에만 열린다. 공개 서버 채널에서는
+조작으로 설정을 오염시킬 여지가 크고 얻는 값이 작아 읽기(`recall`)만 남긴다.
 
 `ownWorkstation` 은 하이브리드 로컬 워커가 "그 사용자 자신의 PC"에서 턴을 실행 중일 때만 선다.
 손님이라도 자기 PC 위에서는 파일/Bash 전권을 갖지만, `manage_access`나 `db_query` 같은
