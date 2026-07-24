@@ -9,6 +9,8 @@ describe("MemoriesRepo", () => {
     await repo.insert({ userId: "owner", scope: "user", title: "고양이", content: "고양이 두 마리" });
     await repo.insert({ userId: "bob", scope: "user", title: "밥선호", content: "매운 것 좋아함" });
     await repo.insert({ userId: "owner", scope: "shared", title: "서버규칙", content: "존댓말 사용" });
+    await repo.insert({ userId: "owner", scope: "character", title: "학년", content: "2학년" });
+    await repo.insert({ userId: "bob", scope: "character", title: "동아리부장", content: "부장은 3학년 선배" });
   });
 
   it("forUser 는 그 사용자 user 기억 + 전체 shared 만 준다(타인 user 제외)", async () => {
@@ -22,8 +24,9 @@ describe("MemoriesRepo", () => {
     expect((await repo.sharedOnly()).map((m) => m.title)).toEqual(["서버규칙"]);
   });
 
-  it("all 은 전원(소유자 recall 용)", async () => {
-    expect(await repo.all()).toHaveLength(3);
+  it("all 은 character(픽션 설정)를 제외한 전원(소유자 recall 용)", async () => {
+    const titles = (await repo.all()).map((m) => m.title).sort();
+    expect(titles).toEqual(["고양이", "밥선호", "서버규칙"]);
   });
 
   it("검색·수정·삭제", async () => {
@@ -43,5 +46,22 @@ describe("MemoriesRepo", () => {
 
     expect((await repo.searchForUser("owner", "50%")).map((m) => m.content)).toEqual(["50% 쿠폰"]);
     expect((await repo.searchForUser("owner", "a_b")).map((m) => m.content)).toEqual(["a_b 값"]);
+  });
+
+  it("characterFacts 는 character 행만 id 오름차순으로 준다(먼저 말한 설정이 먼저)", async () => {
+    const facts = await repo.characterFacts(40);
+    expect(facts.map((f) => f.title)).toEqual(["학년", "동아리부장"]);
+    expect(facts.every((f) => f.scope === "character")).toBe(true);
+  });
+
+  it("characterFacts 는 limit 만큼만 자르고, 오래된 설정을 우선 남긴다", async () => {
+    expect((await repo.characterFacts(1)).map((f) => f.title)).toEqual(["학년"]);
+    expect(await repo.characterFacts(0)).toEqual([]);
+  });
+
+  it("forUser·sharedOnly·searchForUser 에는 character 가 섞이지 않는다", async () => {
+    expect((await repo.forUser("owner")).some((m) => m.scope === "character")).toBe(false);
+    expect((await repo.sharedOnly()).some((m) => m.scope === "character")).toBe(false);
+    expect(await repo.searchForUser("owner", "2학년")).toEqual([]);
   });
 });

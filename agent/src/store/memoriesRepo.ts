@@ -1,14 +1,15 @@
 import type { Db } from "./db.js";
 
-export type Memory = { id: number; userId: string; scope: "user" | "shared"; title: string; content: string };
-type Row = { id: number | string; user_id: string; scope: "user" | "shared"; title: string; content: string };
+export type MemoryScope = "user" | "shared" | "character";
+export type Memory = { id: number; userId: string; scope: MemoryScope; title: string; content: string };
+type Row = { id: number | string; user_id: string; scope: MemoryScope; title: string; content: string };
 function toMemory(r: Row): Memory { return { id: Number(r.id), userId: r.user_id, scope: r.scope, title: r.title, content: r.content }; }
 
 export class MemoriesRepo {
   private now: () => number;
   constructor(private db: Db, now: () => number = Date.now) { this.now = now; }
 
-  async insert(m: { userId: string; scope: "user" | "shared"; title: string; content: string; sourceConversationId?: number }): Promise<number> {
+  async insert(m: { userId: string; scope: MemoryScope; title: string; content: string; sourceConversationId?: number }): Promise<number> {
     const t = this.now();
     const r = await this.db.query(
       "INSERT INTO memories (user_id, scope, title, content, source_conversation_id, created_ts, updated_ts) VALUES ($1, $2, $3, $4, $5, $6, $6) RETURNING id",
@@ -30,9 +31,21 @@ export class MemoriesRepo {
     return (r.rows as Row[]).map(toMemory);
   }
 
+  // 소유자 recall 풀. scope='character'(지어낸 캐릭터 설정)는 제외한다 —
+  // 픽션이 실제 기억 조회 결과에 섞이면 "작업 사실은 지어내지 않는다"는 경계가 무너진다.
   async all(): Promise<Memory[]> {
-    const r = await this.db.query("SELECT id, user_id, scope, title, content FROM memories ORDER BY id");
+    const r = await this.db.query("SELECT id, user_id, scope, title, content FROM memories WHERE scope <> 'character' ORDER BY id");
     return (r.rows as Row[]).map(toMemory);
+  }
+
+  // 캐릭터가 대화 중 지어내 확정한 자기 설정(픽션). 유저 스코프가 아니라 캐릭터 전역이다 —
+  // 소유자에게 한 말이 손님에게도 동일해야 하므로 user_id 로 거르지 않는다.
+  // id ASC: 먼저 말한 설정이 먼저 온다. 상한에 걸려 잘려도 초기 canon 이 안정적으로 남는다.
+  // LIMIT 을 SQL 파라미터로 넘기지 않고 JS 에서 자르는 이유: pg-mem 의 LIMIT $n 지원이 불안정하고,
+  // character 행은 설계상 소량이라 전량 조회 비용이 무시할 수준이다.
+  async characterFacts(limit: number): Promise<Memory[]> {
+    const r = await this.db.query("SELECT id, user_id, scope, title, content FROM memories WHERE scope = 'character' ORDER BY id");
+    return (r.rows as Row[]).map(toMemory).slice(0, Math.max(0, limit));
   }
 
   // FTS5 대체: 제목/본문 대소문자 무시 부분 문자열 검색. ILIKE '%...%' 대신
