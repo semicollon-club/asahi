@@ -8,9 +8,20 @@ import type { MemoriesRepo } from "../store/memoriesRepo.js";
 
 export type ContextRepos = { memories: MemoriesRepo; summaries: SummariesRepo; messages: MessagesRepo };
 
+// 캐릭터 확정 설정 주입 상한. 프롬프트 예산을 지키면서 초기 canon 을 우선 보존한다(id ASC + 앞에서 자름).
+export const CHARACTER_FACT_LIMIT = 40;
+
 // 새 세션 시작 시 주입할 기억+요약+최근대화 컨텍스트 블록.
 // 프라이버시(§6): DM 은 상대(primaryUser)의 개인+공용, 서버/스레드는 공용만.
 export async function buildContextBlock(repos: ContextRepos, conv: Conversation, excludeMessageId: number): Promise<string> {
+  // 캐릭터 설정은 유저 스코프가 아니라 전역이다 — 소유자에게 한 말이 손님에게도 같아야 한다.
+  // 상한을 하나 더 조회해 잘림 여부를 알아낸다. 조용히 자르면 "설정을 다 기억한다"고 오해하게 된다.
+  const probed = await repos.memories.characterFacts(CHARACTER_FACT_LIMIT + 1);
+  const facts = probed.slice(0, CHARACTER_FACT_LIMIT);
+  if (probed.length > CHARACTER_FACT_LIMIT) {
+    console.warn(`[turnPrep] 캐릭터 설정이 상한(${CHARACTER_FACT_LIMIT})을 넘어 오래된 것만 주입합니다.`);
+  }
+  const factLines = facts.length > 0 ? facts.map((f) => `- [${f.title}] ${f.content}`).join("\n") : "(설정 없음)";
   const memories = conv.isPrivate ? await repos.memories.forUser(conv.primaryUserId) : await repos.memories.sharedOnly();
   const memoryLines = memories.length > 0 ? memories.map((m) => `- [${m.title}] ${m.content}`).join("\n") : "(기억 없음)";
   const summaries = await repos.summaries.recent(conv.id, 3);
@@ -21,6 +32,8 @@ export async function buildContextBlock(repos: ContextRepos, conv: Conversation,
     .join("\n");
   return [
     "[기억 컨텍스트 — 새 세션 시작]",
+    "## 내 설정 (이미 말한 것 — 반드시 이대로 유지)",
+    factLines,
     "## 기억 (개인/공용)",
     memoryLines,
     "## 이전 대화 요약 (최신순)",
