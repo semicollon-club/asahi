@@ -66,9 +66,59 @@ describe("봇 쪽 1차 경로 필터", () => {
     await expect(remoteToolHandler(ctx, "fs_read", { path: "/w/a" })).resolves.toContain("allow_dir");
   });
 
-  it("경로 인자가 없는 sh_exec 는 1차 필터를 건너뛴다(워커가 판정)", async () => {
+  it("sh_exec 는 경로 인자가 없어 1차 필터 대상이 아니다(셸은 경로 인자로 봉쇄할 수 없다는 설계 그대로 — FIX6 은 문서만 바로잡고 이 동작은 바꾸지 않는다)", async () => {
     const ctx = withDirs(["/w/proj"], { call: async () => ({ ok: true, content: "출력" }) });
     await expect(remoteToolHandler(ctx, "sh_exec", { command: "ls" })).resolves.toBe("출력");
+  });
+});
+
+// ── FIX6: fs_glob·fs_grep 는 path 인자 유무만으로 1차 필터를 건너뛰면 안 된다 ───────────────
+// path 가 생략되면 allowedDirs 검사 자체가 통째로 스킵됐었다(빈 allowedDirs 로도 워커 루트 전체를
+// 열거할 수 있었다) — 그리고 path 가 허용 폴더 안이어도 pattern 이 '../../**/*' 같은 값이면 봇 쪽은
+// path 만 보고 통과시켰다(워커도 roots 만 재검사할 뿐 allowedDirs 는 모른다). 이 두 도구가 대체한
+// 로컬 SDK Glob/Grep 게이트(pathPermission.ts 의 extractCandidatePaths)가 이미 풀어 둔 문제라
+// 그 로직을 재사용해 검증한다.
+describe("FIX6 — fs_glob·fs_grep 는 path 가 없어도, pattern 이 벗어나도 1차 필터를 건너뛰지 않는다", () => {
+  const withDirs = (dirs: string[], call: ToolCtx["remote"]): ToolCtx =>
+    ({ remote: call, isOwner: true, isPrivate: true, userId: "owner", repos: { allowedDirs: { list: async () => dirs } } } as unknown as ToolCtx);
+
+  it("fs_glob 는 path 생략 + allowedDirs 가 비어 있으면 허브를 부르지 않고 거부한다(전체 루트 열거 방지)", async () => {
+    let called = false;
+    const ctx = withDirs([], { call: async () => { called = true; return { ok: true, content: "" }; } });
+    const out = await remoteToolHandler(ctx, "fs_glob", { pattern: "**/*" });
+    expect(called).toBe(false);
+    expect(out).toContain("allow_dir");
+  });
+
+  it("fs_grep 는 path 생략 + allowedDirs 가 비어 있으면 허브를 부르지 않고 거부한다(전체 루트 열거 방지)", async () => {
+    let called = false;
+    const ctx = withDirs([], { call: async () => { called = true; return { ok: true, content: "" }; } });
+    const out = await remoteToolHandler(ctx, "fs_grep", { pattern: "secret" });
+    expect(called).toBe(false);
+    expect(out).toContain("allow_dir");
+  });
+
+  it("fs_glob 는 path 를 생략해도 allowedDirs 가 있으면 그 첫 폴더를 기본값으로 검사해 통과시킨다(기존 동작 유지)", async () => {
+    const ctx = withDirs(["/w/proj"], { call: async () => ({ ok: true, content: "목록" }) });
+    await expect(remoteToolHandler(ctx, "fs_glob", { pattern: "**/*" })).resolves.toBe("목록");
+  });
+
+  it("fs_grep 는 path 를 생략해도 allowedDirs 가 있으면 그 첫 폴더를 기본값으로 검사해 통과시킨다(기존 동작 유지)", async () => {
+    const ctx = withDirs(["/w/proj"], { call: async () => ({ ok: true, content: "결과" }) });
+    await expect(remoteToolHandler(ctx, "fs_grep", { pattern: "TODO" })).resolves.toBe("결과");
+  });
+
+  it("fs_glob 는 path 는 허용 폴더 안이어도 pattern 이 '../../**/*' 로 그 밖을 가리키면 허브를 부르지 않고 거부한다", async () => {
+    let called = false;
+    const ctx = withDirs(["/w/proj"], { call: async () => { called = true; return { ok: true, content: "" }; } });
+    const out = await remoteToolHandler(ctx, "fs_glob", { path: "/w/proj", pattern: "../../**/*" });
+    expect(called).toBe(false);
+    expect(out).toContain("허용된 폴더 밖");
+  });
+
+  it("fs_glob 는 path·pattern 이 전부 허용 폴더 안이면 정상적으로 허브를 부른다(회귀 없음)", async () => {
+    const ctx = withDirs(["/w/proj"], { call: async () => ({ ok: true, content: "목록2" }) });
+    await expect(remoteToolHandler(ctx, "fs_glob", { path: "/w/proj", pattern: "**/*.ts" })).resolves.toBe("목록2");
   });
 });
 

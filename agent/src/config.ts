@@ -13,6 +13,12 @@ function positiveNumberEnv(env: NodeJS.ProcessEnv, key: string, def: number): nu
   return n;
 }
 
+// FIX2(치명): WORKER_TOKEN 은 "누가 소유자의 워커인가"를 가르는 유일한 인증 수단이다. 비어 있거나
+// 너무 짧으면(추측 가능) hub.ts 가 아무 hello 나 소유자 워커로 인증해버릴 수 있다 — 실제로
+// env.WORKER_TOKEN || "" 인 채로 기동되면 빈 문자열끼리 비교돼 누구나 인증됐다(리뷰 재현). 다른
+// 필수 환경변수처럼 시작 시점에 명확히 실패시킨다.
+const MIN_WORKER_TOKEN_LENGTH = 20;
+
 export type Config = {
   discordToken: string;
   ownerId: string;
@@ -36,9 +42,19 @@ export type Config = {
 };
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
-  const missing = ["DISCORD_TOKEN", "DISCORD_OWNER_ID", "DATABASE_URL"].filter((k) => !env[k]);
+  // FIX2: WORKER_TOKEN 도 다른 필수값과 동일하게 "없으면(빈 문자열 포함) 시작 시점에 실패"로
+  // 취급한다 — 예전엔 이 목록에서 빠져 있어 env.WORKER_TOKEN || "" 로 조용히 빈 문자열이 됐다.
+  const missing = ["DISCORD_TOKEN", "DISCORD_OWNER_ID", "DATABASE_URL", "WORKER_TOKEN"].filter((k) => !env[k]);
   if (missing.length > 0) {
     throw new Error(`환경변수 누락: ${missing.join(", ")} — .env 파일을 확인하세요 (.env.example 참고)`);
+  }
+  const workerToken = env.WORKER_TOKEN as string;
+  if (workerToken.length < MIN_WORKER_TOKEN_LENGTH) {
+    throw new Error(
+      `WORKER_TOKEN 이 너무 짧습니다(최소 ${MIN_WORKER_TOKEN_LENGTH}자 필요, 현재 ${workerToken.length}자) — ` +
+        `무작위로 생성한 긴 문자열을 쓰세요(예: openssl rand -hex 32). 짧거나 빈 토큰은 그 값을 아는(또는 ` +
+        `추측한) 사람 누구나 소유자의 워커인 척 접속해 파일·셸 작업을 가로챌 수 있게 만듭니다.`,
+    );
   }
   // 런타임 데이터의 기본 경로는 앱(agent/) 바깥, 리포 루트의 data/ 아래에 둔다.
   // cwd 는 agent/ (npm 스크립트와 PM2 cwd 기준). DATA_DIR / MEMORY_DIR 로 재정의 가능.
@@ -56,7 +72,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     ownerReserve: positiveNumberEnv(env, "OWNER_RESERVE", 10),
     deployTarget: env.DEPLOY_TARGET === "cloud" ? "cloud" : "local",
     model: env.ANTHROPIC_MODEL || "claude-opus-4-8",
-    workerToken: env.WORKER_TOKEN || "",
+    workerToken,
     httpPort: positiveNumberEnv(env, "PORT", 3000),
   };
 }

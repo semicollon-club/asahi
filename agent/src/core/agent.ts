@@ -109,6 +109,21 @@ export function buildToolCtx(repos: ToolRepos, context: TurnContext, runtime: Ru
   };
 }
 
+// FIX7(중요): 이 턴에 원격 워커(ctx.remote + fs_*/sh_exec 6종)를 열지 정하는 술어만 따로 뽑은
+// 순수 함수 — makeRunAgentTurn 안에 인라인으로 두면 이 판단 하나를 검증하려고 SDK query() 전체를
+// 목업해야 해서 테스트가 없었다(리뷰 지적: 가장 보안에 민감한 줄인데도 회귀를 잡을 방법이 없었다).
+// 정확히 "소유자 DM(소유자 && 비공개)이면서 그 소유자의 워커가 허브에 연결돼 있다"의 AND 다 —
+// "연결은 됐지만 공개 채널"(isPrivate=false)과 "연결은 됐지만 손님"(isOwner=false) 두 경우가 이
+// 판정이 지켜야 할 핵심 회귀다: 허브 쪽 배선(hub.isConnected)은 이 턴이 공개 채널인지도, 소유자인지도
+// 모르고 오직 "그 userId 의 워커가 연결돼 있는가"만 안다 — 그래서 나머지 두 조건은 반드시 여기서
+// 함께 확인해야 한다(remoteToolHandler 가 실행 시점에 독립적으로 다시 확인하는 것과 같은 기준).
+export function shouldConnectWorker(
+  context: { isOwner: boolean; isPrivate: boolean; userId: string },
+  hub?: { isConnected(userId: string): boolean },
+): boolean {
+  return context.isOwner && context.isPrivate && hub?.isConnected(context.userId) === true;
+}
+
 // 도구 리포를 클로저로 받아 실제 SDK 턴 러너를 만든다. 매 턴 컨텍스트로
 // 인프로세스 도구(remember/recall/manage_access)와 allowedTools 를 구성한다.
 // deployTarget(Railway 조각2, 기본 local): cloud 면 owner-DM 이라도 PC 도구(파일/Bash)를 allowedToolsFor
@@ -134,8 +149,9 @@ export function makeRunAgentTurn(
     // (허브 쪽 배선은 이 턴이 공개 채널인지 모른다) 소유자가 공개 서버 채널에 쓴 턴에도 ctx.remote 가
     // 채워져, 그 채널의 모델이 sh_exec 등 PC 도구를 호출할 길이 생긴다. allowedTools 산정에도 같은
     // workerConnected 값을 넘겨야 "도구는 보이는데 실행하면 거부"라는 불일치가 생기지 않는다.
-    const isOwnerDm = req.context.isOwner && req.context.isPrivate;
-    const workerConnected = isOwnerDm && hub?.isConnected(req.context.userId) === true;
+    // FIX7: 이 판정 자체는 shouldConnectWorker 로 뽑아 따로 테스트한다(agent.test.ts) — 이 함수
+    // (makeRunAgentTurn)는 SDK query() 호출까지 가므로 판정 하나만 검증하기엔 무겁다.
+    const workerConnected = shouldConnectWorker(req.context, hub);
     if (workerConnected && hub) {
       ctx.remote = { call: (tool, args) => hub.call(req.context.userId, tool, args) };
     }

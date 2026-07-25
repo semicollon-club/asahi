@@ -7,7 +7,7 @@ import { MemoriesRepo } from "../src/store/memoriesRepo.js";
 import { UsersRepo } from "../src/store/usersRepo.js";
 import { AllowedDirsRepo } from "../src/store/allowedDirsRepo.js";
 import { IntrospectRepo } from "../src/store/introspectRepo.js";
-import { buildToolCtx, buildMultimodalMessage, type TurnContext, type ToolRepos } from "../src/core/agent.js";
+import { buildToolCtx, buildMultimodalMessage, shouldConnectWorker, type TurnContext, type ToolRepos } from "../src/core/agent.js";
 import { allowDirHandler, type RuntimeInfo } from "../src/core/tools.js";
 
 const testRuntime: RuntimeInfo = { model: "claude-opus-4-8", sdkVersion: "0.3.207", deployTarget: "local", maxTurns: 30 };
@@ -54,6 +54,36 @@ describe("buildToolCtx — makeRunAgentTurn 의 ToolCtx 구성(리뷰 #1 회귀)
     const ctx = buildToolCtx(repos, { role: "owner", isPrivate: true, isOwner: true, userId: "o", conversationId: 1 }, runtime);
     expect(ctx.repos.introspect).toBe(repos.introspect);
     expect(ctx.runtime.model).toBe("claude-opus-4-8");
+  });
+});
+
+// FIX7: makeRunAgentTurn 이 ctx.remote(+ 원격 도구 6종)를 열지 정하는 가장 보안에 민감한 판단인데도
+// 테스트가 없었다 — 그 판단만 순수 함수로 뽑아(agent.ts 의 shouldConnectWorker) 직접 검증한다.
+// makeRunAgentTurn 자체는 SDK query() 를 통째로 목업해야 호출까지 갈 수 있어 이 판정 하나만
+// 떼어 보기 번거로웠다(다른 테스트들도 실제 query() 호출까지는 가지 않는다는 점에서 이 파일의
+// 관례와도 맞다). 리뷰가 지목한 핵심 회귀 두 가지: "연결은 됐지만 공개 채널", "연결은 됐지만 손님".
+describe("shouldConnectWorker — 원격 워커 연결 판정(FIX7)", () => {
+  const connectedHub = { isConnected: () => true };
+  const disconnectedHub = { isConnected: () => false };
+
+  it("소유자·DM(비공개)·워커 연결 셋 다 맞으면 true", () => {
+    expect(shouldConnectWorker({ isOwner: true, isPrivate: true, userId: "owner" }, connectedHub)).toBe(true);
+  });
+
+  it("워커는 연결돼 있지만 공개 채널(isPrivate=false)이면 소유자여도 false(회귀 — 리뷰 지적)", () => {
+    expect(shouldConnectWorker({ isOwner: true, isPrivate: false, userId: "owner" }, connectedHub)).toBe(false);
+  });
+
+  it("워커는 연결돼 있지만 손님(isOwner=false)이면 DM 이어도 false(회귀 — 리뷰 지적)", () => {
+    expect(shouldConnectWorker({ isOwner: false, isPrivate: true, userId: "guest" }, connectedHub)).toBe(false);
+  });
+
+  it("소유자 DM 이어도 그 사용자의 워커가 연결돼 있지 않으면 false", () => {
+    expect(shouldConnectWorker({ isOwner: true, isPrivate: true, userId: "owner" }, disconnectedHub)).toBe(false);
+  });
+
+  it("hub 자체를 안 넘기면(봇이 아닌 워커 경로 등) false", () => {
+    expect(shouldConnectWorker({ isOwner: true, isPrivate: true, userId: "owner" }, undefined)).toBe(false);
   });
 });
 

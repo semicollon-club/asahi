@@ -51,6 +51,46 @@ describe("WorkerHub — 인증", () => {
     expect(hub.isConnected("guest")).toBe(false);
   });
 
+  // ── FIX5: denied 사유가 토큰 정오와 신원 정오를 구분하면, 인증되지 않은 클라이언트가 그
+  // 응답만으로 "토큰이 유효한지"를 신원과 무관하게 확인할 수 있는 오라클이 된다. ────────────
+  it("토큰이 틀린 경우와, 토큰은 맞지만 신원이 다른 경우가 완전히 같은 거부 사유를 돌려준다(FIX5 — 인증 오라클 방지)", () => {
+    const wrongToken = fakeSocket();
+    hub.handleConnection(wrongToken.sock);
+    wrongToken.recv({ type: "hello", token: "bad", userId: "owner", roots: ["/w"] });
+    const wrongTokenFrame = wrongToken.sent[0];
+
+    const wrongIdentity = fakeSocket();
+    hub.handleConnection(wrongIdentity.sock);
+    wrongIdentity.recv({ type: "hello", token: "good", userId: "guest", roots: ["/w"] });
+    const wrongIdentityFrame = wrongIdentity.sent[0];
+
+    expect(wrongTokenFrame?.type).toBe("denied");
+    expect(wrongIdentityFrame?.type).toBe("denied");
+    if (wrongTokenFrame?.type !== "denied" || wrongIdentityFrame?.type !== "denied") throw new Error("denied 프레임 아님");
+    expect(wrongTokenFrame.reason).toBe(wrongIdentityFrame.reason);
+  });
+
+  it("토큰 길이가 서로 다르게 틀려도 예외 없이 거부한다(상수 시간 비교의 길이 불일치 경로)", () => {
+    const s = fakeSocket();
+    hub.handleConnection(s.sock);
+    // hub 의 token("good", 4자)과 길이가 다른 훨씬 긴 문자열 — timingSafeEqual 은 길이가 다른
+    // 버퍼를 그냥 넘기면 예외를 던지므로, 그 경우를 hub 내부에서 미리 처리하지 않으면 여기서
+    // 예외가 튀어 소켓 처리 전체가 죽는다.
+    expect(() => s.recv({ type: "hello", token: "x".repeat(50), userId: "owner", roots: ["/w"] })).not.toThrow();
+    expect(s.sent[0]?.type).toBe("denied");
+    expect(hub.isConnected("owner")).toBe(false);
+  });
+
+  it("빈 문자열 토큰으로는 절대 인증되지 않는다(설정된 토큰이 비어 있는 방어적인 경우 대비 — FIX2)", () => {
+    const emptyTokenHub = new WorkerHub({ token: "", ownerId: "owner" });
+    const s = fakeSocket();
+    emptyTokenHub.handleConnection(s.sock);
+    s.recv({ type: "hello", token: "", userId: "owner", roots: ["/w"] });
+    expect(s.sent[0]?.type).toBe("denied");
+    expect(s.closed).toBe(true);
+    expect(emptyTokenHub.isConnected("owner")).toBe(false);
+  });
+
   it("hello 없이 다른 프레임을 먼저 보내면 끊는다", () => {
     const s = fakeSocket();
     hub.handleConnection(s.sock);
@@ -202,5 +242,59 @@ describe("WorkerHub — 재연결(동일 userId 두 연결)", () => {
     if (sentCall2?.type !== "call") throw new Error("call 프레임 없음");
     s2.recv({ type: "result", id: sentCall2.id, ok: true, content: "ok" });
     await expect(p2).resolves.toEqual({ ok: true, content: "ok" });
+  });
+});
+
+// ── FIX3: 인증 전(hello 대기) 소켓은 hub.conns 에 없어 원래 closeAll() 의 대상이 아니었다 —
+// 아무 말도 안 하는 연결 하나가 서버 종료 때 httpServer.close() 콜백을 영원히 막았다. ─────────
+describe("WorkerHub — 인증 전 소켓의 수명(FIX3)", () => {
+  it("연결만 하고 hello 를 안 보내면 hello 타임아웃이 지난 뒤 스스로 닫힌다", async () => {
+    const hub = new WorkerHub({ token: "good", ownerId: "owner", helloTimeoutMs: 30 });
+    const s = fakeSocket();
+    hub.handleConnection(s.sock);
+    expect(s.closed).toBe(false);
+
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    expect(s.closed).toBe(true);
+  });
+
+  it("hello 를 시간 안에 보내 인증에 성공하면, 그 뒤 hello 타임아웃 시각이 지나도 끊기지 않는다(오탐 방지)", async () => {
+    const hub = new WorkerHub({ token: "good", ownerId: "owner", helloTimeoutMs: 30 });
+    const s = fakeSocket();
+    hub.handleConnection(s.sock);
+    s.recv({ type: "hello", token: "good", userId: "owner", roots: ["/w"] });
+    expect(hub.isConnected("owner")).toBe(true);
+
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    expect(s.closed).toBe(false);
+    expect(hub.isConnected("owner")).toBe(true);
+  });
+
+  it("closeAll() 은 아직 인증되지 않은(hello 를 안 보낸) 소켓도 닫는다", () => {
+    const hub = new WorkerHub({ token: "good", ownerId: "owner" });
+    const silent = fakeSocket();
+    hub.handleConnection(silent.sock);
+    expect(silent.closed).toBe(false);
+
+    hub.closeAll();
+
+    expect(silent.closed).toBe(true);
+  });
+
+  it("closeAll() 은 인증 전 소켓과 인증된 소켓을 함께 닫는다", async () => {
+    const hub = new WorkerHub({ token: "good", ownerId: "owner", callTimeoutMs: 300 });
+    const authed = fakeSocket();
+    hub.handleConnection(authed.sock);
+    authed.recv({ type: "hello", token: "good", userId: "owner", roots: ["/w"] });
+    const silent = fakeSocket();
+    hub.handleConnection(silent.sock);
+
+    hub.closeAll();
+
+    expect(authed.closed).toBe(true);
+    expect(silent.closed).toBe(true);
+    expect(hub.isConnected("owner")).toBe(false);
   });
 });
