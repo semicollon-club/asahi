@@ -128,4 +128,95 @@ describe("워커 클라이언트", () => {
     await vi.waitFor(() => expect(statuses.some((m) => m.includes("result 전송 실패"))).toBe(true));
     c.stop();
   });
+
+  // 아래부터는 리뷰에서 지적된 회귀 테스트다: denied·stop() 이후에도 이미 도착했거나 진행 중이던
+  // 프레임/실행이 마치 아무 일도 없었던 것처럼 계속 처리되던 구멍을 잡는다. onClose 가 이미 쓰던
+  // "if (current !== socket) return;" 가드를 onOpen·onMessage(그리고 실행기 완료 시점)에도
+  // 똑같이 적용해야 막힌다.
+
+  it("denied 이후 같은 소켓으로 도착한 call 은 실행기를 돌리지 않고 result 도 보내지 않는다", async () => {
+    const s = fakeSocket();
+    const execFn = vi.fn(async () => ({ ok: true, content: "실행됨" }));
+    const deniedExecutors: Executors = { fs_read: execFn };
+    const c = startWorkerClient({
+      connect: () => s.sock, token: "t", userId: "owner", roots: ["/w"], executors: deniedExecutors,
+    });
+    s.open();
+    s.recv({ type: "denied", reason: "테스트 거부" });
+    // 허브가 denied 를 보낸 직후 소켓을 닫기 전에 call 이 같은 소켓으로 더 도착하는 경우를 흉내낸다.
+    s.recv({ type: "call", id: "20", tool: "fs_read", args: { path: "/w/a.txt" } });
+    await new Promise((r) => setTimeout(r, 40));
+    expect(execFn).not.toHaveBeenCalled();
+    expect(s.sent.some((f) => f.type === "result")).toBe(false);
+    c.stop();
+  });
+
+  it("stop 이후 open 이 뒤늦게 발생해도 hello 를 보내지 않는다", () => {
+    const s = fakeSocket();
+    const c = startWorkerClient({ connect: () => s.sock, token: "t", userId: "owner", roots: ["/w"], executors });
+    // 아직 실제 소켓의 open 이벤트가 오기 전에 stop() 이 먼저 호출된 뒤, 뒤늦게 open 이 발생하는
+    // 경우를 흉내낸다 — 인증 토큰이 담긴 hello 가 나가면 안 된다.
+    c.stop();
+    s.open();
+    expect(s.sent.some((f) => f.type === "hello")).toBe(false);
+  });
+
+  it("stop 이후 도착한 call 은 실행기를 돌리지 않는다", async () => {
+    const s = fakeSocket();
+    const execFn = vi.fn(async () => ({ ok: true, content: "실행됨" }));
+    const stoppedExecutors: Executors = { fs_read: execFn };
+    const c = startWorkerClient({
+      connect: () => s.sock, token: "t", userId: "owner", roots: ["/w"], executors: stoppedExecutors,
+    });
+    s.open();
+    c.stop();
+    s.recv({ type: "call", id: "21", tool: "fs_read", args: { path: "/w/a.txt" } });
+    await new Promise((r) => setTimeout(r, 40));
+    expect(execFn).not.toHaveBeenCalled();
+    expect(s.sent.some((f) => f.type === "result")).toBe(false);
+  });
+
+  it("실행 중이던 실행기가 stop 이후에 끝나도 result 를 보내지 않는다", async () => {
+    const s = fakeSocket();
+    let resolveExec: ((r: { ok: boolean; content: string }) => void) | undefined;
+    const slowExecutors: Executors = {
+      slow: () =>
+        new Promise<{ ok: boolean; content: string }>((resolve) => {
+          resolveExec = resolve;
+        }),
+    };
+    const c = startWorkerClient({
+      connect: () => s.sock, token: "t", userId: "owner", roots: ["/w"], executors: slowExecutors,
+    });
+    s.open();
+    s.recv({ type: "call", id: "22", tool: "slow", args: {} });
+    // 실행기가 아직 끝나지 않은 채로(mid-flight) stop() 이 호출된 뒤에야 실행이 끝나는 경우.
+    c.stop();
+    resolveExec?.({ ok: true, content: "완료" });
+    await new Promise((r) => setTimeout(r, 40));
+    expect(s.sent.some((f) => f.type === "result")).toBe(false);
+  });
+
+  it("hello·pong 전송이 던져도 죽지 않고 클라이언트는 계속 쓸 수 있다", async () => {
+    const s = fakeSocket();
+    const statuses: string[] = [];
+    s.sock.send = () => { throw new Error("연결 끊김"); };
+    const c = startWorkerClient({
+      connect: () => s.sock, token: "t", userId: "owner", roots: ["/w"], executors,
+      onStatus: (m) => statuses.push(m),
+    });
+    expect(() => s.open()).not.toThrow();
+    await vi.waitFor(() => expect(statuses.some((m) => m.includes("hello 전송 실패"))).toBe(true));
+
+    expect(() => s.recv({ type: "ping" })).not.toThrow();
+    await vi.waitFor(() => expect(statuses.some((m) => m.includes("pong 전송 실패"))).toBe(true));
+
+    // send 를 정상으로 되돌리면 클라이언트가 여전히 정상 동작하는지 확인한다(죽지 않고 재사용 가능).
+    s.sock.send = (d) => { const f = parseFrame(d); if (f) s.sent.push(f); };
+    s.recv({ type: "call", id: "23", tool: "fs_read", args: { path: "/w/a.txt" } });
+    await vi.waitFor(() => expect(s.sent.some((f) => f.type === "result")).toBe(true));
+    expect(s.sent.find((f) => f.type === "result")).toMatchObject({ id: "23", ok: true });
+
+    c.stop();
+  });
 });

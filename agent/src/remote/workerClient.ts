@@ -37,11 +37,26 @@ export function startWorkerClient(opts: WorkerClientOpts): { stop(): void } {
     current = socket;
 
     socket.onOpen(() => {
+      // onClose 가 이미 쓰는 것과 동일한 가드. stop() 이후거나 이미 재연결로 교체된(스테일)
+      // 소켓이면 open 이 뒤늦게 발생해도 무시한다 — 그렇지 않으면 인증 토큰이 담긴 hello 가
+      // stop() 을 부른 사람의 의도와 반대로, 혹은 더 이상 아무도 안 듣는 소켓으로 나가버린다.
+      if (current !== socket) return;
       status("연결됨 — 인증 중");
-      socket.send(encodeFrame({ type: "hello", token: opts.token, userId: opts.userId, roots: opts.roots }));
+      try {
+        socket.send(encodeFrame({ type: "hello", token: opts.token, userId: opts.userId, roots: opts.roots }));
+      } catch (err) {
+        // 아래 result·pong 전송과 같은 이유로 감싼다 — send 가 동기적으로 던지면 이 콜백 밖으로
+        // 튀어나가 unhandled 예외로 프로세스를 죽일 수 있다.
+        status(`hello 전송 실패: ${String(err)}`);
+      }
     });
 
     socket.onMessage((raw) => {
+      // onClose 가 이미 쓰는 것과 동일한 가드. denied 처리는 socket.close() 로 onClose 를
+      // 동기적으로 태워 current 를 null 로 만들므로, stop() 뒤든 denied 뒤든 같은 소켓으로
+      // 이어서 도착하는 프레임(특히 call)은 이 한 줄로 전부 막힌다 — 신뢰를 거부당했거나
+      // 멈추라는 지시를 받은 워커가 그래도 도구(셸 포함)를 실행해버리는 사고를 막는다.
+      if (current !== socket) return;
       const frame = parseFrame(raw);
       if (!frame) return; // 형식이 깨진 프레임은 무시한다(허브와 달리 끊지 않는다 — 재연결 폭풍 방지)
       if (frame.type === "ready") { status("준비됨"); return; }
@@ -52,7 +67,14 @@ export function startWorkerClient(opts: WorkerClientOpts): { stop(): void } {
         socket.close();
         return;
       }
-      if (frame.type === "ping") { socket.send(encodeFrame({ type: "pong" })); return; }
+      if (frame.type === "ping") {
+        try {
+          socket.send(encodeFrame({ type: "pong" }));
+        } catch (err) {
+          status(`pong 전송 실패: ${String(err)}`);
+        }
+        return;
+      }
       if (frame.type !== "call") return;
 
       const exec = opts.executors[frame.tool];
@@ -71,6 +93,11 @@ export function startWorkerClient(opts: WorkerClientOpts): { stop(): void } {
         }
       }
       void run.then((r) => {
+        // 실행기가 도는 사이 stop() 이 호출됐거나 소켓이 재연결로 교체됐다면, 이 result 는
+        // 이제 아무도 기다리지 않는 죽은 연결로 보내는 것이다 — 위 onMessage 진입 시점의
+        // 가드는 프레임을 "받은" 순간만 검사할 뿐, 실행기가 비동기로 끝나는 "나중" 시점까지는
+        // 막아주지 못하므로 여기서 다시 검사한다.
+        if (current !== socket) return;
         try {
           socket.send(encodeFrame({ type: "result", id: frame.id, ok: r.ok, content: r.content }));
         } catch (err) {
