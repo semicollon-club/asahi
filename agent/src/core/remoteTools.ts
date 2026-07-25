@@ -30,17 +30,19 @@ function pathArgOf(args: Record<string, unknown>): string | undefined {
   return typeof p === "string" ? p : undefined;
 }
 
-// FIX6(중요): fs_glob·fs_grep 는 path 인자가 없어도 pattern(글롭 패턴) 자체가 경로를 담을 수 있다.
-// path 유무만으로 필터 전체를 걸고/건너뛰면 (1) path 를 생략하면 allowedDirs 검사가 통째로
-// 스킵되어 — 워커는 path 생략 시 roots[0] 를 기본값으로 쓰므로 — 빈 allowedDirs 로도 워커 루트
-// 전체를 열거할 수 있었고, (2) path 가 허용 폴더 안이어도 pattern="../../**/*" 같은 값으로 그
-// 밖을 가리키면 봇 쪽은 path 만 보고 통과시켰다(워커도 결과를 roots 로만 재검사할 뿐 allowedDirs
-// 는 모른다). 이 두 도구가 대체한 로컬 SDK 의 Glob/Grep 도구(canUseTool 이 쓰던 원래 게이트)는
-// pathPermission.ts 의 extractCandidatePaths 로 정확히 이 문제를 이미 풀어 뒀다 — 같은 규칙을
-// 두 번 만들지 않고 그대로 재사용한다. "path 생략 시 실행기(executors.ts)가 roots[0] 를 기본값으로
-// 쓴다"는 것과 같은 정신으로, 여기서는 allowedDirs[0](사용자가 실제로 허용한 첫 폴더)을
-// extractCandidatePaths 의 cwd 인자로 넘긴다 — "후보가 하나도 안 나오면 그 기본값을 검사한다"는
-// 이미 검증된 규칙을 그대로 태운다.
+// FIX6(중요): fs_glob·fs_grep 는 path 인자가 없어도 pattern(글롭 패턴, fs_grep 은 +glob 검색
+// 필터) 자체가 경로를 담을 수 있다. path 유무만으로 필터 전체를 걸고/건너뛰면 (1) path 를
+// 생략하면 allowedDirs 검사가 통째로 스킵되어 — 워커는 path 생략 시 roots[0] 를 기본값으로
+// 쓰므로 — 빈 allowedDirs 로도 워커 루트 전체를 열거할 수 있었고, (2) path 가 허용 폴더 안이어도
+// pattern="../../**/*"(fs_grep 은 glob="../../**/*")같은 값으로 그 밖을 가리키면 봇 쪽은 path 만
+// 보고 통과시켰다(워커도 결과를 roots 로만 재검사할 뿐 allowedDirs 는 모른다). 이 두 도구가
+// 대체한 로컬 SDK 의 Glob/Grep 도구(canUseTool 이 쓰던 원래 게이트)는 pathPermission.ts 의
+// extractCandidatePaths 로 정확히 이 문제를 이미 풀어 뒀다 — 같은 규칙을 두 번 만들지 않고 그대로
+// 재사용한다. "path 생략 시 실행기(executors.ts)가 roots[0] 를 기본값으로 쓴다"는 것과 같은
+// 정신으로, 여기서는 allowedDirs[0](사용자가 실제로 허용한 첫 폴더)을 extractCandidatePaths 의
+// cwd 인자로 넘긴다 — "후보가 하나도 안 나오면 그 기본값을 검사한다"는 이미 검증된 규칙을 그대로
+// 태운다. 다만 "검사"만으로는 부족하다 — 아래 remoteToolHandler 본문의 최종 리뷰 FIX1 주석 참고
+// (검사에 쓴 기본값을 실제로 args 에 주입해야, 워커가 자신의 roots[0] 을 대신 쓰는 일이 없다).
 const LOCAL_TOOL_NAME: Partial<Record<string, string>> = { fs_glob: "Glob", fs_grep: "Grep" };
 
 // 원격 호출은 실패해도 예외를 던지지 않는다 — 도구 하나의 실패가 턴 전체를 죽이면
@@ -100,13 +102,26 @@ export async function remoteToolHandler(
     }
     if (allowed.length === 0) return "먼저 allow_dir 로 작업할 폴더를 허용해 주세요.";
 
-    // FIX6: fs_glob/fs_grep 은 path·pattern 양쪽에서 후보 경로를 뽑는다(extractCandidatePaths 가
-    // path 생략 시 allowed[0] 기본값까지 포함해 처리한다). 나머지 도구는 기존처럼 path 하나만 본다.
+    // FIX6: fs_glob/fs_grep 은 path·pattern(fs_grep 은 +glob) 양쪽에서 후보 경로를 뽑는다
+    // (extractCandidatePaths 가 path 생략 시 allowed[0] 기본값까지 포함해 처리한다). 나머지
+    // 도구는 기존처럼 path 하나만 본다.
     const candidates = localTool
       ? extractCandidatePaths(localTool, args, undefined, allowed[0])
       : singlePathArg !== undefined ? [singlePathArg] : [];
     for (const c of candidates) {
       if (!isPathWithinAny(c, allowed)) return `허용된 폴더 밖 경로예요: ${c}`;
+    }
+
+    // 최종 리뷰 FIX1(치명): 위에서 "검사"만 하고 끝내면 안 된다 — fs_glob/fs_grep 은 path 가
+    // 생략되면 워커(executors.ts)가 자신의 roots[0](워커 루트, 보통 allowed_dirs 보다 넓다)을
+    // 기본값으로 쓴다. 방금 검사에 쓴 allowed[0] 은 봇이 "이 값을 기준으로 검색될 것"이라고
+    // 가정하고 확인한 값인데, 실제로 워커에 보내는 args 를 그대로 두면 워커는 그 가정과 무관하게
+    // roots[0] 을 쓴다 — "검사한 값"과 "실제로 쓰이는 값"이 달라 검사 자체가 무의미해진다(리뷰
+    // 재현: path 없이 fs_grep 을 부르면 워커 루트 전체가 열거됐다). path 를 생략한 경우에 한해,
+    // 검사에 쓴 allowed[0] 을 args 에 실제로 주입해 워커로 보낸다 — 사용자가 이미 path 를
+    // 지정했다면(singlePathArg !== undefined) 그 값을 존중해 덮어쓰지 않는다.
+    if (localTool && singlePathArg === undefined) {
+      args = { ...args, path: allowed[0] };
     }
   }
 

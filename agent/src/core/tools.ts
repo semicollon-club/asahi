@@ -1,4 +1,3 @@
-import fs from "node:fs";
 import path from "node:path";
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
@@ -10,6 +9,7 @@ import type { IntrospectRepo } from "../store/introspectRepo.js";
 import { assertReadOnlySql, formatQueryResult } from "./sqlGuard.js";
 import { CHARACTER_FACT_LIMIT } from "./turnPrep.js";
 import { REMOTE_TOOL_NAMES, remoteToolHandler } from "./remoteTools.js";
+import { isPathWithinAny, normalizeDir } from "./paths.js";
 
 // 도구 서버 이름 → 모델에는 mcp__asahi__<tool> 로 노출된다.
 export const TOOL_SERVER = "asahi";
@@ -26,21 +26,27 @@ export type ToolCtx = {
   isOwner: boolean;
   userId: string;
   conversationId: number;
-  // 로컬 워커가 이 턴을 그 사용자 자신의 PC 에서 실행 중이면 true(아래 canManagePc 가 참조).
-  // Task 8(위임 기계장치 삭제): 이 값을 true 로 설정하던 유일한 생산자(worker/jobRunner.ts)가
-  // 삭제되어 지금은 항상 undefined 다 — canManagePc 는 사실상 isOwner 로만 판정된다. allowedToolsFor
-  // 는 더 이상 이 필드를 보지 않는다(그쪽의 ownWorkstation 분기는 Task 8 에서 제거했다).
-  // manage_access·recall 전원열람 등 신원 기반 특권에는 영향을 주지 않는다(isOwner 로만 판정).
-  ownWorkstation?: boolean;
   runtime: RuntimeInfo;
-  // 원격 워커 호출 통로. 워커가 연결돼 있을 때만 주입된다(index.ts 배선).
-  remote?: { call(tool: string, args: Record<string, unknown>): Promise<{ ok: boolean; content: string }> };
+  // 원격 워커 호출 통로. 워커가 연결돼 있을 때만 주입된다(index.ts 배선, agent.ts 의
+  // buildRemoteCtx). roots 는 그 워커가 hello 프레임으로 알려온 실제 작업 폴더 목록 —
+  // allowDirHandler(아래)가 이 값으로 등록 요청을 재검증한다(FIX2: 봇 프로세스 자신의
+  // 파일시스템은 더 이상 참조하지 않는다 — 봇과 워커는 서로 다른 머신일 수 있다).
+  remote?: {
+    call(tool: string, args: Record<string, unknown>): Promise<{ ok: boolean; content: string }>;
+    roots: string[];
+  };
 };
 
-// PC 관리 도구(allow_dir/revoke_dir/list_dirs)를 쓸 수 있는 신원인지: 소유자 DM, 또는
-// 워커가 실행 중인 자기 PC 의 DM(손님 포함). 서버/스레드(비공개)는 어느 쪽이든 항상 거부한다.
+// PC 관리 도구(allow_dir/revoke_dir/list_dirs)를 쓸 수 있는 신원인지: 소유자 DM 뿐이다.
+// 서버/스레드(비공개 아님)는 물론, 손님 DM 도 항상 거부한다.
+// FIX6(사소하지만 함정, 최종 리뷰): 예전엔 ctx.ownWorkstation===true(손님이 자기 PC 워커 위에서
+// 도는 턴)도 통과시켰다 — 그 값을 채우던 유일한 생산자(worker/jobRunner.ts)는 이미 삭제되어
+// 항상 undefined 였던 죽은 분기였고, 그 분기가 전제하던 경로 강제(canUseTool)도 이미 사라진
+// 상태라 "혹시라도 이 필드가 다시 채워지면" 손님 DM 이 경로 게이트 없이 폴더 관리 도구를 얻는
+// 잠재적 함정이었다(리뷰 지적). 필드 자체(ToolCtx.ownWorkstation)를 삭제해 이 분기가 되살아날
+// 여지를 없앴다.
 function canManagePc(ctx: ToolCtx): boolean {
-  return ctx.isPrivate && (ctx.isOwner || ctx.ownWorkstation === true);
+  return ctx.isPrivate && ctx.isOwner;
 }
 
 // ── 순수 핸들러(테스트 대상) ────────────────────────────────────────────────
@@ -101,20 +107,24 @@ export async function manageAccessHandler(ctx: ToolCtx, args: { userId: string; 
 // 원격 개발 워크플로우(Phase A): 소유자 DM 전용 게이트 — 실제 경로 제한(canUseTool)은 별도 태스크(A3)의 몫이다.
 const OWNER_DM_ONLY = "이 작업은 소유자 DM에서만 할 수 있어요.";
 
+// FIX2(치명, 최종 리뷰): 예전엔 fs.statSync/fs.realpathSync 로 이 경로를 "봇 프로세스의"
+// 파일시스템에서 검증했다 — 클라우드 배포(Railway 컨테이너)는 물론, 워커가 봇과 다른 머신에서
+// 도는 한 local 배포에서도 이 검증은 실제로 아무 의미가 없다(봇과 워커는 서로 다른 파일시스템을
+// 본다 — 리뷰 지적: 설령 이 도구가 노출돼 있었더라도, 실제 워커의 경로는 전부 거부됐을
+// 것이다). 이제는 그 사용자의 워커가 hello 프레임으로 알려온 실제 작업 폴더(ctx.remote.roots)
+// 만을 기준으로 문자열 포함 검사만 한다 — 존재 여부·실경로 확인(심볼릭 링크 등)은 워커 쪽
+// (remote/roots.ts 의 checkPath)이 실제 파일 접근 시점에 이미 하고 있다(이중 방어의 두 번째
+// 겹 — 위 canManagePc 와 별개로, 이건 "누가"가 아니라 "어디"의 문제다).
 export async function allowDirHandler(ctx: ToolCtx, args: { path: string }): Promise<string> {
   if (!canManagePc(ctx)) return OWNER_DM_ONLY;
-  let stat: fs.Stats;
-  try {
-    stat = fs.statSync(args.path);
-  } catch {
-    return `경로를 찾을 수 없어요: ${args.path}`;
+  const roots = ctx.remote?.roots ?? [];
+  if (roots.length === 0) return "워커가 연결돼 있지 않거나 워커에 열린 작업 폴더가 없어요.";
+  if (!isPathWithinAny(args.path, roots)) {
+    return `워커의 작업 폴더 밖 경로예요. 워커에 열린 폴더: ${roots.join(", ")}`;
   }
-  if (!stat.isDirectory()) return `디렉토리가 아니에요: ${args.path}`;
-  // 보안리뷰 #4: 심볼릭 링크/정션으로 등록하면 canUseTool 의 realpath 후보와 어긋나 통째로 과차단되므로,
-  // statSync 로 존재를 확인한 뒤 실경로로 저장한다(normalizeDir 자체는 순수 함수로 그대로 둔다).
-  const real = fs.realpathSync(args.path);
-  await ctx.repos.allowedDirs.add(ctx.userId, real);
-  return `허용 폴더에 추가했어요: ${path.resolve(real)}`;
+  const norm = normalizeDir(args.path);
+  await ctx.repos.allowedDirs.add(ctx.userId, norm);
+  return `허용 폴더에 추가했어요: ${norm}`;
 }
 
 export async function revokeDirHandler(ctx: ToolCtx, args: { path: string }): Promise<string> {
@@ -131,7 +141,7 @@ export async function listDirsHandler(ctx: ToolCtx): Promise<string> {
 }
 
 // 자기인지 도구(§Task4): 소유자 DM 전용 — db_schema/db_query/runtime_info.
-// 손님·서버·ownWorkstation 은 어느 경우에도 노출·실행 둘 다 거부한다(isOwner && isPrivate 로만 판정).
+// 손님·서버는 어느 경우에도 노출·실행 둘 다 거부한다(isOwner && isPrivate 로만 판정).
 function isOwnerDm(ctx: ToolCtx): boolean { return ctx.isOwner && ctx.isPrivate; }
 
 export async function dbSchemaHandler(ctx: ToolCtx): Promise<string> {
@@ -163,23 +173,31 @@ export async function runtimeInfoHandler(ctx: ToolCtx): Promise<string> {
 }
 
 // ── 턴별 도구셋(능력 계층, §7.1) ────────────────────────────────────────────
-// owner-DM → 기억 + 접근관리 + 허용폴더 관리 + db_schema/db_query/runtime_info(+ 워커가 연결돼 있으면
-// 원격 파일/셸 도구까지). 손님 DM → 기억(본인)만. 서버 → recall(공용)만.
+// owner-DM → 기억 + 접근관리 + db_schema/db_query/runtime_info, + 워커가 연결돼 있으면 원격
+// 파일/셸 도구(fs_*/sh_exec)와 허용폴더 관리 도구(allow_dir/revoke_dir/list_dirs)까지.
+// 손님 DM → 기억(본인)만. 서버 → recall(공용)만.
 // Task 7(원격 워커 배선): owner-DM 분기에서 SDK 내장 파일/Bash 도구(Read/Write/Edit/Glob/Grep/Bash)를
 // 뺐다 — core/agent.ts 가 builtinTools=[] 로 그 도구들을 아예 닫아버리므로, 여기 목록에 이름을 남겨봐야
 // 실행할 대상이 없는 허수아비 항목이 된다(있지도 않은 능력을 있다고 보고하는 셈). 실제 파일/셸 작업은
 // 워커가 연결돼 있을 때만 원격 도구(mcp__asahi__fs_*·sh_exec)로 한다.
-// deployTarget="cloud"(Railway 조각2): 소유자 PC 가 없는 컨테이너 실행이므로 owner-DM 이라도
-// allow_dir/revoke_dir/list_dirs(PC 폴더 개념을 전제하는 도구)는 빼고 대화·기억·접근관리·db 도구만
-// 남긴다. local(기본)은 기존과 완전히 동일.
-// workerConnected(원격 워커 1단계): owner-DM 두 분기(local/cloud) 모두에 원격 도구 6종을 추가로 연다.
-// 손님 DM·서버 분기는 그대로 둔다 — 1단계 원격 도구는 소유자 전용이다.
-// Task 8(위임 기계장치 삭제): 이 함수가 갖고 있던 ownWorkstation 분기(손님이라도 자기 PC 전권으로
-// SDK 내장 파일/Bash 를 여는 경로)를 제거했다 — canUseTool 의 경로 검사가 이미 다른 태스크에서
-// 빠진 상태라, 그 분기가 살아있었다면 Read/Write/Edit/Glob/Grep/Bash 를 경로 검사 없이 그대로
-// 여는 셈이었다. 그 분기를 여는 ownWorkstation:true 는 worker/jobRunner.ts 에서만 만들어졌는데
-// 그 파일 자체가 이 태스크로 삭제되어 원래도 도달 불가능한 코드였다. ToolCtx.ownWorkstation 필드
-// 자체는 handler 게이트인 canManagePc 가 여전히 참조하므로 남겨둔다(위 타입 정의 참고).
+// FIX2(치명, 최종 리뷰): allow_dir/revoke_dir/list_dirs 도 이제 workerConnected 하나로만
+// 결정한다 — deployTarget 으로 가르던 예전 판정을 없앴다. 예전엔 deployTarget="cloud"(Railway
+// 조각2, 소유자 PC 가 없는 컨테이너 실행)면 owner-DM 이라도 이 셋을 항상 뺐는데, fs_*/sh_exec 는
+// 이미 workerConnected 기준(cloud 라도 워커만 연결되면 열림)이라 "cloud + 워커 연결"에서
+// fs_read 는 되는데 그 전제조건인 allow_dir 자체가 없어 allowed_dirs 를 영원히 못 채우는 모순이
+// 있었다(리뷰 재현 — 배포 가이드는 DEPLOY_TARGET=cloud 를 강제하면서 allow_dir 를 쓰라고
+// 안내했다). 이제 local/cloud 어느 쪽도 "워커가 지금 연결돼 있는가" 하나로 판단한다 —
+// allowDirHandler 자신은 실행 시점에 ctx.remote.roots(워커가 hello 로 알려온 실제 폴더)로
+// 재검증한다(봇 프로세스의 로컬 파일시스템은 더 이상 보지 않는다).
+// workerConnected(원격 워커 1단계): owner-DM 분기(이제 local/cloud 구분 없이 하나)에 원격 도구
+// 6종과 dir 관리 도구 3종을 함께 연다. 손님 DM·서버 분기는 그대로 둔다 — 1단계 원격 도구는
+// 소유자 전용이다.
+// FIX6(사소하지만 함정, 최종 리뷰): 이 함수가 예전에 갖고 있던 ownWorkstation 분기(손님이라도
+// 자기 PC 전권으로 SDK 내장 파일/Bash 를 여는 경로)는 Task 8 에서 이미 제거됐고, 이번에 그
+// 분기가 참조하던 ToolCtx.ownWorkstation/TurnContext.ownWorkstation 필드 자체도 완전히
+// 삭제했다 — 생산자 없는 죽은 필드를 남겨 두면, 훗날 누군가 실수로(혹은 무심코) 그 필드를 다시
+// 채우는 코드를 추가할 때 canManagePc 가 경로 강제 없이 손님에게 폴더 관리 도구를 열어주는
+// 잠재적 함정이 있었다.
 export function allowedToolsFor(
   role: Role,
   isPrivate: boolean,
@@ -189,19 +207,17 @@ export function allowedToolsFor(
 ): string[] {
   // 원격 도구는 워커 연결이 있을 때만 연다. 판정 축이 "어디서 실행 중인가"(deployTarget)가 아니라
   // "워커가 붙어 있는가"로 바뀐 것이 이 단계의 핵심이다 — cloud 에서도 워커만 붙으면 PC 작업이 된다.
-  // 1단계는 소유자 DM 전용으로 좁힌다 — 아래 두 owner-DM 분기 외에는 추가하지 않는다.
+  // 1단계는 소유자 DM 전용으로 좁힌다 — 아래 owner-DM 분기 외에는 추가하지 않는다.
   const remote = workerConnected ? REMOTE_TOOL_NAMES.map((n) => t(n)) : [];
+  // FIX2: dir 관리 도구도 remote 와 정확히 같은 조건(workerConnected)으로 연다 — deployTarget
+  // 은 이 함수 안에서 더 이상 아무것도 분기하지 않는다(여전히 runtime_info 가 보고하는 배포
+  // 정보로서는 의미가 있어 시그니처에는 남겨 둔다).
+  const dirTools = workerConnected ? [t("allow_dir"), t("revoke_dir"), t("list_dirs")] : [];
   if (isOwner && isPrivate) {
-    if (deployTarget === "cloud") {
-      return [
-        ...remote,
-        t("remember"), t("recall"), t("character_fact"), t("manage_access"), t("db_schema"), t("db_query"), t("runtime_info"),
-      ];
-    }
     return [
       ...remote,
       t("remember"), t("recall"), t("character_fact"), t("manage_access"),
-      t("allow_dir"), t("revoke_dir"), t("list_dirs"),
+      ...dirTools,
       t("db_schema"), t("db_query"), t("runtime_info"),
     ];
   }

@@ -1,6 +1,10 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { REMOTE_TOOL_NAMES, remoteToolHandler } from "../src/core/remoteTools.js";
 import type { ToolCtx } from "../src/core/tools.js";
+import { makeExecutors } from "../src/remote/executors.js";
 
 // 기본값은 "소유자 DM"을 나타낸다 — remoteToolHandler 가 최상단에서 신원을 독립적으로 재확인하므로
 // (FIX1), 신원 자체를 검증 대상으로 삼지 않는 테스트는 소유자 DM 으로 고정해 통과시킨다.
@@ -215,5 +219,114 @@ describe("FIX4 — repos 부재는 통과가 아니라 거부다(fail closed)", 
     const out = await remoteToolHandler(ctx, "fs_read", { path: "/w/a" });
     expect(called).toBe(false);
     expect(out).toContain("확인할 수 없어");
+  });
+});
+
+// ── 최종 pre-merge 리뷰 FIX1(치명) — fs_glob·fs_grep 가 path 생략/glob 이탈로 봇 쪽 필터를
+// 우회한다 ───────────────────────────────────────────────────────────────────────────────
+// (주의: 파일 상단 "FIX6"/이 파일의 "FIX1~FIX4" 라벨은 이 브랜치 이전 SDD 라운드(Task 6/7)의
+// 번호다 — 이번 최종 리뷰의 FIX 번호와는 다른 이름공간이다. 아래 두 describe 는 이번 최종
+// 리뷰가 매긴 "FIX1"(치명, glob/grep 우회)을 가리킨다.)
+//
+// 두 가지 우회 경로:
+// (a) path 를 생략하면 봇은 allowed_dirs[0] 을 "검사"만 하고, 실제로 허브에 보내는 args 는
+//     그대로 두었다 — 워커(executors.ts)는 path 가 없으면 자신의 roots[0](워커 루트, 보통
+//     allowed_dirs 보다 넓다)을 기본값으로 쓰므로, 봇이 검사한 값과 워커가 실제로 쓰는 값이
+//     달랐다.
+// (b) fs_grep 의 glob 인자(검색 대상 파일 필터)는 pathPermission.ts 의 extractCandidatePaths
+//     Grep 분기가 전혀 들여다보지 않았다 — path 는 허용 폴더 안이어도 glob 으로 그 밖(형제
+//     폴더)을 가리키면 봇 쪽 검사를 그대로 통과했다.
+//
+// 아래 첫 describe 는 실제 워커 실행기(executors.ts)를 ctx.remote 에 직접 연결해(네트워크
+// 계층만 생략) 리뷰가 재현한 두 프로브를 문자 그대로 재현한다. 두 번째 describe 는 그 우회를
+// 막는 메커니즘(허브로 나가는 args 에 검사한 기본값을 실제로 주입) 을 스텁으로 더 세밀하게 검증한다.
+describe("FIX1(치명, 최종 리뷰) — fs_glob·fs_grep 가 path 생략/glob 이탈로 봇 쪽 필터를 우회한다(리뷰 재현)", () => {
+  let root: string;
+  let allowedSub: string;
+  let secretDir: string;
+  let executors: ReturnType<typeof makeExecutors>;
+
+  beforeEach(() => {
+    root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "asahi-fix1-root-")));
+    allowedSub = path.join(root, "allowed");
+    secretDir = path.join(root, "secret");
+    fs.mkdirSync(allowedSub, { recursive: true });
+    fs.mkdirSync(secretDir, { recursive: true });
+    fs.writeFileSync(path.join(secretDir, "creds.txt"), "AWS_KEY=PROBE6_SECRET\nAPI_TOKEN=PROBE_SECRET_VALUE\n");
+    // 워커는 root 전체를 연다 — 실제 배포에서 흔한 구성이다(워커 루트가 사용자의 allow_dir
+    // 승인 범위보다 넓다). 봇이 승인한 건 allowedSub 하나뿐이다.
+    executors = makeExecutors([root]);
+  });
+  afterEach(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  const ctxWithRealWorker = (allowed: string[]): ToolCtx =>
+    ({
+      isOwner: true, isPrivate: true, userId: "owner",
+      repos: { allowedDirs: { list: async () => allowed } },
+      remote: { call: (tool: string, args: Record<string, unknown>) => (executors as Record<string, (a: Record<string, unknown>) => Promise<{ ok: boolean; content: string }>>)[tool](args) },
+    } as unknown as ToolCtx);
+
+  it("(a) path 생략 시 워커의 기본값(roots[0]=전체 루트)이 아니라 봇이 승인한 폴더(allowed_dirs[0])를 검색한다", async () => {
+    const ctx = ctxWithRealWorker([allowedSub]);
+    const out = await remoteToolHandler(ctx, "fs_grep", { pattern: "PROBE6_SECRET" });
+    expect(out).not.toContain("PROBE6_SECRET");
+  });
+
+  it("(b) path 가 허용 폴더 안이어도 glob 인자로 형제 폴더(secret)를 가리키면 거부한다", async () => {
+    const ctx = ctxWithRealWorker([allowedSub]);
+    const out = await remoteToolHandler(ctx, "fs_grep", {
+      pattern: "PROBE_SECRET_VALUE",
+      path: allowedSub,
+      glob: "../secret/**/*",
+    });
+    expect(out).not.toContain("PROBE_SECRET_VALUE");
+    expect(out).not.toContain("creds.txt");
+  });
+
+  it("fs_glob 도 (a)와 동일하다 — path 생략 시 워커 루트 전체가 아니라 허용 폴더만 나열한다", async () => {
+    fs.writeFileSync(path.join(secretDir, "leaked-marker.txt"), "x");
+    const ctx = ctxWithRealWorker([allowedSub]);
+    const out = await remoteToolHandler(ctx, "fs_glob", { pattern: "**/*" });
+    expect(out).not.toContain("leaked-marker.txt");
+  });
+});
+
+describe("FIX1(치명, 최종 리뷰) — path 생략 시 허브로 나가는 args 에 검사한 기본값을 실제로 주입한다", () => {
+  const withDirs = (dirs: string[], call: ToolCtx["remote"]): ToolCtx =>
+    ({ remote: call, isOwner: true, isPrivate: true, userId: "owner", repos: { allowedDirs: { list: async () => dirs } } } as unknown as ToolCtx);
+
+  it("fs_grep 에 path 를 생략하면 허브로 나가는 args.path 에 allowed_dirs[0] 이 채워진다(워커가 roots[0] 을 기본값으로 쓰지 못하게)", async () => {
+    const seen: Array<Record<string, unknown>> = [];
+    const ctx = withDirs(["/w/proj"], { call: async (_tool, args) => { seen.push(args); return { ok: true, content: "" }; } });
+    await remoteToolHandler(ctx, "fs_grep", { pattern: "TODO" });
+    expect(seen).toEqual([{ pattern: "TODO", path: "/w/proj" }]);
+  });
+
+  it("fs_glob 에 path 를 생략하면 허브로 나가는 args.path 에 allowed_dirs[0] 이 채워진다", async () => {
+    const seen: Array<Record<string, unknown>> = [];
+    const ctx = withDirs(["/w/proj"], { call: async (_tool, args) => { seen.push(args); return { ok: true, content: "" }; } });
+    await remoteToolHandler(ctx, "fs_glob", { pattern: "**/*" });
+    expect(seen).toEqual([{ pattern: "**/*", path: "/w/proj" }]);
+  });
+
+  it("path 를 이미 명시했으면 주입하지 않고 그대로 전달한다(사용자가 지정한 값을 덮어쓰지 않는다)", async () => {
+    const seen: Array<Record<string, unknown>> = [];
+    const ctx = withDirs(["/w/proj"], { call: async (_tool, args) => { seen.push(args); return { ok: true, content: "" }; } });
+    await remoteToolHandler(ctx, "fs_glob", { pattern: "**/*", path: "/w/proj/sub" });
+    expect(seen).toEqual([{ pattern: "**/*", path: "/w/proj/sub" }]);
+  });
+
+  it("fs_read 는 이 주입 대상이 아니다(원래도 path 가 필수라 생략 케이스가 없다) — args 를 그대로 전달한다(회귀 없음)", async () => {
+    const seen: Array<Record<string, unknown>> = [];
+    const ctx = withDirs(["/w/proj"], { call: async (_tool, args) => { seen.push(args); return { ok: true, content: "" }; } });
+    await remoteToolHandler(ctx, "fs_read", { path: "/w/proj/a.txt" });
+    expect(seen).toEqual([{ path: "/w/proj/a.txt" }]);
+  });
+
+  it("sh_exec 는 이 주입 대상이 아니다(경로 인자 자체가 없다) — args 를 그대로 전달한다(회귀 없음)", async () => {
+    const seen: Array<Record<string, unknown>> = [];
+    const ctx = withDirs(["/w/proj"], { call: async (_tool, args) => { seen.push(args); return { ok: true, content: "" }; } });
+    await remoteToolHandler(ctx, "sh_exec", { command: "ls" });
+    expect(seen).toEqual([{ command: "ls" }]);
   });
 });

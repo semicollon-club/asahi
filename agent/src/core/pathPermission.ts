@@ -48,7 +48,10 @@ function literalPrefixOfGlobPattern(pattern: string): string {
 // canUseTool 의 (toolName, input, {blockedPath}, cwd) 에서 검사할 후보 경로들을 뽑는다.
 // Read/Write/Edit → file_path. Glob → path(있으면) + pattern 의 리터럴 경로 접두(보안리뷰 #1 —
 // tinyglobby 는 pattern 에 절대경로·'..'를 그대로 써서 허용폴더 밖을 열거할 수 있어 반드시 검사해야 한다).
-// Grep → path(있을 때만, pattern 은 정규식이라 경로가 아니므로 건드리지 않는다). Bash → blockedPath(있을 때만).
+// Grep → path(있으면) + glob(검색 대상 파일 필터, 있으면)의 리터럴 경로 접두(최종 리뷰 FIX1 —
+// pattern 은 정규식/검색어라 경로가 아니므로 여전히 건드리지 않지만, glob 은 Glob 의 pattern 과
+// 똑같이 파일 경로를 매칭하는 글롭 문법이라 같은 이유로 검사해야 한다. path 가 허용 폴더 안이어도
+// glob="../secret/**" 처럼 그 밖을 가리키면 이 후보가 없인 잡히지 않았다). Bash → blockedPath(있을 때만).
 // 그 외 도구는 항상 빈 배열(경로 검사 대상이 아님, isPathGatedTool 이 false 이므로 어차피 allow 로 통과한다).
 // 보안리뷰 #3: 위 규칙으로도 후보가 하나도 안 나오면(Glob/Grep 의 path 생략, Bash 의 blockedPath 없음 등)
 // cwd 를 후보로 대신 넣는다 — 도구는 결국 cwd 를 기준으로 동작하므로 빈 배열=허용은 과도한 신뢰다.
@@ -75,8 +78,16 @@ export function extractCandidatePaths(
       }
     }
   } else if (toolName === "Grep") {
-    const p = input.path;
-    candidates = typeof p === "string" && p.length > 0 ? [p] : [];
+    const basePath = typeof input.path === "string" && input.path.length > 0 ? input.path : undefined;
+    if (basePath) candidates.push(basePath);
+    // 최종 리뷰 FIX1(치명): glob 인자도 Glob 의 pattern 과 동일한 방식으로 검사한다.
+    const globArg = input.glob;
+    if (typeof globArg === "string" && globArg.length > 0) {
+      const literal = literalPrefixOfGlobPattern(globArg);
+      if (literal.length > 0) {
+        candidates.push(path.isAbsolute(literal) ? literal : path.resolve(basePath ?? cwd ?? ".", literal));
+      }
+    }
   } else if (toolName === "Bash") {
     candidates = blockedPath ? [blockedPath] : [];
   }

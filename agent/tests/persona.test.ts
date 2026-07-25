@@ -1,6 +1,16 @@
 import { describe, it, expect } from "vitest";
 import { buildSystemPrompt, deriveRapportStage } from "../src/core/persona.js";
 
+// FIX3(최종 리뷰) 관련 테스트가 "능력 안내에 더 이상 존재하지 않는 SDK 도구 이름이 없다"를
+// 확인할 때 쓴다 — 프롬프트 전체를 대상으로 하면 무관한 다른 절(예: 자기 서사의 "지어내면 안
+// 되는 것" 목록은 "명령(Bash) 실행 여부와 결과"처럼 범주를 설명할 때 Bash 를 언급한다)에 걸려
+// 오탐이 난다. "## 능력" 절만 잘라 그 안에서만 검사한다.
+function capabilitySection(fullPrompt: string): string {
+  const start = fullPrompt.indexOf("## 능력");
+  const end = fullPrompt.indexOf("## 관계·말투");
+  return fullPrompt.slice(start, end === -1 ? undefined : end);
+}
+
 describe("buildSystemPrompt", () => {
   it("이모지·이모티콘 사용 금지 지침을 항상 포함한다", () => {
     const p = buildSystemPrompt({ role: "owner", isPrivate: true, isOwner: true });
@@ -24,17 +34,21 @@ describe("buildSystemPrompt", () => {
     expect(p).toMatch(/신뢰할 수 없는/);
   });
 
-  it("owner+DM 이면 파일 도구·manage_access 능력 안내를 포함한다", () => {
-    const p = buildSystemPrompt({ role: "owner", isPrivate: true, isOwner: true });
+  // FIX3(최종 리뷰): 능력 안내는 이제 deployTarget 이 아니라 workerConnected 로 갈린다 — 실제
+  // 파일 도구(fs_read 등)를 쓸 수 있는 상태를 검증하려면 workerConnected:true 를 명시해야 한다
+  // (생략 시엔 "워커 미연결" 문구가 나온다 — 아래 별도 describe 블록에서 그 경로를 검증한다).
+  it("owner+DM+워커 연결 시 파일 도구·manage_access 능력 안내를 포함한다", () => {
+    const p = buildSystemPrompt({ role: "owner", isPrivate: true, isOwner: true, workerConnected: true });
     expect(p).toMatch(/manage_access/);
     expect(p).toMatch(/파일/);
   });
 
-  it("owner+DM 이면 Bash 봉쇄를 과장하지 않고, 폴더 밖·시스템·네트워크 작업은 하지 말라고 안내한다(보안리뷰 #2)", () => {
-    const p = buildSystemPrompt({ role: "owner", isPrivate: true, isOwner: true });
-    expect(p).toMatch(/Bash/);
-    // "Bash 도 허용 폴더 안에서만 가능하다"는 실제보다 강한(거짓) 보장 문구는 없어야 한다.
-    expect(p).not.toMatch(/파일\s*[·,]?\s*셸\(?Bash\)?\s*작업은[^.]*허용\s*폴더\s*안에서만\s*가능/);
+  it("owner+DM+워커 연결 시 sh_exec 봉쇄를 과장하지 않고, 폴더 밖·시스템·네트워크 작업은 하지 말라고 안내한다(보안리뷰 #2, FIX3: 실제 도구 이름 sh_exec 사용)", () => {
+    const p = buildSystemPrompt({ role: "owner", isPrivate: true, isOwner: true, workerConnected: true });
+    // FIX3: 더 이상 존재하지 않는 SDK 내장 도구 이름(Bash)이 아니라 실제 원격 도구 이름을 쓴다.
+    expect(p).toMatch(/sh_exec/);
+    // "셸 작업은 허용 폴더 안에서만 가능하다"는 실제보다 강한(거짓) 보장 문구는 없어야 한다.
+    expect(p).not.toMatch(/허용\s*폴더\s*안에서만\s*가능/);
     expect(p).toMatch(/완전히 막지/);
     expect(p).toMatch(/네트워크/);
   });
@@ -57,23 +71,47 @@ describe("buildSystemPrompt", () => {
   });
 });
 
-describe("buildSystemPrompt — deployTarget(§Railway 조각2)", () => {
-  it("deployTarget 을 생략하면 local 과 동일하게(기존 owner-DM 파일 도구 안내) 동작한다", () => {
-    const withoutField = buildSystemPrompt({ role: "owner", isPrivate: true, isOwner: true });
-    const withLocal = buildSystemPrompt({ role: "owner", isPrivate: true, isOwner: true, deployTarget: "local" });
-    expect(withoutField).toBe(withLocal);
-    expect(withoutField).toMatch(/파일/);
-    expect(withoutField).toMatch(/manage_access/);
+// FIX3(중요, 최종 리뷰) — 능력 안내는 예전엔 deployTarget 만 보고 갈렸다: 프로덕션(cloud + 워커
+// 연결)에서는 "지금은 클라우드에서 실행 중이라 PC 파일·셸(Bash) 작업을 할 수 없습니다"라고
+// 안내하면서 실제로는 fs_*/sh_exec 가 열려 있었고, local + 워커 미연결에서는 "Read/Write/Bash 를
+// 가지고 있다"고 안내하면서 그 도구들은 아예 존재하지 않았다(builtinTools=[]). 이제는
+// workerConnected(이번 턴에 원격 도구가 실제로 열려 있는가)로 갈린다 — deployTarget 은 이
+// 블록에 더 이상 영향을 주지 않는다.
+describe("buildSystemPrompt — 능력 안내는 deployTarget 이 아니라 workerConnected 로 갈린다(FIX3)", () => {
+  it("workerConnected 를 생략하면(기본값) PC 작업 불가 안내를 하고, 더 이상 존재하지 않는 SDK 내장 도구(Read/Write/Bash)를 가지고 있다고 안내하지 않는다", () => {
+    const p = buildSystemPrompt({ role: "owner", isPrivate: true, isOwner: true });
+    const cap = capabilitySection(p);
+    expect(cap).toMatch(/워커/);
+    expect(cap).toMatch(/연결되면/);
+    expect(cap).toMatch(/manage_access/); // 기억·접근관리는 워커 상태와 무관하니 유지
+    expect(cap).not.toMatch(/\bRead\b/);
+    expect(cap).not.toMatch(/\bWrite\b/);
+    expect(cap).not.toMatch(/\bBash\b/);
   });
 
-  it("deployTarget='cloud' + owner-DM 이면 PC 파일·셸 작업 불가 + 로컬 워커 연결 안내로 바뀐다", () => {
-    const p = buildSystemPrompt({ role: "owner", isPrivate: true, isOwner: true, deployTarget: "cloud" });
-    expect(p).toMatch(/클라우드/);
-    expect(p).toMatch(/로컬 워커/);
-    expect(p).toMatch(/manage_access/); // 기억·접근관리는 PC 무관하니 유지
+  it("workerConnected=true + owner-DM 이면 실제 도구 이름(fs_read 등, sh_exec)으로 PC 작업이 가능하다고 안내한다 — deployTarget 과 무관", () => {
+    for (const deployTarget of ["local", "cloud"] as const) {
+      const p = buildSystemPrompt({ role: "owner", isPrivate: true, isOwner: true, deployTarget, workerConnected: true });
+      expect(p).toMatch(/fs_read/);
+      expect(p).toMatch(/sh_exec/);
+      expect(p).toMatch(/manage_access/);
+      // FIX3 핵심 회귀: 클라우드에서 워커가 연결돼 있는데도 "클라우드라서 PC 작업을 못 한다"고
+      // 거짓 안내하면 안 된다.
+      expect(p).not.toMatch(/클라우드에서 실행 중이라/);
+    }
   });
 
-  it("deployTarget='cloud' 라도 손님 DM·서버 안내는 local 과 동일(영향 없음)", () => {
+  it("deployTarget 이 달라도 workerConnected 값이 같으면 owner-DM 능력 안내는 완전히 동일하다(더 이상 deployTarget 로 갈리지 않는다)", () => {
+    const localOn = buildSystemPrompt({ role: "owner", isPrivate: true, isOwner: true, deployTarget: "local", workerConnected: true });
+    const cloudOn = buildSystemPrompt({ role: "owner", isPrivate: true, isOwner: true, deployTarget: "cloud", workerConnected: true });
+    expect(localOn).toBe(cloudOn);
+
+    const localOff = buildSystemPrompt({ role: "owner", isPrivate: true, isOwner: true, deployTarget: "local", workerConnected: false });
+    const cloudOff = buildSystemPrompt({ role: "owner", isPrivate: true, isOwner: true, deployTarget: "cloud", workerConnected: false });
+    expect(localOff).toBe(cloudOff);
+  });
+
+  it("deployTarget 은 여전히 손님 DM·서버 안내에 영향을 주지 않는다(회귀 유지)", () => {
     const guestLocal = buildSystemPrompt({ role: "allowed", isPrivate: true, isOwner: false, deployTarget: "local" });
     const guestCloud = buildSystemPrompt({ role: "allowed", isPrivate: true, isOwner: false, deployTarget: "cloud" });
     expect(guestLocal).toBe(guestCloud);

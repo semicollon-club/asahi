@@ -1,6 +1,6 @@
 import type { EventBus, UserMessageEvent, ConversationHint } from "../events/bus.js";
 import type { Config } from "../config.js";
-import type { TurnRunner, TurnContext, TurnResult, ProgressUpdate } from "./agent.js";
+import { shouldConnectWorker, type TurnRunner, type TurnContext, type TurnResult, type ProgressUpdate } from "./agent.js";
 import { buildSystemPrompt, deriveRapportStage } from "./persona.js";
 import { parseSessionCommand } from "./commands.js";
 import type { Role } from "../store/usersRepo.js";
@@ -68,10 +68,15 @@ export class AgentCore {
   private ingestChains = new Map<string, Promise<void>>();
   private turnChains = new Map<string, Promise<void>>();
   private fetchImpl: typeof fetch;
+  // FIX3(중요, 최종 리뷰): 능력 안내(persona.ts)가 실제 도구 상태를 반영하려면, systemPrompt 를
+  // 만드는 시점(runTurn 호출 전)에 이미 "이번 턴에 워커가 연결돼 있는가"를 알아야 한다 — 그
+  // 판정은 agent.ts 의 shouldConnectWorker 가 쓰는 것과 동일한 hub.isConnected(userId) 다.
+  // 선택值(옵셔널)인 이유: 워커 배선이 없는 환경(테스트 등)에서는 늘 워커 미연결로 간주된다.
+  private hub?: { isConnected(userId: string): boolean };
 
   constructor(deps: {
     bus: EventBus; config: Config; runTurn: TurnRunner; repos: CoreRepos; agentCwd: string; now?: () => number;
-    fetchImpl?: typeof fetch;
+    fetchImpl?: typeof fetch; hub?: { isConnected(userId: string): boolean };
   }) {
     this.bus = deps.bus;
     this.config = deps.config;
@@ -81,6 +86,7 @@ export class AgentCore {
     this.ownerId = deps.config.ownerId;
     this.now = deps.now ?? Date.now;
     this.fetchImpl = deps.fetchImpl ?? fetch;
+    this.hub = deps.hub;
   }
 
   start(): void {
@@ -215,7 +221,13 @@ export class AgentCore {
 
       const context: TurnContext = { role, isPrivate: conv.isPrivate, isOwner, userId, conversationId: conv.id };
       const rapportStage = deriveRapportStage(await this.repos.messages.countUserMessages(userId));
-      const systemPrompt = buildSystemPrompt({ role, isPrivate: conv.isPrivate, isOwner, deployTarget: this.config.deployTarget, rapportStage });
+      // FIX3(최종 리뷰): 능력 안내는 이제 deployTarget 이 아니라 "지금 이 턴에 워커가 실제로
+      // 연결돼 있는가"로 갈린다 — agent.ts 의 shouldConnectWorker 와 완전히 같은 판정을 여기서도
+      // 계산해 페르소나에 싣는다. 도구셋 자체는 agent.ts(makeRunAgentTurn)가 같은 함수로 별도로
+      // 다시 계산한다 — 두 계산이 어긋나면(예: 이 사이 워커가 끊기면) 프롬프트와 실제 도구가
+      // 그 한 턴만 어긋날 수 있지만, "안내 자체가 없거나 늘 거짓"이었던 이전 버그보다는 낫다.
+      const workerConnected = shouldConnectWorker({ isOwner, isPrivate: conv.isPrivate, userId }, this.hub);
+      const systemPrompt = buildSystemPrompt({ role, isPrivate: conv.isPrivate, isOwner, deployTarget: this.config.deployTarget, rapportStage, workerConnected });
       const onProgress = (u: ProgressUpdate) => {
         this.bus.publish({ type: "progress", channel: "discord", channelRef: conv.discordChannelId, text: formatProgress(u), ts: this.now() });
       };
@@ -327,9 +339,19 @@ export class AgentCore {
         const toMessageId = recentMsgs[0]?.id ?? conv.firstMessageId ?? 0;
         const result = await this.runTurn({
           prompt: SUMMARY_PROMPT,
-          systemPrompt: buildSystemPrompt({ role, isPrivate: conv.isPrivate, isOwner, deployTarget: this.config.deployTarget }),
+          // FIX4(중요, 최종 리뷰): 이 턴은 noRemoteTools 로 원격 도구를 강제로 닫으므로(아래),
+          // 페르소나에도 항상 workerConnected:false 를 실어 "안내와 실제 도구"가 어긋나지 않게
+          // 한다 — 실제 hub 연결 상태를 여기서 다시 물어 true 가 나오더라도, 이 턴 자체는
+          // noRemoteTools 때문에 fs_*/sh_exec 를 못 쓰므로 그 상태를 그대로 안내하면 FIX3 가
+          // 고친 것과 같은 종류의 거짓 안내(도구는 없는데 있다고 말하는)가 새로 생긴다.
+          systemPrompt: buildSystemPrompt({ role, isPrivate: conv.isPrivate, isOwner, deployTarget: this.config.deployTarget, workerConnected: false }),
           resume: conv.sessionId, cwd: this.agentCwd,
           context: { role, isPrivate: conv.isPrivate, isOwner, userId: conv.primaryUserId, conversationId: conv.id },
+          // FIX4: 유휴 요약은 사람이 지켜보지 않는 타이머로 돌고, 이전에 모델이 읽은 파일 등을
+          // 통해 프롬프트 인젝션이 심어졌을 수도 있는 세션을 그대로 이어받는다(resume). 워커
+          // 연결 여부·소유자 신원과 무관하게 원격 도구(fs_*/sh_exec, FIX2 로 같은 축에 묶인
+          // allow_dir 등)를 강제로 닫는다.
+          noRemoteTools: true,
         });
         if (result.ok && result.text.trim().length > 0) {
           await this.repos.summaries.insert({

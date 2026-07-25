@@ -110,7 +110,9 @@ async function main() {
   const agentCwd = path.resolve(config.dataDir, "..", "agent-cwd");
   fs.mkdirSync(agentCwd, { recursive: true });
   const runTurn = makeRunAgentTurn({ memories: repos.memories, users: repos.users, allowedDirs: repos.allowedDirs, introspect: repos.introspect }, config.deployTarget, config.model, hub);
-  const core = new AgentCore({ bus, config, runTurn, repos, agentCwd });
+  // FIX3(최종 리뷰): core.ts 도 hub 를 받아 능력 안내(persona.ts)에 "이번 턴에 워커가 실제로
+  // 연결돼 있는가"를 반영한다(agent.ts 의 shouldConnectWorker 와 같은 판정, 같은 hub 인스턴스).
+  const core = new AgentCore({ bus, config, runTurn, repos, agentCwd, hub });
   core.start();
 
   const discord = new DiscordAdapter({ bus, config, users, conversations });

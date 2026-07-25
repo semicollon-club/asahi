@@ -23,7 +23,7 @@ const flush = async () => {
 
 async function setup(over: {
   config?: Partial<Config>; mode?: "immediate" | "manual" | "throw" | "resume-fails";
-  imageFetch?: typeof fetch;
+  imageFetch?: typeof fetch; hub?: { isConnected(userId: string): boolean };
 } = {}) {
   const db = await openTestDb();
   const repos = {
@@ -59,7 +59,7 @@ async function setup(over: {
   const bus = new EventBus();
   const core = new AgentCore({
     bus, config, runTurn, now: () => clock, repos, agentCwd: "/data/agent",
-    fetchImpl: over.imageFetch,
+    fetchImpl: over.imageFetch, hub: over.hub,
   });
   core.start();
   const published: AgentEvent[] = [];
@@ -400,6 +400,64 @@ describe("AgentCore — 친근도(rapportStage) 주입", () => {
     pub(t.bus, dmHint("owner", "owner"), "또 안녕", 100);
     await t.core.drain();
     expect(t.calls[1].systemPrompt).toMatch(/익숙/);
+  });
+});
+
+// FIX3(중요, 최종 리뷰) — 능력 안내(persona.ts)는 이제 deployTarget 이 아니라 "이번 턴에 워커가
+// 실제로 연결돼 있는가"로 갈린다. core.ts 는 이 판정을 agent.ts 의 shouldConnectWorker 로 직접
+// 계산해(makeRunAgentTurn 이 도구셋을 계산할 때 쓰는 것과 동일한 함수) systemPrompt 에 싣는다 —
+// 그러지 않으면 실제로 fs_*/sh_exec 가 열려 있는데도 페르소나는 "PC 작업을 못 한다"고 안내하는
+// (또는 그 반대) 불일치가 생긴다.
+describe("AgentCore — 원격 워커 연결 상태를 페르소나에 반영한다(FIX3)", () => {
+  it("그 소유자의 워커가 연결돼 있으면 owner-DM 프롬프트가 실제 도구 이름(fs_read/sh_exec)으로 PC 작업이 가능하다고 안내한다", async () => {
+    const t = await setup({ hub: { isConnected: (userId) => userId === "owner" } });
+    pub(t.bus, dmHint("owner", "owner"), "안녕", 1);
+    await t.core.drain();
+    expect(t.calls[0].systemPrompt).toMatch(/fs_read/);
+    expect(t.calls[0].systemPrompt).toMatch(/sh_exec/);
+  });
+
+  it("워커가 연결돼 있지 않으면(hub 미배선) owner-DM 프롬프트가 PC 작업 불가를 안내한다", async () => {
+    const t = await setup(); // hub 없음
+    pub(t.bus, dmHint("owner", "owner"), "안녕", 1);
+    await t.core.drain();
+    expect(t.calls[0].systemPrompt).toMatch(/워커/);
+    expect(t.calls[0].systemPrompt).toMatch(/연결되면/);
+    expect(t.calls[0].systemPrompt).not.toMatch(/fs_read/);
+  });
+
+  it("워커가 연결돼 있어도 손님 DM 안내는 영향받지 않는다(손님은 원래도 PC 도구 언급이 없다)", async () => {
+    const t = await setup({ hub: { isConnected: () => true } });
+    pub(t.bus, dmHint("guest", "allowed"), "안녕", 1);
+    await t.core.drain();
+    expect(t.calls[0].systemPrompt).not.toMatch(/fs_read/);
+  });
+});
+
+// FIX4(중요, 최종 리뷰) — 유휴 대화 요약 턴은 사람이 지켜보지 않는 타이머로 돌고, 이전에 모델이
+// 읽은 파일 등을 통해 프롬프트 인젝션이 심어졌을 수도 있는 세션을 그대로 이어받는다(resume). 그런
+// 턴에도 원격 도구가 열려 있으면 그 인젝션이 아무도 모르는 사이에 실제 PC 작업으로 이어질 수
+// 있다 — noRemoteTools 로 워커 연결 여부와 무관하게 강제로 닫는다.
+describe("AgentCore — 유휴 요약 턴은 원격 도구를 강제로 닫는다(FIX4)", () => {
+  it("워커가 연결돼 있어도 요약 턴의 요청은 noRemoteTools:true 이고, systemPrompt 도 PC 작업 가능을 안내하지 않는다", async () => {
+    const t = await setup({ hub: { isConnected: () => true } });
+    pub(t.bus, dmHint("owner", "owner"), "기억해줘", t.now());
+    await t.core.drain();
+    // 평상시 턴(인덱스 0)은 워커 연결을 반영해 fs_read 를 안내한다(FIX3 회귀 가드).
+    expect(t.calls[0].systemPrompt).toMatch(/fs_read/);
+    expect(t.calls[0].noRemoteTools).toBeUndefined();
+
+    t.setClock(1_000_000 + 31 * 60 * 1000);
+    t.setResult({ text: "요약했다.", sessionId: "s1", ok: true });
+    await t.core.closeIdleConversations();
+    await t.core.drain();
+
+    const summaryCall = t.calls[t.calls.length - 1];
+    expect(summaryCall.noRemoteTools).toBe(true);
+    // FIX3 이 고친 것과 같은 종류의 거짓 안내를 새로 만들지 않는다 — 이 턴은 실제로 도구가
+    // 닫혀 있으므로 페르소나도 "가능하다"고 말하면 안 된다.
+    expect(summaryCall.systemPrompt).not.toMatch(/fs_read/);
+    expect(summaryCall.systemPrompt).not.toMatch(/클라우드에서 실행 중이라/);
   });
 });
 
