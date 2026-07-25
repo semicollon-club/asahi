@@ -21,17 +21,45 @@ PC/데이터에 영향을 주는 도구는 발화자의 **신원과 대화 위�
 
 | 계층 | 조건 | 열리는 도구 |
 | --- | --- | --- |
-| 소유자 DM · local | `isOwner && isPrivate`, `deployTarget="local"` | 파일 도구(Read/Write/Edit/Glob/Grep) + Bash + `remember`/`recall`(전원) + `manage_access` + `allow_dir`/`revoke_dir`/`list_dirs` + `db_schema`/`db_query`/`runtime_info` |
-| 소유자 DM · cloud | `isOwner && isPrivate`, `deployTarget="cloud"` | `remember`/`recall`(전원) + `manage_access` + `db_schema`/`db_query`/`runtime_info` — 파일/Bash/폴더관리 등 PC 도구는 전부 제외 |
-| 손님 자기 PC(ownWorkstation) · DM · local | `ownWorkstation && isPrivate`, `deployTarget≠"cloud"` | 파일 도구 + Bash + `remember`/`recall`(본인) + `allow_dir`/`revoke_dir`/`list_dirs` — `manage_access`·DB 조회 도구는 **제외**(신원 특권이 아니므로) |
-| 손님 DM(자기 PC 아님) | `isPrivate && role in {allowed, owner}`, 그 외 | `remember`/`recall`(본인 스코프만) |
+| 소유자 DM · local | `isOwner && isPrivate`, `deployTarget="local"` | 파일 도구(Read/Write/Edit/Glob/Grep) + Bash + `remember`/`recall`(전원) + `character_fact` + `manage_access` + `allow_dir`/`revoke_dir`/`list_dirs` + `db_schema`/`db_query`/`runtime_info` |
+| 소유자 DM · cloud | `isOwner && isPrivate`, `deployTarget="cloud"` | `remember`/`recall`(전원) + `character_fact` + `manage_access` + `db_schema`/`db_query`/`runtime_info` — 파일/Bash/폴더관리 등 PC 도구는 전부 제외 |
+| 손님 자기 PC(ownWorkstation) · DM · local | `ownWorkstation && isPrivate`, `deployTarget≠"cloud"` | 파일 도구 + Bash + `remember`/`recall`(본인) + `character_fact` + `allow_dir`/`revoke_dir`/`list_dirs` — `manage_access`·DB 조회 도구는 **제외**(신원 특권이 아니므로) |
+| 손님 DM(자기 PC 아님) | `isPrivate && role in {allowed, owner}`, 그 외 | `remember`/`recall`(본인 스코프만) + `character_fact` |
 | 서버/스레드(공개) | `!isPrivate` — 소유자여도 동일 | `recall`(공용 스코프만) |
+
+`character_fact`(캐릭터가 지어낸 자기 설정 고정)는 DM 계열 네 계층에만 열린다. 공개 서버 채널에서는
+조작으로 설정을 오염시킬 여지가 크고 얻는 값이 작아 읽기(`recall`)만 남긴다.
 
 `ownWorkstation` 은 하이브리드 로컬 워커가 "그 사용자 자신의 PC"에서 턴을 실행 중일 때만 선다.
 손님이라도 자기 PC 위에서는 파일/Bash 전권을 갖지만, `manage_access`나 `db_query` 같은
 신원 기반 특권은 여전히 `isOwner` 인 사람만 갖는다 — 이 둘은 별개 축이다(아래 절 참고).
 `deployTarget="cloud"`(Railway 컨테이너)는 로컬 워커가 아니므로 `ownWorkstation` 이 와도 PC
 도구를 열지 않는다.
+
+## character_fact 전역 스코프와 DM→공개 데이터 흐름
+
+`character_fact`(위 능력 계층표)로 저장되는 캐릭터 설정은 `scope='character'` 하나의 전역
+저장소다. `MemoriesRepo.characterFacts`(`agent/src/store/memoriesRepo.ts`)는 `user_id` 로
+거르지 않고, `buildContextBlock`(`agent/src/core/turnPrep.ts`)은 `conv.isPrivate` 값과
+무관하게 매 세션 시작마다 이 전역 목록을 `## 내 설정` 섹션에 그대로 주입한다. 소유자에게 한
+번 확정한 설정이 손님에게도, 공개 서버 채널에서도 똑같아야 캐릭터 일관성이 유지되므로
+의도된 설계다.
+
+다만 이 전역성은 이 코드베이스에서 유일하게 존재하는 **DM→공개 데이터 흐름**이다. 나머지
+전 영역의 프라이버시 원칙은 "DM 은 상대의 개인+공용, 서버/스레드는 공용만"(`recallHandler`,
+위 능력 계층표)인데, `character_fact` 는 이 원칙의 반대쪽 끝에 있다.
+
+- **쓰기**: 소유자 DM 뿐 아니라 손님 DM(`ownWorkstation` 여부와 무관)에서도 쓸 수 있다.
+- **읽기**: 소유자 DM·손님 DM·공개 서버 채널 등 모든 컨텍스트에서 예외 없이 주입된다 —
+  `recall` 처럼 신원·대화 위치별로 걸러지지 않는다.
+- **결과**: 손님이 자신의 DM 에서 캐릭터를 유도해 저장시킨 설정이, 소유자와의 대화와 공개
+  서버 채널에도 그대로 나타난다.
+
+이건 사용자에 대한 사실(`scope='user'`/`shared`)이 아니라 **캐릭터가 연기하는 캐논**이므로
+같은 위험 등급으로 취급하지는 않는다 — 새어나갈 수 있는 건 캐릭터가 지어낸 자기 신상뿐이고,
+제목·본문 길이 상한과 저장 개수 상한(도달 시 저장 자체를 거부)이 오염 폭을 제한한다. 그래도
+"손님이 쓴 내용이 소유자의 비공개 대화에도 노출된다"는 사실 자체는 남으므로, 이 전역 스코프에
+기대는 새 기능을 설계할 때는 이 절을 먼저 참고한다.
 
 ## 신원 vs 역할 게이팅
 

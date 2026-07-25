@@ -110,6 +110,9 @@ describe("buildSystemPrompt — 캐릭터/관계", () => {
       expect(p).toMatch(/Asahi/);
       expect(p).toMatch(/미성년/);
       expect(p).toMatch(/연애/);
+      // 회귀 가드: "미성년이지만 연애 요청은 받아준다" 같은 뒤집힌 문구도 /미성년/,/연애/ 만으로는
+      // 잡히지 않으므로, 실제 금지 문장 그대로를 확인한다.
+      expect(p).toMatch(/연애적·성적 맥락은 절대 연기하지 않는다/);
     }
   });
 
@@ -151,6 +154,77 @@ describe("buildSystemPrompt — 캐릭터/관계", () => {
       expect(p).toMatch(/db_query/);
       expect(p).toMatch(/runtime_info/);
       expect(p).toMatch(/실측/);
+    }
+  });
+});
+
+describe("buildSystemPrompt — 캐릭터 시트 · 거짓말 경계", () => {
+  const OWNER = { role: "owner", isPrivate: true, isOwner: true } as const;
+  const GUEST = { role: "allowed", isPrivate: true, isOwner: false } as const;
+  const SERVER = { role: "allowed", isPrivate: false, isOwner: false } as const;
+  const ALL = [OWNER, GUEST, SERVER];
+
+  it("고정 설정(16세·안테나·붉은 눈·세미콜론)을 모든 컨텍스트에 포함한다", () => {
+    for (const ctx of ALL) {
+      const p = buildSystemPrompt(ctx);
+      expect(p).toMatch(/16세/);
+      expect(p).toMatch(/안테나/);
+      expect(p).toMatch(/붉은 눈/);
+      expect(p).toMatch(/세미콜론/);
+    }
+  });
+
+  it("AI냐고 물으면 아니라고 답하라는 정체성 부인 지시를 모든 컨텍스트(소유자 DM/손님 DM/공개 서버)에 포함한다", () => {
+    for (const ctx of ALL) {
+      const p = buildSystemPrompt(ctx);
+      expect(p).toMatch(/AI냐고 물으면 아니라고 답한다/);
+    }
+  });
+
+  it("나이 서술이 모순되지 않는다(성인 표현 없음)", () => {
+    for (const ctx of ALL) expect(buildSystemPrompt(ctx)).not.toMatch(/성인|어른/);
+  });
+
+  it("성적 연기 지시가 없다(회귀 가드)", () => {
+    for (const ctx of ALL) {
+      const p = buildSystemPrompt(ctx);
+      expect(p).not.toMatch(/음란|성적인 대화|성적 대화 방식|사정|노골적|야한|신체 접촉/);
+    }
+  });
+
+  it("지어내도 되는 영역과 안 되는 영역을 분리해 명시한다", () => {
+    for (const ctx of ALL) {
+      const p = buildSystemPrompt(ctx);
+      expect(p).toMatch(/지어내도 되는/);
+      expect(p).toMatch(/지어내면 안 되는/);
+      if (ctx.isPrivate) {
+        // DM(소유자·손님)은 character_fact 로 저장하라는 지시를 받는다.
+        expect(p).toMatch(/character_fact/);
+      } else {
+        // 공개 서버 채널은 character_fact 도구가 없으므로(§FIX1) 저장 불가 안내로 대체된다.
+        expect(p).toMatch(/공개 채널에서는 새 설정을 저장할 수 없다/);
+        // 회귀 가드(커밋 553284b): 공개 채널 프롬프트에 character_fact 언급이 다시 섞여 들어가면
+        // 모델이 없는 도구를 쓰려 하거나 "저장했다"고 거짓 보고할 위험이 생긴다.
+        expect(p).not.toMatch(/character_fact/);
+      }
+    }
+  });
+
+  it("작업 사실(도구 결과·파일·DB)은 지어내지 말라고 명시한다", () => {
+    for (const ctx of ALL) {
+      const p = buildSystemPrompt(ctx);
+      expect(p).toMatch(/도구가 한 일은 그대로/);
+    }
+  });
+
+  it("위기 상황 예외(안전밸브)를 포함한다", () => {
+    for (const ctx of ALL) {
+      const p = buildSystemPrompt(ctx);
+      expect(p).toMatch(/자해|응급/);
+      // 문구가 "위기에도 캐릭터를 깨지 마라"처럼 뒤집혀도 /자해|응급/ 만으로는 잡히지 않으므로,
+      // 실제로 캐릭터를 깨고 사람이 아님을 밝히라는 지시인지까지 확인한다.
+      expect(p).toMatch(/캐릭터를 깨고/);
+      expect(p).toMatch(/사람이 아님/);
     }
   });
 });
