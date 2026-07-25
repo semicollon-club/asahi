@@ -1,5 +1,6 @@
 import { resolveRealOrNearestAncestor } from "../core/pathPermission.js";
 import { isPathWithinAny } from "../core/paths.js";
+import { isAbsolute } from "node:path";
 
 export type PathCheck = { ok: true; path: string } | { ok: false; message: string };
 
@@ -8,6 +9,16 @@ export type PathCheck = { ok: true; path: string } | { ok: false; message: strin
 // 정규화 규칙은 기존 canUseTool 경로 게이트와 동일한 함수를 재사용한다(동작이 갈리지 않게).
 export function checkPath(target: string, roots: string[]): PathCheck {
   if (roots.length === 0) return { ok: false, message: "워커에 열린 작업 폴더가 없어요." };
+
+  // 루트 설정이 절대경로인지 검증한다. 상대경로나 빈 문자열 루트는 runtime 에 process.cwd() 가 바뀌면
+  // 예상치 못한 경로 접근을 허용할 수 있으므로 설정 오류로 거부한다. 잘못된 루트를 조용히 필터링하지 않고
+  // 전체를 거부해야 워커의 루트 설정이 부분적으로 잘못된 경우 명확히 드러난다.
+  for (const root of roots) {
+    if (!isAbsolute(root)) {
+      return { ok: false, message: "워커 루트 설정이 잘못됐어요. 절대경로여야 합니다." };
+    }
+  }
+
   const resolved = resolveRealOrNearestAncestor(target);
   if (!isPathWithinAny(resolved, roots)) {
     return { ok: false, message: `워커 작업 폴더 밖 경로예요: ${resolved}` };

@@ -46,4 +46,29 @@ describe("checkPath — 워커 루트 검사", () => {
       fs.rmSync(other, { recursive: true, force: true });
     }
   });
+
+  it('빈 문자열 루트는 거부한다', () => {
+    const r = checkPath(path.join(root, "proj", "a.txt"), [""]);
+    expect(r.ok).toBe(false);
+  });
+
+  it('현재 디렉토리 상대경로 루트는 거부한다', () => {
+    const r = checkPath(path.join(root, "proj", "a.txt"), ["."]);
+    expect(r.ok).toBe(false);
+  });
+
+  it('상대경로 루트는 거부한다', () => {
+    const r = checkPath(path.join(root, "proj", "a.txt"), ["some/rel"]);
+    expect(r.ok).toBe(false);
+  });
+
+  it('절대경로 루트 하나와 상대경로 루트 하나가 섞여 있으면 거부한다', () => {
+    const r = checkPath(path.join(root, "proj", "a.txt"), [root, "relative/path"]);
+    expect(r.ok).toBe(false);
+  });
+
+  it('절대경로 루트만 있으면 허용한다', () => {
+    const r = checkPath(path.join(root, "proj", "a.txt"), [root]);
+    expect(r.ok).toBe(true);
+  });
 });
