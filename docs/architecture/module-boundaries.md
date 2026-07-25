@@ -1,5 +1,5 @@
 ---
-lastReviewed: 2026-07-13
+lastReviewed: 2026-07-26
 ---
 
 # 모듈 경계 (Module Boundaries)
@@ -13,17 +13,18 @@ lastReviewed: 2026-07-13
 | 디렉토리/파일 | 책임 | 주요 파일 |
 | --- | --- | --- |
 | `adapters/` | 채널(현재는 discord.js) 실제 I/O. 들어온 이벤트를 라우팅 판단해 `user_message`로 발행하고, 코어가 발행한 `assistant_message`/`system_notice`/`progress`를 구독해 실제 전송·편집을 수행한다 | `discord.ts` |
-| `core/` | 대화 오케스트레이션(직렬화·한도·위임 판단), SDK 턴 실행, 페르소나(시스템 프롬프트), 도구 정의·경로 게이팅, 읽기전용 SQL 가드. `discord.js`에 의존하지 않는다(채널 불가지론) | `core.ts`, `agent.ts`, `persona.ts`, `tools.ts`, `pathPermission.ts`, `paths.ts`, `sqlGuard.ts`, `turnPrep.ts`, `commands.ts`, `images.ts` |
+| `core/` | 대화 오케스트레이션(직렬화·한도 판단), SDK 턴 실행, 페르소나(시스템 프롬프트), 도구 정의·원격 도구 1차 경로 필터, 읽기전용 SQL 가드. `discord.js`에 의존하지 않는다(채널 불가지론) | `core.ts`, `agent.ts`, `persona.ts`, `tools.ts`, `remoteTools.ts`, `pathPermission.ts`, `paths.ts`, `sqlGuard.ts`, `turnPrep.ts`, `commands.ts`, `images.ts` |
 | `events/` | 어댑터↔코어를 분리하는 얇은 pub/sub 이벤트버스. 이벤트 타입 정의의 유일한 출처 | `bus.ts` |
-| `store/` | Postgres 영속 계층(레포지토리 패턴). 스키마 정의와 테이블별 CRUD/쿼리만 담당하며, 그 위 어떤 계층에도 의존하지 않는 최하위 레이어다 | `schema.ts`, `db.ts`, `usersRepo.ts`, `conversationsRepo.ts`, `participantsRepo.ts`, `messagesRepo.ts`, `summariesRepo.ts`, `memoriesRepo.ts`, `turnsRepo.ts`, `jobsRepo.ts`, `allowedDirsRepo.ts`, `introspectRepo.ts`, `settingsRepo.ts`, `allowedDirsMigration.ts` |
-| `worker/` | 로컬 워커 진입점(`worker.ts`)이 위임된 job을 실제로 처리하는 핵심 로직. `core`(agent/persona/turnPrep)와 `store`만 재사용하고, `events`·`adapters`(discord.js)에는 의존하지 않는다 — 워커는 디스코드에 직접 연결하지 않는다 | `jobRunner.ts` |
+| `store/` | Postgres 영속 계층(레포지토리 패턴). 스키마 정의와 테이블별 CRUD/쿼리만 담당하며, 그 위 어떤 계층에도 의존하지 않는 최하위 레이어다 | `schema.ts`, `db.ts`, `usersRepo.ts`, `conversationsRepo.ts`, `participantsRepo.ts`, `messagesRepo.ts`, `summariesRepo.ts`, `memoriesRepo.ts`, `turnsRepo.ts`, `allowedDirsRepo.ts`, `introspectRepo.ts`, `settingsRepo.ts`, `allowedDirsMigration.ts` |
+| `remote/` | 봇↔워커 WebSocket 전송 계층. `protocol.ts`(양쪽 공유 계약)·`hub.ts`(봇 쪽 서버)·`workerClient.ts`/`executors.ts`/`roots.ts`(워커 쪽). `core/` 의 순수 경로 헬퍼(`pathPermission.ts`의 `resolveRealOrNearestAncestor`, `paths.ts`의 `isPathWithinAny`)만 재사용하고 `discord.js`·`store/` 에는 의존하지 않는다 | `protocol.ts`, `hub.ts`, `workerClient.ts`, `executors.ts`, `roots.ts` |
 | `memory/` | 에이전트 작업 디렉토리(`agentCwd`)의 파일 기반 기억 스캐폴드(`MEMORY.md` 초기화). DB 기반 기억(`store/memoriesRepo.ts`의 remember/recall)과는 별개 개념이다 | `memory.ts` |
-| `config.ts`(디렉토리 아님, `src/` 최상위 파일) | 환경변수 로드·검증. 봇용 `loadConfig`/`Config`와 워커용 `loadWorkerConfig`/`WorkerConfig` 두 세트를 제공하며, 다른 모듈에 의존하지 않는다 | `config.ts` |
+| `config.ts`(디렉토리 아님, `src/` 최상위 파일) | 환경변수 로드·검증. 봇용 `loadConfig`/`Config`와 워커용 `loadWorkerConfig`/`WorkerConfig` 두 세트를 제공하며, 다른 모듈에 의존하지 않는다. 워커용 설정은 `databaseUrl`도 `model`도 갖지 않는다 — 워커는 이제 DB도 모델도 다루지 않는다(`docs/decisions/0006-thin-worker.md`) | `config.ts` |
 
 두 진입점(`index.ts` = 봇, `worker.ts` = 로컬 워커)은 위 디렉토리를 조립하는 컴포지션
-루트다. `index.ts`는 `adapters`+`core`+`store`+`events`+`config`를 모두 조립하지만,
-`worker.ts`는 `core`+`store`+`config`+`worker/jobRunner.ts`만 조립하고 `events`·
-`adapters`는 쓰지 않는다(디스코드에 연결하지 않고 DB의 `worker_jobs` 큐만 폴링한다).
+루트다. `index.ts`는 `adapters`+`core`+`store`+`events`+`config`+`remote`(허브)를 모두
+조립하지만, 워커는 `remote`(`workerClient.ts`+`executors.ts`)와 `config`만 조립하며
+`store`·`events`·`adapters`에는 의존하지 않는다 — 워커는 디스코드에도 DB에도 붙지 않고,
+봇이 여는 허브에 아웃바운드 WebSocket으로 접속해 개별 도구 호출만 받아 실행한다.
 
 ## 허용 의존 방향
 
@@ -32,7 +33,7 @@ lastReviewed: 2026-07-13
 - `adapters`는 `core`(이미지 타입 등)·`store`(레포 타입)·`events`·`config`를 알아도
   된다. `discord.js`를 임포트하는 유일한 디렉토리다.
 - `core`는 `store`(레포)·`config`·`events`(이벤트 타입)를 알아도 되지만, **`discord.js`를
-  임포트하지 않는다**(채널 불가지론). `core/`·`store/`·`events/`·`worker/`·`memory/`
+  임포트하지 않는다**(채널 불가지론). `core/`·`store/`·`events/`·`remote/`·`memory/`
   전체를 검색해도 `discord.js`/`discord-api` 문자열은 등장하지 않는다 — 오직
   `adapters/discord.ts`만 이를 임포트한다.
 - `store`는 그 위 어떤 레이어도 참조하지 않는다(최하위). 유일한 예외는
@@ -40,9 +41,10 @@ lastReviewed: 2026-07-13
   것뿐이다.
 - `events/bus.ts`는 `core/images.ts`의 `ImageRef` 타입 하나만 임포트한다(이벤트
   페이로드 타입용) — events → core 역방향 의존은 이 한 줄이 전부다.
-- `worker/jobRunner.ts`는 `core`(`agent.ts`/`persona.ts`/`core.ts`의
-  `formatProgress`/`turnPrep.ts`)와 `store`에는 의존하지만, `events`·`adapters`에는
-  의존하지 않는다.
+- `remote/`는 `core`의 순수 경로 헬퍼 두 개(`pathPermission.ts`의
+  `resolveRealOrNearestAncestor`, `paths.ts`의 `isPathWithinAny`)만 재사용한다.
+  `store`·`events`·`adapters`에는 의존하지 않는다 — `remote/roots.ts`가 워커 쪽 최종
+  경로 판정에 이 헬퍼를 재사용하는 것이 유일한 접점이다.
 - `memory/memory.ts`는 `node:fs`/`node:path`만 쓰는 독립 유틸리티다.
 - `config.ts`는 다른 모듈에 의존하지 않는 최하위 설정 로더다.
 
@@ -55,8 +57,8 @@ lastReviewed: 2026-07-13
 | 이벤트 | 추가 필드 | 발행자 | 구독자 |
 | --- | --- | --- | --- |
 | `user_message` | `text: string`, `hint?: ConversationHint`, `images?: ImageRef[]` | `adapters/discord.ts`(메시지 인입 시) | `AgentCore.start()` |
-| `assistant_message` | `text: string`(최종 응답 본문) | `core`(턴 성공 시, 위임 완료 시) | 어댑터(실제 디스코드 전송) |
-| `system_notice` | `text: string`(오류·안내 문구) | `core`(`notify()` — 한도 초과, 처리 오류, 위임 실패 등) | 어댑터(전송) |
+| `assistant_message` | `text: string`(최종 응답 본문) | `core`(턴 성공 시) | 어댑터(실제 디스코드 전송) |
+| `system_notice` | `text: string`(오류·안내 문구) | `core`(`notify()` — 한도 초과, 처리 오류, 이미지 다운로드 실패 등) | 어댑터(전송) |
 | `progress` | `text: string`(도구 호출/완료/답변 작성 중 등 진행 텍스트) | `core`(턴 처리 중 `onProgress` 콜백을 `formatProgress`로 변환) | 어댑터(메시지 편집으로 진행 표시) |
 
 `ConversationHint`(`user_message` 전용 부가 필드): `kind`("dm"|"thread"),
@@ -70,7 +72,7 @@ lastReviewed: 2026-07-13
 
 ## 관련 문서
 
-- 3-프로세스 토폴로지·위임 규칙 전체: `docs/architecture/overview.md`
+- 봇↔워커 토폴로지·원격 도구 전체 그림: `docs/architecture/overview.md`
 - 메시지 하나의 전체 처리 경로(ingest/turn 체인 등): `docs/architecture/data-flow.md`
 - 용어 정의: `docs/architecture/glossary.md`
 - 능력 계층·도구 게이팅: `docs/security/capability-model.md`

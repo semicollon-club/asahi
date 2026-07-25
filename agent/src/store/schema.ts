@@ -147,8 +147,9 @@ CREATE TABLE IF NOT EXISTS triggers (
 CREATE INDEX IF NOT EXISTS idx_triggers_next ON triggers(next_run_ts) WHERE status = 'active';
 
 -- 하이브리드 재설계 조각3(사용자별 로컬 워커): Railway 봇이 owner/손님 DM 의 PC 작업(파일/Bash)을
--- 각자의 로컬 워커에게 위임하는 큐. 워커 진입점·봇 라우팅은 별도 태스크(W2/W3) 몫이며, 이 스키마는
--- 그 데이터 계층만 마련한다.
+-- 각자의 로컬 워커에게 위임하던 큐였다(워커가 비동기 2차 에이전트로 job 전체를 실행하던 시절).
+-- 미사용(2026-07 얇은 워커 전환). 워커가 비동기 2차 에이전트였을 때의 작업 큐다.
+-- 테이블은 마이그레이션 위험을 피해 남겨두었으나 코드는 더 이상 읽고 쓰지 않는다.
 CREATE TABLE IF NOT EXISTS worker_jobs (
   id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   user_id TEXT NOT NULL,
@@ -175,11 +176,14 @@ CREATE INDEX IF NOT EXISTS idx_worker_jobs_status ON worker_jobs(status);
 -- 합류할 뿐 중복 job(=중복 실행)을 만들지 않는다. NULL 은 여러 개 허용(messageId 를 안 주는 경로도 지원).
 CREATE UNIQUE INDEX IF NOT EXISTS idx_worker_jobs_message_id ON worker_jobs(message_id) WHERE message_id IS NOT NULL;
 -- 리뷰 #5a(MED): 타임아웃 뒤늦게 끝난 job 의 결과가 유실되지 않도록 "배달(디스코드 발행) 완료" 여부를
--- delivered_ts 로 추적한다(NULL=아직 안 보냄). 배달 스윕(core.ts deliverPendingJobResults)이 이걸로 스캔한다.
+-- delivered_ts 로 추적했다(NULL=아직 안 보냄). 이 인덱스를 스캔하던 배달 스윕(core.ts
+-- deliverPendingJobResults)은 Task 8(위임 기계장치 삭제)에서 함께 제거됐다.
 CREATE INDEX IF NOT EXISTS idx_worker_jobs_undelivered ON worker_jobs(status) WHERE delivered_ts IS NULL;
 
--- 사용자별 워커 생존 신호. 워커가 주기적으로 heartbeat 를 찍고, 봇은 isOnline(cutoff) 으로
--- "지금 이 사용자의 워커가 떠 있는지" 를 판단한다(라우팅 판단은 W2/W3 몫).
+-- 사용자별 워커 생존 신호였다. 워커가 주기적으로 heartbeat 를 찍고, 봇은 isOnline(cutoff) 으로
+-- "지금 이 사용자의 워커가 떠 있는지" 를 판단해 위임 라우팅에 썼다.
+-- 미사용(2026-07 얇은 워커 전환). 얇은 워커는 하트비트를 찍지 않는다(위임 자체가 없어졌으므로).
+-- worker_jobs 와 같은 이유로 테이블은 남기고 코드만 걷어냈다.
 CREATE TABLE IF NOT EXISTS worker_heartbeats (
   user_id TEXT PRIMARY KEY,
   last_ts BIGINT NOT NULL

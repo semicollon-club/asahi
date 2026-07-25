@@ -182,6 +182,42 @@ describe("extractCandidatePaths — canUseTool 입력에서 경로 추출", () =
     });
   });
 
+  // FIX1(치명) — fs_grep 의 glob 인자(검색 대상 파일 필터)는 Glob 의 pattern 과 똑같이 파일
+  // 경로를 매칭하는 글롭 문법이라 경로를 담을 수 있다. pattern(정규식·검색어)과 달리 glob 은
+  // 반드시 검사해야 한다 — 그동안 이 분기가 glob 을 건드리지 않아, path 가 허용 폴더 안이어도
+  // glob="../secret/**" 로 그 밖을 가리키면 후보에 전혀 잡히지 않았다(리뷰 재현: remoteTools.test.ts
+  // 참고).
+  describe("Grep glob 경로 집행(FIX1) — glob 도 검사 후보에 넣는다", () => {
+    it("path 없이 glob 이 절대경로면 그 리터럴 접두를 후보로 뽑는다", () => {
+      expect(extractCandidatePaths("Grep", { pattern: "foo", glob: "C:\\other\\**" })).toEqual(["C:\\other"]);
+    });
+
+    it("path 있고 glob 이 ../ 로 상위 탈출하면 결합·정규화된 경로가 후보에 포함된다", () => {
+      const result = extractCandidatePaths("Grep", { pattern: "foo", path: "C:\\proj\\a", glob: "../../x/**" });
+      expect(result).toContain("C:\\proj\\a");
+      expect(result).toContain(path.resolve("C:\\proj\\a", "../../x"));
+    });
+
+    it("path 있고 glob 이 하위 상대경로면 결합한 경로가 후보에 포함된다", () => {
+      const result = extractCandidatePaths("Grep", { pattern: "foo", path: "C:\\proj\\a", glob: "sub/**" });
+      expect(result).toContain(path.resolve("C:\\proj\\a", "sub"));
+    });
+
+    it("path 없고 glob 이 상대경로면 cwd 기준으로 resolve 한다", () => {
+      const result = extractCandidatePaths("Grep", { pattern: "foo", glob: "sub/**" }, undefined, "C:\\proj\\a");
+      expect(result).toContain(path.resolve("C:\\proj\\a", "sub"));
+    });
+
+    it("glob 이 메타문자로 시작해 리터럴 접두가 없으면 glob 후보를 추가하지 않는다(중복 방지)", () => {
+      expect(extractCandidatePaths("Grep", { pattern: "foo", glob: "*.ts", path: "C:\\a" })).toEqual(["C:\\a"]);
+    });
+
+    it("glob 이 아예 없으면(기존 동작) path 만 후보로 남는다(회귀 없음)", () => {
+      expect(extractCandidatePaths("Grep", { pattern: "foo", path: "C:\\a" })).toEqual(["C:\\a"]);
+      expect(extractCandidatePaths("Grep", { pattern: "foo" })).toEqual([]);
+    });
+  });
+
   describe("후보가 비면 cwd 를 후보로 넣는다(보안리뷰 #3)", () => {
     it("Bash: blockedPath 없고 cwd 있으면 cwd 를 후보로", () => {
       expect(extractCandidatePaths("Bash", { command: "ls" }, undefined, "C:\\proj\\a")).toEqual(["C:\\proj\\a"]);
@@ -212,6 +248,12 @@ describe("extractCandidatePaths — canUseTool 입력에서 경로 추출", () =
     it("Glob {path: 허용, pattern: '../../x/**'} → 밖이면 deny", () => {
       const candidates = extractCandidatePaths("Glob", { path: "C:\\proj\\a", pattern: "../../x/**" });
       const result = decidePathPermission("Glob", candidates, { isOwnerDm: true, allowedDirs });
+      expect(result.behavior).toBe("deny");
+    });
+
+    it("FIX1 — Grep {path: 허용, glob: '../../x/**'} → 밖이면 deny", () => {
+      const candidates = extractCandidatePaths("Grep", { pattern: "foo", path: "C:\\proj\\a", glob: "../../x/**" });
+      const result = decidePathPermission("Grep", candidates, { isOwnerDm: true, allowedDirs });
       expect(result.behavior).toBe("deny");
     });
 

@@ -110,52 +110,59 @@ describe("manage_access 도구", () => {
   });
 });
 
-describe("allow_dir/revoke_dir/list_dir 도구(§원격개발 A2) — 소유자 DM 전용, ctx.userId 별로 저장", () => {
-  it("소유자 DM 에서 실제 존재하는 디렉토리를 허용하면 list 에 반영된다", async () => {
-    const owner = await ctx({ isOwner: true, isPrivate: true });
+// FIX2(치명, 최종 리뷰) — allowDirHandler 는 더 이상 fs.statSync/fs.realpathSync 로 "봇 프로세스의"
+// 파일시스템을 검사하지 않는다. 봇과 워커는 서로 다른 머신일 수 있어(클라우드는 물론, local 배포도
+// 워커가 다른 PC 에서 돌 수 있다) 그 검증은 애초에 성립하지 않았다 — cloud 배포에서는 이 검사가
+// 실행되기도 전에 도구 자체가 노출되지 않아 문제가 가려져 있었을 뿐이다(allowedToolsFor 쪽 FIX2).
+// 이제는 그 사용자의 워커가 hello 프레임으로 알려온 실제 작업 폴더(ctx.remote.roots)만을 문자열
+// 포함 검사로 대조한다 — 존재 여부·실경로 확인은 워커 쪽(remote/roots.ts 의 checkPath)이 실제
+// 파일 접근 시점에 이미 하고 있다(이중 방어의 두 번째 겹, 위 "경로 게이팅" 참고).
+describe("allow_dir/revoke_dir/list_dir 도구(§원격개발 A2, FIX2: 워커 roots 기준 재검증) — 소유자 DM 전용, ctx.userId 별로 저장", () => {
+  it("소유자 DM 에서 워커의 작업 폴더(roots) 안 경로를 허용하면 list 에 반영된다", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "asahi-allowdir-"));
+    const owner = await ctx({
+      isOwner: true, isPrivate: true,
+      remote: { roots: [os.tmpdir()], call: async () => ({ ok: true, content: "" }) },
+    });
     const out = await allowDirHandler(owner, { path: dir });
     expect(out).toContain(path.resolve(dir));
     expect(await owner.repos.allowedDirs.list(owner.userId)).toEqual([path.resolve(dir)]);
     expect(await listDirsHandler(owner)).toContain(path.resolve(dir));
   });
 
-  it("존재하지 않는 경로는 거부하고 아무것도 추가하지 않는다", async () => {
-    const owner = await ctx({ isOwner: true, isPrivate: true });
-    const bogus = path.join(os.tmpdir(), "asahi-does-not-exist-xyz");
+  it("FIX2 — 워커가 연결돼 있지 않으면(ctx.remote 없음) 거부하고 아무것도 추가하지 않는다", async () => {
+    const owner = await ctx({ isOwner: true, isPrivate: true }); // remote 미설정 — 워커 미연결과 동일
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "asahi-allowdir-noworker-"));
+    const out = await allowDirHandler(owner, { path: dir });
+    expect(out).toContain("워커");
+    expect(await owner.repos.allowedDirs.list(owner.userId)).toEqual([]);
+  });
+
+  it("FIX2 — 워커의 작업 폴더(roots) 밖 경로는 거부하고, 거부 메시지에 워커의 실제 폴더를 알려준다", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "asahi-allowdir-outside-"));
+    const workerRoot = fs.mkdtempSync(path.join(os.tmpdir(), "asahi-workerroot-"));
+    const owner = await ctx({
+      isOwner: true, isPrivate: true,
+      remote: { roots: [workerRoot], call: async () => ({ ok: true, content: "" }) },
+    });
+    const out = await allowDirHandler(owner, { path: dir }); // dir 는 workerRoot 의 형제 — roots 밖
+    expect(out).toContain("밖");
+    expect(out).toContain(workerRoot);
+    expect(await owner.repos.allowedDirs.list(owner.userId)).toEqual([]);
+  });
+
+  it("FIX2 — 존재 여부는 더 이상 봇이 검사하지 않는다(워커와 다른 머신이라 확인 불가) — roots 안이면 실존하지 않아도 등록된다", async () => {
+    // 예전엔 fs.statSync 로 "존재하는 디렉토리인가"를 봇이 직접 확인해 거부했다. 이제 그 확인은
+    // 워커만 할 수 있고(파일시스템을 가진 쪽), 봇은 roots 포함 여부만 본다 — 의도된 동작 변화다.
+    const workerRoot = fs.mkdtempSync(path.join(os.tmpdir(), "asahi-workerroot2-"));
+    const bogus = path.join(workerRoot, "does-not-exist-xyz");
+    const owner = await ctx({
+      isOwner: true, isPrivate: true,
+      remote: { roots: [workerRoot], call: async () => ({ ok: true, content: "" }) },
+    });
     const out = await allowDirHandler(owner, { path: bogus });
-    expect(await owner.repos.allowedDirs.list(owner.userId)).toEqual([]);
-    expect(out).toContain("찾을 수 없어요");
-  });
-
-  it("디렉토리가 아닌 파일 경로는 거부한다", async () => {
-    const owner = await ctx({ isOwner: true, isPrivate: true });
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "asahi-allowdir-file-"));
-    const file = path.join(dir, "a.txt");
-    fs.writeFileSync(file, "x");
-    await allowDirHandler(owner, { path: file });
-    expect(await owner.repos.allowedDirs.list(owner.userId)).toEqual([]);
-  });
-
-  it("심링크(정션)로 등록해도 실경로로 정규화해 저장한다(과차단 방지, 보안리뷰 #4)", async () => {
-    const owner = await ctx({ isOwner: true, isPrivate: true });
-    const target = fs.mkdtempSync(path.join(os.tmpdir(), "asahi-realdir-"));
-    const link = path.join(os.tmpdir(), `asahi-junction-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-    try {
-      fs.symlinkSync(target, link, "junction");
-    } catch {
-      // 이 환경에서 정션/심링크 생성 권한이 없으면 스킵한다(코드리뷰로 갈음).
-      return;
-    }
-    try {
-      const real = fs.realpathSync(link);
-      const out = await allowDirHandler(owner, { path: link });
-      expect(await owner.repos.allowedDirs.list(owner.userId)).toEqual([real]);
-      expect(await owner.repos.allowedDirs.list(owner.userId)).not.toContain(path.resolve(link));
-      expect(out).toContain(real);
-    } finally {
-      fs.rmSync(link, { recursive: true, force: true });
-    }
+    expect(out).toContain(path.resolve(bogus));
+    expect(await owner.repos.allowedDirs.list(owner.userId)).toEqual([path.resolve(bogus)]);
   });
 
   it("revoke_dir 은 허용 목록에서 제거한다", async () => {
@@ -173,8 +180,11 @@ describe("allow_dir/revoke_dir/list_dir 도구(§원격개발 A2) — 소유자 
   });
 
   it("손님 DM 에서는 세 도구 모두 거부하고 아무것도 바꾸지 않는다", async () => {
-    const guest = await ctx({ isOwner: false, isPrivate: true });
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "asahi-guest-"));
+    const guest = await ctx({
+      isOwner: false, isPrivate: true,
+      remote: { roots: [os.tmpdir()], call: async () => ({ ok: true, content: "" }) },
+    });
     expect(await allowDirHandler(guest, { path: dir })).toContain("소유자");
     expect(await guest.repos.allowedDirs.list(guest.userId)).toEqual([]);
     await guest.repos.allowedDirs.add(guest.userId, dir); // 이후 상태로 revoke 시도 검증
@@ -184,37 +194,39 @@ describe("allow_dir/revoke_dir/list_dir 도구(§원격개발 A2) — 소유자 
   });
 
   it("서버(비공개 아님)에서는 소유자여도 세 도구 모두 거부한다", async () => {
-    const ownerServer = await ctx({ isOwner: true, isPrivate: false });
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "asahi-ownerserver-"));
+    const ownerServer = await ctx({
+      isOwner: true, isPrivate: false,
+      remote: { roots: [os.tmpdir()], call: async () => ({ ok: true, content: "" }) },
+    });
     expect(await allowDirHandler(ownerServer, { path: dir })).toContain("소유자");
     expect(await ownerServer.repos.allowedDirs.list(ownerServer.userId)).toEqual([]);
     expect(await listDirsHandler(ownerServer)).toContain("소유자");
   });
 
-  it("ownWorkstation(자기 PC 워커 실행)이면 손님(isOwner=false)이라도 DM 에서 세 도구 모두 허용한다", async () => {
-    const guestOnOwnPc = await ctx({ isOwner: false, isPrivate: true, ownWorkstation: true, userId: "guest" });
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "asahi-ownworkstation-"));
-    const out = await allowDirHandler(guestOnOwnPc, { path: dir });
-    expect(out).toContain(path.resolve(dir));
-    expect(await guestOnOwnPc.repos.allowedDirs.list(guestOnOwnPc.userId)).toEqual([path.resolve(dir)]);
-    expect(await listDirsHandler(guestOnOwnPc)).toContain(path.resolve(dir));
-    const revoked = await revokeDirHandler(guestOnOwnPc, { path: dir });
-    expect(revoked).toContain(path.resolve(dir));
-    expect(await guestOnOwnPc.repos.allowedDirs.list(guestOnOwnPc.userId)).toEqual([]);
-  });
-
-  it("ownWorkstation 이라도 서버(비공개 아님)에서는 세 도구 모두 거부한다", async () => {
-    const guestOnOwnPcServer = await ctx({ isOwner: false, isPrivate: false, ownWorkstation: true });
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "asahi-ownworkstation-server-"));
-    expect(await allowDirHandler(guestOnOwnPcServer, { path: dir })).toContain("소유자");
-    expect(await listDirsHandler(guestOnOwnPcServer)).toContain("소유자");
+  // FIX6(사소하지만 함정, 최종 리뷰) — canManagePc 는 예전에 ctx.isPrivate && (ctx.isOwner ||
+  // ctx.ownWorkstation === true) 였다. ownWorkstation 을 채우는 생산자는 이미 없었지만(죽은
+  // 분기), 필드 자체는 ToolCtx/TurnContext 에 남아 있어 "혹시라도 다시 채워지면" 손님 DM 이 경로
+  // 강제 없이 이 도구들을 얻는 잠재적 함정이었다. 필드 자체를 삭제했으므로, 이제 이 이름의
+  // 프로퍼티를 억지로 흘려 넣어도(예: 실수로 되살아난 코드) canManagePc 는 isOwner 만 본다.
+  it("FIX6 — canManagePc 는 ownWorkstation 같은 임의의 추가 필드를 더 이상 신뢰하지 않는다(죽은 게이트 제거 회귀)", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "asahi-fix6-stray-"));
+    const guest = await ctx({
+      isOwner: false, isPrivate: true, userId: "guest",
+      remote: { roots: [os.tmpdir()], call: async () => ({ ok: true, content: "" }) },
+    });
+    (guest as unknown as Record<string, unknown>).ownWorkstation = true; // 과거엔 이 값으로 게이트를 통과했다
+    expect(await allowDirHandler(guest, { path: dir })).toContain("소유자");
+    expect(await guest.repos.allowedDirs.list(guest.userId)).toEqual([]);
   });
 
   it("허용 폴더는 ctx.userId 별로 격리된다 — 다른 사용자의 허용 목록에 서로 영향 없음", async () => {
     const db = await openTestDb();
     const repos = { memories: new MemoriesRepo(db), users: new UsersRepo(db), allowedDirs: new AllowedDirsRepo(db) };
-    const ownerA: ToolCtx = { repos, role: "owner", isPrivate: true, isOwner: true, userId: "ownerA", conversationId: 1 };
-    const ownerB: ToolCtx = { repos, role: "owner", isPrivate: true, isOwner: true, userId: "ownerB", conversationId: 1 };
+    const runtime = { model: "claude-opus-4-8", sdkVersion: "0.3.207", deployTarget: "local" as const, maxTurns: 30 };
+    const remote = { roots: [os.tmpdir()], call: async () => ({ ok: true, content: "" }) };
+    const ownerA: ToolCtx = { repos, role: "owner", isPrivate: true, isOwner: true, userId: "ownerA", conversationId: 1, runtime, remote } as unknown as ToolCtx;
+    const ownerB: ToolCtx = { repos, role: "owner", isPrivate: true, isOwner: true, userId: "ownerB", conversationId: 1, runtime, remote } as unknown as ToolCtx;
     const dirA = fs.mkdtempSync(path.join(os.tmpdir(), "asahi-userA-"));
     const dirB = fs.mkdtempSync(path.join(os.tmpdir(), "asahi-userB-"));
 
@@ -233,17 +245,41 @@ describe("allow_dir/revoke_dir/list_dir 도구(§원격개발 A2) — 소유자 
 });
 
 describe("allowedToolsFor — 능력 계층(§7.1)", () => {
-  it("소유자 DM 은 파일 도구 + remember/recall/manage_access + Bash + dir 관리 도구", () => {
-    const tools = allowedToolsFor("owner", true, true);
-    expect(tools).toContain("Read");
-    expect(tools).toContain("Write");
+  // Task 7(원격 워커 배선)부터 owner-DM(local) 은 SDK 내장 파일/Bash 도구를 더 이상 받지 않는다 —
+  // core/agent.ts 가 builtinTools=[] 로 그 도구들을 아예 닫으므로, 예전처럼 allowedTools 목록에
+  // Read/Write/Bash 를 넣어두면 실행할 대상이 없는 이름만 보고하는 셈이 된다(허수아비 권한).
+  // 파일/셸 작업은 이제 워커 연결 시에만 원격 도구(mcp__asahi__fs_*·sh_exec)로 한다.
+  // FIX2(치명, 최종 리뷰): dir 관리 도구(allow_dir/revoke_dir/list_dirs)는 이제 workerConnected
+  // 하나로만 결정된다 — 예전엔 deployTarget="local" 이면 워커 연결 여부와 무관하게 항상 노출됐다.
+  // 이 도구가 검증할 워커의 roots 자체가 없는 상태(워커 미연결)에서 노출해 봐야 실행하면 항상
+  // 거부되므로, workerConnected:true 를 명시해야 이 세 도구가 나온다(바로 아래 별도 테스트가
+  // workerConnected 생략/false 시 이 셋이 빠지는 것을 확인한다).
+  it("소유자 DM + 워커 연결 시 remember/recall/manage_access + dir 관리 도구(SDK 내장 파일·Bash 도구는 없다)", () => {
+    const tools = allowedToolsFor("owner", true, true, "local", true);
     expect(tools).toContain("mcp__asahi__remember");
     expect(tools).toContain("mcp__asahi__recall");
     expect(tools).toContain("mcp__asahi__manage_access");
-    expect(tools).toContain("Bash");
     expect(tools).toContain("mcp__asahi__allow_dir");
     expect(tools).toContain("mcp__asahi__revoke_dir");
     expect(tools).toContain("mcp__asahi__list_dirs");
+    expect(tools).not.toContain("Read");
+    expect(tools).not.toContain("Write");
+    expect(tools).not.toContain("Edit");
+    expect(tools).not.toContain("Glob");
+    expect(tools).not.toContain("Grep");
+    expect(tools).not.toContain("Bash");
+  });
+
+  it("FIX2 — 워커가 연결돼 있지 않으면 dir 관리 도구는 local 이라도 노출하지 않는다(워커 roots 가 없어 검증할 수 없으므로)", () => {
+    const withoutArg = allowedToolsFor("owner", true, true);
+    const explicitFalse = allowedToolsFor("owner", true, true, "local", false);
+    for (const tools of [withoutArg, explicitFalse]) {
+      expect(tools).toContain("mcp__asahi__remember");
+      expect(tools).toContain("mcp__asahi__manage_access");
+      expect(tools).not.toContain("mcp__asahi__allow_dir");
+      expect(tools).not.toContain("mcp__asahi__revoke_dir");
+      expect(tools).not.toContain("mcp__asahi__list_dirs");
+    }
   });
 
   it("손님 DM 은 remember/recall/character_fact 만(파일·manage_access·Bash·dir 도구 없음)", () => {
@@ -266,7 +302,10 @@ describe("allowedToolsFor — 능력 계층(§7.1)", () => {
     expect(allowedToolsFor("owner", false, false)).toEqual(allowedToolsFor("owner", false, false, "local"));
   });
 
-  it("deployTarget='cloud' + 소유자 DM 이면 PC 도구(파일·Bash·dir 관리)를 빼고 remember/recall/character_fact/manage_access/db_schema/db_query/runtime_info 만 남는다", () => {
+  // FIX2 갱신(최종 리뷰): 아래 결과 자체(이 셋이 빠짐)는 그대로지만, 진짜 이유가 바뀌었다 —
+  // deployTarget="cloud" 자체가 아니라 workerConnected 가 기본값 false 라서다. 바로 아래 두
+  // 테스트가 FIX2 의 핵심(워커만 연결되면 cloud 에서도 dir 관리 도구가 열린다)을 직접 확인한다.
+  it("deployTarget='cloud' + 소유자 DM + 워커 미연결이면 PC 도구(파일·Bash·dir 관리)를 빼고 remember/recall/character_fact/manage_access/db_schema/db_query/runtime_info 만 남는다", () => {
     const tools = allowedToolsFor("owner", true, true, "cloud");
     expect(tools).toEqual([
       "mcp__asahi__remember",
@@ -285,48 +324,33 @@ describe("allowedToolsFor — 능력 계층(§7.1)", () => {
     expect(tools).not.toContain("mcp__asahi__list_dirs");
   });
 
+  it("FIX2(치명 수정) — deployTarget='cloud' 라도 워커가 연결되면 allow_dir/revoke_dir/list_dirs 를 연다(예전엔 cloud 에서 영원히 열리지 않아 allowed_dirs 를 채울 방법이 없었다 — 리뷰 재현)", () => {
+    const tools = allowedToolsFor("owner", true, true, "cloud", true);
+    expect(tools).toContain("mcp__asahi__allow_dir");
+    expect(tools).toContain("mcp__asahi__revoke_dir");
+    expect(tools).toContain("mcp__asahi__list_dirs");
+    // fs_*/sh_exec 는 이미 워커 연결 기준으로 열려 있었다 — 이제 그 전제조건인 allow_dir 도 같은
+    // 기준으로 열려서, "fs_read 는 되는데 allow_dir 가 없어 allowed_dirs 를 못 채운다"는 모순이 없다.
+    expect(tools).toContain("mcp__asahi__fs_read");
+    expect(tools).toContain("mcp__asahi__sh_exec");
+  });
+
+  it("FIX2 — local·cloud 모두 dir 관리 도구는 이제 workerConnected 하나로만 결정된다(더 이상 deployTarget 로 갈리지 않는다)", () => {
+    for (const dt of ["local", "cloud"] as const) {
+      const connected = allowedToolsFor("owner", true, true, dt, true);
+      const disconnected = allowedToolsFor("owner", true, true, dt, false);
+      expect(connected).toContain("mcp__asahi__allow_dir");
+      expect(disconnected).not.toContain("mcp__asahi__allow_dir");
+    }
+    // local·cloud 는 이제 완전히 동일한 도구 목록을 낸다(같은 workerConnected 값 기준).
+    expect(allowedToolsFor("owner", true, true, "local", true)).toEqual(allowedToolsFor("owner", true, true, "cloud", true));
+    expect(allowedToolsFor("owner", true, true, "local", false)).toEqual(allowedToolsFor("owner", true, true, "cloud", false));
+  });
+
   it("deployTarget='cloud' 라도 손님 DM·서버는 로컬과 동일(영향 없음)", () => {
     expect(allowedToolsFor("allowed", true, false, "cloud")).toEqual(["mcp__asahi__remember", "mcp__asahi__recall", "mcp__asahi__character_fact"]);
     expect(allowedToolsFor("owner", false, false, "cloud")).toEqual(["mcp__asahi__recall"]);
     expect(allowedToolsFor("allowed", false, false, "cloud")).toEqual(["mcp__asahi__recall"]);
-  });
-
-  describe("ownWorkstation(하이브리드 조각3 — 로컬 워커: 자기 PC 전권)", () => {
-    it("손님(isOwner=false)+ownWorkstation+DM 이면 파일/Bash/allow_dir/remember/recall 을 포함하되 manage_access 는 없다", () => {
-      const tools = allowedToolsFor("allowed", true, false, "local", true);
-      expect(tools).toContain("Read");
-      expect(tools).toContain("Write");
-      expect(tools).toContain("Edit");
-      expect(tools).toContain("Glob");
-      expect(tools).toContain("Grep");
-      expect(tools).toContain("Bash");
-      expect(tools).toContain("mcp__asahi__remember");
-      expect(tools).toContain("mcp__asahi__recall");
-      expect(tools).toContain("mcp__asahi__allow_dir");
-      expect(tools).toContain("mcp__asahi__revoke_dir");
-      expect(tools).toContain("mcp__asahi__list_dirs");
-      expect(tools).not.toContain("mcp__asahi__manage_access");
-    });
-
-    it("소유자(isOwner=true)+ownWorkstation+DM 이면 기존 소유자 DM 도구셋과 동일(manage_access 포함)", () => {
-      expect(allowedToolsFor("owner", true, true, "local", true)).toEqual(allowedToolsFor("owner", true, true, "local", false));
-      expect(allowedToolsFor("owner", true, true, "local", true)).toContain("mcp__asahi__manage_access");
-    });
-
-    it("ownWorkstation 이라도 서버(비공개 아님)에서는 영향 없음(recall 만)", () => {
-      expect(allowedToolsFor("allowed", false, false, "local", true)).toEqual(["mcp__asahi__recall"]);
-    });
-
-    it("ownWorkstation=false(기본값, 봇 경로)면 기존 손님 DM 동작과 동일", () => {
-      expect(allowedToolsFor("allowed", true, false, "local")).toEqual(allowedToolsFor("allowed", true, false, "local", false));
-    });
-
-    it("deployTarget='cloud' 이면 ownWorkstation 이 true 여도 PC 도구가 열리지 않는다(워커가 아니므로)", () => {
-      const tools = allowedToolsFor("allowed", true, false, "cloud", true);
-      expect(tools).toEqual(["mcp__asahi__remember", "mcp__asahi__recall", "mcp__asahi__character_fact"]);
-      expect(tools).not.toContain("Read");
-      expect(tools).not.toContain("Bash");
-    });
   });
 });
 
@@ -385,10 +409,9 @@ describe("allowedToolsFor — db 도구 노출", () => {
       expect(tools).toContain("mcp__asahi__runtime_info");
     }
   });
-  it("손님 DM·서버·손님 자기PC(ownWorkstation)엔 노출하지 않는다", () => {
+  it("손님 DM·서버엔 노출하지 않는다", () => {
     expect(allowedToolsFor("allowed", true, false, "local")).not.toContain("mcp__asahi__db_query");
     expect(allowedToolsFor("allowed", false, false, "local")).not.toContain("mcp__asahi__db_query");
-    expect(allowedToolsFor("allowed", true, false, "local", true)).not.toContain("mcp__asahi__db_query");
   });
 });
 
@@ -441,15 +464,53 @@ describe("character_fact — 캐릭터 확정 설정 저장", () => {
 describe("allowedToolsFor — character_fact 노출 계층", () => {
   const CF = "mcp__asahi__character_fact";
 
-  it("DM 계열 네 분기 전부에 노출한다", () => {
+  it("DM 계열 세 분기 전부에 노출한다", () => {
     expect(allowedToolsFor("owner", true, true, "local")).toContain(CF);
     expect(allowedToolsFor("owner", true, true, "cloud")).toContain(CF);
-    expect(allowedToolsFor("allowed", true, false, "local", true)).toContain(CF); // ownWorkstation
-    expect(allowedToolsFor("allowed", true, false, "local")).toContain(CF);       // 일반 손님 DM
+    expect(allowedToolsFor("allowed", true, false, "local")).toContain(CF); // 손님 DM
   });
 
   it("공개 서버 채널에는 노출하지 않는다", () => {
     expect(allowedToolsFor("allowed", false, false, "local")).not.toContain(CF);
     expect(allowedToolsFor("owner", false, true, "local")).not.toContain(CF);
+  });
+});
+
+describe("allowedToolsFor — 원격 도구 노출", () => {
+  const RT = "mcp__asahi__fs_read";
+  const SH = "mcp__asahi__sh_exec";
+
+  it("워커가 연결돼 있으면 소유자 DM 에 원격 도구를 연다(local·cloud 동일)", () => {
+    for (const target of ["local", "cloud"] as const) {
+      const tools = allowedToolsFor("owner", true, true, target, true);
+      expect(tools).toContain(RT);
+      expect(tools).toContain(SH);
+    }
+  });
+
+  it("워커가 없으면 원격 도구를 노출하지 않는다", () => {
+    for (const target of ["local", "cloud"] as const) {
+      const tools = allowedToolsFor("owner", true, true, target, false);
+      expect(tools).not.toContain(RT);
+      expect(tools).not.toContain(SH);
+    }
+  });
+
+  it("workerConnected 를 생략하면 노출하지 않는다(안전한 기본값)", () => {
+    expect(allowedToolsFor("owner", true, true, "local")).not.toContain(RT);
+  });
+
+  it("손님 DM·서버 채널에는 워커가 연결돼 있어도 노출하지 않는다(1단계는 소유자 전용)", () => {
+    expect(allowedToolsFor("allowed", true, false, "local", true)).not.toContain(RT);
+    expect(allowedToolsFor("allowed", false, false, "local", true)).not.toContain(RT);
+  });
+
+  it("기억·접근관리 도구는 워커 연결 여부와 무관하다", () => {
+    const off = allowedToolsFor("owner", true, true, "cloud", false);
+    const on = allowedToolsFor("owner", true, true, "cloud", true);
+    for (const t of ["mcp__asahi__remember", "mcp__asahi__recall", "mcp__asahi__manage_access"]) {
+      expect(off).toContain(t);
+      expect(on).toContain(t);
+    }
   });
 });

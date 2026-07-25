@@ -8,8 +8,7 @@ import { MessagesRepo } from "../src/store/messagesRepo.js";
 import { SummariesRepo } from "../src/store/summariesRepo.js";
 import { MemoriesRepo } from "../src/store/memoriesRepo.js";
 import { TurnsRepo } from "../src/store/turnsRepo.js";
-import { JobsRepo } from "../src/store/jobsRepo.js";
-import { AgentCore, WORKER_ONLINE_CUTOFF_MS } from "../src/core/core.js";
+import { AgentCore } from "../src/core/core.js";
 import type { Config } from "../src/config.js";
 import type { TurnRequest, TurnResult } from "../src/core/agent.js";
 
@@ -24,14 +23,12 @@ const flush = async () => {
 
 async function setup(over: {
   config?: Partial<Config>; mode?: "immediate" | "manual" | "throw" | "resume-fails";
-  sleep?: (ms: number) => Promise<void>; workerPollMs?: number; workerTimeoutMs?: number;
-  imageFetch?: typeof fetch;
+  imageFetch?: typeof fetch; hub?: { isConnected(userId: string): boolean };
 } = {}) {
   const db = await openTestDb();
   const repos = {
     users: new UsersRepo(db), conversations: new ConversationsRepo(db), participants: new ParticipantsRepo(db),
     messages: new MessagesRepo(db), summaries: new SummariesRepo(db), memories: new MemoriesRepo(db), turns: new TurnsRepo(db),
-    jobs: new JobsRepo(db),
   };
   await repos.users.upsert("owner", { role: "owner" });
   await repos.users.upsert("guest", { role: "allowed" });
@@ -60,13 +57,9 @@ async function setup(over: {
     return new Promise((res) => resolvers.push(() => res(nextResult)));
   };
   const bus = new EventBus();
-  // 위임 폴링 기본 sleep: 실제 타이머 대신 가짜 시계를 poll 간격만큼 전진시키고 pg-mem 의
-  // setImmediate 단위 완료를 흘려보낸다(flush) — 테스트가 실시간 대기 없이 폴링 루프를 구동한다.
-  const defaultSleep = async (ms: number) => { clock += ms; await flush(); };
   const core = new AgentCore({
     bus, config, runTurn, now: () => clock, repos, agentCwd: "/data/agent",
-    sleep: over.sleep ?? defaultSleep, workerPollMs: over.workerPollMs, workerTimeoutMs: over.workerTimeoutMs,
-    fetchImpl: over.imageFetch,
+    fetchImpl: over.imageFetch, hub: over.hub,
   });
   core.start();
   const published: AgentEvent[] = [];
@@ -392,247 +385,6 @@ describe("AgentCore — 멀티유저/멀티대화", () => {
   });
 });
 
-describe("AgentCore — 로컬 워커 위임 라우팅(하이브리드 조각3 W3)", () => {
-  it("워커가 온라인이면 DM 은 로컬 대신 job 으로 위임되고, job 이 done 이 되면 assistant_message 로 발행된다", async () => {
-    const t = await setup({
-      // 실제 워커가 하듯: 폴링 사이(sleep) 에 pending job 을 claim 해 완료시킨다.
-      sleep: async () => {
-        const job = await t.repos.jobs.claimNext("owner", t.now());
-        if (job) await t.repos.jobs.complete(job.id, "위임된 답변", t.now());
-      },
-    });
-    await t.repos.jobs.heartbeat("owner");
-    pub(t.bus, dmHint("owner", "owner"), "안녕", t.now());
-    await t.core.drain();
-
-    expect(t.calls.length).toBe(0); // 로컬 runTurn 은 전혀 호출되지 않음(위임됐으므로)
-    expect(t.published.find((e) => e.type === "assistant_message")).toMatchObject({ text: "위임된 답변", channelRef: "dm-owner" });
-    const jobRows = await t.db.query("SELECT * FROM worker_jobs");
-    expect(jobRows.rows.length).toBe(1); // enqueue 됨
-  });
-
-  it("리뷰 #3(HIGH): 손님 DM 은 그 손님의 워커가 온라인이어도 위임하지 않고 이 봇이 로컬 처리한다(정책: 워커는 소유자 전용)", async () => {
-    // 정책: shared DATABASE_URL 을 손님에게 주면 WORKER_USER_ID=ownerId 로 소유자를 사칭해 전권을
-    // 탈취할 위험이 있어, 손님 DM 위임은 워커 온라인 여부와 무관하게 전면 비활성한다(인증 인프라 후속).
-    const t = await setup();
-    await t.repos.jobs.heartbeat("guest"); // 손님 몫 워커가 온라인이라고 자처해도
-    pub(t.bus, dmHint("guest", "allowed"), "안녕", t.now());
-    await t.core.drain();
-
-    expect(t.calls.length).toBe(1); // 위임되지 않고 로컬 runTurn 이 호출됨
-    const jobRows = await t.db.query("SELECT * FROM worker_jobs");
-    expect(jobRows.rows.length).toBe(0); // job 자체가 생성되지 않음
-  });
-
-  it("손님 DM 은 위임되지 않아도 손님 시간당 한도는 기존과 동일하게 로컬 처리 경로에 적용된다", async () => {
-    const t = await setup({ config: { maxTurnsPerHourPerUser: 1 } });
-    await t.repos.jobs.heartbeat("guest"); // 온라인이어도 손님은 위임 대상이 아니므로 영향 없음
-    pub(t.bus, dmHint("guest", "allowed"), "1", t.now());
-    await t.core.drain();
-    expect(t.calls.length).toBe(1);
-
-    pub(t.bus, dmHint("guest", "allowed"), "2", t.now());
-    await t.core.drain();
-    expect(t.calls.length).toBe(1); // 한도 초과로 두 번째는 로컬 호출도 안 됨
-    expect(t.published.filter((e) => e.type === "system_notice").some((e) => e.text.includes("한도"))).toBe(true);
-    const jobRows = await t.db.query("SELECT * FROM worker_jobs");
-    expect(jobRows.rows.length).toBe(0); // 손님은 애초에 위임 경로를 타지 않음
-  });
-
-  it("서버/스레드 대화는 워커가 온라인이어도 위임하지 않고 기존대로 이 봇이 로컬 처리한다", async () => {
-    const t = await setup();
-    await t.repos.jobs.heartbeat("owner");
-    pub(t.bus, threadHint("owner", "ch-1", "owner", "o1"), "안녕", t.now());
-    await t.core.drain();
-
-    expect(t.calls.length).toBe(1); // 로컬 runTurn 이 호출됨
-    const jobRows = await t.db.query("SELECT * FROM worker_jobs");
-    expect(jobRows.rows.length).toBe(0); // job 은 생성되지 않음
-  });
-
-  it("워커가 오프라인(하트비트 없음)이면 DM 도 기존처럼 이 봇이 로컬 처리한다", async () => {
-    const t = await setup();
-    pub(t.bus, dmHint("owner", "owner"), "안녕", t.now());
-    await t.core.drain();
-
-    expect(t.calls.length).toBe(1);
-    const jobRows = await t.db.query("SELECT * FROM worker_jobs");
-    expect(jobRows.rows.length).toBe(0);
-  });
-
-  it("하트비트가 컷오프보다 오래되면(오프라인 판정) 위임하지 않고 로컬 처리한다", async () => {
-    const t = await setup();
-    await t.repos.jobs.heartbeat("owner");
-    // 리뷰 #7: isOnline 은 이제 DB 서버 시계 기준이라 앱의 가짜 시계(setClock)로는 오프라인을
-    // 흉내낼 수 없다 — DB 자신의 now() 로 컷오프보다 확실히 오래된 시각을 직접 구성한다.
-    await t.db.query(
-      "UPDATE worker_heartbeats SET last_ts = (EXTRACT(EPOCH FROM now())*1000)::bigint - $2::bigint WHERE user_id = $1",
-      ["owner", WORKER_ONLINE_CUTOFF_MS + 1000],
-    );
-    pub(t.bus, dmHint("owner", "owner"), "안녕", t.now());
-    await t.core.drain();
-
-    expect(t.calls.length).toBe(1);
-  });
-
-  it("job 이 진행 중 progress 를 갱신하면 progress 이벤트로 중계되고, 완료되면 assistant_message 로 마무리된다", async () => {
-    let step = 0;
-    let jobId: number | null = null;
-    const t = await setup({
-      sleep: async () => {
-        step++;
-        if (step === 1) {
-          const job = await t.repos.jobs.claimNext("owner", t.now());
-          jobId = job!.id;
-          await t.repos.jobs.setProgress(jobId, "파일 읽는 중");
-        } else if (step === 2) {
-          await t.repos.jobs.complete(jobId!, "완료된 답변", t.now());
-        }
-      },
-    });
-    await t.repos.jobs.heartbeat("owner");
-    pub(t.bus, dmHint("owner", "owner"), "안녕", t.now());
-    await t.core.drain();
-
-    const progressTexts = t.published.filter((e) => e.type === "progress").map((e) => e.text);
-    expect(progressTexts).toContain("파일 읽는 중");
-    expect(t.published.find((e) => e.type === "assistant_message")?.text).toBe("완료된 답변");
-  });
-
-  it("job 이 실패로 끝나면 그 오류를 안내한다", async () => {
-    const t = await setup({
-      sleep: async () => {
-        const job = await t.repos.jobs.claimNext("owner", t.now());
-        if (job) await t.repos.jobs.fail(job.id, "워커 오류 상세", t.now());
-      },
-    });
-    await t.repos.jobs.heartbeat("owner");
-    pub(t.bus, dmHint("owner", "owner"), "안녕", t.now());
-    await t.core.drain();
-
-    const notice = t.published.find((e) => e.type === "system_notice");
-    expect(notice?.text).toContain("워커 오류 상세");
-    expect(t.published.some((e) => e.type === "assistant_message")).toBe(false);
-  });
-
-  it("워커가 타임아웃 동안 응답하지 않으면(계속 pending) 안내 메시지를 보낸다", async () => {
-    const t = await setup({ workerPollMs: 500, workerTimeoutMs: 1500 }); // 기본 sleep: job 을 건드리지 않음(계속 pending)
-    await t.repos.jobs.heartbeat("owner");
-    pub(t.bus, dmHint("owner", "owner"), "안녕", t.now());
-    await t.core.drain();
-
-    const notice = t.published.find((e) => e.type === "system_notice");
-    expect(notice?.text).toContain("처리 중이에요"); // 리뷰 #5a: "응답하지 않아요" → 결과를 기다리는 안내로 문구 변경
-    expect(t.calls.length).toBe(0); // 로컬 처리로 폴백하지 않음
-    const jobRows = await t.db.query("SELECT * FROM worker_jobs");
-    expect(jobRows.rows[0].status).toBe("pending"); // job 자체는 그대로 남겨둔다
-  });
-
-  it("리뷰 #2(HIGH): 크래시로 남은 미처리 메시지가 이미 위임 job(messageId)을 갖고 있으면 recoverPending 이 중복 job 을 만들지 않는다", async () => {
-    // 시나리오: 봇이 위임(enqueue)까지 마친 뒤 크래시해 그 사용자 메시지를 processed=true 로 마킹하지
-    // 못했다고 가정한다(finally 가 실행되기 전 프로세스가 죽음). 재기동 후 recoverPending 이 같은
-    // 메시지로 다시 위임을 시도해도, messageId 로 이미 만들어둔 job 에 합류할 뿐 새 job 을 만들지
-    // 않아야 한다(중복 실행 방지).
-    const t = await setup({
-      sleep: async () => {
-        const job = await t.repos.jobs.claimNext("owner", t.now());
-        if (job) await t.repos.jobs.complete(job.id, "복구 후 위임 답변", t.now());
-      },
-    });
-    await t.repos.jobs.heartbeat("owner");
-    const convId = await t.repos.conversations.create({
-      kind: "dm", discordChannelId: "dm-owner", primaryUserId: "owner", isPrivate: true, lastActiveTs: t.now(),
-    });
-    const messageId = await t.repos.messages.insert({
-      conversationId: convId, ts: t.now(), role: "user", userId: "owner", content: "위임 대상 메시지", processed: false,
-    });
-    // "이전 시도"에서 이미 enqueue 까지 끝났던 상황을 직접 재현한다.
-    const priorJobId = await t.repos.jobs.enqueue({
-      userId: "owner", conversationId: convId, discordChannelId: "dm-owner", userMessage: "위임 대상 메시지", ts: t.now(), messageId,
-    });
-
-    await t.core.recoverPending();
-    await t.core.drain();
-
-    // 전체 행 수(필터 없이)로 검사해야 한다 — messageId 로 필터링하면 "새로 만들어진(message_id=NULL)
-    // 중복 job"이 걸러지지 않고 통과해버려 회귀를 못 잡는다.
-    const allJobRows = await t.db.query("SELECT * FROM worker_jobs");
-    expect(allJobRows.rows.length).toBe(1); // 중복 enqueue 되지 않음(전체 테이블 기준)
-    const jobRows = await t.db.query("SELECT * FROM worker_jobs WHERE message_id = $1", [messageId]);
-    expect(jobRows.rows.length).toBe(1);
-    expect(Number(jobRows.rows[0].id)).toBe(priorJobId);
-    expect((await t.repos.messages.unprocessedUserMessages()).length).toBe(0); // 이번엔 끝까지 처리되어 마무리됨
-    expect(t.published.find((e) => e.type === "assistant_message")?.text).toBe("복구 후 위임 답변");
-  });
-});
-
-describe("AgentCore — 위임 결과 배달 스윕(리뷰 #5a: 타임아웃 후 유실 방지)", () => {
-  it("타임아웃 후 워커가 나중에 done 으로 완료하면, 스윕이 assistant_message 를 발행하고 delivered_ts 를 남긴다", async () => {
-    const t = await setup({ workerPollMs: 500, workerTimeoutMs: 1000 }); // 기본 sleep: job 을 건드리지 않음(타임아웃)
-    await t.repos.jobs.heartbeat("owner");
-    pub(t.bus, dmHint("owner", "owner"), "안녕", t.now());
-    await t.core.drain();
-    expect(t.published.some((e) => e.type === "system_notice" && e.text.includes("처리 중"))).toBe(true);
-
-    const jobRows = await t.db.query("SELECT id FROM worker_jobs");
-    const jobId = Number((jobRows.rows[0] as { id: number | string }).id);
-    await t.repos.jobs.complete(jobId, "지연된 답변", t.now()); // 타임아웃 뒤 워커가 뒤늦게 완료
-
-    await t.core.deliverPendingJobResults();
-
-    expect(t.published.find((e) => e.type === "assistant_message" && e.text === "지연된 답변")).toBeDefined();
-    const after = await t.repos.jobs.get(jobId);
-    expect(after?.deliveredTs).not.toBeNull();
-  });
-
-  it("실패로 끝난 job 이 나중에 배달되면 system_notice 로 안내한다", async () => {
-    const t = await setup({ workerPollMs: 500, workerTimeoutMs: 1000 });
-    await t.repos.jobs.heartbeat("owner");
-    pub(t.bus, dmHint("owner", "owner"), "안녕", t.now());
-    await t.core.drain();
-    const jobRows = await t.db.query("SELECT id FROM worker_jobs");
-    const jobId = Number((jobRows.rows[0] as { id: number | string }).id);
-    await t.repos.jobs.fail(jobId, "지연된 실패", t.now());
-
-    await t.core.deliverPendingJobResults();
-
-    const notice = t.published.filter((e) => e.type === "system_notice").find((e) => e.text.includes("지연된 실패"));
-    expect(notice).toBeDefined();
-  });
-
-  it("이미 배달된(delivered_ts 있음) job 은 스윕을 두 번 돌려도 다시 발행하지 않는다(정확히 한 번 배달)", async () => {
-    const t = await setup({ workerPollMs: 500, workerTimeoutMs: 1000 });
-    await t.repos.jobs.heartbeat("owner");
-    pub(t.bus, dmHint("owner", "owner"), "안녕", t.now());
-    await t.core.drain();
-    const jobRows = await t.db.query("SELECT id FROM worker_jobs");
-    const jobId = Number((jobRows.rows[0] as { id: number | string }).id);
-    await t.repos.jobs.complete(jobId, "답변1", t.now());
-
-    await t.core.deliverPendingJobResults();
-    const afterFirst = t.published.filter((e) => e.type === "assistant_message").length;
-    await t.core.deliverPendingJobResults();
-    const afterSecond = t.published.filter((e) => e.type === "assistant_message").length;
-    expect(afterSecond).toBe(afterFirst);
-  });
-
-  it("정상 경로(타임아웃 전에 완료)로 이미 배달된 job 은 스윕이 중복 발행하지 않는다", async () => {
-    const t = await setup({
-      sleep: async () => {
-        const job = await t.repos.jobs.claimNext("owner", t.now());
-        if (job) await t.repos.jobs.complete(job.id, "정상 답변", t.now());
-      },
-    });
-    await t.repos.jobs.heartbeat("owner");
-    pub(t.bus, dmHint("owner", "owner"), "안녕", t.now());
-    await t.core.drain();
-    expect(t.published.filter((e) => e.type === "assistant_message")).toHaveLength(1);
-
-    await t.core.deliverPendingJobResults();
-    expect(t.published.filter((e) => e.type === "assistant_message")).toHaveLength(1); // 스윕이 중복 발행 안 함
-  });
-});
-
 describe("AgentCore — 친근도(rapportStage) 주입", () => {
   it("누적 user 메시지가 적으면 소유자 프롬프트에 '서먹', 10개 이상이면 '익숙' 문구가 담긴다", async () => {
     const t = await setup();
@@ -648,6 +400,64 @@ describe("AgentCore — 친근도(rapportStage) 주입", () => {
     pub(t.bus, dmHint("owner", "owner"), "또 안녕", 100);
     await t.core.drain();
     expect(t.calls[1].systemPrompt).toMatch(/익숙/);
+  });
+});
+
+// FIX3(중요, 최종 리뷰) — 능력 안내(persona.ts)는 이제 deployTarget 이 아니라 "이번 턴에 워커가
+// 실제로 연결돼 있는가"로 갈린다. core.ts 는 이 판정을 agent.ts 의 shouldConnectWorker 로 직접
+// 계산해(makeRunAgentTurn 이 도구셋을 계산할 때 쓰는 것과 동일한 함수) systemPrompt 에 싣는다 —
+// 그러지 않으면 실제로 fs_*/sh_exec 가 열려 있는데도 페르소나는 "PC 작업을 못 한다"고 안내하는
+// (또는 그 반대) 불일치가 생긴다.
+describe("AgentCore — 원격 워커 연결 상태를 페르소나에 반영한다(FIX3)", () => {
+  it("그 소유자의 워커가 연결돼 있으면 owner-DM 프롬프트가 실제 도구 이름(fs_read/sh_exec)으로 PC 작업이 가능하다고 안내한다", async () => {
+    const t = await setup({ hub: { isConnected: (userId) => userId === "owner" } });
+    pub(t.bus, dmHint("owner", "owner"), "안녕", 1);
+    await t.core.drain();
+    expect(t.calls[0].systemPrompt).toMatch(/fs_read/);
+    expect(t.calls[0].systemPrompt).toMatch(/sh_exec/);
+  });
+
+  it("워커가 연결돼 있지 않으면(hub 미배선) owner-DM 프롬프트가 PC 작업 불가를 안내한다", async () => {
+    const t = await setup(); // hub 없음
+    pub(t.bus, dmHint("owner", "owner"), "안녕", 1);
+    await t.core.drain();
+    expect(t.calls[0].systemPrompt).toMatch(/워커/);
+    expect(t.calls[0].systemPrompt).toMatch(/연결되면/);
+    expect(t.calls[0].systemPrompt).not.toMatch(/fs_read/);
+  });
+
+  it("워커가 연결돼 있어도 손님 DM 안내는 영향받지 않는다(손님은 원래도 PC 도구 언급이 없다)", async () => {
+    const t = await setup({ hub: { isConnected: () => true } });
+    pub(t.bus, dmHint("guest", "allowed"), "안녕", 1);
+    await t.core.drain();
+    expect(t.calls[0].systemPrompt).not.toMatch(/fs_read/);
+  });
+});
+
+// FIX4(중요, 최종 리뷰) — 유휴 대화 요약 턴은 사람이 지켜보지 않는 타이머로 돌고, 이전에 모델이
+// 읽은 파일 등을 통해 프롬프트 인젝션이 심어졌을 수도 있는 세션을 그대로 이어받는다(resume). 그런
+// 턴에도 원격 도구가 열려 있으면 그 인젝션이 아무도 모르는 사이에 실제 PC 작업으로 이어질 수
+// 있다 — noRemoteTools 로 워커 연결 여부와 무관하게 강제로 닫는다.
+describe("AgentCore — 유휴 요약 턴은 원격 도구를 강제로 닫는다(FIX4)", () => {
+  it("워커가 연결돼 있어도 요약 턴의 요청은 noRemoteTools:true 이고, systemPrompt 도 PC 작업 가능을 안내하지 않는다", async () => {
+    const t = await setup({ hub: { isConnected: () => true } });
+    pub(t.bus, dmHint("owner", "owner"), "기억해줘", t.now());
+    await t.core.drain();
+    // 평상시 턴(인덱스 0)은 워커 연결을 반영해 fs_read 를 안내한다(FIX3 회귀 가드).
+    expect(t.calls[0].systemPrompt).toMatch(/fs_read/);
+    expect(t.calls[0].noRemoteTools).toBeUndefined();
+
+    t.setClock(1_000_000 + 31 * 60 * 1000);
+    t.setResult({ text: "요약했다.", sessionId: "s1", ok: true });
+    await t.core.closeIdleConversations();
+    await t.core.drain();
+
+    const summaryCall = t.calls[t.calls.length - 1];
+    expect(summaryCall.noRemoteTools).toBe(true);
+    // FIX3 이 고친 것과 같은 종류의 거짓 안내를 새로 만들지 않는다 — 이 턴은 실제로 도구가
+    // 닫혀 있으므로 페르소나도 "가능하다"고 말하면 안 된다.
+    expect(summaryCall.systemPrompt).not.toMatch(/fs_read/);
+    expect(summaryCall.systemPrompt).not.toMatch(/클라우드에서 실행 중이라/);
   });
 });
 
@@ -707,21 +517,5 @@ describe("AgentCore — 이미지 입력", () => {
     const notice = t.published.find((e) => e.type === "system_notice" && e.text.includes("불러오지"));
     expect(notice).toBeDefined();
     expect(notice?.channelRef).toBe("dm-owner");
-  });
-
-  it("이미지가 있으면 워커가 온라인이어도 위임하지 않고 봇이 직접 처리한다", async () => {
-    // 주의(브리프 명시): jobs.isOnline 은 DB 서버 시계 기준이라 pg-mem 환경에서 heartbeat 직후
-    // 온라인 판정이 확실히 성립하는지 보장되지 않는다(실 Postgres 확인 필요). 그래도 핵심 단언인
-    // "위임 job 이 없다(claimNext null)" + "calls===1(봇이 직접 처리)"은 온라인 판정 여부와 무관하게
-    // 이미지 턴이 위임 게이트(images.length===0 조건)에서 걸러졌음을 검증한다.
-    const t = await setup({ imageFetch: fakeFetch });
-    await t.repos.jobs.heartbeat("owner"); // 워커 온라인으로
-    const hint = dmHint("owner", "owner");
-    t.bus.publish({ type: "user_message", channel: "discord", channelRef: hint.discordChannelId, text: "봐줘", ts: 1, hint,
-      images: [{ url: "u", mediaType: "image/png", name: "a.png", size: 3 }] });
-    await t.core.drain();
-    expect(t.calls).toHaveLength(1); // 위임(enqueue) 아니라 직접 runTurn
-    const pending = await t.repos.jobs.claimNext("owner", 999999);
-    expect(pending).toBeNull(); // 위임된 job 없음
   });
 });

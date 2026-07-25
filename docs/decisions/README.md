@@ -1,5 +1,5 @@
 ---
-lastReviewed: 2026-07-13
+lastReviewed: 2026-07-26
 ---
 
 # 결정 기록 (ADR) 인덱스
@@ -38,7 +38,8 @@ ADR을 추가하고 옛 ADR의 `status`를 `Superseded`로 바꾸며 `superseded
 | [0002](./0002-railway-local-worker-hybrid.md) | Railway + 로컬 워커 하이브리드 | 봇 토큰 1개 제약 아래 클라우드=메인 상시봇·로컬=PC작업 워커로 역할을 분리 |
 | [0003](./0003-opus-4-8-default.md) | `claude-opus-4-8` 기본 모델 | 설정 모델과 SDK 실측 모델을 분리해 별칭 드리프트를 감지 가능하게 함 |
 | [0004](./0004-readonly-tx-introspection.md) | READ ONLY 트랜잭션 기반 자기조회 | 애플리케이션 가드(1차) + Postgres `READ ONLY` 트랜잭션(2차, 핵심 방어선)의 다층 방어 |
-| [0005](./0005-owner-only-delegation.md) | 소유자 전용 워커 위임 | 인증 인프라(`WORKER_SECRET`/RLS) 부재 상태에서 손님 위임을 정책으로 차단 |
+| [0005](./0005-owner-only-delegation.md) | 소유자 전용 워커 위임 | 인증 인프라(사용자별 토큰/RLS) 부재 상태에서 손님 워커 연결을 정책으로 차단(2026-07-26 갱신: 메커니즘을 얇은 워커 기준으로 교체) |
+| [0006](./0006-thin-worker.md) | 워커를 얇은 실행기로 전환 | 워커에서 SDK·DB 접근을 제거하고 봇이 개별 도구 호출만 원격으로 위임하도록 재설계 — `DATABASE_URL`/`CLAUDE_CODE_OAUTH_TOKEN` 대신 `WORKER_TOKEN` 하나로 축소 |
 
 관련 리뷰 이력은 [`review-ledger.md`](./review-ledger.md)를 참고한다.
 

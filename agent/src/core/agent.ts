@@ -1,12 +1,11 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
-import type { CanUseTool, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
+import type { SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import type { Role } from "../store/usersRepo.js";
 import type { UsersRepo } from "../store/usersRepo.js";
 import type { MemoriesRepo } from "../store/memoriesRepo.js";
 import type { AllowedDirsRepo } from "../store/allowedDirsRepo.js";
 import type { IntrospectRepo } from "../store/introspectRepo.js";
 import { buildTools, allowedToolsFor, TOOL_SERVER, type ToolCtx, type RuntimeInfo } from "./tools.js";
-import { decidePathPermission, isPathGatedTool, extractCandidatePaths, resolveRealOrNearestAncestor } from "./pathPermission.js";
 import type { ImageInput } from "./images.js";
 
 // 자기인지(§Task5): SDK_VERSION 은 package.json 의 @anthropic-ai/claude-agent-sdk 버전과 동기화한다.
@@ -15,9 +14,7 @@ const SDK_VERSION = "0.3.207"; // package.json 과 동기화
 const DEFAULT_MODEL = "claude-opus-4-8";
 
 // 현재 턴의 상대·대화 컨텍스트. 이걸로 role·is_private 별 도구셋(allowedTools)을 정한다(§7.1).
-// ownWorkstation(하이브리드 조각3): 로컬 워커가 이 턴을 그 사용자 자신의 PC 에서 실행 중이면 true —
-// 손님이라도 자기 PC 전권으로 파일/Bash 를 연다(allowedToolsFor/canUseTool 참고). 봇(index.ts)은 항상 생략(undefined).
-export type TurnContext = { role: Role; isPrivate: boolean; isOwner: boolean; userId: string; conversationId: number; ownWorkstation?: boolean };
+export type TurnContext = { role: Role; isPrivate: boolean; isOwner: boolean; userId: string; conversationId: number };
 // 턴 처리 중 진행 상황(판별 유니온). 표시용 텍스트로 바꾸는 건 core.ts 의 formatProgress 가 맡는다.
 export type ProgressUpdate =
   | { kind: "tool"; name: string; input?: string }
@@ -25,7 +22,16 @@ export type ProgressUpdate =
   | { kind: "answering" };
 // images(§Task3 이미지 입력): 있으면 query() 의 prompt 를 문자열 대신 async-iterable(SDKUserMessage 1개)로
 // 바꿔 멀티모달 턴을 만든다(buildMultimodalMessage). 없으면 기존 문자열 prompt 경로 그대로(회귀 없음).
-export type TurnRequest = { prompt: string; systemPrompt: string; resume?: string; cwd: string; context: TurnContext; onProgress?: (u: ProgressUpdate) => void; images?: ImageInput[] };
+// noRemoteTools(FIX4, 최종 리뷰): true 면 이 턴은 워커 연결 여부·소유자 DM 여부와 무관하게 원격
+// 도구(fs_*/sh_exec, 그리고 FIX2 로 같은 축에 묶인 allow_dir 등)를 강제로 닫는다(resolveWorkerConnected
+// 참고). core.ts 의 유휴 대화 요약 턴(summarizeAndClose)이 이 값을 쓴다 — 그 턴은 사람이 지켜보지
+// 않는 타이머로 돌고, 이전에 모델이 읽은 파일 등을 통해 프롬프트 인젝션이 심어졌을 수도 있는 세션을
+// 그대로 이어받는다(resume). 그런 턴에 PC 접근을 열어 두면 그 인젝션이 아무도 모르는 사이에 실제
+// 파일/셸 작업으로 이어질 수 있다.
+export type TurnRequest = {
+  prompt: string; systemPrompt: string; resume?: string; cwd: string; context: TurnContext;
+  onProgress?: (u: ProgressUpdate) => void; images?: ImageInput[]; noRemoteTools?: boolean;
+};
 export type TurnResult = { text: string; sessionId?: string; ok: boolean };
 export type TurnRunner = (req: TurnRequest) => Promise<TurnResult>;
 
@@ -92,72 +98,118 @@ export function progressFromMessage(message: ProgressSourceMessage, pendingToolN
   return updates;
 }
 
-// TurnContext → ToolCtx 로 옮기는 순수 함수(테스트 대상). 리뷰 #1: 예전엔 이 변환이
-// makeRunAgentTurn 안에 인라인 리터럴로 있었는데 ownWorkstation 필드를 빠뜨렸다 — allowedToolsFor 는
-// req.context.ownWorkstation 을 직접 봐서 도구 목록엔 allow_dir 등이 정상적으로 들어가지만, 정작
-// 도구 핸들러(canManagePc)가 받는 ctx.ownWorkstation 은 undefined 라 실행 시점에 거부당했다
-// (워커가 이 턴을 손님 자신의 PC 에서 실행 중이어도 allow_dir/revoke_dir/list_dirs·파일 경로 게이트가
-// "소유자 DM 전용"으로 막혀버림). 별도 함수로 뽑아 TurnContext 의 모든 필드가 빠짐없이 옮겨지는지
-// 이 함수 자체를 직접 테스트할 수 있게 한다(agent.test.ts).
+// TurnContext → ToolCtx 로 옮기는 순수 함수(테스트 대상) — makeRunAgentTurn 안에 인라인
+// 리터럴로 두지 않고 뽑아 둔 이유는, 필드 하나가 조용히 안 옮겨지는 종류의 버그(과거 실제로
+// 있었다 — ownWorkstation 필드 누락. 그 필드 자체가 FIX6(최종 리뷰)로 완전히 삭제되며 이
+// 히스토리는 종료됐다 — tools.ts 의 canManagePc 주석 참고)를 이 함수 자체를 직접 테스트해서
+// 잡기 위해서다(agent.test.ts).
 // 자기인지(§Task5): runtime(RuntimeInfo) 을 별도 인자로 받아 ctx.runtime 에 그대로 싣는다. repos 는
 // 그대로 넘기기만 하면 introspect 도 함께 옮겨진다(ToolRepos 에 introspect 가 포함돼 있으므로).
+// ctx.remote 는 이 함수가 다루지 않는다 — makeRunAgentTurn 이 buildRemoteCtx 로 별도로 채운다
+// (워커 연결 판정(resolveWorkerConnected)이 끝난 뒤에야 알 수 있는 값이라 여기서 계산할 수 없다).
 export function buildToolCtx(repos: ToolRepos, context: TurnContext, runtime: RuntimeInfo): ToolCtx {
   return {
     repos, role: context.role, isPrivate: context.isPrivate,
     isOwner: context.isOwner, userId: context.userId, conversationId: context.conversationId,
-    ownWorkstation: context.ownWorkstation,
     runtime,
   };
+}
+
+// FIX7(중요): 이 턴에 원격 워커(ctx.remote + fs_*/sh_exec 6종)를 열지 정하는 술어만 따로 뽑은
+// 순수 함수 — makeRunAgentTurn 안에 인라인으로 두면 이 판단 하나를 검증하려고 SDK query() 전체를
+// 목업해야 해서 테스트가 없었다(리뷰 지적: 가장 보안에 민감한 줄인데도 회귀를 잡을 방법이 없었다).
+// 정확히 "소유자 DM(소유자 && 비공개)이면서 그 소유자의 워커가 허브에 연결돼 있다"의 AND 다 —
+// "연결은 됐지만 공개 채널"(isPrivate=false)과 "연결은 됐지만 손님"(isOwner=false) 두 경우가 이
+// 판정이 지켜야 할 핵심 회귀다: 허브 쪽 배선(hub.isConnected)은 이 턴이 공개 채널인지도, 소유자인지도
+// 모르고 오직 "그 userId 의 워커가 연결돼 있는가"만 안다 — 그래서 나머지 두 조건은 반드시 여기서
+// 함께 확인해야 한다(remoteToolHandler 가 실행 시점에 독립적으로 다시 확인하는 것과 같은 기준).
+export function shouldConnectWorker(
+  context: { isOwner: boolean; isPrivate: boolean; userId: string },
+  hub?: { isConnected(userId: string): boolean },
+): boolean {
+  return context.isOwner && context.isPrivate && hub?.isConnected(context.userId) === true;
+}
+
+// FIX4(중요, 최종 리뷰): req.noRemoteTools 를 shouldConnectWorker 판정과 합성하는 순수 함수 —
+// noRemoteTools 가 true 면(유휴 요약 턴) 워커가 실제로 연결돼 있고 소유자 DM 이어도 무조건
+// false 를 돌려준다. makeRunAgentTurn 안에 인라인으로 두지 않고 뽑은 이유는 shouldConnectWorker
+// 를 뽑은 이유와 같다 — SDK query() 전체를 목업하지 않고 이 판정 하나만 검증하기 위해서다.
+export function resolveWorkerConnected(
+  req: { context: { isOwner: boolean; isPrivate: boolean; userId: string }; noRemoteTools?: boolean },
+  hub?: { isConnected(userId: string): boolean },
+): boolean {
+  if (req.noRemoteTools) return false;
+  return shouldConnectWorker(req.context, hub);
+}
+
+// FIX2(치명, 최종 리뷰): ctx.remote(호출 통로 + 워커의 실제 작업 폴더)를 구성하는 순수 함수.
+// makeRunAgentTurn 안에 인라인으로 두면 hub.rootsOf 배선을 직접 검증하려고 SDK query() 전체를
+// 목업해야 해서(다른 추출 함수들과 같은 이유) 테스트가 무거워진다. workerConnected 가 false 거나
+// hub 가 없으면 undefined(= ctx.remote 를 아예 채우지 않음)를 돌려준다. roots 는 tools.ts 의
+// allowDirHandler 가 "이 경로가 워커의 실제 작업 폴더 안인가"를 검증하는 데 쓴다(봇 프로세스
+// 자신의 파일시스템은 더 이상 보지 않는다 — 봇과 워커는 서로 다른 머신일 수 있다) —
+// WorkerHub.rootsOf(userId) 는 이 함수가 생기기 전까지 프로덕션 호출자가 없었다(테스트 전용).
+export function buildRemoteCtx(
+  workerConnected: boolean,
+  hub: { call(userId: string, tool: string, args: Record<string, unknown>): Promise<{ ok: boolean; content: string }>; rootsOf(userId: string): string[] } | undefined,
+  userId: string,
+): ToolCtx["remote"] {
+  if (!workerConnected || !hub) return undefined;
+  return { call: (tool, args) => hub.call(userId, tool, args), roots: hub.rootsOf(userId) };
 }
 
 // 도구 리포를 클로저로 받아 실제 SDK 턴 러너를 만든다. 매 턴 컨텍스트로
 // 인프로세스 도구(remember/recall/manage_access)와 allowedTools 를 구성한다.
 // deployTarget(Railway 조각2, 기본 local): cloud 면 owner-DM 이라도 PC 도구(파일/Bash)를 allowedToolsFor
-// 단계에서 이미 뺀다. canUseTool 에서도 이중방어로 즉시 거부한다(아래 참고).
+// 단계에서 이미 뺀다.
 // model(자기인지 §Task5, 기본 DEFAULT_MODEL): query() 에 그대로 전달되고, ctx.runtime.model 로도 실려
 // runtime_info 도구가 "설정값"으로 보고한다. init 메시지의 실제 model 과 다르면 아래에서 warn 로그를 남긴다.
-export function makeRunAgentTurn(repos: ToolRepos, deployTarget: "local" | "cloud" = "local", model: string = DEFAULT_MODEL): TurnRunner {
+// hub(원격 워커 1단계, 선택 — Task 7): 봇(index.ts)만 넘긴다. 소유자 DM 이고 그 소유자의 워커가
+// 허브에 연결돼 있으면 ctx.remote 를 채우고 원격 도구(fs_*/sh_exec)를 연다. 워커 프로세스(worker.ts)는
+// 이 함수 자체를 쓰지 않는다 — 워커는 startWorkerClient 로 도구 호출을 직접 받는다.
+// rootsOf(FIX2, 최종 리뷰): hub 가 그 사용자의 워커가 hello 로 알려온 실제 작업 폴더를 돌려준다 —
+// buildRemoteCtx 가 이 값을 ctx.remote.roots 에 실어, tools.ts 의 allowDirHandler 가 등록 요청을
+// 그 값으로 재검증할 수 있게 한다.
+export function makeRunAgentTurn(
+  repos: ToolRepos,
+  deployTarget: "local" | "cloud" = "local",
+  model: string = DEFAULT_MODEL,
+  hub?: {
+    isConnected(userId: string): boolean;
+    call(userId: string, tool: string, args: Record<string, unknown>): Promise<{ ok: boolean; content: string }>;
+    rootsOf(userId: string): string[];
+  },
+): TurnRunner {
   return async (req) => {
     const runtime: RuntimeInfo = { model, sdkVersion: SDK_VERSION, deployTarget, maxTurns: 30 };
     const ctx: ToolCtx = buildToolCtx(repos, req.context, runtime);
     const server = buildTools(ctx);
-    const allowedTools = allowedToolsFor(req.context.role, req.context.isPrivate, req.context.isOwner, deployTarget, req.context.ownWorkstation);
-    // 파일/Bash 는 canUseTool(decidePathPermission) 을 반드시 거치도록 bare 사전승인 목록에서 뺀다 —
-    // SDK 는 allowedTools 에 괄호 없는 "이름 그대로" 항목이 있으면 canUseTool 을 아예 호출하지 않고
-    // 통과시켜 버린다(경로 검사가 완전히 우회됨). mcp__asahi__* 도구는 그대로 bare 사전승인 유지.
-    const preApprovedTools = allowedTools.filter((name) => !isPathGatedTool(name));
-    // 이 턴에서 실제로 쓸 수 있는 내장 도구(Read/Write/Edit/Glob/Grep/Bash) 기본 집합을 role 별로 제한한다.
-    // (query() 의 canUseTool 은 파일/Bash 가 아닌 도구는 항상 allow 하므로, 이 제한이 없으면 permissionMode
-    // 를 "default" 로 바꾼 뒤 WebSearch/Task 등 기존에 쓸 수 없던 내장 도구까지 새로 열리게 된다.)
-    const builtinTools = allowedTools.filter(isPathGatedTool);
-    const isOwnerDm = req.context.isOwner && req.context.isPrivate;
-    // 자기 PC 전권(하이브리드 조각3): 워커가 이 턴을 그 사용자 자신의 PC 에서 실행 중이면, 손님이라도
-    // decidePathPermission 의 "소유자 DM 전용" 게이트를 통과시킨다(경로는 여전히 allowedDirs 로 제한).
-    // cloud(Railway 봇)는 워커가 아니므로 ownWorkstation 이 와도 이 게이트를 열지 않는다(이중방어).
-    const isOwnWorkstationDm = req.context.ownWorkstation === true && req.context.isPrivate && deployTarget !== "cloud";
-    const pcPrivileged = isOwnerDm || isOwnWorkstationDm;
 
-    const canUseTool: CanUseTool = async (toolName, input, options) => {
-      // cloud 이중방어: allowedToolsFor 가 이미 PC 도구를 뺐지만, 여기서도 경로 검사 이전에
-      // 즉시 거부해 어떤 경로로도(모델의 임의 도구 호출 시도 포함) 클라우드에서 PC 작업이 새지 않게 한다.
-      if (deployTarget === "cloud" && isPathGatedTool(toolName)) {
-        return { behavior: "deny", message: "클라우드 실행 중이라 PC 작업은 로컬 워커 연결 후 가능해요." };
-      }
-      const allowedDirs = await repos.allowedDirs.list(req.context.userId);
-      const rawPaths = extractCandidatePaths(toolName, input, options.blockedPath, req.cwd);
-      const resolvedPaths = rawPaths.map(resolveRealOrNearestAncestor);
-      // 보안리뷰 #2: dangerouslyDisableSandbox 로 남은 봉쇄까지 무력화하는 걸 canUseTool 이 항상 막는다.
-      const dangerouslyDisableSandbox = toolName === "Bash" && input.dangerouslyDisableSandbox === true;
-      const decision = decidePathPermission(toolName, resolvedPaths, { isOwnerDm: pcPrivileged, allowedDirs, dangerouslyDisableSandbox });
-      return decision.behavior === "allow" ? { behavior: "allow" } : { behavior: "deny", message: decision.message };
-    };
+    // 원격 통로는 "소유자 DM"(진짜 사설 1:1) 일 때만 연다 — remoteToolHandler(remoteTools.ts)가
+    // 실행 시점에 다시 확인하는 것과 동일한 기준이다. hub.isConnected(userId) 만으로 판단하면
+    // (허브 쪽 배선은 이 턴이 공개 채널인지 모른다) 소유자가 공개 서버 채널에 쓴 턴에도 ctx.remote 가
+    // 채워져, 그 채널의 모델이 sh_exec 등 PC 도구를 호출할 길이 생긴다. allowedTools 산정에도 같은
+    // workerConnected 값을 넘겨야 "도구는 보이는데 실행하면 거부"라는 불일치가 생기지 않는다.
+    // FIX7: 이 판정 자체는 shouldConnectWorker 로 뽑아 따로 테스트한다(agent.test.ts) — 이 함수
+    // (makeRunAgentTurn)는 SDK query() 호출까지 가므로 판정 하나만 검증하기엔 무겁다.
+    // FIX4(최종 리뷰): req.noRemoteTools 가 있으면(유휴 요약 턴) shouldConnectWorker 결과와
+    // 무관하게 강제로 false 다 — resolveWorkerConnected 가 그 합성을 담당한다.
+    const workerConnected = resolveWorkerConnected(req, hub);
+    // FIX2(최종 리뷰): ctx.remote 구성(호출 통로 + 워커 roots) 자체도 buildRemoteCtx 로 뽑아
+    // 테스트한다.
+    ctx.remote = buildRemoteCtx(workerConnected, hub, req.context.userId);
+    const allowedTools = allowedToolsFor(req.context.role, req.context.isPrivate, req.context.isOwner, deployTarget, workerConnected);
+    // 원격 도구는 전부 mcp__asahi__* 이므로 bare 사전승인으로 두고, 내장 파일/Bash 도구는 아예 열지 않는다
+    // (builtinTools=[] 이 SDK 내장 도구를 전부 닫는다). 경로 검사는 이제 워커(remote/roots.ts)가 최종
+    // 권한을 갖는다 — 이 프로세스는 내장 도구를 안 여니 canUseTool 로 판정할 대상 자체가 없다.
+    const preApprovedTools = allowedTools;
+    const builtinTools: string[] = [];
 
     let sessionId: string | undefined;
     let text = "";
     let ok = false;
     // 턴 하나 동안 tool_use_id → 짧은 도구명(진행 이벤트용). onProgress 가 없으면 추출도 하지 않는다.
     const pendingToolNames = new Map<string, string>();
-    const additionalDirectories = pcPrivileged && deployTarget === "local" ? await repos.allowedDirs.list(req.context.userId) : [];
     // 이미지가 있으면 async-iterable(멀티모달 1메시지)로, 없으면 기존 문자열 prompt 그대로(회귀 금지).
     const promptInput = req.images && req.images.length > 0
       ? (async function* () { yield buildMultimodalMessage(req.prompt, req.images!); })()
@@ -174,8 +226,6 @@ export function makeRunAgentTurn(repos: ToolRepos, deployTarget: "local" | "clou
         mcpServers: { [TOOL_SERVER]: server },
         permissionMode: "default",
         model,
-        canUseTool,
-        additionalDirectories,
         maxTurns: 30,
       },
     })) {

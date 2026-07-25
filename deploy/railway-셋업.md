@@ -43,6 +43,8 @@ Supabase Postgres에 있으므로 컨테이너 자체는 상태를 갖지 않는
 | `DATABASE_URL` | 예 | Supabase **Session pooler** 연결 문자열. 아래 별도 설명 참고 |
 | `CLAUDE_CODE_OAUTH_TOKEN` | 예(사실상) | `claude setup-token` 으로 발급한 구독 OAuth 토큰. 없으면 에이전트 SDK 가 인증 못 해 턴 처리가 실패한다 |
 | `DEPLOY_TARGET` | 예 | 반드시 `cloud` 로 설정. local(기본값)로 두면 안 됨 — 아래 "cloud 배포 시 동작 차이" 참고 |
+| `WORKER_TOKEN` | 예 | 워커 인증 토큰. 최소 20자, 무작위 문자열(예: `openssl rand -hex 32`) — 없거나 짧으면 봇이 시작 자체를 거부한다. 로컬 워커를 띄울 때(`deploy/worker-셋업.md`) 정확히 같은 값을 써야 한다 |
+| `PORT` | 아니오(설정 금지) | 워커가 붙을 HTTP/WebSocket 포트. Railway 가 자동으로 주입하므로 직접 설정하지 않는다 |
 | `DISCORD_CHANNEL_ID` | 선택 | DM 외에 반응할 서버 채널 ID |
 | `DATA_DIR`, `MEMORY_DIR` | 아니오(설정 금지) | Dockerfile 이 이미 `/data/store`, `/data/memory` 로 고정해 둔다. 굳이 다시 지정할 필요 없음 — 지정하면 그 값으로 덮어써지므로 컨테이너 안 실제 존재하는 절대경로가 아니면 오히려 문제가 될 수 있다 |
 | `SESSION_IDLE_MINUTES`, `MAX_TURNS_PER_HOUR_PER_USER`, `MAX_TURNS_PER_HOUR_GLOBAL` 등 | 선택 | 비워두면 기본값(각각 30분/20/40). 필요할 때만 조정 |
@@ -91,19 +93,34 @@ Danger/Remove 또는 배포 일시중지) 로컬에서 `pm2 restart asahi-assist
 
 ## cloud 배포 시 동작 차이(중요)
 
-`DEPLOY_TARGET=cloud` 로 실행하면, 소유자와의 1:1 DM 이라도 **PC 파일·Bash(셸) 도구가
-비활성화**된다(로컬 PM2 운영의 Phase A "허용 폴더 내 파일·셸" 기능). 이 상태에서 그런 작업을
-요청하면 봇이 "클라우드 실행 중이라 PC 작업은 로컬 워커 연결 후 가능해요." 라고 안내한다(코드
-상 이미 구현됨 — `agent/src/core/agent.ts`, `agent/src/core/persona.ts`). 대화, 기억(메모리),
-사용량 한도 등 나머지 기능은 로컬과 동일하게 동작한다.
+`DEPLOY_TARGET=cloud` 로 실행해도, 파일/셸 도구 자체가 `deployTarget` 으로 갈리지 않는다 —
+SDK 내장 파일/Bash 도구는 로컬이든 cloud 든 이제 항상 닫혀 있고, 대신 그 사용자의 **워커가
+연결돼 있는가**가 파일/셸 작업(원격 도구 `fs_*`/`sh_exec`) 가능 여부를 결정한다
+(`docs/security/capability-model.md` 참고, `docs/decisions/0006-thin-worker.md`). 즉
+**cloud 로 띄웠어도 소유자의 로컬 워커가 연결돼 있으면 PC 작업이 그대로 가능하다** — 이전
+버전(2026-07 이전)에서는 `deployTarget=cloud` 자체가 PC 도구를 무조건 막았지만, 지금은 그
+축이 아니다.
 
-PC 작업이 필요하면 `agent/src/worker.ts`(로컬 워커, 하이브리드 조각3)를 자기 PC 에서 띄워
-연동할 수 있다 — **단, 워커는 현재 소유자 전용 정책이다.** `DATABASE_URL`(Supabase 연결 문자열)은
-소유자만 소지해야 한다: 손님에게 공유하면 그 손님이 직접 워커를 띄우고 `WORKER_USER_ID` 를
-소유자 ID 로 설정해 소유자를 사칭, PC 전권(파일/Bash)을 탈취할 수 있다. 이 때문에 봇(core.ts)은
-손님 DM 은 워커가 온라인이어도 절대 위임하지 않고 항상 이 봇(cloud 도구셋)이 처리하도록 고정돼
-있다. 손님용 워커(자기 PC 로 작업을 위임)를 지원하려면 WORKER_SECRET 검증·행 단위 권한(RLS) 같은
-인증 인프라가 먼저 필요하며, 아직 구현되지 않았다.
+`allow_dir`/`revoke_dir`/`list_dirs`(허용 폴더 관리 도구)도 `fs_*`/`sh_exec` 와 똑같이 워커
+연결 여부로만 결정된다 — `DEPLOY_TARGET` 값은 이제 이 세 도구의 노출 여부에도 영향을 주지
+않는다. 즉 cloud 로 띄운 뒤 워커를 연결하면, 아래 안내대로 `allow_dir` 로 폴더를 허용하는
+절차가 그대로 동작한다(이전 버전은 cloud 에서 이 세 도구가 영원히 노출되지 않아, 이 안내
+자체가 cloud 배포에서는 실행 불가능했다).
+
+워커가 연결돼 있지 않은 상태에서 소유자가 PC 작업을 요청하면, 봇은 "지금은 워커가 연결돼
+있지 않아 PC 작업을 할 수 없어요." 계열 안내로 대체한다. 대화, 기억(메모리), 사용량 한도 등
+나머지 기능은 워커 연결 여부와 무관하게 동일하게 동작한다.
+
+PC 작업이 필요하면 `agent/src/worker.ts`(로컬 워커)를 자기 PC 에서 띄워 연동한다 —
+[deploy/worker-셋업.md](worker-셋업.md) 참고. **워커는 현재 소유자 전용 정책이다.** 워커의
+유일한 자격증명은 `WORKER_TOKEN` 이며(더 이상 `DATABASE_URL` 을 공유하지 않는다), 이 토큰이
+유출되면 그 값을 아는 사람이 소유자의 워커인 척 접속해 그 워커의 `WORKER_ROOTS` 안 파일
+작업(및 `sh_exec` 로는 그 프로세스의 OS 권한이 닿는 범위)을 가로챌 수 있다 — 단, Postgres나
+소유자의 Claude 구독에는 접근하지 못한다. 손님 DM은 워커가 연결돼 있어도 원격 도구 자체가
+노출되지 않도록 정책으로 고정돼 있다(`shouldConnectWorker`가 `isOwner && isPrivate` 를
+요구). 손님용 워커(사용자별 토큰·행 단위 권한)를 지원하려면 별도 인증 인프라가 먼저
+필요하며, 아직 구현되지 않았다 — 자세한 위협·완화 서술은
+[docs/security/risk-register.md](../docs/security/risk-register.md) 참고.
 
 ## 컨테이너 경로 설계 메모 (참고용)
 

@@ -1,7 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
+import http from "node:http";
 import dotenv from "dotenv";
+import { WebSocketServer } from "ws";
 import { loadConfig } from "./config.js";
+import { WorkerHub, MAX_FRAME_CHARS, type HubSocket } from "./remote/hub.js";
 import { EventBus } from "./events/bus.js";
 import { openDb } from "./store/db.js";
 import { UsersRepo } from "./store/usersRepo.js";
@@ -12,7 +15,6 @@ import { SummariesRepo } from "./store/summariesRepo.js";
 import { MemoriesRepo } from "./store/memoriesRepo.js";
 import { TurnsRepo } from "./store/turnsRepo.js";
 import { AllowedDirsRepo } from "./store/allowedDirsRepo.js";
-import { JobsRepo } from "./store/jobsRepo.js";
 import { SettingsRepo } from "./store/settingsRepo.js";
 import { IntrospectRepo } from "./store/introspectRepo.js";
 import { backfillLegacyAllowedDirs } from "./store/allowedDirsMigration.js";
@@ -40,7 +42,6 @@ async function main() {
     summaries: new SummariesRepo(db),
     memories: new MemoriesRepo(db),
     turns: new TurnsRepo(db),
-    jobs: new JobsRepo(db),
     allowedDirs,
     introspect: new IntrospectRepo(db),
   };
@@ -51,26 +52,77 @@ async function main() {
   // 소유자 허용 폴더를 이전한다(멱등이라 부팅마다 호출해도 안전).
   await backfillLegacyAllowedDirs(new SettingsRepo(db), allowedDirs, config.ownerId);
 
+  // 워커 허브: 워커가 아웃바운드로 붙는 유일한 표면. 토큰 인증을 통과하지 못하면 즉시 끊는다.
+  const hub = new WorkerHub({ token: config.workerToken, ownerId: config.ownerId });
+
+  // FIX9(사소): 예전엔 모든 경로·메서드에 무조건 200 "ok" 를 돌려줘, 이 서버가 뭘 하는 프로세스인지
+  // 외부에서 스캔하기 쉬웠다. 헬스체크 전용 경로만 응답하고 나머지는 404 한다 — /worker 는 ws 가
+  // 'upgrade' 이벤트로 별도 처리하므로(아래 wss) 이 제한과 무관하게 그대로 동작한다.
+  const HEALTH_PATH = "/health";
+  const httpServer = http.createServer((req, res) => {
+    if (req.method === "GET" && req.url === HEALTH_PATH) {
+      res.writeHead(200);
+      res.end("ok");
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+  // FIX9: listen 실패(예: EADDRINUSE)는 'error' 이벤트로만 알려진다 — 리스너가 없으면 main() 의
+  // 프로미스 체인 밖에서 uncaught exception 으로 튀어 올라, 운영자가 원인 없는 스택트레이스만
+  // 보게 된다. 다른 시작 실패와 같은 문구로 남겨 로그를 일관되게 한다.
+  httpServer.on("error", (err) => {
+    console.error("시작 실패:", err);
+    process.exit(1);
+  });
+
+  // FIX4(중요): ws 의 기본 maxPayload(100MiB)를 그대로 두면, 인증조차 안 된 클라이언트가 보낸
+  // 거대한 프레임을 전송 계층이 이미 다 "버퍼링한 뒤"에야 hub.ts 의 MAX_FRAME_CHARS 검사가
+  // 실행돼 방어가 너무 늦다. maxPayload(바이트 상한)를 여기서 지정해 그 크기를 넘는 프레임을
+  // 버퍼링 전에 전송 계층이 끊게 한다. hub.ts 와 값을 공유해(export 된 상수) 두 상수가 갈리지
+  // 않게 한다.
+  const wss = new WebSocketServer({ server: httpServer, path: "/worker", maxPayload: MAX_FRAME_CHARS });
+  wss.on("error", (err) => {
+    console.error("[허브] 서버 오류:", err instanceof Error ? err.message : err);
+  });
+  wss.on("connection", (ws) => {
+    // FIX1(치명): ws 는 프로토콜 오류(예: 마스킹 안 된 클라이언트 프레임)에서 'error' 를 emit
+    // 하는데, 리스너가 하나도 없으면 EventEmitter 가 그 오류를 그냥 던진다 — 인증조차 안 한
+    // 클라이언트가 프레임 3바이트만 잘못 보내도(Invalid WebSocket frame: MASK must be set)
+    // 프로세스 전체가 죽는다(리뷰 재현). 로그만 남기고 닫는다(다시 던지지 않는다).
+    ws.on("error", (err) => {
+      console.error("[허브] 소켓 오류(닫음):", err instanceof Error ? err.message : err);
+      try { ws.close(); } catch { /* 이미 닫혔으면 무시 */ }
+    });
+    // ws → HubSocket 어댑터. 허브는 ws 를 직접 알지 못한다(테스트 가능성 유지).
+    const socket: HubSocket = {
+      send: (d) => ws.send(d),
+      close: () => ws.close(),
+      onMessage: (cb) => ws.on("message", (data) => cb(data.toString())),
+      onClose: (cb) => ws.on("close", cb),
+    };
+    hub.handleConnection(socket);
+  });
+  httpServer.listen(config.httpPort, () => console.log(`워커 허브 대기 중: 포트 ${config.httpPort}`));
+
   const bus = new EventBus();
   // 에이전트 cwd 는 소스가 아닌 데이터 영역에 둔다 — 에이전트가 소스 트리를 훑지 않도록(1단계 점검 지적).
   const agentCwd = path.resolve(config.dataDir, "..", "agent-cwd");
   fs.mkdirSync(agentCwd, { recursive: true });
-  const runTurn = makeRunAgentTurn({ memories: repos.memories, users: repos.users, allowedDirs: repos.allowedDirs, introspect: repos.introspect }, config.deployTarget, config.model);
-  const core = new AgentCore({ bus, config, runTurn, repos, agentCwd });
+  const runTurn = makeRunAgentTurn({ memories: repos.memories, users: repos.users, allowedDirs: repos.allowedDirs, introspect: repos.introspect }, config.deployTarget, config.model, hub);
+  // FIX3(최종 리뷰): core.ts 도 hub 를 받아 능력 안내(persona.ts)에 "이번 턴에 워커가 실제로
+  // 연결돼 있는가"를 반영한다(agent.ts 의 shouldConnectWorker 와 같은 판정, 같은 hub 인스턴스).
+  const core = new AgentCore({ bus, config, runTurn, repos, agentCwd, hub });
   core.start();
 
   const discord = new DiscordAdapter({ bus, config, users, conversations });
   await discord.start();
 
   await core.recoverPending(); // 크래시로 남은 미처리 메시지 재개
-  // 리뷰 #5a(MED): 부팅 사이(재배포 등)에 위임 타임아웃 뒤 뒤늦게 끝났지만 아직 디스코드로
-  // 못 보낸(delivered_ts 없음) job 결과가 있으면 지금 흘려보낸다.
-  await core.deliverPendingJobResults().catch((err) => console.error("[core] 위임 결과 배달(부팅) 오류:", err));
 
-  // 유휴 세션 정리 + 위임 결과 배달 스윕: 1분마다 확인
+  // 유휴 세션 정리: 1분마다 확인
   const idleTimer = setInterval(() => {
     void core.closeIdleConversations().catch((err) => console.error("[core] 유휴 정리 오류:", err));
-    void core.deliverPendingJobResults().catch((err) => console.error("[core] 위임 결과 배달 오류:", err));
   }, 60 * 1000);
 
   const shutdown = async () => {
@@ -78,6 +130,15 @@ async function main() {
     clearInterval(idleTimer);
     await core.drain();     // 처리 중인 메시지를 마저 끝내고
     await discord.stop();   // 체인에 남은 전송을 흘려보낸 뒤 클라이언트 종료
+    // FIX3(중요): 인증 전(hello 대기 중) 소켓은 hub.conns 에 없어 hub.closeAll() 이 원래 놓쳤다 —
+    // 그 상태로 아무 말도 안 하는 연결 하나가 httpServer.close() 의 콜백을 영원히 막아, SIGTERM
+    // 뒤 db.end() 전에 셧다운이 멈추고 플랫폼이 SIGKILL 로 pg 풀·디스코드 큐를 강제로 날렸다
+    // (리뷰 재현: 4초 안에 콜백이 안 옴). wss.close() 로 새 연결 수신을 먼저 멈추고(지금 붙어
+    // 있는 연결은 안 끊는다 — ws 문서: options.server 로 만든 서버는 close() 가 리스너만 뗀다),
+    // hub.closeAll() 이 인증 전 소켓까지 포함해 전부 닫아야 아래 httpServer.close() 콜백이 온다.
+    wss.close();
+    hub.closeAll();
+    await new Promise<void>((resolve) => httpServer.close(() => resolve()));
     await db.end();         // pg Pool 연결 정리
     process.exit(0);
   };

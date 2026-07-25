@@ -1,5 +1,5 @@
 ---
-lastReviewed: 2026-07-13
+lastReviewed: 2026-07-26
 ---
 
 # 위험 등록부 (Risk Register)
@@ -8,29 +8,45 @@ lastReviewed: 2026-07-13
 싣지 않는다 — 여기서는 위협의 성격과 현재 완화책만 서술한다. 상세 능력 계층은
 `docs/security/capability-model.md` 참고.
 
-## 1. `DATABASE_URL` 취급
+## 1. `WORKER_TOKEN` 취급
 
-`DATABASE_URL` 은 소유자 전용 비밀이다. 봇(Railway)과 로컬 워커가 이 값을 공유해 같은
-Postgres(Supabase) 를 정본 상태 저장소로 쓴다. 이 값이 유출되면 위임 신뢰 경계가 무너진다 —
-누구든 이 값을 손에 넣고 워커 설정을 조작하면 소유자로 위장한 작업 큐 항목을 만들 수 있는
-잠재적 경로가 생긴다.
+`WORKER_TOKEN` 은 지금 이 프로젝트에서 "누가 소유자의 워커로 인증되는가"를 가르는 유일한
+비밀이다(`agent/src/config.ts` — 봇 쪽 `loadConfig`, 워커 쪽 `loadWorkerConfig` 모두 필수로
+요구하며, 봇 쪽은 최소 20자 미만이면 시작 자체를 거부한다). 이 값이 유출되면, 그 값을 아는
+사람이 스스로 봇의 `/worker` WebSocket 허브에 접속해 `hello` 프레임으로 인증에 성공할 수
+있다 — 1단계는 사용자별 토큰이 아니라 소유자 한 명을 위한 고정값이므로, 인증 성공은 그 접속을
+"소유자의 워커"로 등록하는 것과 사실상 같다(`agent/src/remote/hub.ts` 의
+`WorkerHub.handleConnection`).
 
-**완화**: `.env` 는 저장소에 커밋하지 않는다(`.env.example` 만 형태를 공유). 워커 위임은
-`isOwner`(신원) 판정을 통과한 대화에서만 이뤄지며(`agent/src/core/core.ts`), 손님 DM 은 워커가
-온라인이어도 항상 봇이 직접(cloud 도구셋으로) 처리한다 — 현재는 손님용 워커 자체를 지원하지
-않는 정책으로 막아 둔 상태다(아래 §2 참고).
+등록에 성공한 뒤 할 수 있는 일은 원래 워커가 하던 것과 동일하다 — 모델이 그 접속 위로 보내는
+`fs_read`/`fs_write`/`fs_edit`/`fs_glob`/`fs_grep`/`sh_exec` 호출을 전부 받아 실행하고,
+결과(`result` 프레임)를 조작해 돌려줄 수 있다 — 허브는 그 접속이 보낸 결과를 그대로 신뢰한다.
+반대로 이 값 하나로는 Postgres(`DATABASE_URL`)에도, 소유자의 Claude 구독
+(`CLAUDE_CODE_OAUTH_TOKEN`)에도 접근할 수 없다 — 워커는 이제 이 두 자격증명을 아예 갖지
+않는다(`docs/decisions/0006-thin-worker.md`).
 
-## 2. `WORKER_SECRET`/RLS 미구현 — 손님용 워커 미지원
+**완화**: `.env` 는 저장소에 커밋하지 않는다(`.env.example` 만 형태를 공유). 봇은 빈 값이거나
+20자 미만인 `WORKER_TOKEN` 으로는 시작 자체를 거부한다(`agent/src/config.ts`). 허브는 토큰을
+상수 시간 비교(`timingSafeEqual`)하고, 토큰 오류와 신원(`userId`) 불일치를 같은 거부 사유로
+응답해 인증 오라클을 막는다(`agent/src/remote/hub.ts` 의 `tokensMatch`/`DENIED_REASON`). 원격
+도구(`fs_*`/`sh_exec`)는 소유자 DM(`isOwner && isPrivate`)일 때만 열리며, 이 신원 확인은
+`shouldConnectWorker`(`agent/src/core/agent.ts`)와 `remoteToolHandler`(`agent/src/core/
+remoteTools.ts`)의 `isOwnerDm` 재확인, 두 곳에서 각각 이뤄진다 — 그래서 손님 DM 은 워커가
+연결돼 있어도 원격 도구 자체가 노출되지 않는다(아래 §2 참고).
 
-손님용 워커(자기 PC 로 작업을 위임)를 지원하려면 워커 요청이 실제로 그 워커의 소유임을
-확인하는 인증(`WORKER_SECRET` 검증)과, 여러 사용자의 작업 큐 행이 서로 섞이지 않도록 하는
-행 단위 권한 분리(RLS)가 필요하다. 둘 다 아직 구현돼 있지 않다.
+## 2. 사용자별 워커 토큰 미구현 — 손님용 워커 미지원
 
-**완화**: `agent/src/config.ts` 는 `WORKER_SECRET` 을 환경변수로 읽어두기만 하고 검증에는
-아직 쓰지 않는다(`loadWorkerConfig`, 필드 주석에 명시). 그 공백을 메우기 전까지는 정책으로
-막는다 — 워커 위임 자체가 소유자 신원(`isOwner`)일 때만 일어나므로, 손님이 자신의 워커를
-직접 띄워도 봇은 그 손님의 DM 을 위임 대상으로 고려하지 않는다. `.env.example` 에도 같은
-취지의 경고를 남겨 둔다.
+손님용 워커(자기 PC 로 작업을 위임)를 지원하려면 워커 접속이 실제로 그 접속을 요청한
+사용자의 것임을 구분하는 사용자별 토큰 발급·회전이 필요하다. 1단계는 이게 없다 —
+`WORKER_TOKEN` 은 소유자 한 명을 위한 고정값이고, `hello` 의 `userId` 는
+`DISCORD_OWNER_ID` 와 정확히 일치해야만 인증된다(`agent/src/remote/hub.ts`). 허브도 동시에
+소유자 연결 하나만 유지한다(`dropExisting` — 같은 신원으로 재연결하면 이전 연결을 밀어낸다).
+
+**완화**: 정책으로 막는다 — `shouldConnectWorker`(`agent/src/core/agent.ts`)와
+`remoteToolHandler` 의 `isOwnerDm` 재확인(`agent/src/core/remoteTools.ts`) 모두
+`isOwner && isPrivate` 를 요구하므로, 손님 DM 은 워커가 연결돼 있어도 원격 도구 자체가
+노출·실행 어느 쪽도 되지 않는다. 사용자별 토큰 발급·회전·손님용 워커 라우팅은 2단계 몫이다
+(`docs/superpowers/specs/2026-07-25-thin-worker-design.md` §10 비목표).
 
 ## 3. 하드 크래시 중 응답 전송 유실 가능성
 
@@ -52,17 +68,26 @@ pg-mem 은 이 구문을 파싱하지 못해(스파이크로 확인) READ ONLY �
 (`docs/status/STATUS.md` 참고). 사전검사(`assertReadOnlySql`)는 pg-mem 으로도 정상 검증된다 —
 비어 있는 건 DB 단 방어선 하나뿐이다.
 
-## 5. Bash 셸 탈출 — 완전한 봉쇄 아님
+## 5. `sh_exec` — 경로로 봉쇄되지 않는 셸 실행
 
-원격 개발 워크플로우의 경로 게이팅(`docs/security/capability-model.md` §경로 게이팅)은 Bash
-호출에서 추출되는 `blockedPath` 휴리스틱에 의존한다. 이 휴리스틱은 Bash 명령어 자체가 실행
-중에 허용 폴더 밖으로 나가는 모든 방법(셸 스크립팅, 다른 프로세스 기동 등)을 다 막아 주지는
-못한다.
+`fs_read`/`fs_write`/`fs_edit`/`fs_glob`/`fs_grep` 는 봇 쪽 `allowed_dirs` 1차 필터와 워커
+쪽 `WORKER_ROOTS` 최종 판정, 두 겹을 통과해야 하지만(`docs/security/capability-model.md`
+§경로 게이팅), `sh_exec` 는 이 두 겹 어디에도 속하지 않는다 — 셸 명령은 경로 인자 하나로
+판정할 수 있는 대상이 아니다(파이프·서브셸·`cd`·PATH 탐색 등으로 인자 검사를 얼마든지
+우회한다). `agent/src/remote/executors.ts` 의 `sh_exec` 실행기는 경로 검사를 시도조차 하지
+않고 `spawn(command, { cwd: roots[0], shell: true })` 로 그대로 실행한다.
 
-**완화**: 손님·서버 대화는 애초에 Bash 도구 자체가 열리지 않는다(능력 계층표 참고). 소유자
-DM 안에서의 잔여 위험은 페르소나 억제(모델이 이런 시도를 하지 않도록 유도) 수준에 머문다.
-손님에게 Bash 를 여는 시나리오(향후 손님 샌드박스)는 OS 수준 격리(별도 계정/컨테이너/VM)
-없이는 진행하지 않는다 — 현재 손님·서버 대화는 PC 접근 권한이 전혀 없다.
+남는 경계는 정확히 두 가지뿐이다 — 실행 시 작업 디렉토리(`WORKER_ROOTS` 의 첫 번째 폴더)와,
+워커 프로세스를 돌리는 OS 계정의 권한. 그 계정이 닿는 곳이라면 셸 명령은 `WORKER_ROOTS` 밖도
+얼마든지 오갈 수 있다 — 이건 이전 SDK 내장 `Bash` 도구가 가졌던 것과 같은 성격의 한계이며,
+얇은 워커 전환으로 새로 생긴 약점이 아니다(`docs/decisions/0006-thin-worker.md`).
+
+**완화**: 신원 게이팅(소유자 DM + 워커 연결)으로 호출 가능한 사람 자체를 좁힌다
+(`docs/security/capability-model.md` §능력 계층표) — 손님·서버 대화는 원격 도구 자체가
+노출되지 않는다. 그 안에서의 잔여 위험은 애플리케이션 코드가 아니라 **운영**으로만 줄어든다
+— 워커를 최소 권한 OS 계정으로 돌리고, `WORKER_ROOTS` 를 실제로 노출해도 되는 폴더로 좁히는
+것이 유일한 실질적 완화다. 손님에게 `sh_exec` 를 여는 시나리오(향후 손님 샌드박스)는 OS
+수준 격리(별도 계정/컨테이너/VM) 없이는 진행하지 않는다 — 2단계 범위 밖이다.
 
 ## 6. 읽기전용 조회 결과 크기 제한
 
