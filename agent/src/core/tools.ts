@@ -13,7 +13,6 @@ import { REMOTE_TOOL_NAMES, remoteToolHandler } from "./remoteTools.js";
 
 // 도구 서버 이름 → 모델에는 mcp__asahi__<tool> 로 노출된다.
 export const TOOL_SERVER = "asahi";
-const FILE_TOOLS = ["Read", "Write", "Edit", "Glob", "Grep"];
 const t = (name: string): string => `mcp__${TOOL_SERVER}__${name}`;
 
 // 자기인지(§Task4): 이 봇이 어떤 모델·SDK·배포 설정으로 동작 중인지. runtime_info 도구가 그대로 보고한다.
@@ -27,8 +26,10 @@ export type ToolCtx = {
   isOwner: boolean;
   userId: string;
   conversationId: number;
-  // 하이브리드 조각3: 로컬 워커가 이 턴을 그 사용자 자신의 PC 에서 실행 중이면 true.
-  // 손님이라도 자기 PC 이므로 PC 도구를 열어준다(아래 canManagePc/allowedToolsFor 참고).
+  // 로컬 워커가 이 턴을 그 사용자 자신의 PC 에서 실행 중이면 true(아래 canManagePc 가 참조).
+  // Task 8(위임 기계장치 삭제): 이 값을 true 로 설정하던 유일한 생산자(worker/jobRunner.ts)가
+  // 삭제되어 지금은 항상 undefined 다 — canManagePc 는 사실상 isOwner 로만 판정된다. allowedToolsFor
+  // 는 더 이상 이 필드를 보지 않는다(그쪽의 ownWorkstation 분기는 Task 8 에서 제거했다).
   // manage_access·recall 전원열람 등 신원 기반 특권에는 영향을 주지 않는다(isOwner 로만 판정).
   ownWorkstation?: boolean;
   runtime: RuntimeInfo;
@@ -171,19 +172,19 @@ export async function runtimeInfoHandler(ctx: ToolCtx): Promise<string> {
 // deployTarget="cloud"(Railway 조각2): 소유자 PC 가 없는 컨테이너 실행이므로 owner-DM 이라도
 // allow_dir/revoke_dir/list_dirs(PC 폴더 개념을 전제하는 도구)는 빼고 대화·기억·접근관리·db 도구만
 // 남긴다. local(기본)은 기존과 완전히 동일.
-// ownWorkstation(하이브리드 조각3, 로컬 워커 전용 — 이 브랜치는 이번 태스크 범위 밖이라 손대지 않는다.
-// 2단계 과제): 이 턴이 그 사용자 자신의 PC 에서 실행 중이면, 손님(isOwner=false)이라도 자기 PC 는
-// 전권이어야 하므로 (SDK 내장) 파일/Bash/dir 관리 도구를 그대로 연다. 다만 manage_access·recall
-// 전원열람 같은 신원 기반 특권은 그대로 소유자(isOwner)만 갖는다(프라이버시 불변식).
-// deployTarget="cloud" 는 워커가 아니므로(Railway 봇) ownWorkstation 이 와도 PC 도구를 열지 않는다.
 // workerConnected(원격 워커 1단계): owner-DM 두 분기(local/cloud) 모두에 원격 도구 6종을 추가로 연다.
-// ownWorkstation·손님 DM·서버 분기는 그대로 둔다 — 1단계 원격 도구는 소유자 전용이다.
+// 손님 DM·서버 분기는 그대로 둔다 — 1단계 원격 도구는 소유자 전용이다.
+// Task 8(위임 기계장치 삭제): 이 함수가 갖고 있던 ownWorkstation 분기(손님이라도 자기 PC 전권으로
+// SDK 내장 파일/Bash 를 여는 경로)를 제거했다 — canUseTool 의 경로 검사가 이미 다른 태스크에서
+// 빠진 상태라, 그 분기가 살아있었다면 Read/Write/Edit/Glob/Grep/Bash 를 경로 검사 없이 그대로
+// 여는 셈이었다. 그 분기를 여는 ownWorkstation:true 는 worker/jobRunner.ts 에서만 만들어졌는데
+// 그 파일 자체가 이 태스크로 삭제되어 원래도 도달 불가능한 코드였다. ToolCtx.ownWorkstation 필드
+// 자체는 handler 게이트인 canManagePc 가 여전히 참조하므로 남겨둔다(위 타입 정의 참고).
 export function allowedToolsFor(
   role: Role,
   isPrivate: boolean,
   isOwner: boolean,
   deployTarget: "local" | "cloud" = "local",
-  ownWorkstation = false,
   workerConnected = false,
 ): string[] {
   // 원격 도구는 워커 연결이 있을 때만 연다. 판정 축이 "어디서 실행 중인가"(deployTarget)가 아니라
@@ -202,13 +203,6 @@ export function allowedToolsFor(
       t("remember"), t("recall"), t("character_fact"), t("manage_access"),
       t("allow_dir"), t("revoke_dir"), t("list_dirs"),
       t("db_schema"), t("db_query"), t("runtime_info"),
-    ];
-  }
-  if (ownWorkstation && isPrivate && deployTarget !== "cloud") {
-    return [
-      ...FILE_TOOLS, "Bash",
-      t("remember"), t("recall"), t("character_fact"),
-      t("allow_dir"), t("revoke_dir"), t("list_dirs"),
     ];
   }
   if (isPrivate && (role === "owner" || role === "allowed")) return [t("remember"), t("recall"), t("character_fact")];

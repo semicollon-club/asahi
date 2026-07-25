@@ -14,8 +14,10 @@ const SDK_VERSION = "0.3.207"; // package.json 과 동기화
 const DEFAULT_MODEL = "claude-opus-4-8";
 
 // 현재 턴의 상대·대화 컨텍스트. 이걸로 role·is_private 별 도구셋(allowedTools)을 정한다(§7.1).
-// ownWorkstation(하이브리드 조각3): 로컬 워커가 이 턴을 그 사용자 자신의 PC 에서 실행 중이면 true —
-// 손님이라도 자기 PC 전권으로 파일/Bash 를 연다(allowedToolsFor 참고). 봇(index.ts)은 항상 생략(undefined).
+// ownWorkstation: 로컬 워커가 이 턴을 그 사용자 자신의 PC 에서 실행 중이면 true — PC 관리 도구
+// 핸들러의 canManagePc 게이트가 참조한다(tools.ts). Task 8(위임 기계장치 삭제)로 이 값을 true 로
+// 설정하던 유일한 생산자(worker/jobRunner.ts)가 삭제되어 지금은 항상 undefined 다(봇 경로는
+// 원래도 항상 생략) — allowedToolsFor 는 더 이상 이 필드를 보지 않는다.
 export type TurnContext = { role: Role; isPrivate: boolean; isOwner: boolean; userId: string; conversationId: number; ownWorkstation?: boolean };
 // 턴 처리 중 진행 상황(판별 유니온). 표시용 텍스트로 바꾸는 건 core.ts 의 formatProgress 가 맡는다.
 export type ProgressUpdate =
@@ -155,7 +157,7 @@ export function makeRunAgentTurn(
     if (workerConnected && hub) {
       ctx.remote = { call: (tool, args) => hub.call(req.context.userId, tool, args) };
     }
-    const allowedTools = allowedToolsFor(req.context.role, req.context.isPrivate, req.context.isOwner, deployTarget, req.context.ownWorkstation, workerConnected);
+    const allowedTools = allowedToolsFor(req.context.role, req.context.isPrivate, req.context.isOwner, deployTarget, workerConnected);
     // 원격 도구는 전부 mcp__asahi__* 이므로 bare 사전승인으로 두고, 내장 파일/Bash 도구는 아예 열지 않는다
     // (builtinTools=[] 이 SDK 내장 도구를 전부 닫는다). 경로 검사는 이제 워커(remote/roots.ts)가 최종
     // 권한을 갖는다 — 이 프로세스는 내장 도구를 안 여니 canUseTool 로 판정할 대상 자체가 없다.

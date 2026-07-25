@@ -11,18 +11,10 @@ import type { MessagesRepo } from "../store/messagesRepo.js";
 import type { SummariesRepo } from "../store/summariesRepo.js";
 import type { MemoriesRepo } from "../store/memoriesRepo.js";
 import type { TurnsRepo } from "../store/turnsRepo.js";
-import type { JobsRepo } from "../store/jobsRepo.js";
 import { buildContextBlock, isSessionNotFound } from "./turnPrep.js";
 import { buildImageMarker, downloadImages, type ImageRef, type ImageInput } from "./images.js";
 
 const HOUR_MS = 60 * 60 * 1000;
-
-// 하이브리드 조각3(W3): 워커 하트비트가 이보다 오래되면 오프라인으로 간주한다(worker.ts 의
-// HEARTBEAT_MS=10s 의 3배 — 한두 번 하트비트가 늦어도 잘못 오프라인 판정하지 않도록 여유를 둔다).
-export const WORKER_ONLINE_CUTOFF_MS = 30_000;
-// 위임된 job 의 진행을 확인하는 폴링 간격/전체 타임아웃 기본값.
-const WORKER_POLL_MS = 500;
-const WORKER_TIMEOUT_MS = 120_000;
 
 const SUMMARY_PROMPT = `이 대화 세션이 곧 종료됩니다. 나중에 다시 깨어날 너 자신을 위해 이번 대화를 요약하세요.
 - 결정된 것, 사용자에 대해 새로 알게 된 것, 진행 중인 일 중심으로 10줄 이내
@@ -48,7 +40,6 @@ export type CoreRepos = {
   summaries: SummariesRepo;
   memories: MemoriesRepo;
   turns: TurnsRepo;
-  jobs: JobsRepo;
 };
 
 // 대화(conversation)별 세션 + 대화 키별 직렬락으로 동작하는 코어.
@@ -76,16 +67,11 @@ export class AgentCore {
   // 채널별(=대화별)로 직렬화되어 같은 대화 재진입 금지 불변식을 유지한다.
   private ingestChains = new Map<string, Promise<void>>();
   private turnChains = new Map<string, Promise<void>>();
-  // 위임된 job 을 폴링하는 간격/타임아웃 및 그 사이 대기(sleep) — 테스트가 주입해 가짜 시간으로
-  // 결정론적으로 구동할 수 있게 now() 와 마찬가지로 오버라이드 가능하게 한다.
-  private sleep: (ms: number) => Promise<void>;
-  private workerPollMs: number;
-  private workerTimeoutMs: number;
   private fetchImpl: typeof fetch;
 
   constructor(deps: {
     bus: EventBus; config: Config; runTurn: TurnRunner; repos: CoreRepos; agentCwd: string; now?: () => number;
-    sleep?: (ms: number) => Promise<void>; workerPollMs?: number; workerTimeoutMs?: number; fetchImpl?: typeof fetch;
+    fetchImpl?: typeof fetch;
   }) {
     this.bus = deps.bus;
     this.config = deps.config;
@@ -94,9 +80,6 @@ export class AgentCore {
     this.agentCwd = deps.agentCwd;
     this.ownerId = deps.config.ownerId;
     this.now = deps.now ?? Date.now;
-    this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
-    this.workerPollMs = deps.workerPollMs ?? WORKER_POLL_MS;
-    this.workerTimeoutMs = deps.workerTimeoutMs ?? WORKER_TIMEOUT_MS;
     this.fetchImpl = deps.fetchImpl ?? fetch;
   }
 
@@ -216,21 +199,6 @@ export class AgentCore {
         }
       }
 
-      // 하이브리드 조각3(W3): 소유자 DM 이고 그 소유자의 로컬 워커가 온라인이면, 이 봇(Railway)에서
-      // 직접 턴을 실행하지 않고 소유자의 워커에 위임한다(워커는 소유자 자신의 PC 전권으로 처리한다).
-      // 서버/스레드 대화는 특정 개인 소유가 아니므로 위임 대상이 모호해 항상 이 봇이 처리한다.
-      // 리뷰 #3(HIGH): 위임은 신원(isOwner)이 소유자일 때만 한다 — 손님이 자기 워커를 돌리려면
-      // shared DATABASE_URL 이 필요한데, WORKER_USER_ID=ownerId 로 설정해 소유자를 사칭하면 전권을
-      // 탈취할 수 있다. 인증 인프라(WORKER_SECRET 검증·RLS)가 갖춰지기 전까지 워커는 소유자 전용
-      // 정책으로 제한한다 — 손님 DM 은 워커가 온라인이어도 이 봇이 기존(cloud 도구셋)대로 처리한다.
-      // 한도 예약은 이미 위에서 끝났으므로, 위임/로컬 어느 경로든 손님 한도가 동일하게 걸린다.
-      // 이미지가 있는 턴은 위임하지 않는다(§7: 워커 경로는 아직 멀티모달을 다루지 않으므로, 이미지가
-      // 있으면 이 봇이 직접 처리해 모델이 이미지를 보게 한다).
-      if (images.length === 0 && isOwner && conv.isPrivate && await this.repos.jobs.isOnline(userId, WORKER_ONLINE_CUTOFF_MS)) {
-        await this.delegateToWorker(conv, userId, text, messageId);
-        return;
-      }
-
       // 세션: 열린 세션이 유휴 이내면 resume(새 메시지만), 아니면 새 세션(기억 컨텍스트 주입).
       let resume: string | undefined;
       let prompt = text;
@@ -313,68 +281,6 @@ export class AgentCore {
     }
   }
 
-  // 하이브리드 조각3(W3): 이 턴을 이 봇에서 실행하는 대신 사용자의 로컬 워커에 위임한다.
-  // job 을 넣고(그 사용자 PC 전권으로 워커가 처리) 완료될 때까지 진행/결과를 폴링해 디스코드로
-  // 흘려보낸다 — 메시지 저장(assistant)·세션 갱신은 워커가 이미 끝낸 뒤이므로 여기선 발행만 한다.
-  // messageId(리뷰 #2): 이 턴을 유발한 사용자 메시지 id 로 enqueue 를 멱등화한다 — 봇이 여기서
-  // 크래시해도 recoverPending 이 같은 메시지로 재시도할 때 새 job 을 또 만들지 않고 이 job 에 합류한다.
-  private async delegateToWorker(conv: Conversation, userId: string, text: string, messageId: number): Promise<void> {
-    const jobId = await this.repos.jobs.enqueue({
-      userId, conversationId: conv.id, discordChannelId: conv.discordChannelId, userMessage: text, ts: this.now(), messageId,
-    });
-    const deadline = this.now() + this.workerTimeoutMs;
-    let lastProgress: string | null = null;
-    while (this.now() < deadline) {
-      const job = await this.repos.jobs.get(jobId);
-      if (job) {
-        if (job.progress !== null && job.progress !== lastProgress) {
-          lastProgress = job.progress;
-          this.bus.publish({ type: "progress", channel: "discord", channelRef: conv.discordChannelId, text: job.progress, ts: this.now() });
-        }
-        if (job.status === "done") {
-          // 리뷰 #5a: 배달 스윕(deliverPendingJobResults)과 "정확히 한 번" 배달을 두고 경합할 수
-          // 있으므로 markDelivered 로 승리한 쪽만 실제로 발행한다.
-          if (await this.repos.jobs.markDelivered(job.id, this.now())) {
-            this.bus.publish({ type: "assistant_message", channel: "discord", channelRef: conv.discordChannelId, text: job.result ?? "", ts: this.now() });
-          }
-          return;
-        }
-        if (job.status === "failed") {
-          if (await this.repos.jobs.markDelivered(job.id, this.now())) {
-            await this.notify(conv, `비서 처리 중 오류가 있었어요: ${job.error ?? "알 수 없는 오류"}`);
-          }
-          return;
-        }
-      }
-      await this.sleep(this.workerPollMs);
-    }
-    // 타임아웃: job 은 delivered_ts 없이 그대로 두어(워커가 나중에라도 끝내면) 배달 스윕
-    // (deliverPendingJobResults)이 그 결과를 대신 발행할 수 있게 한다(리뷰 #5a: 결과 유실 방지).
-    await this.notify(conv, "아직 처리 중이에요. 끝나면 이어서 알려드릴게요.");
-  }
-
-  // 리뷰 #5a(MED): delegateToWorker 의 폴링이 타임아웃으로 포기한 뒤, 워커가 뒤늦게 done/failed 로
-  // 끝낸 job 의 결과를 대신 배달한다. closeIdleConversations 옆에서 주기적으로, 그리고 부팅 시 1회
-  // 호출한다(index.ts). markDelivered 의 compare-and-set 덕에 delegateToWorker 의 정상 경로와
-  // 경합해도 정확히 한 번만 발행된다.
-  async deliverPendingJobResults(): Promise<void> {
-    for (const job of await this.repos.jobs.listUndelivered()) {
-      const won = await this.repos.jobs.markDelivered(job.id, this.now());
-      if (!won) continue; // 이미 다른 경로(정상 폴링)가 배달함
-      if (job.status === "done") {
-        this.bus.publish({ type: "assistant_message", channel: "discord", channelRef: job.discordChannelId, text: job.result ?? "", ts: this.now() });
-      } else if (job.status === "failed") {
-        const text = `비서 처리 중 오류가 있었어요: ${job.error ?? "알 수 없는 오류"}`;
-        const conv = await this.repos.conversations.getById(job.conversationId);
-        if (conv) {
-          await this.notify(conv, text);
-        } else {
-          this.bus.publish({ type: "system_notice", channel: "discord", channelRef: job.discordChannelId, text, ts: this.now() });
-        }
-      }
-    }
-  }
-
   // 부팅 시 미처리 사용자 메시지를 그 대화 문맥으로 재개한다(크래시 복구).
   async recoverPending(): Promise<void> {
     for (const m of await this.repos.messages.unprocessedUserMessages()) {
@@ -411,8 +317,8 @@ export class AgentCore {
       ownerReserve: 0, isOwner: false, windowMs: HOUR_MS,
     });
     if (reserved) {
-      // 리뷰 #4(MED): 위임된 대화의 세션은 워커 PC 에 있어 봇의 SDK 로는 resume 이 실패할 수 있다
-      // (isSessionNotFound 류). 이 요약 시도가 그대로 던지면 예외가 enqueue 의 catch 까지 올라가
+      // 리뷰 #4(MED): 클라우드 재배포/재시작 등으로 세션 저장소가 초기화되면 resume 이 실패할 수
+      // 있다(isSessionNotFound 류). 이 요약 시도가 그대로 던지면 예외가 enqueue 의 catch 까지 올라가
       // 아래 compare-and-close 가 전혀 실행되지 않고, 세션이 active 로 고착되어 매 유휴 스윕마다
       // 같은 실패를 반복하며(손님 몫이면 전역 한도까지 소진) 대화가 영원히 안 닫힌다. 요약은
       // "있으면 좋은" 부가 기능이므로, 실패해도 요약만 건너뛰고 아래 세션 정리는 반드시 실행한다.

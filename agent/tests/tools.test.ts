@@ -297,44 +297,6 @@ describe("allowedToolsFor — 능력 계층(§7.1)", () => {
     expect(allowedToolsFor("owner", false, false, "cloud")).toEqual(["mcp__asahi__recall"]);
     expect(allowedToolsFor("allowed", false, false, "cloud")).toEqual(["mcp__asahi__recall"]);
   });
-
-  describe("ownWorkstation(하이브리드 조각3 — 로컬 워커: 자기 PC 전권)", () => {
-    it("손님(isOwner=false)+ownWorkstation+DM 이면 파일/Bash/allow_dir/remember/recall 을 포함하되 manage_access 는 없다", () => {
-      const tools = allowedToolsFor("allowed", true, false, "local", true);
-      expect(tools).toContain("Read");
-      expect(tools).toContain("Write");
-      expect(tools).toContain("Edit");
-      expect(tools).toContain("Glob");
-      expect(tools).toContain("Grep");
-      expect(tools).toContain("Bash");
-      expect(tools).toContain("mcp__asahi__remember");
-      expect(tools).toContain("mcp__asahi__recall");
-      expect(tools).toContain("mcp__asahi__allow_dir");
-      expect(tools).toContain("mcp__asahi__revoke_dir");
-      expect(tools).toContain("mcp__asahi__list_dirs");
-      expect(tools).not.toContain("mcp__asahi__manage_access");
-    });
-
-    it("소유자(isOwner=true)+ownWorkstation+DM 이면 기존 소유자 DM 도구셋과 동일(manage_access 포함)", () => {
-      expect(allowedToolsFor("owner", true, true, "local", true)).toEqual(allowedToolsFor("owner", true, true, "local", false));
-      expect(allowedToolsFor("owner", true, true, "local", true)).toContain("mcp__asahi__manage_access");
-    });
-
-    it("ownWorkstation 이라도 서버(비공개 아님)에서는 영향 없음(recall 만)", () => {
-      expect(allowedToolsFor("allowed", false, false, "local", true)).toEqual(["mcp__asahi__recall"]);
-    });
-
-    it("ownWorkstation=false(기본값, 봇 경로)면 기존 손님 DM 동작과 동일", () => {
-      expect(allowedToolsFor("allowed", true, false, "local")).toEqual(allowedToolsFor("allowed", true, false, "local", false));
-    });
-
-    it("deployTarget='cloud' 이면 ownWorkstation 이 true 여도 PC 도구가 열리지 않는다(워커가 아니므로)", () => {
-      const tools = allowedToolsFor("allowed", true, false, "cloud", true);
-      expect(tools).toEqual(["mcp__asahi__remember", "mcp__asahi__recall", "mcp__asahi__character_fact"]);
-      expect(tools).not.toContain("Read");
-      expect(tools).not.toContain("Bash");
-    });
-  });
 });
 
 describe("db_query 게이팅·안전", () => {
@@ -392,10 +354,9 @@ describe("allowedToolsFor — db 도구 노출", () => {
       expect(tools).toContain("mcp__asahi__runtime_info");
     }
   });
-  it("손님 DM·서버·손님 자기PC(ownWorkstation)엔 노출하지 않는다", () => {
+  it("손님 DM·서버엔 노출하지 않는다", () => {
     expect(allowedToolsFor("allowed", true, false, "local")).not.toContain("mcp__asahi__db_query");
     expect(allowedToolsFor("allowed", false, false, "local")).not.toContain("mcp__asahi__db_query");
-    expect(allowedToolsFor("allowed", true, false, "local", true)).not.toContain("mcp__asahi__db_query");
   });
 });
 
@@ -448,11 +409,10 @@ describe("character_fact — 캐릭터 확정 설정 저장", () => {
 describe("allowedToolsFor — character_fact 노출 계층", () => {
   const CF = "mcp__asahi__character_fact";
 
-  it("DM 계열 네 분기 전부에 노출한다", () => {
+  it("DM 계열 세 분기 전부에 노출한다", () => {
     expect(allowedToolsFor("owner", true, true, "local")).toContain(CF);
     expect(allowedToolsFor("owner", true, true, "cloud")).toContain(CF);
-    expect(allowedToolsFor("allowed", true, false, "local", true)).toContain(CF); // ownWorkstation
-    expect(allowedToolsFor("allowed", true, false, "local")).toContain(CF);       // 일반 손님 DM
+    expect(allowedToolsFor("allowed", true, false, "local")).toContain(CF); // 손님 DM
   });
 
   it("공개 서버 채널에는 노출하지 않는다", () => {
@@ -467,7 +427,7 @@ describe("allowedToolsFor — 원격 도구 노출", () => {
 
   it("워커가 연결돼 있으면 소유자 DM 에 원격 도구를 연다(local·cloud 동일)", () => {
     for (const target of ["local", "cloud"] as const) {
-      const tools = allowedToolsFor("owner", true, true, target, false, true);
+      const tools = allowedToolsFor("owner", true, true, target, true);
       expect(tools).toContain(RT);
       expect(tools).toContain(SH);
     }
@@ -475,7 +435,7 @@ describe("allowedToolsFor — 원격 도구 노출", () => {
 
   it("워커가 없으면 원격 도구를 노출하지 않는다", () => {
     for (const target of ["local", "cloud"] as const) {
-      const tools = allowedToolsFor("owner", true, true, target, false, false);
+      const tools = allowedToolsFor("owner", true, true, target, false);
       expect(tools).not.toContain(RT);
       expect(tools).not.toContain(SH);
     }
@@ -486,13 +446,13 @@ describe("allowedToolsFor — 원격 도구 노출", () => {
   });
 
   it("손님 DM·서버 채널에는 워커가 연결돼 있어도 노출하지 않는다(1단계는 소유자 전용)", () => {
-    expect(allowedToolsFor("allowed", true, false, "local", false, true)).not.toContain(RT);
-    expect(allowedToolsFor("allowed", false, false, "local", false, true)).not.toContain(RT);
+    expect(allowedToolsFor("allowed", true, false, "local", true)).not.toContain(RT);
+    expect(allowedToolsFor("allowed", false, false, "local", true)).not.toContain(RT);
   });
 
   it("기억·접근관리 도구는 워커 연결 여부와 무관하다", () => {
-    const off = allowedToolsFor("owner", true, true, "cloud", false, false);
-    const on = allowedToolsFor("owner", true, true, "cloud", false, true);
+    const off = allowedToolsFor("owner", true, true, "cloud", false);
+    const on = allowedToolsFor("owner", true, true, "cloud", true);
     for (const t of ["mcp__asahi__remember", "mcp__asahi__recall", "mcp__asahi__manage_access"]) {
       expect(off).toContain(t);
       expect(on).toContain(t);

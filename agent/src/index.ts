@@ -15,7 +15,6 @@ import { SummariesRepo } from "./store/summariesRepo.js";
 import { MemoriesRepo } from "./store/memoriesRepo.js";
 import { TurnsRepo } from "./store/turnsRepo.js";
 import { AllowedDirsRepo } from "./store/allowedDirsRepo.js";
-import { JobsRepo } from "./store/jobsRepo.js";
 import { SettingsRepo } from "./store/settingsRepo.js";
 import { IntrospectRepo } from "./store/introspectRepo.js";
 import { backfillLegacyAllowedDirs } from "./store/allowedDirsMigration.js";
@@ -43,7 +42,6 @@ async function main() {
     summaries: new SummariesRepo(db),
     memories: new MemoriesRepo(db),
     turns: new TurnsRepo(db),
-    jobs: new JobsRepo(db),
     allowedDirs,
     introspect: new IntrospectRepo(db),
   };
@@ -119,14 +117,10 @@ async function main() {
   await discord.start();
 
   await core.recoverPending(); // 크래시로 남은 미처리 메시지 재개
-  // 리뷰 #5a(MED): 부팅 사이(재배포 등)에 위임 타임아웃 뒤 뒤늦게 끝났지만 아직 디스코드로
-  // 못 보낸(delivered_ts 없음) job 결과가 있으면 지금 흘려보낸다.
-  await core.deliverPendingJobResults().catch((err) => console.error("[core] 위임 결과 배달(부팅) 오류:", err));
 
-  // 유휴 세션 정리 + 위임 결과 배달 스윕: 1분마다 확인
+  // 유휴 세션 정리: 1분마다 확인
   const idleTimer = setInterval(() => {
     void core.closeIdleConversations().catch((err) => console.error("[core] 유휴 정리 오류:", err));
-    void core.deliverPendingJobResults().catch((err) => console.error("[core] 위임 결과 배달 오류:", err));
   }, 60 * 1000);
 
   const shutdown = async () => {

@@ -3,8 +3,9 @@ import type { MessagesRepo } from "../store/messagesRepo.js";
 import type { SummariesRepo } from "../store/summariesRepo.js";
 import type { MemoriesRepo } from "../store/memoriesRepo.js";
 
-// core.ts(봇 실시간 경로)와 워커(job 처리, worker/jobRunner.ts)가 공유하는 턴 준비 로직.
-// 원래 AgentCore 의 private 메서드/지역 함수였던 것을 그대로 옮긴 것 — 동작은 완전히 동일하다.
+// core.ts(봇 실시간 경로)가 쓰는 턴 준비 로직 — 원래 AgentCore 의 private 메서드/지역 함수였던
+// 것을 그대로 옮긴 것(동작은 완전히 동일하다). 한때는 워커(job 처리, worker/jobRunner.ts)와도
+// 공유했으나, Task 8(위임 기계장치 삭제)에서 그 워커 자체가 삭제되어 지금은 core.ts 단독 사용이다.
 
 export type ContextRepos = { memories: MemoriesRepo; summaries: SummariesRepo; messages: MessagesRepo };
 
