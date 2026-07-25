@@ -1,102 +1,108 @@
 ---
-lastReviewed: 2026-07-13
+lastReviewed: 2026-07-26
 ---
 
 # 아키텍처 개요
 
-Asahi 비서는 **3-프로세스 하이브리드** 구조로 상시 운영된다. 하나의 모놀리식 서버가 아니라,
-서로 다른 신뢰 경계에서 도는 두 개의 실행 프로세스(Railway 클라우드 봇 / 로컬 워커)가 하나의
-정본 상태 저장소(Supabase Postgres)를 공유하며 협업하는 구조다.
+Asahi 비서는 **봇**과 **워커**, 두 프로세스로 나뉘어 상시 운영된다. 판단(모델 호출·기억·
+세션·한도)은 전부 봇 쪽에 있고, 워커는 봇이 원격으로 호출하는 파일/셸 도구 하나하나를
+자신의 PC 위에서 대신 실행하는 얇은 실행기다(`docs/decisions/0006-thin-worker.md`). 하나의
+모놀리식 서버가 아니라, 서로 다른 신뢰 경계에서 도는 두 프로세스가 WebSocket 하나로
+연결되고, **봇만** 정본 상태 저장소(Supabase Postgres)에 접속하는 구조다 — 워커는 DB
+자격증명을 아예 갖지 않는다.
 
-## 세 프로세스
+## 세 구성 요소
 
-### Railway 클라우드 봇 (`agent/src/index.ts`)
+### 봇 (`agent/src/index.ts`)
 
-24/7 상시 구동되는 컨테이너다. 디스코드에 연결해 모든 대화(소유자 DM·손님 DM·서버/스레드)를
-받아들이는 유일한 진입점이며, `AgentCore`(`agent/src/core/core.ts`)를 구동해 대화별 직렬
-처리·세션 관리·한도(rate limit)·위임 판단을 담당한다.
+Railway(24/7) 또는 로컬 PM2로 상시 구동되며, 디스코드에 연결해 모든 대화(소유자 DM·손님
+DM·서버/스레드)를 받아들이는 유일한 진입점이다. `AgentCore`(`agent/src/core/core.ts`)가
+대화별 직렬 처리·세션 관리·한도(rate limit)를 담당하고, **매 턴을 예외 없이 자신의 Claude
+Agent SDK 세션으로 직접 실행한다** — 위임이라는 개념은 이제 없다(아래 "위임이 사라진 자리"
+참고). 모델이 파일/셸 도구를 호출하면, 그 개별 호출 하나만 워커에게 원격으로 보내고 결과를
+기다린다(아래 "원격 도구 호출").
 
-이 컨테이너는 소유자의 PC가 아니므로 파일 시스템·Bash 같은 PC 도구를 신뢰할 수 없다.
+봇은 워커가 아웃바운드로 접속하는 유일한 표면도 함께 연다 — HTTP 서버(`/health`)와, 그
+서버 위에서 `/worker` 경로로 WebSocket 업그레이드를 받는 허브(`agent/src/remote/hub.ts`의
+`WorkerHub`)다(`agent/src/index.ts`). **이것이 봇이 갖는 최초의 공개 네트워크 리스너다**
+— 예전에는 디스코드 게이트웨이에 나가는 연결만 있었지, 들어오는 연결을 받는 서버가 없었다.
+
 `agent/src/config.ts`의 `loadConfig`가 환경변수 `DEPLOY_TARGET`을 읽어 `deployTarget`을
-결정하는데, 정확히 `"cloud"`일 때만 `cloud`로 판정하고(그 외 미설정·오타는 모두 `local`)
-(`config.ts:53`), `deployTarget === "cloud"`이면 소유자 DM이라도 파일/Bash 계열 PC 도구를
-도구셋에서 아예 제외한다(`agent/src/core/agent.ts`의 `allowedToolsFor`/`canUseTool` 이중
-방어). 즉 클라우드 봇은 대화·기억·위임 라우팅만 하고, 실제 PC 작업(파일 읽기·쓰기·Bash
-실행)은 절대 이 프로세스 안에서 실행되지 않는다.
-
-컨테이너 자체는 무상태(stateless)다 — 재배포되어도 대화·기억·작업 큐는 Supabase Postgres에
-남아 있으므로 데이터가 사라지지 않는다.
+결정하는데, 정확히 `"cloud"`일 때만 `cloud`로 판정한다(그 외 미설정·오타는 모두 `local`).
+이 값은 지금은 `allow_dir`/`revoke_dir`/`list_dirs`(허용 폴더 관리 도구)의 노출 여부만
+가른다 — 파일/셸 작업 자체의 가용성은 더 이상 `deployTarget`이 아니라 아래 "워커 연결"
+여부가 결정한다(`docs/security/capability-model.md` 참고). 컨테이너 자체는
+무상태(stateless)다 — 재배포되어도 대화·기억은 Supabase Postgres에 남아 있으므로 데이터가
+사라지지 않는다.
 
 ### 로컬 워커 (`agent/src/worker.ts`)
 
-소유자 PC에서 실행되는 별도 프로세스다. 디스코드에는 전혀 연결하지 않고
-(`worker.ts:17-19`), 오직 DB의 `worker_jobs` 큐를 폴링해(`POLL_MS = 2_000`) 자신에게
-위임된 job을 집어 실행한다. 이 워커가 실행하는 PC 작업(파일/Bash)은 언제나 워커가 실제로
-돌고 있는 **그 PC 위에서** 실행되므로, 소유자 자신의 PC 전권을 그대로 쓸 수 있다 — `allowedDirs`로
-등록된 폴더 밖은 `canUseTool`(경로 게이트)이 그대로 막는다는 제약은 클라우드 봇과 동일하게
-적용된다. 워커 진입점 내부에서 `runTurn`을 만들 때 `deployTarget`을 항상 `"local"`로
-고정한다(`worker.ts:53`) — 워커는 태생적으로 로컬 실행이기 때문이다.
+소유자 PC에서 실행되는 별도 프로세스다. 디스코드에도 DB에도 붙지 않는다 — 갖고 있는
+자격증명은 `WORKER_TOKEN` 문자열 하나뿐이다(`agent/src/config.ts`의 `loadWorkerConfig`는
+`databaseUrl`도 `model`도 요구하지 않는다). 기동하면 `HUB_URL`(봇의 `/worker` WebSocket
+주소)로 아웃바운드 연결을 열고, `hello` 프레임으로 토큰과 자신이 노출할 폴더 목록
+(`WORKER_ROOTS`)을 보낸다(`agent/src/remote/workerClient.ts`). 봇이 토큰을 검증하고
+`ready`를 돌려주면 콘솔에 `준비됨`이 찍힌다. 그 뒤로는 봇이 보내는 개별 도구 호출(`call`
+프레임)을 실행기(`agent/src/remote/executors.ts`)로 실행하고 결과(`result` 프레임)를
+돌려주는 것 말고는 아무것도 하지 않는다 — 대화 이력도, 시스템 프롬프트도, SDK 세션도 워커
+쪽에는 없다.
 
-워커는 기동 시 재시작으로 고아가 된 `running` 상태 job을 `failed`로 되돌리고(`worker.ts:61`),
-10초 간격으로 `worker_heartbeats`에 생존 신호를 남기며(`HEARTBEAT_MS = 10_000`), job을
-잡으면 `agent/src/worker/jobRunner.ts`의 `processJob`으로 실행한 뒤 진행 상황/결과를 job
-행에 기록한다.
+연결이 끊기면 고정 간격(기본 3초, 지수 백오프 아님)으로 재연결을 시도한다
+(`agent/src/remote/workerClient.ts`). 인증에 실패(`denied`)하면 재연결 자체를 멈추고
+사람이 설정을 고치길 기다린다 — 토큰이 틀렸는데 계속 재시도해 봐야 결과가 같기 때문이다.
 
 ### Supabase Postgres (정본 상태)
 
-두 프로세스가 공유하는 유일한 정본(source of truth) 저장소다. 연결은 Supabase의
-**Session pooler** 연결 문자열(`DATABASE_URL`)을 통해 이뤄지며(`agent/src/store/db.ts`의
-`openDb`), 스키마는 `agent/src/store/schema.ts`에 정의된다. 유저·대화·메시지·기억뿐 아니라
-위임 큐(`worker_jobs`)와 워커 생존 신호(`worker_heartbeats`)도 이 안에 있다 — 즉 봇과
-워커 사이의 "통신"은 별도의 메시지 브로커가 아니라 이 공유 Postgres 테이블을 통해서만
-이뤄진다.
+**봇만** 접속하는 정본(source of truth) 저장소다. 연결은 Supabase의 **Session pooler**
+연결 문자열(`DATABASE_URL`)을 통해 이뤄지며(`agent/src/store/db.ts`의 `openDb`), 스키마는
+`agent/src/store/schema.ts`에 정의된다. 유저·대화·메시지·기억이 이 안에 있다.
+`worker_jobs`·`worker_heartbeats` 테이블은 예전 위임 모델의 흔적으로 DDL만 남아 있고,
+지금은 어떤 코드도 이 두 테이블을 읽거나 쓰지 않는다(`schema.ts` 주석,
+`docs/decisions/0006-thin-worker.md`) — 마이그레이션 위험을 피하려고 테이블 자체는
+지우지 않았을 뿐이다.
 
-## 조율: 위임 큐와 하트비트
+## 원격 도구 호출
 
-봇과 워커는 서로를 직접 호출하지 않는다. 대신 Postgres 테이블 두 개로 느슨하게 결합된다.
+봇의 SDK 세션이 파일/셸 작업이 필요하면, SDK 내장 도구(Read/Write/Edit/Glob/Grep/Bash)
+대신 인프로세스 MCP 도구 6종(`fs_read`/`fs_write`/`fs_edit`/`fs_glob`/`fs_grep`/`sh_exec`,
+`agent/src/core/tools.ts`)을 호출한다 — 내장 도구는 `builtinTools: []`로 아예 닫혀 있다
+(`agent/src/core/agent.ts`). 이 도구들의 핸들러(`agent/src/core/remoteTools.ts`의
+`remoteToolHandler`)는 신원을 재확인하고 경로를 1차로 거른 뒤, `WorkerHub.call`
+(`agent/src/remote/hub.ts`)로 그 사용자의 워커에게 도구 이름과 인자를 실어 보내고 결과를
+기다린다.
 
-- **`worker_jobs`** (`schema.ts:152`) — 봇이 로컬 워커에게 넘길 턴을 적재하는 큐. 컬럼은
-  `status`(`pending → running → done/failed`), `progress`, `result`, `error`,
-  `claimed_ts`, `done_ts`, `delivered_ts` 등으로 구성된다. `message_id`에 부분 유니크
-  인덱스를 걸어(`idx_worker_jobs_message_id`) 같은 사용자 메시지로 위임이 중복 생성되지
-  않도록 멱등화한다 — 봇이 크래시 후 `recoverPending`으로 같은 메시지를 재처리해도 기존
-  job에 합류할 뿐 중복 실행되지 않는다.
-- **`worker_heartbeats`** (`schema.ts:183`) — 사용자별 워커 생존 신호. 워커가 10초마다
-  갱신하고, 봇은 `JobsRepo.isOnline`으로 "이 사용자의 워커가 지금 떠 있는지"를 판단한다.
-- **`isOnline` cutoff** — `AgentCore`는 하트비트가 `WORKER_ONLINE_CUTOFF_MS = 30_000`
-  (30초, `core.ts:22`)보다 오래됐으면 오프라인으로 간주한다. 이 값은 워커의
-  `HEARTBEAT_MS`(10초)의 3배로, 한두 번 하트비트가 늦어도 잘못 오프라인 판정하지 않도록
-  여유를 둔 것이다.
+- **연결 여부가 도구 노출을 결정한다** — `shouldConnectWorker`(`agent/src/core/agent.ts`)가
+  `isOwner && isPrivate && hub.isConnected(userId)`를 매 턴 판정해, 참이면 `ctx.remote`를
+  채우고 `allowedToolsFor`에 원격 도구를 포함시킨다. 거짓이면(워커 오프라인, 또는 소유자
+  DM이 아님) 원격 도구 자체가 도구셋에 나타나지 않는다. 판정은 **턴 시작 시점**에 한 번
+  이뤄진다 — 턴 도중 연결이 끊기면 이후 개별 도구 호출이 실패로 돌아올 뿐, 이미 시작된
+  턴을 중단시키지는 않는다.
+- **타임아웃은 도구 하나만 실패시킨다** — `WorkerHub.call`은 기본 120초 안에 응답이 없으면
+  그 호출만 실패로 모델에 돌려준다(`ok: false`). 턴 전체가 죽지 않으므로 모델이 다른
+  방법을 시도하거나 사용자에게 실패를 알릴 수 있다.
+- **경로 검사는 두 겹** — 봇 쪽 `allowed_dirs` 1차 필터와 워커 쪽 `WORKER_ROOTS` 최종
+  판정을 모두 통과해야 한다. `sh_exec`는 경로 인자가 없어 이 두 겹 어디에도 속하지 않는다
+  — 실행 시 작업 디렉토리와 워커 프로세스의 OS 권한만이 경계다. 자세한 내용은
+  `docs/security/capability-model.md` "경로 게이팅" 참고.
+- **1단계는 소유자 전용, 워커 하나** — `WORKER_TOKEN`은 사용자별이 아니라 고정값 하나이고,
+  허브는 동시에 소유자의 워커 연결 하나만 유지한다(`agent/src/remote/hub.ts`의
+  `dropExisting` — 같은 신원으로 재연결하면 이전 연결을 밀어낸다). 손님용 워커·사용자별
+  토큰은 2단계 몫이다.
 
-봇이 job을 enqueue한 뒤에는 `WORKER_POLL_MS`(500ms) 간격으로 최대 `WORKER_TIMEOUT_MS`
-(120초) 동안 그 job의 진행/완료를 폴링하며 디스코드로 진행 상황과 최종 결과를 흘려보낸다
-(`AgentCore.delegateToWorker`). 타임아웃 안에 끝나지 않으면 "아직 처리 중"이라 안내하고,
-job은 `delivered_ts` 없이 남겨둔다 — 이후 워커가 뒤늦게 끝내면 봇이 1분마다 도는 배달 스윕
-(`deliverPendingJobResults`, `index.ts`의 유휴 정리 타이머 옆)이 그 결과를 대신 배달해
-유실을 막는다.
+## 위임이 사라진 자리
 
-## 위임 규칙
+예전에는 소유자 DM이고 이미지가 없는 턴을, 봇이 직접 처리하지 않고 소유자의 로컬 워커에
+**대화 턴째로** 넘겼다 — 워커가 `worker_jobs` 큐에서 job을 읽어 자신의 DB 자격증명으로
+대화 이력을 직접 조회하고, 자신의 Claude 구독으로 SDK `query()`를 직접 호출하고, 결과를
+다시 DB에 썼다(`worker_heartbeats`로 생존 신호를 찍어 봇이 "온라인"을 판정). 이 메커니즘은
+얇은 워커 전환(`docs/decisions/0006-thin-worker.md`)으로 완전히 제거됐다 —
+`AgentCore.runConversationTurn`은 더 이상 위임 분기를 갖지 않는다.
 
-`AgentCore.runConversationTurn`(`core.ts`)은 매 턴마다 이 봇이 직접 처리할지, 소유자의
-로컬 워커에 위임할지를 판단한다. 위임은 다음 조건을 **모두** 만족할 때만 이뤄진다
-(`core.ts:229`):
-
-1. **이미지가 없음** (`images.length === 0`) — 워커 경로는 아직 멀티모달을 다루지 않으므로,
-   이미지가 있는 턴은 항상 이 봇이 직접 처리해 모델이 이미지를 보게 한다.
-2. **소유자 신원** (`isOwner`, `userId === config.ownerId`) — `role`이 아니라 신원으로
-   판정한다. 위임은 소유자 전용 정책이다: 손님이 자기 워커를 돌리려면 공유
-   `DATABASE_URL`이 필요한데, `WORKER_USER_ID`를 소유자 ID로 설정해 소유자를 사칭하면
-   전권을 탈취할 수 있기 때문이다. `WORKER_SECRET` 검증·행 단위 권한 분리(RLS) 같은 인증
-   인프라가 갖춰지기 전까지는 손님 DM은 워커가 온라인이어도 항상 이 봇이(cloud 도구셋으로)
-   처리한다 — 이것이 보안상 손님 DM을 항상 봇이 처리하는 이유다.
-3. **DM(사적 대화)** (`conv.isPrivate`) — 서버/스레드 대화는 특정 개인 소유가 아니므로
-   위임 대상이 모호해 항상 이 봇이 처리한다.
-4. **워커 온라인** (`this.repos.jobs.isOnline(userId, WORKER_ONLINE_CUTOFF_MS)`) — 위
-   30초 cutoff 판정을 통과해야 한다.
-
-네 조건을 모두 만족하면 `delegateToWorker`로 job을 넣고 결과를 폴링하며, 하나라도
-어긋나면 봇이 자신의 SDK 세션으로 턴을 직접 실행한다(소유자 DM인데 워커가 오프라인이면
-클라우드 도구셋으로, 손님/서버는 애초에 위임 후보가 아니다).
+지금은 **모든 턴이 예외 없이 봇에서 실행되며**, 워커가 대신하는 것은 그 턴 안에서 모델이
+호출하는 개별 파일/셸 도구뿐이다. 이미지가 있는 턴도 더 이상 특별 취급하지 않는다 — 예전
+위임 조건이던 "이미지 없음"은 턴 전체를 워커로 넘길지를 가르던 조건이었는데, 그런 통짜
+위임 자체가 없어졌으므로 이제는 이미지가 있는 턴에서도 같은 턴 안에서 원격 도구를 쓸 수
+있다.
 
 ## 이벤트버스로 어댑터 분리
 
@@ -113,16 +119,20 @@ job은 `delivered_ts` 없이 남겨둔다 — 이후 워커가 뒤늦게 끝내�
 
 ```mermaid
 flowchart LR
-  U[Discord DM/스레드/채널] --> B[Railway 봇\nindex.ts · AgentCore]
-  B <-- worker_jobs 큐/heartbeat --> W[로컬 워커\nworker.ts · 자기 PC 전권]
-  B <--> DB[(Supabase Postgres\n정본 상태)]
-  W <--> DB
+  U[Discord DM/스레드/채널] --> B["봇\nindex.ts · AgentCore · SDK 세션\n(+ /worker 허브)"]
+  B <--> DB[(Supabase Postgres\n정본 상태 — 봇만 접속)]
+  W["로컬 워커\nworker.ts · 실행기 전용\n(WORKER_TOKEN 하나)"] -- "아웃바운드 WebSocket(hello)" --> B
+  B -- "도구 호출(fs_*/sh_exec) → 결과" --> W
 ```
 
 ## 관련 문서
 
-- 능력 계층·도구 게이팅: `docs/security/capability-model.md`
+- 얇은 워커 결정 배경(무엇을 얻고 무엇을 잃었는가): `docs/decisions/0006-thin-worker.md`
+- 능력 계층·도구 게이팅·경로 게이팅 두 겹 구조: `docs/security/capability-model.md`
 - 위협 모델·알려진 한계: `SECURITY.md`, `docs/security/risk-register.md`
 - 현재 라이브 상태·미완 항목: `docs/status/STATUS.md`
 - 배포 절차: `deploy/railway-셋업.md`, `deploy/worker-셋업.md`, `deploy/다른-PC-셋업.md`
-- 데이터 흐름 상세(메시지 → 저장 → 응답 경로): `docs/architecture/data-flow.md`
+- 메시지 하나의 저장·직렬화 경로(이 문서가 다루지 않는 ingest/turn 체인 상세):
+  `docs/architecture/data-flow.md`(주의: 위임 관련 서술은 이 얇은 워커 전환 이전 버전이라
+  아직 갱신되지 않았다 — `AgentCore.runConversationTurn`이 항상 직접 실행한다는 이 문서의
+  서술이 우선한다)

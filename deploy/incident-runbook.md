@@ -1,5 +1,5 @@
 ---
-lastReviewed: 2026-07-13
+lastReviewed: 2026-07-26
 ---
 
 # 장애 대응 런북 (증상 → 원인 → 조치)
@@ -14,10 +14,9 @@ Asahi 는 크래시·재배포·워커 단절 같은 상황에서 스스로 복�
 | 증상 | 원인(코드) | 정상 여부 | 조치 |
 |---|---|---|---|
 | 재배포/재시작 직후, 그 사이 밀려 있던 사용자 메시지에 응답이 한꺼번에 온다 | 부팅 시 `recoverPending()` 1회 호출(`agent/src/index.ts` → `agent/src/core/core.ts`) — 크래시 등으로 `processed=false`로 남은 사용자 메시지를 그 대화 문맥 그대로 재개한다 | 정상 | 조치 불필요. 재배포가 유난히 잦다면 그 자체(크래시 루프)를 별도로 조사한다. |
-| 로컬 워커에 위임한 작업의 결과가 최대 1분 정도 늦게 도착한다 | `deliverPendingJobResults()` — `agent/src/index.ts`의 60초 간격 `setInterval`(유휴 정리 `closeIdleConversations`와 같이 돎)이, 아직 배달되지 않은(`delivered_ts` 없음) job 결과를 대신 발행한다 | 정상 | 조치 불필요. |
-| 워커를 재시작했더니 재시작 직전에 요청했던 작업이 "워커가 재시작되어 이전 작업이 유실됐어요. 다시 요청해 주세요."로 안내된다 | `failStaleRunning()` — `agent/src/worker.ts` 기동 시 1회, 지난 프로세스가 `claim`한 뒤 끝내지 못하고 죽어 `running`으로 고아가 된 job을 `failed`로 되돌린다(결과를 조용히 잃어버리지 않기 위한 안전장치) | 정상 | 조치 불필요. 안내대로 같은 요청을 다시 보내면 된다. |
-| "아직 처리 중이에요. 끝나면 이어서 알려드릴게요."를 받은 뒤 한참 지나서(길게는 수 분) 실제 답이 온다 | `delegateToWorker`의 120초(`WORKER_TIMEOUT_MS`) 폴링이 타임아웃돼 먼저 안내만 보내고, 이후 워커가 실제로 끝내면 위 `deliverPendingJobResults` 스윕이 결과를 대신 배달한다(`agent/src/core/core.ts`) | 정상 | 조치 불필요. 워커가 정말 멈췄는지 의심되면 `deploy/worker-셋업.md`의 검증 절(하트비트 30초 온라인 판정)로 확인. |
-| 대화가 이전 문맥을 기억 못 하고 처음부터 다시 시작한 것처럼 한 번 답한다 | `isSessionNotFound()`(`agent/src/core/turnPrep.ts`)가 SDK 응답의 `"No conversation found with session ID"` 에러를 감지 — 세션 저장소가 초기화된 경우(클라우드 컨테이너 재배포 등) 그 세션을 버리고 새 세션 + 기억/요약/최근대화 컨텍스트로 즉시 재시도한다(`core.ts`의 봇 경로, `worker/jobRunner.ts`의 워커 경로 둘 다 동일 정책) | 1회성이면 정상 | 조치 불필요. **반복적으로** 매 턴 세션을 잃는다면 아래 "반복될 때" 참고. |
+| PC 작업(파일 읽기 등) 도중 워커 연결이 끊기면, 그 도구 호출만 "워커 연결이 끊겼어요."로 즉시 실패하고 대화 자체는 계속된다 | `WorkerHub`(`agent/src/remote/hub.ts`)의 소켓 `onClose` 핸들러가 그 연결에 대기 중이던 호출을 전부 즉시 실패 처리한다(`failAllPending`) — 응답을 기다리며 120초를 채우지 않는다 | 정상 | 조치 불필요. 모델이 실패를 보고 사용자에게 안내하거나 다른 방법을 시도한다. 워커가 다시 뜨면(고정 간격 재연결) 다음 요청부터 다시 된다. |
+| 워커가 응답 없이 멈춰 있으면(연결은 유지된 채 매달림) PC 작업 요청이 120초 뒤에야 실패로 끝난다 | `WorkerHub.call`의 기본 타임아웃(`DEFAULT_CALL_TIMEOUT_MS = 120_000`, `agent/src/remote/hub.ts`)이 그 호출 하나만 실패시킨다 — 턴 전체나 다른 도구 호출에는 영향 없음 | 정상(다만 느림) | 조치 불필요. 반복된다면 워커 프로세스 자체(특히 `sh_exec`로 실행된 장시간 명령)를 확인. |
+| 대화가 이전 문맥을 기억 못 하고 처음부터 다시 시작한 것처럼 한 번 답한다 | `isSessionNotFound()`(`agent/src/core/turnPrep.ts`)가 SDK 응답의 `"No conversation found with session ID"` 에러를 감지 — 세션 저장소가 초기화된 경우(클라우드 컨테이너 재배포 등) 그 세션을 버리고 새 세션 + 기억/요약/최근대화 컨텍스트로 즉시 재시도한다(`core.ts`, 모든 턴이 이 경로 하나로 실행된다) | 1회성이면 정상 | 조치 불필요. **반복적으로** 매 턴 세션을 잃는다면 아래 "반복될 때" 참고. |
 
 ## 2. 반복되거나 진짜 장애일 때
 
@@ -27,9 +26,10 @@ Asahi 는 크래시·재배포·워커 단절 같은 상황에서 스스로 복�
 - **세션을 매번 새로 잃는다(위 5번 행이 반복)**: 컨테이너가 재배포 사이에 세션 저장소를
   영속시키지 못하고 있을 가능성. `/새세션`(별칭 `/새대화`, `/새로시작`, `/reset`)으로 사용자가
   직접 새 세션을 강제하고, 그래도 반복되면 3절대로 재배포 후 다시 확인한다.
-- **위임 결과가 계속 60초를 넘겨도 안 온다(위 2·4번이 반복)**: 워커가 죽어 있거나
-  `heartbeat`가 끊겼을 가능성 — `deploy/worker-셋업.md`의 검증 절대로 워커 콘솔·하트비트를
-  확인하고 필요하면 워커 프로세스를 재기동한다.
+- **PC 작업 요청마다 "지금은 워커가 연결돼 있지 않아 PC 작업을 할 수 없어요."가 반복된다**:
+  워커 프로세스가 죽어 있거나, 인증에 실패(`WORKER_TOKEN` 불일치)해 재연결 자체를 멈춘
+  상태일 수 있다 — `deploy/worker-셋업.md`의 검증 절대로 워커 콘솔에 `준비됨`/`거부됨` 중
+  무엇이 찍히는지 확인하고 필요하면 `.env`를 고쳐 워커 프로세스를 재기동한다.
 - **응답 자체가 없고 로그도 안 찍힌다**: DB 연결 문제일 가능성이 높다 → 4절 Supabase
   트러블슈팅으로 이동.
 - **`환경변수 누락: ...` 에러로 프로세스가 즉시 종료된다**: `.env`(로컬) 또는 Railway
@@ -44,8 +44,9 @@ Asahi 는 크래시·재배포·워커 단절 같은 상황에서 스스로 복�
 - **수동 재배포(코드 변경 없이 프로세스만 새로)**: 서비스 → **Deployments** 탭 → 최신 배포
   우측 메뉴 → **Redeploy**.
 - 컨테이너는 stateless이므로(실제 상태는 Supabase에 있음) 재시작 자체로 데이터가 사라지지
-  않는다 — 재시작 직후엔 1절의 `recoverPending`/`deliverPendingJobResults`가 자동으로 밀린
-  것을 정리한다. 자세한 배포 절차는 `deploy/railway-셋업.md` 참고.
+  않는다 — 재시작 직후엔 1절의 `recoverPending`이 자동으로 밀린 메시지를 정리한다. 워커는
+  봇과 독립적으로 재연결하므로(고정 간격 재시도) 봇만 재시작해도 워커를 따로 손댈 필요는
+  없다. 자세한 배포 절차는 `deploy/railway-셋업.md` 참고.
 
 ### PM2(로컬 폴백)
 
@@ -80,22 +81,25 @@ DB 연결 관련 증상이 보이면(로그인은 되는데 응답이 전혀 없
 1. **무료 티어 자동 정지(pause)인가?** — 한동안 요청이 없던 Supabase 무료 프로젝트는 자동으로
    일시정지될 수 있다. Supabase 대시보드에서 프로젝트가 "Paused" 상태로 보이면 **Restore
    project**로 재개한다. 재개 직후 몇 분간은 콜드스타트로 첫 연결이 느릴 수 있다.
-2. **풀 고갈(pool exhaustion)인가?** — 봇(Railway)과 로컬 워커가 **같은** `DATABASE_URL`
-   (Session pooler)을 공유해서 커넥션 풀을 나눠 쓴다. 봇+워커+로컬 개발 접속이 겹치는
-   시점에 간헐적으로 연결 실패/지연이 난다면 Supabase 대시보드 **Database → Connection
-   pooling** 에서 현재 연결 수를 확인한다. 원인이 여기라면 불필요하게 떠 있는 워커/개발
-   연결부터 정리한다.
+2. **풀 고갈(pool exhaustion)인가?** — Postgres 에 접속하는 건 이제 **봇(Railway 또는 로컬
+   PM2) 하나뿐이다** — 로컬 워커는 DB 자격증명을 아예 갖지 않는다(`docs/decisions/
+   0006-thin-worker.md`). 그래도 봇 인스턴스 중복 실행(Railway+PM2를 동시에 띄운 경우)이나
+   로컬 개발 접속이 겹치면 간헐적으로 연결 실패/지연이 날 수 있다 — Supabase 대시보드
+   **Database → Connection pooling** 에서 현재 연결 수를 확인하고, 원인이 여기라면
+   불필요하게 떠 있는 봇/개발 접속부터 정리한다.
 3. **`ECONNREFUSED`/`ENETUNREACH`가 로그에 보이는가?** — `DATABASE_URL`이 **Direct
    connection**(`db.<project-ref>.supabase.co:5432`, IPv6 전용)으로 잘못 설정된 경우가
-   가장 흔한 원인이다. Railway/워커 모두 IPv4 egress이므로 반드시 **Session pooler**
-   (`aws-0-<region>.pooler.supabase.com:5432`) 형식으로 바꾼다 — 자세한 값 형식은
+   가장 흔한 원인이다. Railway도 로컬 PM2 폴백도 IPv4 egress이므로 반드시 **Session
+   pooler**(`aws-0-<region>.pooler.supabase.com:5432`) 형식으로 바꾼다(이 항목은 봇에만
+   해당한다 — 로컬 워커는 `DATABASE_URL`을 아예 쓰지 않는다) — 자세한 값 형식은
    `deploy/railway-셋업.md`의 "DATABASE_URL — 반드시 Session pooler를 쓴다" 절 참고.
 4. **자격증명(비밀번호)을 회전해야 하는가?** — 유출 의심 등으로 DB 비밀번호를 바꿔야 한다면:
    1. Supabase 대시보드 → **Project Settings → Database** 에서 비밀번호를 재설정하고 새
       연결 문자열을 복사한다(비밀번호에 특수문자가 있으면 URL 인코딩됐는지 확인).
    2. Railway 서비스 **Variables**의 `DATABASE_URL`을 새 값으로 교체 → 자동 재배포.
-   3. 로컬 워커/PM2를 쓰고 있다면 그 PC의 `.env`도 같은 값으로 동시에 갱신하고 재시작한다
-      (`deploy/다른-PC-셋업.md`, `deploy/worker-셋업.md` 참고) — 한쪽만 갱신하면 그쪽은
-      옛 비밀번호로 연결이 실패한다.
-   4. `DATABASE_URL`은 소유자만 소지해야 하는 값이다 — 유출 위협 성격은
-      `docs/security/risk-register.md` "1. `DATABASE_URL` 취급" 절 참고.
+   3. 로컬 PM2로도 봇을 띄우고 있다면(다른-PC 폴백 등) 그 PC의 `.env`도 같은 값으로 동시에
+      갱신하고 재시작한다(`deploy/다른-PC-셋업.md` 참고) — 한쪽만 갱신하면 그쪽은 옛
+      비밀번호로 연결이 실패한다. **로컬 워커의 `.env`는 손댈 필요가 없다** — 워커는
+      `DATABASE_URL`을 아예 요구하지 않는다(`deploy/worker-셋업.md` 참고).
+   4. `DATABASE_URL`은 봇(과 로컬 PM2 폴백)만 사용하는 자격증명이다 — 유출되면 Postgres
+      전체(유저·대화·기억)에 접근할 수 있으므로 위 절차로 즉시 회전한다.
