@@ -64,6 +64,26 @@ describe("WorkerHub — 인증", () => {
     s.recvRaw("{{{");
     expect(s.closed).toBe(true);
   });
+
+  it("이미 인증된 연결에 두 번째 hello 가 와도 무시한다(재등록·roots 변경·ready 재전송 없음, 다른 userId 로도 탈취되지 않음)", () => {
+    const s = fakeSocket();
+    hub.handleConnection(s.sock);
+    s.recv({ type: "hello", token: "good", userId: "owner", roots: ["/w"] });
+    expect(s.sent).toHaveLength(1); // ready 하나만 보낸 상태
+
+    // 같은 연결로 두 번째 hello — 심지어 다른 userId 로 탈취를 시도해도 무시되어야 한다.
+    s.recv({ type: "hello", token: "good", userId: "intruder", roots: ["/evil"] });
+
+    expect(s.sent).toHaveLength(1); // ready 를 다시 보내지 않는다
+    expect(hub.isConnected("owner")).toBe(true); // 기존 등록 유지
+    expect(hub.isConnected("intruder")).toBe(false); // 탈취 실패
+    expect(hub.rootsOf("owner")).toEqual(["/w"]); // roots 변경 없음
+    expect(s.closed).toBe(false); // 연결은 계속 열려 있다
+
+    // 연결이 여전히 정상 동작하는지 ping/pong 으로 확인한다.
+    s.recv({ type: "ping" });
+    expect(s.sent[s.sent.length - 1]).toEqual({ type: "pong" });
+  });
 });
 
 describe("WorkerHub — 도구 호출", () => {
@@ -103,5 +123,84 @@ describe("WorkerHub — 도구 호출", () => {
 
   it("모르는 id 의 result 가 와도 죽지 않는다", () => {
     expect(() => s.recv({ type: "result", id: "없는id", ok: true, content: "x" })).not.toThrow();
+  });
+
+  it("같은 id 의 result 가 두 번 오면 한 번만 resolve 되고 두 번째는 아무 일도 하지 않는다(던지지 않는다)", async () => {
+    const p = hub.call("owner", "fs_read", { path: "/w/a.txt" });
+    const sentCall = s.sent.find((f) => f.type === "call");
+    if (sentCall?.type !== "call") throw new Error("call 프레임 없음");
+
+    s.recv({ type: "result", id: sentCall.id, ok: true, content: "첫번째" });
+    expect(() => s.recv({ type: "result", id: sentCall.id, ok: false, content: "두번째" })).not.toThrow();
+
+    // 첫 번째 result 의 내용으로만 resolve 되어야 한다 — 두 번째는 완전히 무시된다.
+    await expect(p).resolves.toEqual({ ok: true, content: "첫번째" });
+  });
+
+  it("call 의 args 에 __proto__ 키가 있어도 Object.prototype 을 오염시키지 않고 가공 없이 그대로 전달한다", async () => {
+    // 객체 리터럴이 아니라 JSON.parse 로 만들어야 진짜 소유(own) 프로퍼티 "__proto__" 가 생긴다
+    // (리터럴 { __proto__: ... } 문법은 새 객체의 프로토타입을 지정하는 특수 취급을 받아 재현이 안 된다).
+    const args = JSON.parse('{"__proto__":{"polluted":true},"path":"/w/a.txt"}') as Record<string, unknown>;
+
+    const p = hub.call("owner", "fs_read", args);
+
+    // 전역 Object.prototype 은 절대 오염되면 안 된다.
+    expect((Object.prototype as Record<string, unknown>).polluted).toBeUndefined();
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+
+    // hub 는 args 를 merge·spread·Object.assign 하지 않고 그대로 넘겨야 하므로,
+    // socket.send 로 나간 프레임에도 __proto__ 키가 사라지거나 값이 바뀌지 않고 그대로 남아야 한다.
+    const sentCall = s.sent.find((f) => f.type === "call");
+    if (sentCall?.type !== "call") throw new Error("call 프레임 없음");
+    expect(Object.prototype.hasOwnProperty.call(sentCall.args, "__proto__")).toBe(true);
+    expect(Object.getOwnPropertyDescriptor(sentCall.args, "__proto__")?.value).toEqual({ polluted: true });
+
+    // 타이머가 남지 않도록 정리한다.
+    s.recv({ type: "result", id: sentCall.id, ok: true, content: "ok" });
+    await expect(p).resolves.toEqual({ ok: true, content: "ok" });
+  });
+
+  it("socket.send 가 동기적으로 던지면 call() 은 reject 하지 않고 ok:false 로 resolve 한다", async () => {
+    // fakeSocket 을 재사용하되, 이 테스트에서만 send 가 던지도록 덮어쓴다(두 번째 헬퍼를 새로 만들지 않는다).
+    s.sock.send = () => { throw new Error("두번째 send 부터 강제 실패"); };
+
+    await expect(hub.call("owner", "fs_read", { path: "/w/a.txt" })).resolves.toMatchObject({ ok: false });
+  });
+});
+
+describe("WorkerHub — 재연결(동일 userId 두 연결)", () => {
+  let hub: WorkerHub;
+  beforeEach(() => { hub = new WorkerHub({ token: "good", ownerId: "owner", callTimeoutMs: 300 }); });
+
+  it("같은 userId 로 두 번째 연결이 오면 첫 번째를 밀어내고, 첫 연결의 대기 중 호출은 ok:false 로 정리되며, 이후 호출은 새 소켓으로만 간다", async () => {
+    const s1 = fakeSocket();
+    hub.handleConnection(s1.sock);
+    s1.recv({ type: "hello", token: "good", userId: "owner", roots: ["/w"] });
+
+    const p1 = hub.call("owner", "fs_read", { path: "/w/a.txt" });
+
+    const s2 = fakeSocket();
+    hub.handleConnection(s2.sock);
+    s2.recv({ type: "hello", token: "good", userId: "owner", roots: ["/w2"] });
+
+    // 첫 번째 소켓은 닫히고, 그 연결에 대기 중이던 호출은 orphan 되지 않고 실패로 정리된다.
+    expect(s1.closed).toBe(true);
+    await expect(p1).resolves.toMatchObject({ ok: false });
+
+    // 등록 정보가 새 연결로 교체되어 있어야 한다.
+    expect(hub.isConnected("owner")).toBe(true);
+    expect(hub.rootsOf("owner")).toEqual(["/w2"]);
+
+    // 이후 호출은 새 소켓(s2)에만 전달되고, 이미 닫힌 s1 에는 더 이상 전달되지 않는다.
+    const s1CallCountBefore = s1.sent.filter((f) => f.type === "call").length;
+    const p2 = hub.call("owner", "fs_read", { path: "/w2/b.txt" });
+    expect(s2.sent.some((f) => f.type === "call")).toBe(true);
+    expect(s1.sent.filter((f) => f.type === "call").length).toBe(s1CallCountBefore);
+
+    // 정리: 두 번째 호출에도 응답해 타이머를 남기지 않는다.
+    const sentCall2 = s2.sent.find((f) => f.type === "call");
+    if (sentCall2?.type !== "call") throw new Error("call 프레임 없음");
+    s2.recv({ type: "result", id: sentCall2.id, ok: true, content: "ok" });
+    await expect(p2).resolves.toEqual({ ok: true, content: "ok" });
   });
 });

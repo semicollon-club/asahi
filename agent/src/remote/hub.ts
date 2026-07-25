@@ -105,7 +105,19 @@ export class WorkerHub {
         resolve({ ok: false, content: `워커가 ${this.callTimeoutMs}ms 안에 응답하지 않았어요.` });
       }, this.callTimeoutMs);
       conn.pending.set(id, { resolve, timer });
-      conn.socket.send(encodeFrame({ type: "call", id, tool, args } satisfies Frame));
+      try {
+        conn.socket.send(encodeFrame({ type: "call", id, tool, args } satisfies Frame));
+      } catch (e) {
+        // send 가 동기적으로 던지면(예: 소켓이 이미 닫힌 상태) Promise executor 안의 예외이므로
+        // 잡지 않으면 이 프로미스가 그대로 reject 된다 — 그러면 call() 은 "절대 reject 하지 않는다"는
+        // 불변식이 깨지고, 호출측(에이전트 턴)이 이를 못 잡을 경우 턴 전체가 죽는다. 그래서 여기서
+        // 잡아 다른 실패 경로와 똑같이 ok:false 로 정상 해결한다. 이미 등록해 둔 pending 항목과
+        // 타이머를 정리하지 않으면 이미 끝난 프로미스에 대해 나중에 또 resolve 를 시도하거나(무해하지만
+        // 낭비) 타이머가 누수되므로 함께 정리한다.
+        conn.pending.delete(id);
+        clearTimeout(timer);
+        resolve({ ok: false, content: `워커로 전송하지 못했어요: ${e instanceof Error ? e.message : String(e)}` });
+      }
     });
   }
 
