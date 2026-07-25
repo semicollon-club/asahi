@@ -70,6 +70,18 @@ describe("워커 실행기", () => {
     expect(fs.readFileSync(p, "utf8")).toBe("다름\n다름\n");
   });
 
+  it("fs_edit 는 newString 에 담긴 '$&'·'$$' 같은 치환 패턴을 문자 그대로 쓴다(단건 치환)", async () => {
+    // String.prototype.replace 는 두 번째 인자가 "문자열"이어도 $&·$$·$`·$'·$<n> 을
+    // 특수 치환 패턴으로 해석한다 — replacer 를 함수로 주지 않으면 이 문자들을 리터럴로
+    // 쓸 수 없다. Makefile·셸 스크립트·CI 설정처럼 '$'가 흔한 파일을 고칠 때 조용히
+    // 다른 내용이 써지는 걸 막기 위한 회귀 테스트.
+    const p = path.join(root, "dollar.txt");
+    fs.writeFileSync(p, "TARGET\n");
+    const r = await ex.fs_edit({ path: p, oldString: "TARGET", newString: "$&-literal-$$" });
+    expect(r.ok).toBe(true);
+    expect(fs.readFileSync(p, "utf8")).toBe("$&-literal-$$\n");
+  });
+
   it("fs_glob 는 루트 기준 상대 패턴으로 파일을 찾는다", async () => {
     const r = await ex.fs_glob({ pattern: "**/*.ts", path: root });
     expect(r.ok).toBe(true);
@@ -118,5 +130,61 @@ describe("워커 실행기", () => {
     fs.writeFileSync(p, "가".repeat(OUTPUT_MAX * 2));
     const r = await ex.fs_read({ path: p });
     expect(r.content.length).toBeLessThanOrEqual(OUTPUT_MAX + 200);
+  });
+
+  // fs_glob·fs_grep 는 glob 패턴 자체에 절대경로나 '..' 를 담아 루트 밖을 가리킬 수 있으므로,
+  // tinyglobby 가 돌려준 결과를 checkPath 로 다시 거른다(executors.ts 의 hits.filter / 파일별
+  // continue). 기존 "루트 밖은 모든 fs 도구가 거부한다" 테스트는 인자 자체가 루트 밖인 경우만
+  // 검사해 이 재검증 로직을 지나지 않으므로, 그 방어 코드를 지워도 기존 스위트는 그대로
+  // 초록불이었다 — 실제로 루트 밖에 파일을 만들어 두고 4가지 탈출 경로를 각각 확인한다.
+  describe("fs_glob·fs_grep 는 패턴으로 루트 밖을 노출하지 않는다(회귀)", () => {
+    const OUTSIDE_MARKER = "바깥전용비밀표식";
+    const OUTSIDE_FILE_PREFIX = "zz-asahi-fix2-outside-secret";
+    let outsideFile: string;
+    // tinyglobby(picomatch 기반)는 '\' 를 글롭 이스케이프 문자로 다뤄서, 윈도우의
+    // path.join 이 만든 역슬래시 절대경로를 패턴으로 주면 애초에 아무 것도 매칭하지 않는다
+    // (재검증 이전에 이미 무해해짐 — 즉 그 상태로는 이 테스트가 재검증 로직을 지나가지도
+    // 않는다). 절대경로 패턴이 실제로 루트 밖에 "닿게" 하려면 슬래시로 바꿔줘야 한다 —
+    // fs_glob({ absolute: true }) 가 돌려주는 경로들도 항상 슬래시 형태인 것과 동일한 이유.
+    const toGlobPattern = (p: string) => p.split(path.sep).join("/");
+
+    beforeEach(() => {
+      // root 와 형제 위치(os.tmpdir() 바로 아래)에 둬야 "../*" 패턴 하나만으로도 이 파일에 닿는다.
+      outsideFile = path.join(os.tmpdir(), `${OUTSIDE_FILE_PREFIX}-${process.pid}-${Date.now()}.txt`);
+      fs.writeFileSync(outsideFile, `${OUTSIDE_MARKER}\n`);
+    });
+    afterEach(() => fs.rmSync(outsideFile, { force: true }));
+
+    it("fs_glob 는 루트 밖을 가리키는 절대경로 패턴을 다시 걸러낸다", async () => {
+      const r = await ex.fs_glob({ path: root, pattern: toGlobPattern(path.join(os.tmpdir(), `${OUTSIDE_FILE_PREFIX}-*`)) });
+      expect(r.ok).toBe(true);
+      expect(r.content).not.toContain(OUTSIDE_FILE_PREFIX);
+      expect(r.content).toBe("(일치하는 파일 없음)");
+    });
+
+    it("fs_glob 는 '../*' 로 루트 상위를 오르는 패턴을 다시 걸러낸다", async () => {
+      const r = await ex.fs_glob({ path: root, pattern: "../*" });
+      expect(r.ok).toBe(true);
+      expect(r.content).not.toContain(OUTSIDE_FILE_PREFIX);
+    });
+
+    it("fs_grep 는 glob 인자가 루트 밖 절대경로를 가리켜도 내용을 읽지 않는다", async () => {
+      const r = await ex.fs_grep({
+        path: root,
+        pattern: OUTSIDE_MARKER,
+        glob: toGlobPattern(path.join(os.tmpdir(), `${OUTSIDE_FILE_PREFIX}-*`)),
+      });
+      expect(r.ok).toBe(true);
+      expect(r.content).not.toContain(OUTSIDE_MARKER);
+      expect(r.content).not.toContain(OUTSIDE_FILE_PREFIX);
+      expect(r.content).toBe("(일치하는 내용 없음)");
+    });
+
+    it("fs_grep 는 glob 인자가 '..' 로 루트 상위를 올라도 내용을 읽지 않는다", async () => {
+      const r = await ex.fs_grep({ path: root, pattern: OUTSIDE_MARKER, glob: `../${OUTSIDE_FILE_PREFIX}-*` });
+      expect(r.ok).toBe(true);
+      expect(r.content).not.toContain(OUTSIDE_MARKER);
+      expect(r.content).not.toContain(OUTSIDE_FILE_PREFIX);
+    });
   });
 });
