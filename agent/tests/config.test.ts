@@ -74,53 +74,74 @@ describe("loadConfig", () => {
   });
 });
 
-describe("loadWorkerConfig(하이브리드 조각3 — 로컬 워커 전용 설정, 봇 설정과 분리)", () => {
-  const workerBase = { DATABASE_URL: "postgres://localhost/test", DISCORD_OWNER_ID: "123", WORKER_USER_ID: "456" };
+// Task 7(배선): 워커가 얇은 클라이언트(DB·모델·세션 없음, 허브에 붙는 소켓+도구 실행뿐)로
+// 바뀌면서 WorkerConfig 자체가 통째로 교체됐다 — 옛 loadWorkerConfig 테스트(databaseUrl·
+// workerSecret·dataDir·memoryDir·sessionIdleMinutes·model)는 더 이상 존재하지 않는 필드를
+// 검증하므로 전부 이 블록으로 대체한다.
+describe("얇은 워커 설정(Task 7 — 워커는 DB·모델·세션을 다루지 않는다)", () => {
+  const base = { DATABASE_URL: "postgres://x", DISCORD_TOKEN: "d", DISCORD_OWNER_ID: "o" };
+  // 플랫폼마다 "모호하지 않은 절대경로"의 모양이 다르다(윈도우는 드라이브 문자 필요) —
+  // remote/roots.ts 의 isUnambiguousRoot 와 같은 기준을 테스트도 따라야 한다(보정 2).
+  const ROOT_A = process.platform === "win32" ? "C:\\a" : "/a";
+  const ROOT_B = process.platform === "win32" ? "C:\\b" : "/b";
 
-  it("필수값이 있으면 로드된다", () => {
-    const c = loadWorkerConfig(workerBase);
-    expect(c.databaseUrl).toBe("postgres://localhost/test");
-    expect(c.ownerId).toBe("123");
-    expect(c.workerUserId).toBe("456");
-    expect(c.workerSecret).toBeUndefined();
-    expect(c.sessionIdleMinutes).toBe(30);
-    expect(c.dataDir.endsWith("store")).toBe(true);
-    expect(c.memoryDir.endsWith("memory")).toBe(true);
+  it("봇 설정에 WORKER_TOKEN 과 PORT 가 실린다", () => {
+    const c = loadConfig({ ...base, WORKER_TOKEN: "wt", PORT: "8080" } as NodeJS.ProcessEnv);
+    expect(c.workerToken).toBe("wt");
+    expect(c.httpPort).toBe(8080);
   });
 
-  it("WORKER_SECRET 이 있으면 로드만 한다(지금은 로드만, 검증 없음)", () => {
-    const c = loadWorkerConfig({ ...workerBase, WORKER_SECRET: "s3cr3t" });
-    expect(c.workerSecret).toBe("s3cr3t");
+  it("PORT 를 생략하면 기본값 3000", () => {
+    expect(loadConfig({ ...base, WORKER_TOKEN: "wt" } as NodeJS.ProcessEnv).httpPort).toBe(3000);
   });
 
-  it("DISCORD_TOKEN 은 필요 없다(워커는 디스코드에 연결하지 않는다)", () => {
-    expect(() => loadWorkerConfig(workerBase)).not.toThrow();
+  it("워커 설정은 DATABASE_URL 이 아니라 HUB_URL·WORKER_TOKEN·WORKER_ROOTS 를 요구한다", () => {
+    const w = loadWorkerConfig({
+      DISCORD_OWNER_ID: "o", WORKER_USER_ID: "o",
+      HUB_URL: "wss://h/worker", WORKER_TOKEN: "wt", WORKER_ROOTS: `${ROOT_A},${ROOT_B}`,
+    } as NodeJS.ProcessEnv);
+    expect(w.hubUrl).toBe("wss://h/worker");
+    expect(w.workerToken).toBe("wt");
+    expect(w.roots).toEqual([ROOT_A, ROOT_B]);
+    expect(w).not.toHaveProperty("databaseUrl");
   });
 
-  it("DATABASE_URL/DISCORD_OWNER_ID/WORKER_USER_ID 중 하나라도 없으면 무엇이 빠졌는지 알려주며 실패한다", () => {
-    const { DATABASE_URL, ...withoutDb } = workerBase;
-    expect(() => loadWorkerConfig(withoutDb)).toThrow(/DATABASE_URL/);
-    const { DISCORD_OWNER_ID, ...withoutOwner } = workerBase;
-    expect(() => loadWorkerConfig(withoutOwner)).toThrow(/DISCORD_OWNER_ID/);
-    const { WORKER_USER_ID, ...withoutWorkerUser } = workerBase;
-    expect(() => loadWorkerConfig(withoutWorkerUser)).toThrow(/WORKER_USER_ID/);
+  it("워커 설정에서 필수값이 빠지면 시작 시점에 실패한다", () => {
+    expect(() => loadWorkerConfig({ DISCORD_OWNER_ID: "o", WORKER_USER_ID: "o" } as NodeJS.ProcessEnv)).toThrow(/HUB_URL|WORKER_TOKEN|WORKER_ROOTS/);
   });
 
-  it("SESSION_IDLE_MINUTES 를 env 로 덮어쓸 수 있다", () => {
-    const c = loadWorkerConfig({ ...workerBase, SESSION_IDLE_MINUTES: "10" });
-    expect(c.sessionIdleMinutes).toBe(10);
+  // 보정 2: WORKER_ROOTS 는 remote/roots.ts 의 checkPath 가 최종 판정에 쓰는 것과 동일한 기준
+  // ("모호하지 않은 절대경로")을 config 로드 시점에도 적용해야 한다 — 그러지 않으면 config 는
+  // 통과했는데 모든 도구 호출을 거부하는 워커가 조용히 뜬다.
+  it("WORKER_ROOTS 에 절대경로가 아닌 항목이 있으면 시작 시점에 실패한다", () => {
+    expect(() => loadWorkerConfig({
+      DISCORD_OWNER_ID: "o", WORKER_USER_ID: "o",
+      HUB_URL: "wss://h/worker", WORKER_TOKEN: "wt", WORKER_ROOTS: "relative/path",
+    } as NodeJS.ProcessEnv)).toThrow(/WORKER_ROOTS/);
   });
+
+  it("WORKER_ROOTS 여러 개 중 하나라도 절대경로가 아니면 전부 거부한다", () => {
+    expect(() => loadWorkerConfig({
+      DISCORD_OWNER_ID: "o", WORKER_USER_ID: "o",
+      HUB_URL: "wss://h/worker", WORKER_TOKEN: "wt", WORKER_ROOTS: `${ROOT_A},relative/path`,
+    } as NodeJS.ProcessEnv)).toThrow(/WORKER_ROOTS/);
+  });
+
+  it.skipIf(process.platform !== "win32")(
+    "윈도우에서 드라이브 문자·UNC 없이 구분자로만 시작하는 WORKER_ROOTS 는 거부한다(모호한 경로, remote/roots.ts 와 동일 기준)",
+    () => {
+      expect(() => loadWorkerConfig({
+        DISCORD_OWNER_ID: "o", WORKER_USER_ID: "o",
+        HUB_URL: "wss://h/worker", WORKER_TOKEN: "wt", WORKER_ROOTS: "/workspace",
+      } as NodeJS.ProcessEnv)).toThrow(/WORKER_ROOTS/);
+    },
+  );
 });
 
-describe("model 구성(Opus 4.8 기본)", () => {
+describe("model 구성(Opus 4.8 기본, 봇 설정 전용 — 워커는 더 이상 model 을 다루지 않는다)", () => {
   const base = { DISCORD_TOKEN: "t", DISCORD_OWNER_ID: "1", DATABASE_URL: "postgres://x" };
   it("loadConfig: 기본 모델은 claude-opus-4-8, ANTHROPIC_MODEL 로 재정의된다", () => {
     expect(loadConfig({ ...base } as NodeJS.ProcessEnv).model).toBe("claude-opus-4-8");
     expect(loadConfig({ ...base, ANTHROPIC_MODEL: "claude-sonnet-5" } as NodeJS.ProcessEnv).model).toBe("claude-sonnet-5");
-  });
-  it("loadWorkerConfig: 기본 모델은 claude-opus-4-8, 재정의 가능", () => {
-    const wbase = { DATABASE_URL: "postgres://x", DISCORD_OWNER_ID: "1", WORKER_USER_ID: "2" };
-    expect(loadWorkerConfig({ ...wbase } as NodeJS.ProcessEnv).model).toBe("claude-opus-4-8");
-    expect(loadWorkerConfig({ ...wbase, ANTHROPIC_MODEL: "claude-haiku-4-5-20251001" } as NodeJS.ProcessEnv).model).toBe("claude-haiku-4-5-20251001");
   });
 });

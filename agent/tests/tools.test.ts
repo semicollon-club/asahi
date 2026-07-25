@@ -233,17 +233,24 @@ describe("allow_dir/revoke_dir/list_dir 도구(§원격개발 A2) — 소유자 
 });
 
 describe("allowedToolsFor — 능력 계층(§7.1)", () => {
-  it("소유자 DM 은 파일 도구 + remember/recall/manage_access + Bash + dir 관리 도구", () => {
+  // Task 7(원격 워커 배선)부터 owner-DM(local) 은 SDK 내장 파일/Bash 도구를 더 이상 받지 않는다 —
+  // core/agent.ts 가 builtinTools=[] 로 그 도구들을 아예 닫으므로, 예전처럼 allowedTools 목록에
+  // Read/Write/Bash 를 넣어두면 실행할 대상이 없는 이름만 보고하는 셈이 된다(허수아비 권한).
+  // 파일/셸 작업은 이제 워커 연결 시에만 원격 도구(mcp__asahi__fs_*·sh_exec)로 한다.
+  it("소유자 DM 은 remember/recall/manage_access + dir 관리 도구(SDK 내장 파일·Bash 도구는 없다)", () => {
     const tools = allowedToolsFor("owner", true, true);
-    expect(tools).toContain("Read");
-    expect(tools).toContain("Write");
     expect(tools).toContain("mcp__asahi__remember");
     expect(tools).toContain("mcp__asahi__recall");
     expect(tools).toContain("mcp__asahi__manage_access");
-    expect(tools).toContain("Bash");
     expect(tools).toContain("mcp__asahi__allow_dir");
     expect(tools).toContain("mcp__asahi__revoke_dir");
     expect(tools).toContain("mcp__asahi__list_dirs");
+    expect(tools).not.toContain("Read");
+    expect(tools).not.toContain("Write");
+    expect(tools).not.toContain("Edit");
+    expect(tools).not.toContain("Glob");
+    expect(tools).not.toContain("Grep");
+    expect(tools).not.toContain("Bash");
   });
 
   it("손님 DM 은 remember/recall/character_fact 만(파일·manage_access·Bash·dir 도구 없음)", () => {

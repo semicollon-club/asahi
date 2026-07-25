@@ -1,7 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
+import http from "node:http";
 import dotenv from "dotenv";
+import { WebSocketServer } from "ws";
 import { loadConfig } from "./config.js";
+import { WorkerHub, type HubSocket } from "./remote/hub.js";
 import { EventBus } from "./events/bus.js";
 import { openDb } from "./store/db.js";
 import { UsersRepo } from "./store/usersRepo.js";
@@ -51,11 +54,27 @@ async function main() {
   // 소유자 허용 폴더를 이전한다(멱등이라 부팅마다 호출해도 안전).
   await backfillLegacyAllowedDirs(new SettingsRepo(db), allowedDirs, config.ownerId);
 
+  // 워커 허브: 워커가 아웃바운드로 붙는 유일한 표면. 토큰 인증을 통과하지 못하면 즉시 끊는다.
+  const hub = new WorkerHub({ token: config.workerToken, ownerId: config.ownerId });
+  const httpServer = http.createServer((_req, res) => { res.writeHead(200); res.end("ok"); });
+  const wss = new WebSocketServer({ server: httpServer, path: "/worker" });
+  wss.on("connection", (ws) => {
+    // ws → HubSocket 어댑터. 허브는 ws 를 직접 알지 못한다(테스트 가능성 유지).
+    const socket: HubSocket = {
+      send: (d) => ws.send(d),
+      close: () => ws.close(),
+      onMessage: (cb) => ws.on("message", (data) => cb(data.toString())),
+      onClose: (cb) => ws.on("close", cb),
+    };
+    hub.handleConnection(socket);
+  });
+  httpServer.listen(config.httpPort, () => console.log(`워커 허브 대기 중: 포트 ${config.httpPort}`));
+
   const bus = new EventBus();
   // 에이전트 cwd 는 소스가 아닌 데이터 영역에 둔다 — 에이전트가 소스 트리를 훑지 않도록(1단계 점검 지적).
   const agentCwd = path.resolve(config.dataDir, "..", "agent-cwd");
   fs.mkdirSync(agentCwd, { recursive: true });
-  const runTurn = makeRunAgentTurn({ memories: repos.memories, users: repos.users, allowedDirs: repos.allowedDirs, introspect: repos.introspect }, config.deployTarget, config.model);
+  const runTurn = makeRunAgentTurn({ memories: repos.memories, users: repos.users, allowedDirs: repos.allowedDirs, introspect: repos.introspect }, config.deployTarget, config.model, hub);
   const core = new AgentCore({ bus, config, runTurn, repos, agentCwd });
   core.start();
 
@@ -78,6 +97,8 @@ async function main() {
     clearInterval(idleTimer);
     await core.drain();     // 처리 중인 메시지를 마저 끝내고
     await discord.stop();   // 체인에 남은 전송을 흘려보낸 뒤 클라이언트 종료
+    hub.closeAll();
+    await new Promise<void>((resolve) => httpServer.close(() => resolve()));
     await db.end();         // pg Pool 연결 정리
     process.exit(0);
   };

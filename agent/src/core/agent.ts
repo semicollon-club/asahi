@@ -1,12 +1,11 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
-import type { CanUseTool, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
+import type { SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import type { Role } from "../store/usersRepo.js";
 import type { UsersRepo } from "../store/usersRepo.js";
 import type { MemoriesRepo } from "../store/memoriesRepo.js";
 import type { AllowedDirsRepo } from "../store/allowedDirsRepo.js";
 import type { IntrospectRepo } from "../store/introspectRepo.js";
 import { buildTools, allowedToolsFor, TOOL_SERVER, type ToolCtx, type RuntimeInfo } from "./tools.js";
-import { decidePathPermission, isPathGatedTool, extractCandidatePaths, resolveRealOrNearestAncestor } from "./pathPermission.js";
 import type { ImageInput } from "./images.js";
 
 // 자기인지(§Task5): SDK_VERSION 은 package.json 의 @anthropic-ai/claude-agent-sdk 버전과 동기화한다.
@@ -16,7 +15,7 @@ const DEFAULT_MODEL = "claude-opus-4-8";
 
 // 현재 턴의 상대·대화 컨텍스트. 이걸로 role·is_private 별 도구셋(allowedTools)을 정한다(§7.1).
 // ownWorkstation(하이브리드 조각3): 로컬 워커가 이 턴을 그 사용자 자신의 PC 에서 실행 중이면 true —
-// 손님이라도 자기 PC 전권으로 파일/Bash 를 연다(allowedToolsFor/canUseTool 참고). 봇(index.ts)은 항상 생략(undefined).
+// 손님이라도 자기 PC 전권으로 파일/Bash 를 연다(allowedToolsFor 참고). 봇(index.ts)은 항상 생략(undefined).
 export type TurnContext = { role: Role; isPrivate: boolean; isOwner: boolean; userId: string; conversationId: number; ownWorkstation?: boolean };
 // 턴 처리 중 진행 상황(판별 유니온). 표시용 텍스트로 바꾸는 건 core.ts 의 formatProgress 가 맡는다.
 export type ProgressUpdate =
@@ -113,51 +112,45 @@ export function buildToolCtx(repos: ToolRepos, context: TurnContext, runtime: Ru
 // 도구 리포를 클로저로 받아 실제 SDK 턴 러너를 만든다. 매 턴 컨텍스트로
 // 인프로세스 도구(remember/recall/manage_access)와 allowedTools 를 구성한다.
 // deployTarget(Railway 조각2, 기본 local): cloud 면 owner-DM 이라도 PC 도구(파일/Bash)를 allowedToolsFor
-// 단계에서 이미 뺀다. canUseTool 에서도 이중방어로 즉시 거부한다(아래 참고).
+// 단계에서 이미 뺀다.
 // model(자기인지 §Task5, 기본 DEFAULT_MODEL): query() 에 그대로 전달되고, ctx.runtime.model 로도 실려
 // runtime_info 도구가 "설정값"으로 보고한다. init 메시지의 실제 model 과 다르면 아래에서 warn 로그를 남긴다.
-export function makeRunAgentTurn(repos: ToolRepos, deployTarget: "local" | "cloud" = "local", model: string = DEFAULT_MODEL): TurnRunner {
+// hub(원격 워커 1단계, 선택 — Task 7): 봇(index.ts)만 넘긴다. 소유자 DM 이고 그 소유자의 워커가
+// 허브에 연결돼 있으면 ctx.remote 를 채우고 원격 도구(fs_*/sh_exec)를 연다. 워커 프로세스(worker.ts)는
+// 이 함수 자체를 쓰지 않는다 — 워커는 startWorkerClient 로 도구 호출을 직접 받는다.
+export function makeRunAgentTurn(
+  repos: ToolRepos,
+  deployTarget: "local" | "cloud" = "local",
+  model: string = DEFAULT_MODEL,
+  hub?: { isConnected(userId: string): boolean; call(userId: string, tool: string, args: Record<string, unknown>): Promise<{ ok: boolean; content: string }> },
+): TurnRunner {
   return async (req) => {
     const runtime: RuntimeInfo = { model, sdkVersion: SDK_VERSION, deployTarget, maxTurns: 30 };
     const ctx: ToolCtx = buildToolCtx(repos, req.context, runtime);
     const server = buildTools(ctx);
-    const allowedTools = allowedToolsFor(req.context.role, req.context.isPrivate, req.context.isOwner, deployTarget, req.context.ownWorkstation);
-    // 파일/Bash 는 canUseTool(decidePathPermission) 을 반드시 거치도록 bare 사전승인 목록에서 뺀다 —
-    // SDK 는 allowedTools 에 괄호 없는 "이름 그대로" 항목이 있으면 canUseTool 을 아예 호출하지 않고
-    // 통과시켜 버린다(경로 검사가 완전히 우회됨). mcp__asahi__* 도구는 그대로 bare 사전승인 유지.
-    const preApprovedTools = allowedTools.filter((name) => !isPathGatedTool(name));
-    // 이 턴에서 실제로 쓸 수 있는 내장 도구(Read/Write/Edit/Glob/Grep/Bash) 기본 집합을 role 별로 제한한다.
-    // (query() 의 canUseTool 은 파일/Bash 가 아닌 도구는 항상 allow 하므로, 이 제한이 없으면 permissionMode
-    // 를 "default" 로 바꾼 뒤 WebSearch/Task 등 기존에 쓸 수 없던 내장 도구까지 새로 열리게 된다.)
-    const builtinTools = allowedTools.filter(isPathGatedTool);
-    const isOwnerDm = req.context.isOwner && req.context.isPrivate;
-    // 자기 PC 전권(하이브리드 조각3): 워커가 이 턴을 그 사용자 자신의 PC 에서 실행 중이면, 손님이라도
-    // decidePathPermission 의 "소유자 DM 전용" 게이트를 통과시킨다(경로는 여전히 allowedDirs 로 제한).
-    // cloud(Railway 봇)는 워커가 아니므로 ownWorkstation 이 와도 이 게이트를 열지 않는다(이중방어).
-    const isOwnWorkstationDm = req.context.ownWorkstation === true && req.context.isPrivate && deployTarget !== "cloud";
-    const pcPrivileged = isOwnerDm || isOwnWorkstationDm;
 
-    const canUseTool: CanUseTool = async (toolName, input, options) => {
-      // cloud 이중방어: allowedToolsFor 가 이미 PC 도구를 뺐지만, 여기서도 경로 검사 이전에
-      // 즉시 거부해 어떤 경로로도(모델의 임의 도구 호출 시도 포함) 클라우드에서 PC 작업이 새지 않게 한다.
-      if (deployTarget === "cloud" && isPathGatedTool(toolName)) {
-        return { behavior: "deny", message: "클라우드 실행 중이라 PC 작업은 로컬 워커 연결 후 가능해요." };
-      }
-      const allowedDirs = await repos.allowedDirs.list(req.context.userId);
-      const rawPaths = extractCandidatePaths(toolName, input, options.blockedPath, req.cwd);
-      const resolvedPaths = rawPaths.map(resolveRealOrNearestAncestor);
-      // 보안리뷰 #2: dangerouslyDisableSandbox 로 남은 봉쇄까지 무력화하는 걸 canUseTool 이 항상 막는다.
-      const dangerouslyDisableSandbox = toolName === "Bash" && input.dangerouslyDisableSandbox === true;
-      const decision = decidePathPermission(toolName, resolvedPaths, { isOwnerDm: pcPrivileged, allowedDirs, dangerouslyDisableSandbox });
-      return decision.behavior === "allow" ? { behavior: "allow" } : { behavior: "deny", message: decision.message };
-    };
+    // 원격 통로는 "소유자 DM"(진짜 사설 1:1) 일 때만 연다 — remoteToolHandler(remoteTools.ts)가
+    // 실행 시점에 다시 확인하는 것과 동일한 기준이다. hub.isConnected(userId) 만으로 판단하면
+    // (허브 쪽 배선은 이 턴이 공개 채널인지 모른다) 소유자가 공개 서버 채널에 쓴 턴에도 ctx.remote 가
+    // 채워져, 그 채널의 모델이 sh_exec 등 PC 도구를 호출할 길이 생긴다. allowedTools 산정에도 같은
+    // workerConnected 값을 넘겨야 "도구는 보이는데 실행하면 거부"라는 불일치가 생기지 않는다.
+    const isOwnerDm = req.context.isOwner && req.context.isPrivate;
+    const workerConnected = isOwnerDm && hub?.isConnected(req.context.userId) === true;
+    if (workerConnected && hub) {
+      ctx.remote = { call: (tool, args) => hub.call(req.context.userId, tool, args) };
+    }
+    const allowedTools = allowedToolsFor(req.context.role, req.context.isPrivate, req.context.isOwner, deployTarget, req.context.ownWorkstation, workerConnected);
+    // 원격 도구는 전부 mcp__asahi__* 이므로 bare 사전승인으로 두고, 내장 파일/Bash 도구는 아예 열지 않는다
+    // (builtinTools=[] 이 SDK 내장 도구를 전부 닫는다). 경로 검사는 이제 워커(remote/roots.ts)가 최종
+    // 권한을 갖는다 — 이 프로세스는 내장 도구를 안 여니 canUseTool 로 판정할 대상 자체가 없다.
+    const preApprovedTools = allowedTools;
+    const builtinTools: string[] = [];
 
     let sessionId: string | undefined;
     let text = "";
     let ok = false;
     // 턴 하나 동안 tool_use_id → 짧은 도구명(진행 이벤트용). onProgress 가 없으면 추출도 하지 않는다.
     const pendingToolNames = new Map<string, string>();
-    const additionalDirectories = pcPrivileged && deployTarget === "local" ? await repos.allowedDirs.list(req.context.userId) : [];
     // 이미지가 있으면 async-iterable(멀티모달 1메시지)로, 없으면 기존 문자열 prompt 그대로(회귀 금지).
     const promptInput = req.images && req.images.length > 0
       ? (async function* () { yield buildMultimodalMessage(req.prompt, req.images!); })()
@@ -174,8 +167,6 @@ export function makeRunAgentTurn(repos: ToolRepos, deployTarget: "local" | "clou
         mcpServers: { [TOOL_SERVER]: server },
         permissionMode: "default",
         model,
-        canUseTool,
-        additionalDirectories,
         maxTurns: 30,
       },
     })) {

@@ -162,12 +162,19 @@ export async function runtimeInfoHandler(ctx: ToolCtx): Promise<string> {
 }
 
 // ── 턴별 도구셋(능력 계층, §7.1) ────────────────────────────────────────────
-// owner-DM → 파일 도구 + Bash + 기억 + 접근관리 + 허용폴더 관리. 손님 DM → 기억(본인)만. 서버 → recall(공용)만.
-// deployTarget="cloud"(Railway 조각2): 소유자 PC 가 없는 컨테이너 실행이므로 owner-DM 이라도 PC 도구
-// (파일/Bash/allow_dir 류)는 빼고 대화·기억·접근관리(PC 무관)만 남긴다. local(기본)은 기존과 완전히 동일.
-// ownWorkstation(하이브리드 조각3, 로컬 워커 전용): 이 턴이 그 사용자 자신의 PC 에서 실행 중이면,
-// 손님(isOwner=false)이라도 자기 PC 는 전권이어야 하므로 파일/Bash/dir 관리 도구를 연다. 다만
-// manage_access·recall 전원열람 같은 신원 기반 특권은 그대로 소유자(isOwner)만 갖는다(프라이버시 불변식).
+// owner-DM → 기억 + 접근관리 + 허용폴더 관리 + db_schema/db_query/runtime_info(+ 워커가 연결돼 있으면
+// 원격 파일/셸 도구까지). 손님 DM → 기억(본인)만. 서버 → recall(공용)만.
+// Task 7(원격 워커 배선): owner-DM 분기에서 SDK 내장 파일/Bash 도구(Read/Write/Edit/Glob/Grep/Bash)를
+// 뺐다 — core/agent.ts 가 builtinTools=[] 로 그 도구들을 아예 닫아버리므로, 여기 목록에 이름을 남겨봐야
+// 실행할 대상이 없는 허수아비 항목이 된다(있지도 않은 능력을 있다고 보고하는 셈). 실제 파일/셸 작업은
+// 워커가 연결돼 있을 때만 원격 도구(mcp__asahi__fs_*·sh_exec)로 한다.
+// deployTarget="cloud"(Railway 조각2): 소유자 PC 가 없는 컨테이너 실행이므로 owner-DM 이라도
+// allow_dir/revoke_dir/list_dirs(PC 폴더 개념을 전제하는 도구)는 빼고 대화·기억·접근관리·db 도구만
+// 남긴다. local(기본)은 기존과 완전히 동일.
+// ownWorkstation(하이브리드 조각3, 로컬 워커 전용 — 이 브랜치는 이번 태스크 범위 밖이라 손대지 않는다.
+// 2단계 과제): 이 턴이 그 사용자 자신의 PC 에서 실행 중이면, 손님(isOwner=false)이라도 자기 PC 는
+// 전권이어야 하므로 (SDK 내장) 파일/Bash/dir 관리 도구를 그대로 연다. 다만 manage_access·recall
+// 전원열람 같은 신원 기반 특권은 그대로 소유자(isOwner)만 갖는다(프라이버시 불변식).
 // deployTarget="cloud" 는 워커가 아니므로(Railway 봇) ownWorkstation 이 와도 PC 도구를 열지 않는다.
 // workerConnected(원격 워커 1단계): owner-DM 두 분기(local/cloud) 모두에 원격 도구 6종을 추가로 연다.
 // ownWorkstation·손님 DM·서버 분기는 그대로 둔다 — 1단계 원격 도구는 소유자 전용이다.
@@ -192,7 +199,6 @@ export function allowedToolsFor(
     }
     return [
       ...remote,
-      ...FILE_TOOLS, "Bash",
       t("remember"), t("recall"), t("character_fact"), t("manage_access"),
       t("allow_dir"), t("revoke_dir"), t("list_dirs"),
       t("db_schema"), t("db_query"), t("runtime_info"),
