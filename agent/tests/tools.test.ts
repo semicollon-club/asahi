@@ -453,3 +453,42 @@ describe("allowedToolsFor — character_fact 노출 계층", () => {
     expect(allowedToolsFor("owner", false, true, "local")).not.toContain(CF);
   });
 });
+
+describe("allowedToolsFor — 원격 도구 노출", () => {
+  const RT = "mcp__asahi__fs_read";
+  const SH = "mcp__asahi__sh_exec";
+
+  it("워커가 연결돼 있으면 소유자 DM 에 원격 도구를 연다(local·cloud 동일)", () => {
+    for (const target of ["local", "cloud"] as const) {
+      const tools = allowedToolsFor("owner", true, true, target, false, true);
+      expect(tools).toContain(RT);
+      expect(tools).toContain(SH);
+    }
+  });
+
+  it("워커가 없으면 원격 도구를 노출하지 않는다", () => {
+    for (const target of ["local", "cloud"] as const) {
+      const tools = allowedToolsFor("owner", true, true, target, false, false);
+      expect(tools).not.toContain(RT);
+      expect(tools).not.toContain(SH);
+    }
+  });
+
+  it("workerConnected 를 생략하면 노출하지 않는다(안전한 기본값)", () => {
+    expect(allowedToolsFor("owner", true, true, "local")).not.toContain(RT);
+  });
+
+  it("손님 DM·서버 채널에는 워커가 연결돼 있어도 노출하지 않는다(1단계는 소유자 전용)", () => {
+    expect(allowedToolsFor("allowed", true, false, "local", false, true)).not.toContain(RT);
+    expect(allowedToolsFor("allowed", false, false, "local", false, true)).not.toContain(RT);
+  });
+
+  it("기억·접근관리 도구는 워커 연결 여부와 무관하다", () => {
+    const off = allowedToolsFor("owner", true, true, "cloud", false, false);
+    const on = allowedToolsFor("owner", true, true, "cloud", false, true);
+    for (const t of ["mcp__asahi__remember", "mcp__asahi__recall", "mcp__asahi__manage_access"]) {
+      expect(off).toContain(t);
+      expect(on).toContain(t);
+    }
+  });
+});

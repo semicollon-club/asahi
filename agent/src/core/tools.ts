@@ -9,6 +9,7 @@ import type { AllowedDirsRepo } from "../store/allowedDirsRepo.js";
 import type { IntrospectRepo } from "../store/introspectRepo.js";
 import { assertReadOnlySql, formatQueryResult } from "./sqlGuard.js";
 import { CHARACTER_FACT_LIMIT } from "./turnPrep.js";
+import { REMOTE_TOOL_NAMES, remoteToolHandler } from "./remoteTools.js";
 
 // 도구 서버 이름 → 모델에는 mcp__asahi__<tool> 로 노출된다.
 export const TOOL_SERVER = "asahi";
@@ -31,6 +32,8 @@ export type ToolCtx = {
   // manage_access·recall 전원열람 등 신원 기반 특권에는 영향을 주지 않는다(isOwner 로만 판정).
   ownWorkstation?: boolean;
   runtime: RuntimeInfo;
+  // 원격 워커 호출 통로. 워커가 연결돼 있을 때만 주입된다(index.ts 배선).
+  remote?: { call(tool: string, args: Record<string, unknown>): Promise<{ ok: boolean; content: string }> };
 };
 
 // PC 관리 도구(allow_dir/revoke_dir/list_dirs)를 쓸 수 있는 신원인지: 소유자 DM, 또는
@@ -166,18 +169,29 @@ export async function runtimeInfoHandler(ctx: ToolCtx): Promise<string> {
 // 손님(isOwner=false)이라도 자기 PC 는 전권이어야 하므로 파일/Bash/dir 관리 도구를 연다. 다만
 // manage_access·recall 전원열람 같은 신원 기반 특권은 그대로 소유자(isOwner)만 갖는다(프라이버시 불변식).
 // deployTarget="cloud" 는 워커가 아니므로(Railway 봇) ownWorkstation 이 와도 PC 도구를 열지 않는다.
+// workerConnected(원격 워커 1단계): owner-DM 두 분기(local/cloud) 모두에 원격 도구 6종을 추가로 연다.
+// ownWorkstation·손님 DM·서버 분기는 그대로 둔다 — 1단계 원격 도구는 소유자 전용이다.
 export function allowedToolsFor(
   role: Role,
   isPrivate: boolean,
   isOwner: boolean,
   deployTarget: "local" | "cloud" = "local",
   ownWorkstation = false,
+  workerConnected = false,
 ): string[] {
+  // 원격 도구는 워커 연결이 있을 때만 연다. 판정 축이 "어디서 실행 중인가"(deployTarget)가 아니라
+  // "워커가 붙어 있는가"로 바뀐 것이 이 단계의 핵심이다 — cloud 에서도 워커만 붙으면 PC 작업이 된다.
+  // 1단계는 소유자 DM 전용으로 좁힌다 — 아래 두 owner-DM 분기 외에는 추가하지 않는다.
+  const remote = workerConnected ? REMOTE_TOOL_NAMES.map((n) => t(n)) : [];
   if (isOwner && isPrivate) {
     if (deployTarget === "cloud") {
-      return [t("remember"), t("recall"), t("character_fact"), t("manage_access"), t("db_schema"), t("db_query"), t("runtime_info")];
+      return [
+        ...remote,
+        t("remember"), t("recall"), t("character_fact"), t("manage_access"), t("db_schema"), t("db_query"), t("runtime_info"),
+      ];
     }
     return [
+      ...remote,
       ...FILE_TOOLS, "Bash",
       t("remember"), t("recall"), t("character_fact"), t("manage_access"),
       t("allow_dir"), t("revoke_dir"), t("list_dirs"),
@@ -262,6 +276,42 @@ export function buildTools(ctx: ToolCtx) {
         "(소유자 전용) 내가 어떤 모델·SDK·배포 설정으로 동작 중인지 보여줍니다.",
         {},
         async () => textResult(await runtimeInfoHandler(ctx)),
+      ),
+      tool(
+        "fs_read",
+        "워커 PC 의 파일을 읽습니다. offset(1부터)·limit 로 일부만 읽을 수 있습니다.",
+        { path: z.string().describe("읽을 파일의 절대경로"), offset: z.number().optional().describe("시작 줄(1부터)"), limit: z.number().optional().describe("읽을 줄 수") },
+        async (args) => textResult(await remoteToolHandler(ctx, "fs_read", args)),
+      ),
+      tool(
+        "fs_write",
+        "워커 PC 에 파일을 씁니다. 상위 폴더가 없으면 만듭니다. 기존 파일은 덮어씁니다.",
+        { path: z.string().describe("쓸 파일의 절대경로"), content: z.string().describe("파일 전체 내용") },
+        async (args) => textResult(await remoteToolHandler(ctx, "fs_write", args)),
+      ),
+      tool(
+        "fs_edit",
+        "워커 PC 의 파일에서 문자열을 치환합니다. 여러 번 등장하면 replaceAll 이 필요합니다.",
+        { path: z.string().describe("고칠 파일의 절대경로"), oldString: z.string().describe("찾을 문자열"), newString: z.string().describe("바꿀 문자열"), replaceAll: z.boolean().optional().describe("전부 바꿀지 여부") },
+        async (args) => textResult(await remoteToolHandler(ctx, "fs_edit", args)),
+      ),
+      tool(
+        "fs_glob",
+        "워커 PC 에서 glob 패턴으로 파일을 찾습니다.",
+        { pattern: z.string().describe("예: **/*.ts"), path: z.string().optional().describe("기준 폴더의 절대경로") },
+        async (args) => textResult(await remoteToolHandler(ctx, "fs_glob", args)),
+      ),
+      tool(
+        "fs_grep",
+        "워커 PC 의 파일 내용에서 정규식으로 검색합니다.",
+        { pattern: z.string().describe("찾을 정규식"), path: z.string().optional().describe("기준 폴더의 절대경로"), glob: z.string().optional().describe("검색 대상 파일 패턴") },
+        async (args) => textResult(await remoteToolHandler(ctx, "fs_grep", args)),
+      ),
+      tool(
+        "sh_exec",
+        "워커 PC 에서 셸 명령을 실행합니다. 강력한 도구이니 신중히 쓰세요.",
+        { command: z.string().describe("실행할 셸 명령"), timeoutMs: z.number().optional().describe("타임아웃(밀리초)") },
+        async (args) => textResult(await remoteToolHandler(ctx, "sh_exec", args)),
       ),
     ],
   });
