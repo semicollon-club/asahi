@@ -38,11 +38,19 @@ lastReviewed: 2026-07-26
   Postgres READ ONLY 트랜잭션 + 정적 SQL 가드 + 타임아웃으로 다층 방어한다.
 - **디스코드 이미지 입력(멀티모달)** — 이미지 첨부를 모델에 직접 전달한다. 과거 이미지는
   재주입하지 않고 마커만 저장한다(비용 방지).
+- **표정 이미지** — 모델이 답변에 `[표정:이름]` 마커를 쓰면 해당 표정 이미지를 embed 로 함께 보낸다.
+  이미지는 Supabase Storage 에, 카탈로그는 `character_images` 테이블에 있고 `agent/scripts/sync-images.mjs`
+  로 갱신한다(기존 감정의 이미지 교체·추가는 재배포 불필요 — 단, 새 감정 폴더는 감정 목록을 기동 시
+  한 번만 읽으므로 봇 재시작이 필요하다. `image/README.md` 참고). 감정이 움직일 때만 쓰도록 프롬프트로
+  유도하고, 어댑터가 대화별
+  120초 하한으로 남발을 막는다(단, 마커만 있고 본문이 없는 답변은 이미지가 곧 응답이라 하한을
+  건너뛴다). 이모지 금지 규칙의 감정 표현 수단을 대신하는 장식 요소로, 조회·전송이 실패해도
+  텍스트 응답은 항상 나간다.
 - **모델**: 기본 Opus 계열 최신 모델로 고정, 환경변수로 재정의 가능.
 
 ## 테스트
 
-`agent/` 기준 vitest 33개 파일, **401개 통과 + 1개 skip**(402개). skip 1건은 Postgres READ ONLY
+`agent/` 기준 vitest 36개 파일, **474개 통과 + 1개 skip**(475개). skip 1건은 Postgres READ ONLY
 트랜잭션의 실제 쓰기 거부 동작으로, 테스트용 인메모리 Postgres 구현(pg-mem)의 한계상 유닛 테스트로
 재현할 수 없어 실 Supabase 스모크로만 검증 가능하다.
 
@@ -58,6 +66,9 @@ lastReviewed: 2026-07-26
   `remoteHub.test.ts`, `remoteWorkerClient.test.ts`, `remoteRoots.test.ts`, `remoteExecutors.test.ts`,
   `remoteTools.test.ts`)는 소켓 없이 프로토콜·핸들러 로직만 검증한다.
 - 디스코드 이미지 첨부 → 모델 인식(실제 첨부 파일로 확인).
+- **표정 이미지 실 배포 검증** — Supabase Storage 실제 업로드, `character_images` 카탈로그 갱신,
+  디스코드 embed 렌더링이 실 환경에서 그대로 동작하는지. 유닛 테스트(`characterImagesRepo.test.ts`,
+  `expressionSend.test.ts`, `persona.test.ts` 등)는 로직만 pg-mem·모킹으로 검증한다.
 - `/새세션` 계열 명령으로 세션을 리셋했을 때 캐릭터 톤이 실제로 체감되는지.
 - 손님·서버 채널에서의 한도·프라이버시 스코프 체감(유닛 테스트는 순수 로직만 커버).
 
