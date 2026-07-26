@@ -38,6 +38,9 @@ async function setup(over: {
     discordToken: "t", ownerId: "owner", databaseUrl: "postgres://test", dataDir: ":memory:", memoryDir: "x",
     sessionIdleMinutes: 30, maxTurnsPerHour: 30, maxTurnsPerHourPerUser: 20, maxTurnsPerHourGlobal: 40, ownerReserve: 10,
     deployTarget: "local",
+    // 기본은 미설정(빈 객체) — 조사 결과가 명령을 친 곳으로 폴백하는 경로다.
+    // 지정 채널로 보내는 경로는 over.config 로 덮어써 따로 검증한다.
+    digestChannels: {},
     ...over.config,
   };
   let clock = 1_000_000;
@@ -698,5 +701,124 @@ describe("AgentCore — 이미지 입력", () => {
     const notice = t.published.find((e) => e.type === "system_notice" && e.text.includes("불러오지"));
     expect(notice).toBeDefined();
     expect(notice?.channelRef).toBe("dm-owner");
+  });
+});
+
+// 일반 채널의 예약어(어댑터의 channel-command → commandOnly 힌트).
+//
+// 가장 중요한 불변식: 이 경로는 conversations 행을 만들지 않는다. 만들면 decideRoute 의
+// hasConversation 이 참이 되어 그 채널의 모든 메시지가 thread-existing 으로 라우팅되고,
+// 봇이 그 채널에서 오가는 잡담 전부에 답하기 시작한다.
+function channelCommandHint(userId: string, channelId: string, role: "owner" | "allowed"): ConversationHint {
+  return {
+    kind: "thread", discordChannelId: channelId, guildId: "g", isPrivate: false,
+    primaryUserId: userId, userId, role, discordMessageId: `msg-${seq++}`, commandOnly: true,
+  };
+}
+
+describe("AgentCore — 일반 채널의 예약어(commandOnly)", () => {
+  it("조사 예약어를 처리하면서도 그 채널을 대화로 만들지 않는다", async () => {
+    const digestCalls: Array<{ topic: string; channelRef: string }> = [];
+    const digest = { run: async (topic: string, channelRef: string) => { digestCalls.push({ topic, channelRef }); return { started: true }; } };
+    const t = await setup({ digest } as any);
+
+    pub(t.bus, channelCommandHint("owner", "chan-일반", "owner"), "/대회", 1);
+    await t.core.drain();
+
+    expect(digestCalls).toHaveLength(1);
+    // 대화 행이 생기지 않아야 한다 — 생기면 이후 그 채널의 모든 메시지에 봇이 답하게 된다.
+    expect(await t.repos.conversations.getByChannelId("chan-일반")).toBeNull();
+    expect(t.calls).toHaveLength(0); // LLM 대화 턴도 돌지 않는다
+  });
+
+  it("/help 도 대화를 만들지 않고 그 자리에서 답한다", async () => {
+    const t = await setup();
+
+    pub(t.bus, channelCommandHint("guest", "chan-일반", "allowed"), "/help", 1);
+    await t.core.drain();
+
+    expect(t.published.find((e) => e.type === "assistant_message")?.text).toContain("/대회");
+    expect(await t.repos.conversations.getByChannelId("chan-일반")).toBeNull();
+    expect(t.calls).toHaveLength(0);
+  });
+
+  it("손님 한도는 이 경로에도 그대로 적용된다", async () => {
+    const digestCalls: Array<{ topic: string; channelRef: string }> = [];
+    const digest = { run: async (topic: string, channelRef: string) => { digestCalls.push({ topic, channelRef }); return { started: true }; } };
+    const t = await setup({ config: { maxTurnsPerHourPerUser: 0 }, digest } as any);
+
+    pub(t.bus, channelCommandHint("guest", "chan-일반", "allowed"), "/대회", 1);
+    await t.core.drain();
+
+    expect(digestCalls).toHaveLength(0);
+    expect(t.published.find((e) => e.type === "system_notice")?.text).toContain("한도");
+    // 거부 안내도 대화를 만들지 않는다(notify 대신 알림만).
+    expect(await t.repos.conversations.getByChannelId("chan-일반")).toBeNull();
+  });
+});
+
+// 조사 결과의 목적지. 스레드에서 예약어를 부르면 결과가 그 스레드에 갇혀 채널 밖에서는
+// 보이지 않았다 — 결과는 항상 그 주제의 지정 채널로 보내고, 명령을 친 곳에는 어디에 올릴지만 알린다.
+describe("AgentCore — 조사 결과는 주제의 지정 채널로 간다", () => {
+  it("스레드에서 불러도 결과는 지정 채널로 가고, 친 곳에는 안내만 남는다", async () => {
+    const digestCalls: Array<{ topic: string; channelRef: string }> = [];
+    const digest = { run: async (topic: string, channelRef: string) => { digestCalls.push({ topic, channelRef }); return { started: true }; } };
+    const t = await setup({ config: { digestChannels: { contest: "news-대회" } }, digest } as any);
+
+    pub(t.bus, threadHint("owner", "thread-1", "owner", "o1"), "/대회", 1);
+    await t.core.drain();
+
+    expect(digestCalls[0].channelRef).toBe("news-대회"); // 스레드가 아니라 지정 채널
+    const notice = t.published.find((e) => e.type === "system_notice");
+    expect(notice?.channelRef).toBe("thread-1");        // 안내는 명령을 친 곳에
+    expect(notice?.text).toContain("news-대회");         // 어디에 올리는지 링크로 알린다
+  });
+
+  it("일반 채널에서 불러도 마찬가지다", async () => {
+    const digestCalls: Array<{ topic: string; channelRef: string }> = [];
+    const digest = { run: async (topic: string, channelRef: string) => { digestCalls.push({ topic, channelRef }); return { started: true }; } };
+    const t = await setup({ config: { digestChannels: { devnews: "news-개발" } }, digest } as any);
+
+    pub(t.bus, channelCommandHint("owner", "chan-일반", "owner"), "/개발뉴스", 1);
+    await t.core.drain();
+
+    expect(digestCalls[0].channelRef).toBe("news-개발");
+    expect(t.published.find((e) => e.type === "system_notice")?.channelRef).toBe("chan-일반");
+  });
+
+  it("지정 채널 안에서 부르면 안내 없이 그 자리에 바로 올린다", async () => {
+    const digestCalls: Array<{ topic: string; channelRef: string }> = [];
+    const digest = { run: async (topic: string, channelRef: string) => { digestCalls.push({ topic, channelRef }); return { started: true }; } };
+    const t = await setup({ config: { digestChannels: { contest: "news-대회" } }, digest } as any);
+
+    pub(t.bus, channelCommandHint("owner", "news-대회", "owner"), "/대회", 1);
+    await t.core.drain();
+
+    expect(digestCalls[0].channelRef).toBe("news-대회");
+    expect(t.published.filter((e) => e.type === "system_notice")).toHaveLength(0); // 같은 곳이라 안내 불필요
+  });
+
+  it("지정 채널이 없으면 명령을 친 곳으로 폴백한다(설정 전 동작 유지)", async () => {
+    const digestCalls: Array<{ topic: string; channelRef: string }> = [];
+    const digest = { run: async (topic: string, channelRef: string) => { digestCalls.push({ topic, channelRef }); return { started: true }; } };
+    const t = await setup({ digest } as any); // digestChannels: {}
+
+    pub(t.bus, dmHint("owner", "owner"), "/대회", 1);
+    await t.core.drain();
+
+    expect(digestCalls[0].channelRef).toBe("dm-owner");
+    expect(t.published.filter((e) => e.type === "system_notice")).toHaveLength(0);
+  });
+
+  it("이미 조사 중이라는 안내는 결과 채널이 아니라 명령을 친 곳으로 간다", async () => {
+    const digest = { run: async () => ({ started: false }) };
+    const t = await setup({ config: { digestChannels: { contest: "news-대회" } }, digest } as any);
+
+    pub(t.bus, channelCommandHint("owner", "chan-일반", "owner"), "/대회", 1);
+    await t.core.drain();
+    await flush();
+
+    const busy = t.published.find((e) => e.type === "system_notice" && e.text.includes("이미 조사 중"));
+    expect(busy?.channelRef).toBe("chan-일반");
   });
 });

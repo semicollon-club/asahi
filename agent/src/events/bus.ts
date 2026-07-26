@@ -15,6 +15,11 @@ export type ConversationHint = {
   userId: string;              // 이번 발화자
   role: "owner" | "allowed";   // blocked/미등록은 애초에 이벤트를 발행하지 않음
   discordMessageId: string;    // 사용자 메시지 id (저장·중복방지)
+  // 일반 채널에서 멘션 없이 들어온 예약어(isChannelCommand). 코어는 이 힌트로 conversations 행을
+  // 조회하지도 만들지도 않는다 — 만들면 그 채널이 봇 대화로 굳어(decideRoute 의 hasConversation)
+  // 이후 그 채널의 모든 메시지에 답하게 된다. 명령 하나를 처리하고 끝나므로 메시지 저장·LLM
+  // 대화 턴도 거치지 않는다.
+  commandOnly?: true;
 };
 
 export type UserMessageEvent = { type: "user_message"; channel: ChannelKind; channelRef: string; text: string; ts: number; hint?: ConversationHint; images?: ImageRef[] };

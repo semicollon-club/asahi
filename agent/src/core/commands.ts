@@ -34,12 +34,24 @@ export function parseHelpCommand(text: string): boolean {
   return HELP_COMMANDS.has(text.trim().toLowerCase());
 }
 
+// 대화(스레드·DM) 없이 일반 채널에서 그 자리에서 처리할 수 있는 예약어인가.
+//
+// 배경: 어댑터는 일반 채널의 멘션 없는 메시지를 전부 무시한다(decideRoute). 무시하지 않으려면
+// 그 채널을 대화로 채택해야 하는데, 그러면 conversations 행이 생겨 이후 그 채널의 모든 메시지에
+// 봇이 답하기 시작한다. 그래서 "대화를 만들지 않고 그 자리에서 끝나는 명령"만 따로 통과시킨다.
+//
+// /새세션 은 제외한다 — 초기화할 세션이 있어야 의미가 있고, 대화가 없는 채널에는 리셋할 대상
+// 자체가 없다(스레드·DM 안에서는 지금까지처럼 그대로 동작한다).
+export function isChannelCommand(text: string): boolean {
+  return parseHelpCommand(text) || parseDigestCommand(text) !== null;
+}
+
 // 안내문은 위 예약어 테이블에서 파생시킨다. 손으로 적으면 예약어를 추가하는 순간
 // 조용히 어긋나고, 그 어긋남은 아무도 눈치채지 못한다(테스트가 이 일치를 검증한다).
 export const COMMAND_HELP: ReadonlyArray<{ commands: readonly string[]; description: string }> = [
   { commands: [...RESET_COMMANDS], description: "대화를 새 세션으로 시작한다. 성격이나 설정이 바뀐 뒤에 쓴다" },
-  { commands: ["/대회"], description: "코딩·CTF 대회 소식을 지금 조사해서 이 채널에 알려준다" },
-  { commands: ["/개발뉴스"], description: "개발 관련 소식을 지금 조사해서 이 채널에 알려준다" },
+  { commands: ["/대회"], description: "코딩·CTF 대회 소식을 지금 조사한다. 결과는 대회 소식 채널에 올라간다" },
+  { commands: ["/개발뉴스"], description: "개발 관련 소식을 지금 조사한다. 결과는 개발 뉴스 채널에 올라간다" },
   { commands: [...HELP_COMMANDS], description: "이 목록을 보여준다" },
 ];
 

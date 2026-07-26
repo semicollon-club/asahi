@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseSessionCommand, parseDigestCommand, parseHelpCommand, renderCommandHelp, COMMAND_HELP } from "../src/core/commands.js";
+import { parseSessionCommand, parseDigestCommand, parseHelpCommand, renderCommandHelp, COMMAND_HELP, isChannelCommand } from "../src/core/commands.js";
 
 describe("parseSessionCommand", () => {
   it("예약어(/새세션·/새대화·/새로시작·/reset)를 reset 으로 인식한다(대소문자·앞뒤 공백 무시)", () => {
@@ -93,5 +93,25 @@ describe("renderCommandHelp — 안내문이 실제 예약어와 어긋나지 �
       expect(g.commands.length).toBeGreaterThan(0);
       expect(g.description.length).toBeGreaterThan(5);
     }
+  });
+});
+
+describe("isChannelCommand — 대화 없이 일반 채널에서 처리할 수 있는 예약어", () => {
+  it("조사 예약어와 /help 는 채널에서 받는다", () => {
+    for (const t of ["/대회", "/개발뉴스", "/help", "/도움말", "/명령어"]) {
+      expect(isChannelCommand(t)).toBe(true);
+    }
+  });
+
+  it("/새세션 계열은 제외한다 — 초기화할 세션이 있어야 의미가 있다", () => {
+    for (const t of ["/새세션", "/새대화", "/새로시작", "/reset"]) {
+      expect(isChannelCommand(t)).toBe(false);
+    }
+  });
+
+  it("일반 대화는 통과시키지 않는다", () => {
+    expect(isChannelCommand("대회 알려줘")).toBe(false);
+    expect(isChannelCommand("/대회 나가고 싶다")).toBe(false);
+    expect(isChannelCommand("")).toBe(false);
   });
 });

@@ -63,3 +63,45 @@ describe("detectBotMention", () => {
     expect(detectBotMention(fakeMentions({ directHasBot: true, everyone: false }), {})).toBe(true);
   });
 });
+
+// 일반 채널의 예약어: 지금까지는 멘션이 없으면 무시돼 코어까지 닿지도 못했다. 쓰려면 봇을 멘션해
+// 스레드를 연 뒤 그 안에서 쳐야 했고, 그러면 뉴스가 스레드에 갇혀 채널 밖에서 보이지 않았다.
+describe("decideRoute — 일반 채널의 예약어(channel-command)", () => {
+  it("멘션이 없어도 조사 예약어는 채널에서 그대로 받는다", () => {
+    expect(decideRoute(inc({ content: "/대회" }), "allowed", false)).toEqual({ kind: "channel-command" });
+    expect(decideRoute(inc({ content: "/개발뉴스" }), "owner", false)).toEqual({ kind: "channel-command" });
+  });
+
+  it("/help 도 채널에서 그대로 받는다", () => {
+    expect(decideRoute(inc({ content: "/help" }), "allowed", false)).toEqual({ kind: "channel-command" });
+  });
+
+  it("앞뒤 공백·대소문자는 무시한다(파싱 규칙 일치)", () => {
+    expect(decideRoute(inc({ content: "  /HELP  " }), "allowed", false)).toEqual({ kind: "channel-command" });
+  });
+
+  it("/새세션 은 채널 예약어가 아니다 — 초기화할 세션이 없으므로 무시한다", () => {
+    expect(decideRoute(inc({ content: "/새세션" }), "owner", false)).toEqual({ kind: "ignore" });
+  });
+
+  it("예약어를 닮았을 뿐인 일반 대화는 여전히 무시한다", () => {
+    expect(decideRoute(inc({ content: "/대회 나가고 싶다" }), "owner", false)).toEqual({ kind: "ignore" });
+    expect(decideRoute(inc({ content: "오늘 대회 뭐 있어?" }), "owner", false)).toEqual({ kind: "ignore" });
+  });
+
+  it("게이트가 먼저다 — blocked 사용자의 예약어는 무시한다", () => {
+    expect(decideRoute(inc({ content: "/대회" }), "blocked", false)).toEqual({ kind: "ignore" });
+  });
+
+  it("이미 대화인 채널에서는 기존 경로를 유지한다(대화로 처리)", () => {
+    expect(decideRoute(inc({ content: "/대회" }), "owner", true)).toEqual({ kind: "thread-existing" });
+  });
+
+  it("멘션이 함께 있으면 기존대로 스레드를 연다(멘션이 우선)", () => {
+    expect(decideRoute(inc({ content: "/대회", mentionsBot: true }), "owner", false)).toEqual({ kind: "thread-create" });
+  });
+
+  it("스레드 안에서는 규칙이 바뀌지 않는다 — 대화도 멘션도 없으면 무시", () => {
+    expect(decideRoute(inc({ content: "/대회", isThread: true }), "owner", false)).toEqual({ kind: "ignore" });
+  });
+});

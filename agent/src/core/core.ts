@@ -3,7 +3,8 @@ import type { Config } from "../config.js";
 import { shouldConnectWorker, type TurnRunner, type TurnContext, type TurnResult, type ProgressUpdate } from "./agent.js";
 import { buildSystemPrompt, deriveRapportStage } from "./persona.js";
 import { parseSessionCommand, parseDigestCommand, parseHelpCommand, renderCommandHelp } from "./commands.js";
-import type { DigestRunner } from "./digest.js";
+import { DIGEST_TOPICS } from "./digest.js";
+import type { DigestRunner, DigestTopic } from "./digest.js";
 import type { Role } from "../store/usersRepo.js";
 import type { UsersRepo } from "../store/usersRepo.js";
 import type { ConversationsRepo, Conversation } from "../store/conversationsRepo.js";
@@ -129,6 +130,20 @@ export class AgentCore {
   // durable 저장만 담당(짧다) — 크래시 복구 불변식: 이 함수가 끝나면 메시지는 반드시
   // processed=false 로 DB 에 있다. 뒤이은 LLM 턴은 turnChains 로 넘겨 별도로 직렬화한다.
   private async ingest(hint: ConversationHint, ts: number, text: string, images: ImageRef[]): Promise<void> {
+    // 일반 채널에서 멘션 없이 들어온 예약어(어댑터의 channel-command 경로). 대화를 조회하지도
+    // 만들지도 않고 그 자리에서 끝낸다 — 여기서 conversations 행을 만들면 그 채널이 봇 대화로
+    // 굳어(decideRoute 의 hasConversation) 이후 그 채널의 모든 메시지에 답하기 시작한다.
+    // 어댑터의 isChannelCommand 를 통과한 것만 오므로 /help 와 조사 예약어 둘뿐이다.
+    if (hint.commandOnly) {
+      if (parseHelpCommand(text)) {
+        this.bus.publish({ type: "assistant_message", channel: "discord", channelRef: hint.discordChannelId, text: renderCommandHelp(), ts: this.now() });
+        return;
+      }
+      const topic = parseDigestCommand(text);
+      if (topic) await this.startDigestCommand(topic, { userId: hint.userId, conv: null, replyRef: hint.discordChannelId });
+      return;
+    }
+
     const conv = await this.resolveConversation(hint, ts);
 
     // 예약어 세션 명령(/새세션 등): LLM 턴·메시지 저장 없이 세션만 리셋하고 확인을 보낸다.
@@ -146,56 +161,9 @@ export class AgentCore {
       return;
     }
 
-    // 정기 게시 예약어: 명령을 친 그 채널에 즉시 답한다. 스케줄의 lastRun 은 건드리지 않는다.
-    // LLM 턴 체인(turnChains)·메시지 저장은 여전히 거치지 않지만(아래 참가자 upsert/저장보다 앞에
-    // 두는 이유), 손님 한도(turns.reserve)는 반드시 통과시킨다 — 이 조사 턴은 claude-opus·웹검색·
-    // maxTurns:30 으로 이 앱에서 가장 비싼 턴이라, 예약어로 이 검사를 건너뛰면 구독 한도 보호가
-    // 완전히 무력화된다(리뷰 발견: 손님이 예약어를 연타해 무제한·동시 다발로 조사를 돌릴 수 있었음).
     const digestTopic = parseDigestCommand(text);
     if (digestTopic) {
-      if (!this.digest) {
-        this.bus.publish({ type: "system_notice", channel: "discord", channelRef: conv.discordChannelId, text: "지금은 조사 기능이 꺼져 있어요.", ts: this.now() });
-        return;
-      }
-      // 손님 한도: runConversationTurn 의 예약(아래 참고)과 완전히 같은 모양·한도·거부 문구를
-      // 그대로 재사용한다(§8 불변식 유지, 새 한도값·문구를 만들지 않는다). 소유자는 신원
-      // (userId===ownerId) 기준으로 기존 정책대로 무제한 — 예약 자체를 생략한다.
-      const isOwner = hint.userId === this.ownerId;
-      if (!isOwner) {
-        const reserved = await this.repos.turns.reserve({
-          userId: hint.userId, conversationId: conv.id, kind: "proactive", ts: this.now(),
-          perUserLimit: this.config.maxTurnsPerHourPerUser, globalLimit: this.config.maxTurnsPerHourGlobal,
-          ownerReserve: 0, isOwner: false, windowMs: HOUR_MS,
-        });
-        if (!reserved) {
-          await this.notify(conv, "구독 한도 보호를 위해 잠시 쉬고 있어요. 1시간 안에 다시 시도해 주세요.");
-          return;
-        }
-      }
-
-      // FIX1(치명, 최종 리뷰 3차): 같은 주제의 동시 실행 방지는 더 이상 여기(AgentCore)의 몫이
-      // 아니다 — DigestRunner 내부의 주제별 running Set 이 checkAndRun(스케줄)·run(예약어) 양쪽에
-      // 똑같이 적용된다(이전엔 여기 채널별 Set 만 예약어 경로를 막았고, 스케줄이 겹쳐 도는 훨씬
-      // 심각한 재진입은 전혀 막지 못했다). run() 은 이제 시작 여부를 { started } 로 돌려주므로,
-      // 여기서는 그 결과만 보고 "이미 조사 중" 안내를 낼지 정한다 — 손님 몫은 이미 위에서
-      // 예약했으므로, 겹쳐서 거부돼도 되돌려주지 않는다(가장 비싼 턴이 두 번 도는 것보다는
-      // 손님의 몫 하나를 쓰는 편이 훨씬 싸다).
-      //
-      // digest 를 지역 상수로 캡처해야 아래 클로저에서 undefined 가 아닌 타입으로 좁혀진다
-      // (this.digest 는 위에서 이미 존재함을 확인했지만, TS 는 클로저 안에서 this 필드의 좁힘을
-      // 유지하지 않는다).
-      const digest = this.digest;
-      const channelRef = conv.discordChannelId;
-      void (async () => {
-        try {
-          const { started } = await digest.run(digestTopic, channelRef);
-          if (!started) {
-            this.bus.publish({ type: "system_notice", channel: "discord", channelRef, text: "지금 같은 주제로 이미 조사 중이에요. 끝나면 다시 시도해 주세요.", ts: this.now() });
-          }
-        } catch (err) {
-          console.error("[core] 조사 실행 오류:", err);
-        }
-      })();
+      await this.startDigestCommand(digestTopic, { userId: hint.userId, conv, replyRef: conv.discordChannelId });
       return;
     }
 
@@ -207,6 +175,76 @@ export class AgentCore {
       discordMessageId: hint.discordMessageId, content: buildImageMarker(text, images), processed: false,
     });
     this.enqueue(this.turnChains, hint.discordChannelId, () => this.runConversationTurn(conv.id, hint.userId, hint.role as "owner" | "allowed", text, messageId, images));
+  }
+
+  // 정기 게시 예약어(/대회·/개발뉴스)를 즉시 실행한다. 스케줄의 lastRun 은 건드리지 않는다 —
+  // 수동으로 한 번 봤다고 다음 날 아침 게시가 걸러지면 안 된다.
+  //
+  // 두 경로가 이 메서드 하나를 쓴다: 대화 안(스레드·DM, conv 있음)과 일반 채널의 예약어
+  // (commandOnly, conv 없음). conv 는 안내를 대화 기록에도 남길지에만 쓰인다.
+  //
+  // replyRef 는 "명령을 친 곳"(안내·거부 문구가 가는 곳)이고, 조사 결과 자체는 그 주제의 지정
+  // 채널로 간다 — 스레드에서 부르면 결과가 스레드에 갇혀 밖에서 안 보이던 문제 때문이다.
+  // 지정 채널이 없으면(DIGEST_*_CHANNEL_ID 미설정) 친 곳으로 폴백한다.
+  //
+  // LLM 대화 턴 체인(turnChains)·메시지 저장은 거치지 않지만 손님 한도(turns.reserve)는 반드시
+  // 통과시킨다 — 이 조사 턴은 claude-opus·웹검색·maxTurns:30 으로 이 앱에서 가장 비싼 턴이라,
+  // 예약어로 이 검사를 건너뛰면 구독 한도 보호가 완전히 무력화된다(리뷰 발견: 손님이 예약어를
+  // 연타해 무제한·동시 다발로 조사를 돌릴 수 있었음).
+  private async startDigestCommand(
+    topic: DigestTopic,
+    o: { userId: string; conv: Conversation | null; replyRef: string },
+  ): Promise<void> {
+    const publishNotice = (text: string) =>
+      this.bus.publish({ type: "system_notice", channel: "discord", channelRef: o.replyRef, text, ts: this.now() });
+
+    if (!this.digest) {
+      publishNotice("지금은 조사 기능이 꺼져 있어요.");
+      return;
+    }
+
+    // 손님 한도: runConversationTurn 의 예약과 완전히 같은 모양·한도·거부 문구를 그대로 재사용한다
+    // (§8 불변식 유지, 새 한도값·문구를 만들지 않는다). 소유자는 신원(userId===ownerId) 기준으로
+    // 기존 정책대로 무제한 — 예약 자체를 생략한다. conversationId 는 대화가 없으면 null 이다
+    // (turns.reserve 가 허용한다 — 한도 계산은 user_id 와 전역 카운트만 본다).
+    const isOwner = o.userId === this.ownerId;
+    if (!isOwner) {
+      const reserved = await this.repos.turns.reserve({
+        userId: o.userId, conversationId: o.conv?.id ?? null, kind: "proactive", ts: this.now(),
+        perUserLimit: this.config.maxTurnsPerHourPerUser, globalLimit: this.config.maxTurnsPerHourGlobal,
+        ownerReserve: 0, isOwner: false, windowMs: HOUR_MS,
+      });
+      if (!reserved) {
+        const text = "구독 한도 보호를 위해 잠시 쉬고 있어요. 1시간 안에 다시 시도해 주세요.";
+        // 대화가 있으면 기존대로 대화 기록에도 남긴다(notify). 없으면 알림만 보낸다.
+        if (o.conv) await this.notify(o.conv, text);
+        else publishNotice(text);
+        return;
+      }
+    }
+
+    const target = this.config.digestChannels[topic] ?? o.replyRef;
+    if (target !== o.replyRef) {
+      publishNotice(`「${DIGEST_TOPICS[topic].label}」 소식은 <#${target}> 에 올릴게. 잠깐만.`);
+    }
+
+    // 같은 주제의 동시 실행 방지는 DigestRunner 내부의 주제별 running Set 이 담당한다 —
+    // checkAndRun(스케줄)·run(예약어) 양쪽에 똑같이 적용된다. run() 이 { started:false } 를
+    // 돌려주면 이미 도는 중이라는 뜻이다. 손님 몫은 위에서 이미 예약했으므로 겹쳐서 거부돼도
+    // 되돌려주지 않는다(가장 비싼 턴이 두 번 도는 것보다 손님의 몫 하나를 쓰는 편이 훨씬 싸다).
+    //
+    // digest 를 지역 상수로 캡처해야 아래 클로저에서 undefined 가 아닌 타입으로 좁혀진다
+    // (this.digest 는 위에서 존재를 확인했지만, TS 는 클로저 안에서 this 필드의 좁힘을 유지하지 않는다).
+    const digest = this.digest;
+    void (async () => {
+      try {
+        const { started } = await digest.run(topic, target);
+        // 거부 안내는 결과가 가는 곳이 아니라 명령을 친 곳으로 보낸다 — 그쪽을 보고 있으니까.
+        if (!started) publishNotice("지금 같은 주제로 이미 조사 중이에요. 끝나면 다시 시도해 주세요.");
+      } catch (err) {
+        console.error("[core] 조사 실행 오류:", err);
+      }
+    })();
   }
 
   // 힌트로 대화 행을 확정한다(멱등: discord_channel_id → origin_message_id → 생성).
