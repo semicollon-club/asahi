@@ -79,12 +79,14 @@ export class AgentCore {
   private hub?: { isConnected(userId: string): boolean };
   // 정기 게시(조사) 실행기. 옵셔널인 이유는 hub 와 같다 — 배선이 없는 환경(테스트 등)에서는
   // 예약어를 받아도 실행할 대상이 없으므로 ingest 가 안내만 하고 넘어간다.
+  // FIX1(치명, 최종 리뷰 3차): 예전엔 여기(AgentCore)에 예약어 전용 채널별 동시 실행 가드
+  // (digestInFlight Set)를 따로 뒀다 — 그런데 스케줄 경로(index.ts 의 checkAndRun 타이머)는
+  // 이 가드를 전혀 거치지 않아, 이전 틱의 턴이 안 끝난 채 다음 틱이 오면 같은 주제로 새 턴을
+  // 또 시작하는 훨씬 심각한 재진입을 막지 못했다(리뷰 재현: 5틱 중 5턴 시작 — 매일 아침의
+  // 정상 경로였다). 가드를 DigestRunner 내부(주제별 running Set)로 옮겨 checkAndRun·run 양쪽이
+  // 같은 가드를 공유하게 했으므로, 이 필드는 삭제한다 — run() 의 반환값({ started: boolean })만
+  // 보고 아래 ingest 에서 안내 여부를 정한다.
   private digest?: DigestRunner;
-  // 리뷰 수정: 조사 예약어(/대회·/개발뉴스)의 채널별 동시 실행 가드. 이 Set 에 있는
-  // discordChannelId 는 지금 그 채널에서 digest.run 이 진행 중이라는 뜻 — 같은 채널의 새 예약어는
-  // 이 Set 에 있는 동안 새 실행을 시작하지 않고 안내만 한다(ingestChains/turnChains 와 달리
-  // 메모리에만 둔다: 재시작으로 잃어도 무해하고, 최악의 경우 한 번 더 도는 정도라 영속화할 이유가 없다).
-  private digestInFlight = new Set<string>();
 
   constructor(deps: {
     bus: EventBus; config: Config; runTurn: TurnRunner; repos: CoreRepos; agentCwd: string; now?: () => number;
@@ -155,13 +157,6 @@ export class AgentCore {
         this.bus.publish({ type: "system_notice", channel: "discord", channelRef: conv.discordChannelId, text: "지금은 조사 기능이 꺼져 있어요.", ts: this.now() });
         return;
       }
-      // 채널별 동시 실행 방지(리뷰): 이미 이 채널에서 조사가 진행 중이면 새로 시작하지 않는다 —
-      // 소유자도 예외 없음(예약어를 연달아 보내도 가장 비싼 턴이 동시에 여럿 돌지 않게 한다).
-      // 손님 한도 예약보다 먼저 검사해서, 어차피 막힐 요청 때문에 손님의 시간당 몫을 쓰지 않는다.
-      if (this.digestInFlight.has(conv.discordChannelId)) {
-        this.bus.publish({ type: "system_notice", channel: "discord", channelRef: conv.discordChannelId, text: "지금 이 채널은 이미 조사 중이에요. 끝나면 다시 시도해 주세요.", ts: this.now() });
-        return;
-      }
       // 손님 한도: runConversationTurn 의 예약(아래 참고)과 완전히 같은 모양·한도·거부 문구를
       // 그대로 재사용한다(§8 불변식 유지, 새 한도값·문구를 만들지 않는다). 소유자는 신원
       // (userId===ownerId) 기준으로 기존 정책대로 무제한 — 예약 자체를 생략한다.
@@ -178,21 +173,27 @@ export class AgentCore {
         }
       }
 
+      // FIX1(치명, 최종 리뷰 3차): 같은 주제의 동시 실행 방지는 더 이상 여기(AgentCore)의 몫이
+      // 아니다 — DigestRunner 내부의 주제별 running Set 이 checkAndRun(스케줄)·run(예약어) 양쪽에
+      // 똑같이 적용된다(이전엔 여기 채널별 Set 만 예약어 경로를 막았고, 스케줄이 겹쳐 도는 훨씬
+      // 심각한 재진입은 전혀 막지 못했다). run() 은 이제 시작 여부를 { started } 로 돌려주므로,
+      // 여기서는 그 결과만 보고 "이미 조사 중" 안내를 낼지 정한다 — 손님 몫은 이미 위에서
+      // 예약했으므로, 겹쳐서 거부돼도 되돌려주지 않는다(가장 비싼 턴이 두 번 도는 것보다는
+      // 손님의 몫 하나를 쓰는 편이 훨씬 싸다).
+      //
       // digest 를 지역 상수로 캡처해야 아래 클로저에서 undefined 가 아닌 타입으로 좁혀진다
       // (this.digest 는 위에서 이미 존재함을 확인했지만, TS 는 클로저 안에서 this 필드의 좁힘을
       // 유지하지 않는다).
       const digest = this.digest;
       const channelRef = conv.discordChannelId;
-      this.digestInFlight.add(channelRef);
-      // try/finally 로 감싸 성공·실패·던짐 어느 경로든 가드를 반드시 해제한다 — 풀리지 않으면
-      // 그 채널의 예약어가 재시작 전까지 영구히 막힌다.
       void (async () => {
         try {
-          await digest.run(digestTopic, channelRef);
+          const { started } = await digest.run(digestTopic, channelRef);
+          if (!started) {
+            this.bus.publish({ type: "system_notice", channel: "discord", channelRef, text: "지금 같은 주제로 이미 조사 중이에요. 끝나면 다시 시도해 주세요.", ts: this.now() });
+          }
         } catch (err) {
           console.error("[core] 조사 실행 오류:", err);
-        } finally {
-          this.digestInFlight.delete(channelRef);
         }
       })();
       return;
@@ -426,6 +427,12 @@ export class AgentCore {
           // 연결 여부·소유자 신원과 무관하게 원격 도구(fs_*/sh_exec, FIX2 로 같은 축에 묶인
           // allow_dir 등)를 강제로 닫는다.
           noRemoteTools: true,
+          // FIX3(중요, 최종 리뷰 3차): noRemoteTools 는 이름 그대로 원격 도구 축만 잠그고 SDK
+          // 내장 WebSearch 는 건드리지 않는다 — 이 브랜치로 모든 턴이 웹 검색을 갖게 되면서, 이
+          // 무인 요약 턴도 실제로는 WebSearch 를 그대로 쓸 수 있었다(리뷰 재현: db_schema/
+          // db_query 로 소유자 DB 전체를 읽을 수 있는 턴에 외부로 내보낼 통로까지 열려 있었던
+          // 셈). 요약은 이미 끝난 대화를 요약할 뿐 검색이 필요 없으므로, 별도 플래그로 함께 닫는다.
+          noWebTools: true,
         });
         if (result.ok && result.text.trim().length > 0) {
           await this.repos.summaries.insert({

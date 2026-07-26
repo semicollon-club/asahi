@@ -28,9 +28,15 @@ export type ProgressUpdate =
 // 않는 타이머로 돌고, 이전에 모델이 읽은 파일 등을 통해 프롬프트 인젝션이 심어졌을 수도 있는 세션을
 // 그대로 이어받는다(resume). 그런 턴에 PC 접근을 열어 두면 그 인젝션이 아무도 모르는 사이에 실제
 // 파일/셸 작업으로 이어질 수 있다.
+// noWebTools(FIX3, 최종 리뷰 3차): noRemoteTools 와 짝을 이루는 별도 플래그다 — noRemoteTools 는
+// 이름 그대로 원격 도구(fs_*/sh_exec) 축만 잠그고 SDK 내장 WebSearch 는 건드리지 않는다(builtinTools
+// 는 이 파일 아래쪽의 별도 상수). 이 브랜치로 모든 턴이 WebSearch 를 갖게 되면서, noRemoteTools 만
+// 세운 유휴 요약 턴도 실제로는 WebSearch 를 그대로 쓸 수 있었다(리뷰 재현 — db_schema/db_query 로
+// 소유자 DB 전체를 읽는 턴에 외부 전송 통로까지 열려 있었던 셈). 요약은 이미 끝난 대화를 요약할
+// 뿐 검색이 필요 없으므로, true 로 세워도 잃는 기능이 없다.
 export type TurnRequest = {
   prompt: string; systemPrompt: string; resume?: string; cwd: string; context: TurnContext;
-  onProgress?: (u: ProgressUpdate) => void; images?: ImageInput[]; noRemoteTools?: boolean;
+  onProgress?: (u: ProgressUpdate) => void; images?: ImageInput[]; noRemoteTools?: boolean; noWebTools?: boolean;
 };
 export type TurnResult = { text: string; sessionId?: string; ok: boolean };
 export type TurnRunner = (req: TurnRequest) => Promise<TurnResult>;
@@ -142,6 +148,14 @@ export function resolveWorkerConnected(
   return shouldConnectWorker(req.context, hub);
 }
 
+// FIX3(중요, 최종 리뷰 3차): req.noWebTools 를 뽑아내는 순수 함수 — resolveWorkerConnected 를
+// 뽑은 이유와 같다(SDK query() 전체를 목업하지 않고 이 판정 하나만 검증하기 위해서). 워커
+// 연결과 달리 이 값은 hub 상태를 보지 않는다 — WebSearch 는 워커 유무와 무관한 SDK 내장 도구라
+// "닫을지"가 오직 요청 쪽 플래그 하나로만 정해진다(요약 턴이면 true, 그 외엔 항상 false).
+export function resolveWebToolsEnabled(req: { noWebTools?: boolean }): boolean {
+  return !req.noWebTools;
+}
+
 // FIX2(치명, 최종 리뷰): ctx.remote(호출 통로 + 워커의 실제 작업 폴더)를 구성하는 순수 함수.
 // makeRunAgentTurn 안에 인라인으로 두면 hub.rootsOf 배선을 직접 검증하려고 SDK query() 전체를
 // 목업해야 해서(다른 추출 함수들과 같은 이유) 테스트가 무거워진다. workerConnected 가 false 거나
@@ -195,17 +209,23 @@ export function makeRunAgentTurn(
     // FIX4(최종 리뷰): req.noRemoteTools 가 있으면(유휴 요약 턴) shouldConnectWorker 결과와
     // 무관하게 강제로 false 다 — resolveWorkerConnected 가 그 합성을 담당한다.
     const workerConnected = resolveWorkerConnected(req, hub);
+    // FIX3(최종 리뷰 3차): req.noWebTools 가 있으면(유휴 요약 턴) 웹 검색도 함께 강제로 닫는다 —
+    // resolveWebToolsEnabled 가 그 판정을 담당한다. allowedToolsFor 와 builtinTools 양쪽에
+    // 반드시 같은 값을 넘겨야 "허용 목록엔 있는데 실행 화이트리스트엔 없음(또는 그 반대)" 불일치가
+    // 생기지 않는다.
+    const webToolsEnabled = resolveWebToolsEnabled(req);
     // FIX2(최종 리뷰): ctx.remote 구성(호출 통로 + 워커 roots) 자체도 buildRemoteCtx 로 뽑아
     // 테스트한다.
     ctx.remote = buildRemoteCtx(workerConnected, hub, req.context.userId);
-    const allowedTools = allowedToolsFor(req.context.role, req.context.isPrivate, req.context.isOwner, deployTarget, workerConnected);
+    const allowedTools = allowedToolsFor(req.context.role, req.context.isPrivate, req.context.isOwner, deployTarget, workerConnected, webToolsEnabled);
     // 원격 도구는 전부 mcp__asahi__* 이므로 bare 사전승인으로 두고, 내장 파일/Bash 도구는 아예 열지 않는다
     // (builtinTools=[] 이 SDK 내장 도구를 전부 닫는다). 경로 검사는 이제 워커(remote/roots.ts)가 최종
     // 권한을 갖는다 — 이 프로세스는 내장 도구를 안 여니 canUseTool 로 판정할 대상 자체가 없다.
     const preApprovedTools = allowedTools;
-    // SDK 내장 도구는 웹 검색만 연다. 파일/Bash 는 원격 도구(fs_*·sh_exec)가 대신하므로
-    // 내장 쪽은 계속 닫아 둔다 — 열면 봇 컨테이너의 파일시스템을 건드리게 된다.
-    const builtinTools: string[] = ["WebSearch"];
+    // SDK 내장 도구는 웹 검색만 연다(webToolsEnabled 가 false 면 그마저도 닫는다 — 유휴 요약
+    // 턴 전용, FIX3). 파일/Bash 는 원격 도구(fs_*·sh_exec)가 대신하므로 내장 쪽은 계속 닫아
+    // 둔다 — 열면 봇 컨테이너의 파일시스템을 건드리게 된다.
+    const builtinTools: string[] = webToolsEnabled ? ["WebSearch"] : [];
 
     let sessionId: string | undefined;
     let text = "";

@@ -52,6 +52,18 @@ export type DigestChannels = Partial<Record<DigestTopic, string>>;
 const LAST_RUN_KEY = (topic: DigestTopic) => `digest.lastRun.${topic}`;
 const FAILED_TEXT = "…오늘은 못 찾았어. 나중에 다시 볼게.";
 
+// FIX2(치명, 최종 리뷰 3차) — 실패한 날은 lastRun 을 기록하지 않으므로 shouldRunDigest 가
+// 자정까지 계속 true 를 낸다. 그 상태로 실패가 계속되면(만료된 토큰·error_max_turns 등, 구독
+// 토큰이라 현실적이다) 1분 틱마다 재시도해 하루 약 1,020회 × 주제 수만큼 이 앱에서 가장 비싼
+// 턴(Opus·웹검색·maxTurns:30)을 부르고, 실패를 무조건 알리는 옛 execute() 탓에 채널이 같은
+// 실패 메시지로 도배된다(리뷰 재현: 10틱 실패 시 10번 호출·10번 게시). settings 키
+// digest.attempts.<topic> 에 KST 날짜·시도 횟수·안내 여부를 저장해 하루 3회로 시도 자체를
+// 제한하고, 실패 안내는 하루 한 번만 낸다(그 이후는 로그 한 줄로 대체 — 같은 실패 메시지로
+// 채널을 채우는 것보다 침묵이 낫다). KST 날짜가 바뀌면 자연히 새로 시작한다.
+type DigestAttempts = { date: string; count: number; notified: boolean };
+const ATTEMPTS_KEY = (topic: DigestTopic) => `digest.attempts.${topic}`;
+export const DIGEST_MAX_ATTEMPTS_PER_DAY = 3;
+
 export class DigestRunner {
   private runTurn: TurnRunner;
   private bus: EventBus;
@@ -60,6 +72,13 @@ export class DigestRunner {
   private channels: DigestChannels;
   private emotions: string[];
   private now: () => number;
+  // FIX1(치명, 최종 리뷰 3차) — 주제별 실행 중 표시. checkAndRun 은 60초마다 fire-and-forget 로
+  // 불리므로(index.ts), 이전 틱의 턴이 안 끝난 채 다음 틱이 와도 lastRun 은 성공 후에만 기록돼
+  // 재조회한 값이 여전히 "오늘 안 함"이라 새 턴을 또 시작했다(리뷰 재현: 5틱 중 5턴 시작). 이
+  // Set 에 있는 동안은 checkAndRun·run(예약어) 어느 경로로도 같은 주제를 다시 시작하지 않는다 —
+  // 채널이 아니라 주제로 키를 잡는다: 예약어는 어느 채널에서든 같은 주제를 가리킬 수 있고, 스케줄도
+  // 결국 주제 하나당 채널 하나이므로 "그 조사가 지금 도는가"는 주제 단위 사실이다.
+  private running = new Set<DigestTopic>();
 
   constructor(deps: {
     runTurn: TurnRunner; bus: EventBus; settings: SettingsRepo; agentCwd: string;
@@ -74,9 +93,13 @@ export class DigestRunner {
     this.now = deps.now ?? Date.now;
   }
 
-  // 한 주제를 조사해 지정한 채널로 발행한다. 성공 여부를 돌려준다 —
-  // checkAndRun 이 이 값으로 기록 여부를 정한다. 예약어 경로는 값을 무시한다.
-  private async execute(topic: DigestTopic, channelRef: string): Promise<boolean> {
+  // 한 주제를 조사해 지정한 채널로 발행한다. 성공 여부를 돌려준다 — checkAndRun 이 이 값으로
+  // 기록 여부를 정한다. 예약어 경로(run)는 값을 무시한다.
+  // announceFailure(FIX2, 기본 true): false 면 실패해도 채널에 알리지 않고 로그만 남긴다 —
+  // 하루 한도 안에서 이미 한 번 안내한 뒤의 재시도(2·3회차)에 스케줄 경로가 이 값을 false 로 넘긴다.
+  // 성공했을 때는 이 값과 무관하게 항상 알린다(성공은 도배 문제가 아니다).
+  private async execute(topic: DigestTopic, channelRef: string, opts: { announceFailure?: boolean } = {}): Promise<boolean> {
+    const announceFailure = opts.announceFailure ?? true;
     const spec = DIGEST_TOPICS[topic];
     // 게시는 사용자 대화가 아니다. 공개 채널 계층(isOwner:false, isPrivate:false)으로 돌려
     // PC 도구가 구조적으로 열리지 않게 한다 — 플래그로 빼는 게 아니라 그 계층에 애초에 없다.
@@ -95,20 +118,47 @@ export class DigestRunner {
     } catch (err) {
       console.error(`[digest] ${topic} 조사 실패:`, err);
     }
-    this.bus.publish({
-      type: "assistant_message", channel: "discord", channelRef,
-      text: ok ? text : FAILED_TEXT, ts: this.now(),
-    });
+    if (ok || announceFailure) {
+      this.bus.publish({
+        type: "assistant_message", channel: "discord", channelRef,
+        text: ok ? text : FAILED_TEXT, ts: this.now(),
+      });
+    } else {
+      console.warn(`[digest] ${topic} 실패 — 오늘 이미 안내해 채널 알림은 생략한다(하루 한도 내 재시도).`);
+    }
     return ok;
   }
 
-  // 예약어 경로: 명령을 친 채널에 즉시 답한다. lastRun 을 건드리지 않는다 —
-  // 수동으로 한 번 봤다고 다음 날 아침 게시가 걸러지면 안 된다.
-  async run(topic: DigestTopic, channelRef: string): Promise<void> {
-    await this.execute(topic, channelRef);
+  // FIX1: running 을 확인·표시하고 execute 를 호출한 뒤 finally 로 반드시 해제한다 — run·
+  // checkAndRun 양쪽이 이 메서드 하나만 거치므로 가드가 두 경로에 동일하게 적용된다. 이미 그
+  // 주제가 실행 중이면 execute 를 아예 호출하지 않고 undefined 를 돌려준다(시도로 치지 않는다 —
+  // FIX2 의 일일 횟수 상한과는 별개 개념이다).
+  private async guardedExecute(topic: DigestTopic, channelRef: string, opts: { announceFailure?: boolean } = {}): Promise<boolean | undefined> {
+    if (this.running.has(topic)) return undefined;
+    this.running.add(topic);
+    try {
+      return await this.execute(topic, channelRef, opts);
+    } finally {
+      this.running.delete(topic);
+    }
+  }
+
+  // 예약어 경로: 명령을 친 채널에 즉시 답한다. lastRun 을 건드리지 않는다 — 수동으로 한 번
+  // 봤다고 다음 날 아침 게시가 걸러지면 안 된다. FIX2 의 일일 시도 상한과도 무관하다 — 그건
+  // 스케줄의 무인 재시도 폭주를 막기 위한 것이고, 예약어는 사람이 직접 요청한 단발성 호출이라
+  // 이미 손님 한도(turns.reserve, core.ts)로 별도 보호된다.
+  // FIX1: started=false 면 같은 주제가 이미 실행 중이라 새로 시작하지 않았다는 뜻 — 호출자
+  // (core.ts)가 이 값으로 "이미 조사 중" 안내를 낼지 정한다.
+  async run(topic: DigestTopic, channelRef: string): Promise<{ started: boolean }> {
+    const ok = await this.guardedExecute(topic, channelRef);
+    return { started: ok !== undefined };
   }
 
   // 스케줄 경로: 주제별로 판정해 실행하고, 성공한 것만 기록한다.
+  // FIX1: guardedExecute 가 이미 실행 중인 주제를 걸러준다 — 겹친 틱은 시도 자체를 하지 않으므로
+  // FIX2 의 시도 횟수에도 반영하지 않는다(continue). FIX2: 하루 시도 상한에 도달했으면
+  // guardedExecute 를 부르지도 않는다(모델 호출 자체가 없다) — 실패 안내는 그 하루의 첫 실패
+  // 때만 내고 이후는 announceFailure:false 로 로그만 남긴다.
   async checkAndRun(): Promise<void> {
     for (const topic of Object.keys(DIGEST_TOPICS) as DigestTopic[]) {
       const channelRef = this.channels[topic];
@@ -116,9 +166,39 @@ export class DigestRunner {
       const nowMs = this.now();
       const last = await this.settings.get(LAST_RUN_KEY(topic));
       if (!shouldRunDigest(nowMs, last)) continue;
-      const ok = await this.execute(topic, channelRef);
-      // 실패한 날은 기록하지 않아 다음 확인(1분 뒤)에서 다시 시도한다.
-      if (ok) await this.settings.set(LAST_RUN_KEY(topic), kstDateString(nowMs));
+
+      const today = kstDateString(nowMs);
+      const attempts = await this.readAttempts(topic, today);
+      if (attempts.count >= DIGEST_MAX_ATTEMPTS_PER_DAY) continue; // 오늘 한도 소진 — 더 시도하지 않는다
+
+      const ok = await this.guardedExecute(topic, channelRef, { announceFailure: !attempts.notified });
+      if (ok === undefined) continue; // FIX1 가드에 막힘(다른 실행이 진행 중) — 시도로 치지 않는다
+
+      if (ok) {
+        // 성공했으니 다음 날을 위해 실패 기록을 정리한다(다음에 실패하면 다시 처음부터 안내한다).
+        await this.settings.set(LAST_RUN_KEY(topic), today);
+        await this.settings.delete(ATTEMPTS_KEY(topic));
+      } else {
+        await this.writeAttempts(topic, { date: today, count: attempts.count + 1, notified: true });
+      }
     }
+  }
+
+  // KST 날짜가 저장된 값과 다르면(자정을 넘겼거나 최초 호출) 새로 시작한다 — 손상된 JSON 도
+  // 같은 방식으로 안전하게 리셋한다(fail-open 이 아니라 "오늘 처음"으로 취급).
+  private async readAttempts(topic: DigestTopic, today: string): Promise<DigestAttempts> {
+    const raw = await this.settings.get(ATTEMPTS_KEY(topic));
+    if (!raw) return { date: today, count: 0, notified: false };
+    try {
+      const parsed = JSON.parse(raw) as DigestAttempts;
+      if (parsed.date !== today) return { date: today, count: 0, notified: false };
+      return parsed;
+    } catch {
+      return { date: today, count: 0, notified: false };
+    }
+  }
+
+  private async writeAttempts(topic: DigestTopic, attempts: DigestAttempts): Promise<void> {
+    await this.settings.set(ATTEMPTS_KEY(topic), JSON.stringify(attempts));
   }
 }

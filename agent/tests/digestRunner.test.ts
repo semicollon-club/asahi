@@ -20,6 +20,9 @@ async function make(over: Partial<{
   const sent: AgentEvent[] = [];
   bus.subscribe("assistant_message", (e) => sent.push(e));
   const prompts: string[] = [];
+  // FIX2(최종 리뷰 3차) 날짜 롤오버 테스트용: now 를 고정값이 아니라 가변 클록으로 둔다 —
+  // 기존 호출부(over.now 만 쓰는 테스트)는 setClock 을 부르지 않으므로 동작이 완전히 그대로다.
+  let clock = over.now ?? AFTER_SEVEN;
   const runner = new DigestRunner({
     runTurn: async (req) => {
       prompts.push(req.prompt);
@@ -30,9 +33,43 @@ async function make(over: Partial<{
     settings,
     agentCwd: "/tmp",
     channels: (over.channels ?? { contest: "C1", devnews: "C2" }) as any,
-    now: () => over.now ?? AFTER_SEVEN,
+    now: () => clock,
   });
-  return { runner, settings, sent, prompts };
+  return { runner, settings, sent, prompts, setClock: (t: number) => { clock = t; } };
+}
+
+// pg-mem 의 Pool.query() 는 마이크로태스크가 아니라 매크로태스크(setImmediate) 단위로 풀린다
+// (coreMulti.test.ts 의 동일 주석 참고). checkAndRun/run 은 settings.get/set 을 여러 번 순차
+// await 하므로, "아직 처리 전" 중간 상태(재진입 가드)를 관찰하려면 그 홉 수만큼 setImmediate 로
+// 넘겨줘야 한다.
+const flush = async () => {
+  for (let i = 0; i < 60; i++) await new Promise((r) => setImmediate(r));
+};
+
+// FIX1(최종 리뷰 3차) 재진입 가드 테스트용: runTurn 을 즉시 resolve 하지 않고 테스트가 원하는
+// 시점에 직접 흘려보낼 수 있게 만든다(coreMulti.test.ts 의 manualDigest 와 같은 목적, 여기서는
+// DigestRunner 실물에 주입하는 runTurn 쪽을 흉내낸다).
+async function makeManual(over: Partial<{ channels: Record<string, string>; now: number }> = {}) {
+  const db = await openTestDb();
+  const settings = new SettingsRepo(db);
+  const bus = new EventBus();
+  const sent: AgentEvent[] = [];
+  bus.subscribe("assistant_message", (e) => sent.push(e));
+  const runTurnCalls: string[] = [];
+  const pending: Array<{ resolve: (r: { text: string; ok: boolean }) => void; reject: (e: unknown) => void }> = [];
+  let clock = over.now ?? AFTER_SEVEN;
+  const runner = new DigestRunner({
+    runTurn: async (req) => {
+      runTurnCalls.push(req.prompt);
+      return new Promise<{ text: string; ok: boolean }>((resolve, reject) => { pending.push({ resolve, reject }); });
+    },
+    bus,
+    settings,
+    agentCwd: "/tmp",
+    channels: (over.channels ?? { contest: "C1", devnews: "C2" }) as any,
+    now: () => clock,
+  });
+  return { runner, settings, sent, runTurnCalls, pending, setClock: (t: number) => { clock = t; } };
 }
 
 describe("DigestRunner.run — 즉시 실행", () => {
@@ -106,5 +143,163 @@ describe("DigestRunner.checkAndRun — 스케줄", () => {
     const { runner, settings } = await make({ result: { text: "", ok: false } });
     await runner.checkAndRun();
     expect(await settings.get("digest.lastRun.contest")).toBeNull();
+  });
+});
+
+// ── FIX1(치명, 최종 리뷰 3차) — 스케줄 재진입 가드 ──────────────────────────────
+// index.ts 는 checkAndRun 을 60초마다 `void digest.checkAndRun().catch(...)` 로 fire-and-forget
+// 호출한다. 이전 틱의 턴(Opus·웹검색·maxTurns:30, 이 앱에서 가장 비싼 턴)이 안 끝난 채 다음
+// 틱이 와도 lastRun 은 성공 이후에만 기록되므로, 재조회한 settings 값은 여전히 "오늘 안 함"이라
+// 새 턴을 또 시작했다(리뷰 재현: 5틱 중 5턴 시작). private running = new Set<DigestTopic>() 로
+// 주제별 실행 중 상태를 표시해 checkAndRun·run 양쪽에서 공유한다.
+describe("DigestRunner — 스케줄 재진입 가드(FIX1, 최종 리뷰 3차)", () => {
+  it("턴이 안 끝난 상태로 checkAndRun 을 5번 겹쳐 불러도 같은 주제는 한 번만 시작한다", async () => {
+    const { runner, runTurnCalls, pending } = await makeManual({ channels: { contest: "C1" } });
+
+    // index.ts 의 실제 호출 패턴(await 없이 fire-and-forget)을 그대로 재현 — 5틱을 동시에 흘린다.
+    const ticks = [runner.checkAndRun(), runner.checkAndRun(), runner.checkAndRun(), runner.checkAndRun(), runner.checkAndRun()];
+    await flush();
+
+    expect(runTurnCalls).toHaveLength(1); // 5틱이 겹쳤어도 실제 턴은 하나만 시작됐다
+
+    pending[0].resolve({ text: "오늘의 소식", ok: true });
+    await Promise.all(ticks);
+    await flush();
+  });
+
+  it("run(예약어)도 같은 주제가 실행 중이면 새로 시작하지 않고 { started: false } 를 돌려준다", async () => {
+    const { runner, runTurnCalls, pending } = await makeManual();
+
+    const first = runner.run("contest", "C1");
+    await flush();
+    expect(runTurnCalls).toHaveLength(1);
+
+    const secondOutcome = await runner.run("contest", "C2"); // 다른 채널에서 같은 주제를 요청해도 막힌다
+    expect(secondOutcome.started).toBe(false);
+    expect(runTurnCalls).toHaveLength(1); // 새로 시작되지 않았다
+
+    pending[0].resolve({ text: "오늘의 소식", ok: true });
+    const firstOutcome = await first;
+    expect(firstOutcome.started).toBe(true);
+    await flush();
+  });
+
+  it("스케줄(checkAndRun)과 예약어(run)는 같은 가드를 공유한다 — run 이 진행 중이면 checkAndRun 도 그 주제를 건너뛴다", async () => {
+    const { runner, settings, runTurnCalls, pending } = await makeManual({ channels: { contest: "C1" } });
+
+    void runner.run("contest", "C-manual"); // 예약어로 먼저 시작(끝나지 않음)
+    await flush();
+    expect(runTurnCalls).toHaveLength(1);
+
+    await runner.checkAndRun(); // 같은 순간 스케줄 틱이 와도 같은 주제라 건너뛴다
+    expect(runTurnCalls).toHaveLength(1); // 추가로 시작되지 않았다
+    expect(await settings.get("digest.lastRun.contest")).toBeNull(); // 건너뛴 시도라 기록도 없다
+
+    pending[0].resolve({ text: "오늘의 소식", ok: true });
+    await flush();
+  });
+
+  it("턴이 끝나면 가드가 풀려 다음 시도가 정상적으로 시작된다", async () => {
+    const { runner, runTurnCalls, pending } = await makeManual({ channels: { contest: "C1" } });
+
+    const firstTick = runner.checkAndRun();
+    await flush();
+    expect(runTurnCalls).toHaveLength(1);
+
+    pending[0].resolve({ text: "오늘의 소식", ok: true });
+    await firstTick;
+    await flush();
+
+    // 이미 성공해 lastRun 이 오늘로 기록됐으므로, 재현은 run(예약어)으로 확인한다 —
+    // run 은 lastRun 과 무관하게 항상 즉시 실행을 시도한다(가드만 걸린다).
+    const outcomePromise = runner.run("contest", "C1");
+    await flush();
+    expect(runTurnCalls).toHaveLength(2); // 가드가 풀려 두 번째 시도가 시작됐다
+
+    pending[1].resolve({ text: "오늘의 소식2", ok: true });
+    const outcome = await outcomePromise;
+    expect(outcome.started).toBe(true);
+    await flush();
+  });
+});
+
+// ── FIX2(치명, 최종 리뷰 3차) — 일일 재시도 상한 ────────────────────────────────
+// shouldRunDigest 는 lastRun 이 기록되지 않는 한(=턴이 계속 실패하는 한) 자정까지 계속 true 를
+// 낸다. 1분 틱마다 재시도하면 하루 약 1,020회(주제당) × Opus 호출과, execute() 가 실패를
+// 무조건 알리는 탓에 채널 도배(리뷰 재현: 10틱 실패 시 10번 호출·10번 게시)가 난다. settings 키
+// digest.attempts.<topic> 에 KST 날짜·횟수·안내 여부를 저장해 하루 3회로 시도를 제한하고,
+// 실패 안내는 하루 한 번만 낸다(그 이후는 로그만 남긴다).
+describe("DigestRunner — 일일 재시도 상한(FIX2, 최종 리뷰 3차)", () => {
+  it("계속 실패하면 하루 3회까지만 시도하고 그 뒤엔 모델 호출 자체를 멈춘다", async () => {
+    const { runner, prompts } = await make({ result: { text: "", ok: false } });
+
+    for (let i = 0; i < 10; i++) await runner.checkAndRun();
+
+    // 주제 둘(contest·devnews) × 최대 3회 = 6번까지만 실제로 모델을 불렀다(10틱이 아니라).
+    expect(prompts).toHaveLength(6);
+  });
+
+  it("실패 안내 메시지는 주제당 하루 한 번만 채널에 올라간다", async () => {
+    const { runner, sent } = await make({ result: { text: "", ok: false } });
+
+    for (let i = 0; i < 10; i++) await runner.checkAndRun();
+
+    const contestNotices = sent.filter((e) => e.channelRef === "C1");
+    const devnewsNotices = sent.filter((e) => e.channelRef === "C2");
+    expect(contestNotices).toHaveLength(1);
+    expect(devnewsNotices).toHaveLength(1);
+    expect((contestNotices[0] as any).text).not.toContain("오늘의 소식");
+  });
+
+  it("실패해도 lastRun 은 기록하지 않는다(회귀 유지 — 다음날 재시도)", async () => {
+    const { runner, settings } = await make({ result: { text: "", ok: false } });
+
+    for (let i = 0; i < 10; i++) await runner.checkAndRun();
+
+    expect(await settings.get("digest.lastRun.contest")).toBeNull();
+    expect(await settings.get("digest.lastRun.devnews")).toBeNull();
+  });
+
+  it("한도에 도달한 뒤 같은 날 다시 확인해도 더 시도하지 않는다(스팸 방지 유지)", async () => {
+    const { runner, prompts } = await make({ result: { text: "", ok: false } });
+    for (let i = 0; i < 3; i++) await runner.checkAndRun();
+    expect(prompts).toHaveLength(6); // 이미 한도(주제당 3) 도달
+
+    for (let i = 0; i < 20; i++) await runner.checkAndRun(); // 같은 날 더 돌려도
+    expect(prompts).toHaveLength(6); // 늘지 않는다
+  });
+
+  it("성공하면 그날의 실패 횟수 기록을 정리한다(다음에 실패하면 다시 안내할 수 있도록)", async () => {
+    const result = { text: "", ok: false };
+    const { runner, settings } = await make({ result, channels: { contest: "C1" } });
+
+    await runner.checkAndRun(); // 1차 실패 — digest.attempts.contest 기록 생김
+    expect(await settings.get("digest.attempts.contest")).not.toBeNull();
+
+    // lastRun 이 아직 없어 같은 날 다시 shouldRunDigest 가 true 를 낸다 — 그 사이 검색이
+    // 성공했다고 가정하고 결과를 성공으로 바꾼다.
+    result.ok = true;
+    result.text = "오늘의 소식";
+    await runner.checkAndRun(); // 2차 성공
+
+    expect(await settings.get("digest.attempts.contest")).toBeNull(); // 실패 기록이 정리됐다
+    expect(await settings.get("digest.lastRun.contest")).not.toBeNull();
+  });
+
+  it("KST 날짜가 바뀌면 시도 횟수·안내 여부가 자연 초기화된다", async () => {
+    const day1 = AFTER_SEVEN; // 2026-07-27 KST
+    const day2 = utc("2026-07-28T03:00:00Z"); // 2026-07-28 KST 12:00 — 다음날, 여전히 7시 이후
+    const { runner, prompts, sent, setClock } = await make({
+      result: { text: "", ok: false }, channels: { contest: "C1" }, now: day1,
+    });
+
+    for (let i = 0; i < 5; i++) await runner.checkAndRun(); // 하루 한도(3) 도달, 이후는 무시됨
+    expect(prompts).toHaveLength(3);
+    expect(sent).toHaveLength(1);
+
+    setClock(day2);
+    await runner.checkAndRun(); // 새 날 — 한도·안내 여부 모두 리셋
+    expect(prompts).toHaveLength(4); // 새 날의 첫 시도가 다시 실행됐다
+    expect(sent).toHaveLength(2); // 새 날의 첫 실패는 다시 안내한다
   });
 });

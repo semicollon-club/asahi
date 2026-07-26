@@ -543,4 +543,24 @@ describe("allowedToolsFor — 웹 검색", () => {
       expect(t).not.toContain("WebFetch");
     }
   });
+
+  // FIX3(중요, 최종 리뷰 3차) — 유휴 요약 턴은 noWebTools:true 로 이 6번째 인자(webToolsEnabled)를
+  // false 로 넘긴다. 일반 대화·정기 게시는 이 인자를 생략하므로(기본값 true) 기존 동작 그대로다.
+  it("FIX3 — webToolsEnabled=false 면 WebSearch 가 세 계층 어디에도 없다(유휴 요약 턴 전용)", () => {
+    expect(allowedToolsFor("owner", true, true, "local", true, false)).not.toContain("WebSearch");
+    expect(allowedToolsFor("allowed", true, false, "local", false, false)).not.toContain("WebSearch");
+    expect(allowedToolsFor("allowed", false, false, "local", false, false)).not.toContain("WebSearch");
+  });
+
+  it("FIX3 — webToolsEnabled 를 생략하면 기존처럼 WebSearch 가 열려 있다(기본값 true, 회귀 없음)", () => {
+    expect(allowedToolsFor("owner", true, true, "local", true)).toContain("WebSearch");
+    expect(allowedToolsFor("allowed", true, false)).toContain("WebSearch");
+  });
+
+  it("FIX3 — webToolsEnabled=false 여도 WebSearch 이외의 도구는 그대로 남는다(owner-DM 예시)", () => {
+    const tools = allowedToolsFor("owner", true, true, "local", true, false);
+    expect(tools).toContain("mcp__asahi__remember");
+    expect(tools).toContain("mcp__asahi__fs_read");
+    expect(tools).toContain("mcp__asahi__manage_access");
+  });
 });
