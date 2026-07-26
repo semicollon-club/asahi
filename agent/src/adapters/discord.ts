@@ -1,11 +1,13 @@
 import {
-  ChannelType, Client, GatewayIntentBits, Partials, ThreadAutoArchiveDuration, type Message,
+  ChannelType, Client, GatewayIntentBits, Partials, ThreadAutoArchiveDuration, EmbedBuilder, type Message,
 } from "discord.js";
 import type { EventBus, ConversationHint } from "../events/bus.js";
 import type { Config } from "../config.js";
 import type { UsersRepo, Role } from "../store/usersRepo.js";
 import type { ConversationsRepo } from "../store/conversationsRepo.js";
 import { filterImageAttachments, type ImageRef } from "../core/images.js";
+import { parseExpression } from "../core/expressions.js";
+import type { CharacterImagesRepo } from "../store/characterImagesRepo.js";
 
 export function chunkMessage(text: string, max = 2000): string[] {
   const chunks: string[] = [];
@@ -27,6 +29,46 @@ export function chunkMessage(text: string, max = 2000): string[] {
     rest = rest.slice(cut).replace(/^\n/, "");
   }
   return chunks;
+}
+
+// 같은 대화에서 표정 이미지를 연달아 보내지 않도록 하는 하한. 프롬프트 지침은 반드시 새므로
+// 어댑터가 최종 방어선이 된다 — 모델이 매 답변마다 마커를 붙여도 실제로는 이 간격으로 걸러진다.
+// 지침대로 쓰면 애초에 이보다 드물게 나오므로 정상 동작을 막지 않는다.
+export const EXPRESSION_MIN_INTERVAL_MS = 120_000;
+
+// 그 감정의 URL 중 하나를 고른다. 직전에 보낸 것과 겹치지 않게 하되, 후보가 하나뿐이면
+// 그대로 쓴다(웃음 폴더처럼 이미지가 한 장인 경우).
+export function pickExpressionUrl(
+  urls: string[],
+  lastUrl: string | undefined,
+  rand: () => number = Math.random,
+): string | undefined {
+  if (urls.length === 0) return undefined;
+  const pool = urls.length > 1 ? urls.filter((u) => u !== lastUrl) : urls;
+  const candidates = pool.length > 0 ? pool : urls;
+  return candidates[Math.min(candidates.length - 1, Math.floor(rand() * candidates.length))];
+}
+
+// 아직 상한 안이면 true — 즉 "이번엔 보내지 않는다". 경계(정확히 상한만큼 지남)는 보내는 쪽이다.
+export function withinExpressionInterval(
+  lastTs: number | undefined,
+  now: number,
+  minMs: number = EXPRESSION_MIN_INTERVAL_MS,
+): boolean {
+  if (lastTs === undefined) return false;
+  return now - lastTs < minMs;
+}
+
+// 텍스트와 이미지 유무로 전송 형태를 정한다. send() 는 이 결과를 그대로 실행만 한다 —
+// 판단을 여기로 몰아야 디스코드 채널 없이 테스트할 수 있다.
+export function planSend(text: string, hasImage: boolean): {
+  chunks: string[];
+  embedOnLast: boolean;
+  embedOnly: boolean;
+} {
+  const chunks = text.length > 0 ? chunkMessage(text) : [];
+  if (chunks.length === 0) return { chunks: [], embedOnLast: false, embedOnly: hasImage };
+  return { chunks, embedOnLast: hasImage, embedOnly: false };
 }
 
 // ── 순수 라우팅 결정 (테스트 용이) ──────────────────────────────────────────
@@ -141,12 +183,16 @@ export class DiscordAdapter {
   // 완료되도록 강제한다(sendChains/statusChains 와 같은 패턴).
   private inboundChains = new Map<string, Promise<void>>();
   private progressState = new Map<string, ProgressState>();
+  // 대화별 표정 전송 상태(메모리). 재배포로 초기화돼도 무해하다 — 최악이 이미지 한 장 더 나가는 것이다.
+  private expressionState = new Map<string, { lastTs: number; lastUrl?: string }>();
+  private characterImages?: CharacterImagesRepo;
 
-  constructor(deps: { bus: EventBus; config: Config; users: UsersRepo; conversations: ConversationsRepo }) {
+  constructor(deps: { bus: EventBus; config: Config; users: UsersRepo; conversations: ConversationsRepo; characterImages?: CharacterImagesRepo }) {
     this.bus = deps.bus;
     this.config = deps.config;
     this.users = deps.users;
     this.conversations = deps.conversations;
+    this.characterImages = deps.characterImages;
     this.client = new Client({
       intents: [
         GatewayIntentBits.Guilds,          // 채널·스레드 메타
@@ -168,7 +214,10 @@ export class DiscordAdapter {
     });
     this.bus.subscribe("assistant_message", (e) => {
       const statusDone = this.enqueueStatus(e.channelRef, () => this.finishStatus(e.channelRef));
-      this.enqueueSendAfter(e.channelRef, statusDone, e.text);
+      const { text, emotion } = parseExpression(e.text);
+      void this.resolveExpression(e.channelRef, emotion).then((imageUrl) => {
+        this.enqueueSendAfter(e.channelRef, statusDone, text, imageUrl);
+      });
     });
     this.bus.subscribe("system_notice", (e) => {
       const statusDone = this.enqueueStatus(e.channelRef, () => this.finishStatus(e.channelRef));
@@ -297,10 +346,29 @@ export class DiscordAdapter {
   }
 
   // 기존 sendChains 직렬화에 더해, 그 채널의 상태 정리(wait)가 끝난 뒤에만 전송하도록 합류시킨다.
-  private enqueueSendAfter(channelRef: string, wait: Promise<void>, text: string): void {
+  private enqueueSendAfter(channelRef: string, wait: Promise<void>, text: string, imageUrl?: string): void {
     const prev = this.sendChains.get(channelRef) ?? Promise.resolve();
-    const next = Promise.all([prev, wait]).then(() => this.send(channelRef, text)).catch(() => {});
+    const next = Promise.all([prev, wait]).then(() => this.send(channelRef, text, imageUrl)).catch(() => {});
     this.sendChains.set(channelRef, next);
+  }
+
+  // 감정 이름을 실제 이미지 URL 로 바꾼다. 어떤 이유로든 실패하면 undefined 를 돌려주고,
+  // 호출측은 이미지 없이 텍스트만 보낸다 — 이미지 때문에 답변이 막히면 안 된다.
+  private async resolveExpression(channelRef: string, emotion: string | null): Promise<string | undefined> {
+    if (!emotion || !this.characterImages) return undefined;
+    const now = Date.now();
+    const state = this.expressionState.get(channelRef);
+    if (withinExpressionInterval(state?.lastTs, now)) return undefined;
+    try {
+      const urls = await this.characterImages.urlsFor(emotion);
+      const url = pickExpressionUrl(urls, state?.lastUrl);
+      if (!url) return undefined;
+      this.expressionState.set(channelRef, { lastTs: now, lastUrl: url });
+      return url;
+    } catch (err) {
+      console.error("[discord] 표정 이미지 조회 실패:", err);
+      return undefined;
+    }
   }
 
   private getProgressState(channelRef: string): ProgressState {
@@ -395,12 +463,21 @@ export class DiscordAdapter {
     }
   }
 
-  private async send(channelRef: string, text: string): Promise<void> {
+  private async send(channelRef: string, text: string, imageUrl?: string): Promise<void> {
     try {
       const channel = await this.client.channels.fetch(channelRef);
       if (!channel || !channel.isSendable()) return;
-      for (const chunk of chunkMessage(text)) {
-        await channel.send(chunk);
+      const plan = planSend(text, imageUrl !== undefined);
+      const embeds = imageUrl ? [new EmbedBuilder().setImage(imageUrl)] : [];
+      if (plan.embedOnly) {
+        // 마커만 있고 본문이 없는 경우 — 이미지만 보낸다.
+        await channel.send({ embeds });
+        return;
+      }
+      for (let i = 0; i < plan.chunks.length; i++) {
+        // 이미지는 마지막 청크와 함께 보낸다. 따로 보내면 메시지가 둘로 갈라져 어색하다.
+        const isLast = i === plan.chunks.length - 1;
+        await channel.send(isLast && plan.embedOnLast ? { content: plan.chunks[i], embeds } : plan.chunks[i]);
       }
     } catch (err) {
       console.error("[discord] 전송 실패:", err);
