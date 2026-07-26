@@ -143,14 +143,26 @@ export class DigestRunner {
     }
   }
 
-  // 예약어 경로: 명령을 친 채널에 즉시 답한다. lastRun 을 건드리지 않는다 — 수동으로 한 번
-  // 봤다고 다음 날 아침 게시가 걸러지면 안 된다. FIX2 의 일일 시도 상한과도 무관하다 — 그건
+  // 예약어 경로: 명령을 친 채널에 즉시 답한다. FIX2 의 일일 시도 상한과는 무관하다 — 그건
   // 스케줄의 무인 재시도 폭주를 막기 위한 것이고, 예약어는 사람이 직접 요청한 단발성 호출이라
   // 이미 손님 한도(turns.reserve, core.ts)로 별도 보호된다.
   // FIX1: started=false 면 같은 주제가 이미 실행 중이라 새로 시작하지 않았다는 뜻 — 호출자
   // (core.ts)가 이 값으로 "이미 조사 중" 안내를 낼지 정한다.
+  //
+  // FIX3(중요, 머지 전 리뷰) — lastRun 기록 여부는 "결과가 그 주제의 지정 채널(this.channels[topic])로
+  // 갔는가"로 가른다. core.ts 는 예약어 결과를 그 주제의 지정 채널로 리다이렉트하므로(설정돼 있고
+  // DM 이 아니면), 그 채널로 성공적으로 올라간 실행은 스케줄이 몇 시간 뒤 같은 채널에 같은 주제를
+  // 또 올리지 않도록 lastRun 을 남겨야 한다(리뷰 재현: 06시 수동 실행 + 07시 스케줄 = 같은 채널에
+  // 2회 게시). 반대로 DM 으로 답했거나 지정 채널이 없어 명령 친 곳으로 폴백했다면 그 채널은
+  // 오늘 치 소식을 못 봤으므로 예전처럼 lastRun 을 그대로 둔다 — 그래야 그날 아침 스케줄이
+  // 정상적으로 돈다. 성공 시의 정리(attempts 삭제)는 checkAndRun 의 성공 처리와 동일하게 맞춘다.
   async run(topic: DigestTopic, channelRef: string): Promise<{ started: boolean }> {
     const ok = await this.guardedExecute(topic, channelRef);
+    if (ok && this.channels[topic] === channelRef) {
+      const today = kstDateString(this.now());
+      await this.settings.set(LAST_RUN_KEY(topic), today);
+      await this.settings.delete(ATTEMPTS_KEY(topic));
+    }
     return { started: ok !== undefined };
   }
 

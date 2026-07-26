@@ -303,3 +303,72 @@ describe("DigestRunner — 일일 재시도 상한(FIX2, 최종 리뷰 3차)", (
     expect(sent).toHaveLength(2); // 새 날의 첫 실패는 다시 안내한다
   });
 });
+
+// ── FIX3(중요, 머지 전 리뷰) — 지정 채널로 리다이렉트된 예약어만 lastRun 을 남긴다 ──────────
+// "예약어는 lastRun 을 절대 건드리지 않는다"는 원래 불변식은 수동 결과가 항상 명령을 친 곳으로만
+// 갔을 때는 맞았다. 그런데 core.ts 가 예약어 결과를 이제 그 주제의 지정 채널로 리다이렉트하므로,
+// 예약어 실행이 KST 07시 이전에 지정 채널(예: news-대회)에 성공적으로 결과를 올려도 lastRun 을
+// 안 남기면 07시 스케줄이 몇 시간 뒤 같은 채널에 같은 주제를 또 올린다(리뷰 재현: 06시 수동 실행
+// + 07시 스케줄 = news-대회 게시 2회). 결과가 다른 곳(DM, 또는 지정 채널이 없어 명령 친 곳으로
+// 폴백)으로 갔을 때는 그 채널이 오늘 치 소식을 못 봤으므로 기존처럼 lastRun 을 그대로 둬야 한다
+// (그래야 그 채널과 무관하게 그날 아침 스케줄이 정상적으로 돈다). 이 두 갈래는 "결과가 실제로
+// 그 주제의 지정 채널(this.channels[topic])로 갔는가"로 가른다 — DigestRunner 는 core.ts 가
+// 어떤 경위로 그 채널을 골랐는지(같은 곳에서 불러 리다이렉트가 없었는지, DIGEST_CHANNELS 설정으로
+// 리다이렉트됐는지)는 몰라도 되고, 그저 channelRef 가 지정 채널과 같은지만 보면 된다.
+describe("DigestRunner.run — FIX3: 지정 채널로 간 결과만 lastRun 을 남긴다", () => {
+  it("결과가 그 주제의 지정 채널로 가면(성공) lastRun 을 기록한다", async () => {
+    const { runner, settings } = await make(); // 기본 channels: { contest: "C1", devnews: "C2" }
+    await runner.run("contest", "C1"); // C1 이 곧 contest 의 지정 채널
+    expect(await settings.get("digest.lastRun.contest")).toBe("2026-07-27");
+  });
+
+  it("결과가 지정 채널이 아닌 곳(DM·폴백)으로 가면 lastRun 을 기록하지 않는다(기존 회귀 유지)", async () => {
+    const { runner, settings } = await make();
+    await runner.run("contest", "C99"); // C99 는 contest 의 지정 채널(C1)이 아니다
+    expect(await settings.get("digest.lastRun.contest")).toBeNull();
+  });
+
+  it("지정 채널로 갔어도 실패하면 lastRun 을 기록하지 않는다", async () => {
+    const { runner, settings } = await make({ result: { text: "", ok: false }, channels: { contest: "C1" } });
+    await runner.run("contest", "C1");
+    expect(await settings.get("digest.lastRun.contest")).toBeNull();
+  });
+
+  it("지정 채널로의 성공은 그날 쌓인 실패 시도 기록도 정리한다(스케줄 성공과 같은 정리)", async () => {
+    const { runner, settings } = await make({ channels: { contest: "C1" } });
+    // 스케줄이 이미 두 번 실패해 시도 기록이 쌓인 상태를 흉내낸다.
+    await settings.set("digest.attempts.contest", JSON.stringify({ date: "2026-07-27", count: 2, notified: true }));
+
+    await runner.run("contest", "C1");
+
+    expect(await settings.get("digest.attempts.contest")).toBeNull();
+  });
+
+  it("수동 실행이 지정 채널에 성공적으로 올리면, 같은 날 07시 스케줄은 건너뛴다(리뷰 재현 시나리오 — 중복 게시 방지)", async () => {
+    const { runner, settings, sent, setClock } = await make({ channels: { contest: "C1" }, now: BEFORE_SEVEN });
+
+    await runner.run("contest", "C1"); // KST 06시, 지정 채널로 결과가 감
+    expect(sent).toHaveLength(1);
+    expect(sent[0].channelRef).toBe("C1");
+    expect(await settings.get("digest.lastRun.contest")).not.toBeNull();
+
+    setClock(AFTER_SEVEN); // 같은 날 07시 이후
+    await runner.checkAndRun();
+
+    expect(sent).toHaveLength(1); // 스케줄이 건너뛰어 총 1회만 게시됐다(중복 없음)
+  });
+
+  it("DM(또는 폴백)으로 간 수동 실행은 lastRun 을 안 남겨 같은 날 07시 스케줄이 정상적으로 돈다", async () => {
+    const { runner, settings, sent, setClock } = await make({ channels: { contest: "C1" }, now: BEFORE_SEVEN });
+
+    await runner.run("contest", "dm-owner"); // DM 채널로 감 — 지정 채널(C1)과 다르다
+    expect(sent).toHaveLength(1);
+    expect(await settings.get("digest.lastRun.contest")).toBeNull();
+
+    setClock(AFTER_SEVEN); // 같은 날 07시 이후
+    await runner.checkAndRun();
+
+    expect(sent).toHaveLength(2); // 스케줄이 정상적으로 실행돼 지정 채널에 게시했다(DM 실행과 무관)
+    expect(sent[1].channelRef).toBe("C1");
+  });
+});

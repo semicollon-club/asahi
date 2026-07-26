@@ -755,6 +755,26 @@ describe("AgentCore — 일반 채널의 예약어(commandOnly)", () => {
     // 거부 안내도 대화를 만들지 않는다(notify 대신 알림만).
     expect(await t.repos.conversations.getByChannelId("chan-일반")).toBeNull();
   });
+
+  // FIX1(치명, 머지 전 리뷰) — 방어적 회귀 테스트. 정상 경로에서는 decideRoute(어댑터)가
+  // "constructor" 같은 Object.prototype 상속 키를 애초에 channel-command 로 판정하지 않아
+  // commandOnly 힌트 자체가 만들어지지 않는다(discordRouting.test.ts 의 FIX1 테스트가 그
+  // 관문을 확인한다). 이 테스트는 그 관문을 우회해 hint.commandOnly 가 어떻게든 true 로 들어온
+  // 가상의 상황을 가정해, ingest 내부의 parseDigestCommand 호출 자체도 안전한지(2차 방어선)
+  // 확인한다 — 고쳐지기 전에는 여기서 DIGEST_TOPICS[Object 생성자].prompt 접근으로 예외가 나
+  // 손님 턴을 하나 태우고("조사 실패" 안내가 나감) 있었다.
+  it("commandOnly 힌트로 'constructor' 가 들어와도(관문 우회 가정) 조사를 시작하지 않고 조용히 끝낸다", async () => {
+    const digestCalls: Array<{ topic: string; channelRef: string }> = [];
+    const digest = { run: async (topic: string, channelRef: string) => { digestCalls.push({ topic, channelRef }); return { started: true }; } };
+    const t = await setup({ digest } as any);
+
+    pub(t.bus, channelCommandHint("guest", "chan-일반", "allowed"), "constructor", 1);
+    await t.core.drain();
+
+    expect(digestCalls).toHaveLength(0); // 조사가 시작되지 않았다
+    expect(t.published).toHaveLength(0); // 잘못된 실패 안내도 나가지 않았다
+    expect(await t.repos.conversations.getByChannelId("chan-일반")).toBeNull();
+  });
 });
 
 // 조사 결과의 목적지. 스레드에서 예약어를 부르면 결과가 그 스레드에 갇혀 채널 밖에서는
@@ -769,7 +789,9 @@ describe("AgentCore — 조사 결과는 주제의 지정 채널로 간다", () 
     await t.core.drain();
 
     expect(digestCalls[0].channelRef).toBe("news-대회"); // 스레드가 아니라 지정 채널
-    const notice = t.published.find((e) => e.type === "system_notice");
+    // FIX6(사소, 머지 전 리뷰): 이 안내는 오류·거부가 아니라 정상 진행 상황이라 assistant_message 로
+    // 나간다(system_notice 였다면 어댑터가 전부 ⚠️ 를 붙여 경고처럼 보였다).
+    const notice = t.published.find((e) => e.type === "assistant_message");
     expect(notice?.channelRef).toBe("thread-1");        // 안내는 명령을 친 곳에
     expect(notice?.text).toContain("news-대회");         // 어디에 올리는지 링크로 알린다
   });
@@ -783,7 +805,8 @@ describe("AgentCore — 조사 결과는 주제의 지정 채널로 간다", () 
     await t.core.drain();
 
     expect(digestCalls[0].channelRef).toBe("news-개발");
-    expect(t.published.find((e) => e.type === "system_notice")?.channelRef).toBe("chan-일반");
+    // FIX6: 정상 안내이므로 assistant_message(⚠️ 없음) — 위 테스트의 주석 참고.
+    expect(t.published.find((e) => e.type === "assistant_message")?.channelRef).toBe("chan-일반");
   });
 
   it("지정 채널 안에서 부르면 안내 없이 그 자리에 바로 올린다", async () => {

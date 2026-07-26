@@ -197,6 +197,15 @@ export class AgentCore {
   ): Promise<void> {
     const publishNotice = (text: string) =>
       this.bus.publish({ type: "system_notice", channel: "discord", channelRef: o.replyRef, text, ts: this.now() });
+    // FIX6(사소, 머지 전 리뷰): 리다이렉트 안내는 오류·거부가 아니라 정상 진행 상황이다. discord.ts 는
+    // system_notice 를 전부 ⚠️ 로 접두해(어댑터가 갖는 유일한 시각적 구분) 진짜 경고를 눈에 띄게
+    // 하는데, 이 문구까지 그 경로를 타면 담담한 안내가 경고처럼 보인다. assistant_message 로 보내
+    // 그 접두사를 피한다 — 이 텍스트엔 표정 마커가 없어 parseExpression 은 그대로 통과시키고
+    // (emotion:null), resolveExpression 도 즉시 undefined 로 끝나 이미지 경로에 영향이 없다. 턴 종료
+    // (finishStatus, ✅ 반응) 처리는 system_notice 와 완전히 같은 경로를 그대로 타므로 그 동작도
+    // 달라지지 않는다.
+    const publishAck = (text: string) =>
+      this.bus.publish({ type: "assistant_message", channel: "discord", channelRef: o.replyRef, text, ts: this.now() });
 
     if (!this.digest) {
       publishNotice("지금은 조사 기능이 꺼져 있어요.");
@@ -228,7 +237,7 @@ export class AgentCore {
     // 곳이 아니다. 공개 채널에 올리고 싶으면 서버에서 부르면 된다(양쪽 다 가능해진다).
     const target = o.isPrivate ? o.replyRef : (this.config.digestChannels[topic] ?? o.replyRef);
     if (target !== o.replyRef) {
-      publishNotice(`「${DIGEST_TOPICS[topic].label}」 소식은 <#${target}> 에 올릴게. 잠깐만.`);
+      publishAck(`「${DIGEST_TOPICS[topic].label}」 소식은 <#${target}> 에 올릴게. 잠깐만.`);
     }
 
     // 같은 주제의 동시 실행 방지는 DigestRunner 내부의 주제별 running Set 이 담당한다 —

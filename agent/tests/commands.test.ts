@@ -115,3 +115,44 @@ describe("isChannelCommand — 대화 없이 일반 채널에서 처리할 수 �
     expect(isChannelCommand("")).toBe(false);
   });
 });
+
+// ── FIX1(치명, 머지 전 리뷰) — Object.prototype 상속 키 오인식 방지 ─────────────
+// DIGEST_COMMANDS 는 `{ "/대회": "contest", "/개발뉴스": "devnews" }` 같은 평범한 객체 리터럴이었다.
+// `DIGEST_COMMANDS[key] ?? null` 은 key 가 "constructor"·"__proto__"·"toString"·"hasOwnProperty"·
+// "valueOf" 처럼 Object.prototype 이 물려주는 이름이면, 그 상속된 값(모두 truthy 한 함수/객체)을
+// 그대로 돌려준다 — `?? null` 은 null/undefined 에만 반응하므로 걸러내지 못한다. 그 결과
+// `parseDigestCommand('constructor')` 가 `Object` 생성자 함수를 돌려주고, 이게 `isChannelCommand`를
+// 거쳐 `decideRoute`까지 올라가 "constructor"라고만 친 손님 메시지가 채널 명령으로 오인식됐다
+// (실제 재현: 조사 시작 → DIGEST_TOPICS[Object 함수] 가 undefined 라 .prompt 접근에서 TypeError,
+// 손님 턴 하나 소모, 엉뚱한 실패 메시지가 채널에 전송). 세션·도움말 예약어는 원래 Set 기반이라
+// (Set.has 는 멤버십만 보고 프로토타입 체인을 타지 않는다) 이 종류의 버그가 없다 — 아래에서
+// 실제로 안전함을 함께 확인해 회귀를 막는다.
+describe("FIX1 — Object.prototype 상속 키는 예약어로 오인식되지 않는다", () => {
+  const poisonedKeys = ["constructor", "__proto__", "toString", "hasOwnProperty", "valueOf"];
+
+  it("parseDigestCommand 는 Object.prototype 상속 키에 null 을 돌려준다(핵심 회귀)", () => {
+    for (const key of poisonedKeys) {
+      expect(parseDigestCommand(key), `${key} 는 예약어가 아니어야 한다`).toBeNull();
+      // 대소문자·앞뒤 공백을 무시하는 정규화를 거쳐도 여전히 안전해야 한다.
+      expect(parseDigestCommand(`  ${key.toUpperCase()}  `)).toBeNull();
+    }
+  });
+
+  it("parseSessionCommand 는 Set 기반이라 원래도 안전하다(검증, 회귀 방지)", () => {
+    for (const key of poisonedKeys) {
+      expect(parseSessionCommand(key)).toBeNull();
+    }
+  });
+
+  it("parseHelpCommand 는 Set 기반이라 원래도 안전하다(검증, 회귀 방지)", () => {
+    for (const key of poisonedKeys) {
+      expect(parseHelpCommand(key)).toBe(false);
+    }
+  });
+
+  it("isChannelCommand 는 어떤 상속 키에도 채널 명령으로 통과시키지 않는다(실제 취약 경로)", () => {
+    for (const key of poisonedKeys) {
+      expect(isChannelCommand(key), `${key} 는 채널 명령이 아니어야 한다`).toBe(false);
+    }
+  });
+});

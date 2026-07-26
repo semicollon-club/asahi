@@ -22,8 +22,15 @@ const DIGEST_COMMANDS: Record<string, DigestTopic> = {
   "/개발뉴스": "devnews",
 };
 
+// FIX1(치명, 머지 전 리뷰) — DIGEST_COMMANDS 는 평범한 객체 리터럴이라 `DIGEST_COMMANDS[key] ?? null`
+// 는 key 가 "constructor"·"__proto__"·"toString"·"hasOwnProperty"·"valueOf" 처럼 Object.prototype
+// 이 물려주는 이름이면 그 상속된(모두 truthy 한) 값을 그대로 돌려준다 — `??`는 null/undefined 에만
+// 반응하므로 걸러내지 못한다. isChannelCommand 를 거쳐 decideRoute 까지 이 값이 올라가면, 손님이
+// 그냥 "constructor" 라고만 쳐도 채널 명령으로 오인식돼 조사가 시작되려다 실패했다(리뷰 재현).
+// Object.hasOwn 으로 그 객체 "자신의" 키인지 먼저 확인해 상속 키는 애초에 조회하지 않는다.
 export function parseDigestCommand(text: string): DigestTopic | null {
-  return DIGEST_COMMANDS[text.trim().toLowerCase()] ?? null;
+  const key = text.trim().toLowerCase();
+  return Object.hasOwn(DIGEST_COMMANDS, key) ? DIGEST_COMMANDS[key] : null;
 }
 
 // 예약어 목록 안내(/help). 세션·조사 예약어와 같은 규칙 — 앞 슬래시를 요구하고 앞뒤 공백·대소문자를
@@ -50,8 +57,12 @@ export function isChannelCommand(text: string): boolean {
 // 조용히 어긋나고, 그 어긋남은 아무도 눈치채지 못한다(테스트가 이 일치를 검증한다).
 export const COMMAND_HELP: ReadonlyArray<{ commands: readonly string[]; description: string }> = [
   { commands: [...RESET_COMMANDS], description: "대화를 새 세션으로 시작한다. 성격이나 설정이 바뀐 뒤에 쓴다" },
-  { commands: ["/대회"], description: "코딩·CTF 대회 소식을 지금 조사한다. 결과는 대회 소식 채널에 올라간다" },
-  { commands: ["/개발뉴스"], description: "개발 관련 소식을 지금 조사한다. 결과는 개발 뉴스 채널에 올라간다" },
+  // FIX6(사소, 머지 전 리뷰): 결과가 항상 "대회 소식 채널"에 올라가는 건 아니다 — DM 에서 부르거나
+  // 지정 채널(DIGEST_CONTEST_CHANNEL_ID 등)이 설정돼 있지 않으면 명령을 친 곳에 그대로 온다
+  // (core.ts 의 startDigestCommand). 조건부 목적지를 그대로 반영해 안내문이 실제 동작과 어긋나지
+  // 않게 한다.
+  { commands: ["/대회"], description: "코딩·CTF 대회 소식을 지금 조사한다. 지정 채널이 있으면 그리로, DM이거나 없으면 여기로 온다" },
+  { commands: ["/개발뉴스"], description: "개발 관련 소식을 지금 조사한다. 지정 채널이 있으면 그리로, DM이거나 없으면 여기로 온다" },
   { commands: [...HELP_COMMANDS], description: "이 목록을 보여준다" },
 ];
 
