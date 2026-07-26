@@ -822,3 +822,18 @@ describe("AgentCore — 조사 결과는 주제의 지정 채널로 간다", () 
     expect(busy?.channelRef).toBe("chan-일반");
   });
 });
+
+describe("AgentCore — DM 의 조사 예약어는 DM 에 답한다", () => {
+  it("지정 채널이 있어도 DM 에서 부른 결과는 DM 으로 온다", async () => {
+    const digestCalls: Array<{ topic: string; channelRef: string }> = [];
+    const digest = { run: async (topic: string, channelRef: string) => { digestCalls.push({ topic, channelRef }); return { started: true }; } };
+    const t = await setup({ config: { digestChannels: { contest: "news-대회" } }, digest } as any);
+
+    pub(t.bus, dmHint("owner", "owner"), "/대회", 1);
+    await t.core.drain();
+
+    // 혼자 확인해 보려던 것이 매번 동아리 채널에 게시되면 안 된다.
+    expect(digestCalls[0].channelRef).toBe("dm-owner");
+    expect(t.published.filter((e) => e.type === "system_notice")).toHaveLength(0);
+  });
+});

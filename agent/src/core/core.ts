@@ -140,7 +140,7 @@ export class AgentCore {
         return;
       }
       const topic = parseDigestCommand(text);
-      if (topic) await this.startDigestCommand(topic, { userId: hint.userId, conv: null, replyRef: hint.discordChannelId });
+      if (topic) await this.startDigestCommand(topic, { userId: hint.userId, conv: null, replyRef: hint.discordChannelId, isPrivate: false });
       return;
     }
 
@@ -163,7 +163,7 @@ export class AgentCore {
 
     const digestTopic = parseDigestCommand(text);
     if (digestTopic) {
-      await this.startDigestCommand(digestTopic, { userId: hint.userId, conv, replyRef: conv.discordChannelId });
+      await this.startDigestCommand(digestTopic, { userId: hint.userId, conv, replyRef: conv.discordChannelId, isPrivate: hint.isPrivate });
       return;
     }
 
@@ -193,7 +193,7 @@ export class AgentCore {
   // 연타해 무제한·동시 다발로 조사를 돌릴 수 있었음).
   private async startDigestCommand(
     topic: DigestTopic,
-    o: { userId: string; conv: Conversation | null; replyRef: string },
+    o: { userId: string; conv: Conversation | null; replyRef: string; isPrivate: boolean },
   ): Promise<void> {
     const publishNotice = (text: string) =>
       this.bus.publish({ type: "system_notice", channel: "discord", channelRef: o.replyRef, text, ts: this.now() });
@@ -223,7 +223,10 @@ export class AgentCore {
       }
     }
 
-    const target = this.config.digestChannels[topic] ?? o.replyRef;
+    // DM 에서 부른 건 DM 에 답한다. 공개 채널로 돌리면 혼자 확인해 보려던 것이 매번 동아리
+    // 채널에 게시돼 버린다 — 스레드에 갇히는 문제는 서버 쪽 이야기고, DM 은 애초에 보기 힘든
+    // 곳이 아니다. 공개 채널에 올리고 싶으면 서버에서 부르면 된다(양쪽 다 가능해진다).
+    const target = o.isPrivate ? o.replyRef : (this.config.digestChannels[topic] ?? o.replyRef);
     if (target !== o.replyRef) {
       publishNotice(`「${DIGEST_TOPICS[topic].label}」 소식은 <#${target}> 에 올릴게. 잠깐만.`);
     }
