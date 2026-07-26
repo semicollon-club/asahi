@@ -2,7 +2,8 @@ import type { EventBus, UserMessageEvent, ConversationHint } from "../events/bus
 import type { Config } from "../config.js";
 import { shouldConnectWorker, type TurnRunner, type TurnContext, type TurnResult, type ProgressUpdate } from "./agent.js";
 import { buildSystemPrompt, deriveRapportStage } from "./persona.js";
-import { parseSessionCommand } from "./commands.js";
+import { parseSessionCommand, parseDigestCommand } from "./commands.js";
+import type { DigestRunner } from "./digest.js";
 import type { Role } from "../store/usersRepo.js";
 import type { UsersRepo } from "../store/usersRepo.js";
 import type { ConversationsRepo, Conversation } from "../store/conversationsRepo.js";
@@ -76,10 +77,13 @@ export class AgentCore {
   // 판정은 agent.ts 의 shouldConnectWorker 가 쓰는 것과 동일한 hub.isConnected(userId) 다.
   // 선택值(옵셔널)인 이유: 워커 배선이 없는 환경(테스트 등)에서는 늘 워커 미연결로 간주된다.
   private hub?: { isConnected(userId: string): boolean };
+  // 정기 게시(조사) 실행기. 옵셔널인 이유는 hub 와 같다 — 배선이 없는 환경(테스트 등)에서는
+  // 예약어를 받아도 실행할 대상이 없으므로 ingest 가 안내만 하고 넘어간다.
+  private digest?: DigestRunner;
 
   constructor(deps: {
     bus: EventBus; config: Config; runTurn: TurnRunner; repos: CoreRepos; agentCwd: string; now?: () => number;
-    fetchImpl?: typeof fetch; hub?: { isConnected(userId: string): boolean }; emotions?: string[];
+    fetchImpl?: typeof fetch; hub?: { isConnected(userId: string): boolean }; emotions?: string[]; digest?: DigestRunner;
   }) {
     this.bus = deps.bus;
     this.config = deps.config;
@@ -91,6 +95,7 @@ export class AgentCore {
     this.fetchImpl = deps.fetchImpl ?? fetch;
     this.hub = deps.hub;
     this.emotions = deps.emotions ?? [];
+    this.digest = deps.digest;
   }
 
   start(): void {
@@ -125,6 +130,18 @@ export class AgentCore {
     if (parseSessionCommand(text) === "reset") {
       await this.repos.conversations.setSession(conv.id, null, ts);
       this.bus.publish({ type: "assistant_message", channel: "discord", channelRef: conv.discordChannelId, text: "…알겠어. 새 세션으로 시작할게. 다음 메시지부터 새로 대화하자.", ts: this.now() });
+      return;
+    }
+
+    // 정기 게시 예약어: 명령을 친 그 채널에 즉시 답한다. 스케줄의 lastRun 은 건드리지 않는다.
+    // LLM 턴을 거치지 않으므로(메시지 저장·손님 한도 예약도 없음) 아래 참가자 upsert/저장보다 앞에 둔다.
+    const digestTopic = parseDigestCommand(text);
+    if (digestTopic) {
+      if (!this.digest) {
+        this.bus.publish({ type: "system_notice", channel: "discord", channelRef: conv.discordChannelId, text: "지금은 조사 기능이 꺼져 있어요.", ts: this.now() });
+        return;
+      }
+      void this.digest.run(digestTopic, conv.discordChannelId).catch((err) => console.error("[core] 조사 실행 오류:", err));
       return;
     }
 

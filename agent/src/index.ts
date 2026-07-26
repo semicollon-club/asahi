@@ -21,6 +21,7 @@ import { CharacterImagesRepo } from "./store/characterImagesRepo.js";
 import { backfillLegacyAllowedDirs } from "./store/allowedDirsMigration.js";
 import { AgentCore } from "./core/core.js";
 import { makeRunAgentTurn } from "./core/agent.js";
+import { DigestRunner, DIGEST_TOPICS } from "./core/digest.js";
 import { DiscordAdapter } from "./adapters/discord.js";
 
 // 비밀값(.env)은 리포 루트(agent/ 바깥, data/ 와 같은 위치)에서 읽는다.
@@ -121,9 +122,20 @@ async function main() {
   });
   console.log(`[index] 표정 카탈로그: ${emotions.length}종`);
 
+  // 정기 게시(조사) 실행기. runTurn·agentCwd 는 core 와 동일한 것을 공유한다 —
+  // 별도 프로세스가 아니라 같은 봇 안에서 같은 방식으로 LLM 턴을 돌리는 또 하나의 진입점이다.
+  const digest = new DigestRunner({
+    runTurn, bus, settings: new SettingsRepo(db), agentCwd,
+    channels: config.digestChannels, emotions,
+  });
+  for (const topic of Object.keys(DIGEST_TOPICS)) {
+    const set = config.digestChannels[topic as keyof typeof config.digestChannels];
+    console.log(`[index] 정기 게시 ${topic}: ${set ? `채널 ${set}` : "채널 미설정 — 스케줄 건너뜀"}`);
+  }
+
   // FIX3(최종 리뷰): core.ts 도 hub 를 받아 능력 안내(persona.ts)에 "이번 턴에 워커가 실제로
   // 연결돼 있는가"를 반영한다(agent.ts 의 shouldConnectWorker 와 같은 판정, 같은 hub 인스턴스).
-  const core = new AgentCore({ bus, config, runTurn, repos, agentCwd, hub, emotions });
+  const core = new AgentCore({ bus, config, runTurn, repos, agentCwd, hub, emotions, digest });
   core.start();
 
   const discord = new DiscordAdapter({ bus, config, users, conversations, characterImages });
@@ -131,9 +143,10 @@ async function main() {
 
   await core.recoverPending(); // 크래시로 남은 미처리 메시지 재개
 
-  // 유휴 세션 정리: 1분마다 확인
+  // 유휴 세션 정리 + 정기 게시 확인: 1분마다 같은 타이머에서 함께 확인한다(타이머를 새로 만들지 않는다).
   const idleTimer = setInterval(() => {
     void core.closeIdleConversations().catch((err) => console.error("[core] 유휴 정리 오류:", err));
+    void digest.checkAndRun().catch((err) => console.error("[digest] 스케줄 확인 오류:", err));
   }, 60 * 1000);
 
   const shutdown = async () => {

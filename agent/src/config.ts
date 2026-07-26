@@ -1,5 +1,6 @@
 import path from "node:path";
 import { isUnambiguousRoot } from "./remote/roots.js";
+import type { DigestChannels } from "./core/digest.js";
 
 // 숫자 환경변수를 파싱·검증한다. 값이 없으면 기본값, 있으면 양의 유한수여야 하며
 // 아니면(오타·0 등) 시작 시점에 명확히 실패한다 — NaN 으로 봇이 조용히 먹통 되는 것을 막는다.
@@ -39,6 +40,8 @@ export type Config = {
   // 하이브리드 조각3 2단계(원격 워커): 봇은 워커가 아웃바운드로 붙는 허브(WorkerHub)를 이 포트에 띄운다.
   workerToken: string;   // 워커 인증 토큰(WORKER_TOKEN). 워커 쪽과 같은 값이어야 한다.
   httpPort: number;      // 워커 허브 WS 를 붙일 HTTP 포트. Railway 는 PORT 를 주입한다.
+  // 정기 게시 목적지. 주제별로 설정하며, 없는 주제는 스케줄에서 건너뛴다(예약어로는 실행 가능).
+  digestChannels: DigestChannels;
 };
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -74,6 +77,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     model: env.ANTHROPIC_MODEL || "claude-opus-4-8",
     workerToken,
     httpPort: positiveNumberEnv(env, "PORT", 3000),
+    digestChannels: {
+      ...(env.DIGEST_CONTEST_CHANNEL_ID ? { contest: env.DIGEST_CONTEST_CHANNEL_ID } : {}),
+      ...(env.DIGEST_DEVNEWS_CHANNEL_ID ? { devnews: env.DIGEST_DEVNEWS_CHANNEL_ID } : {}),
+    },
   };
 }
 

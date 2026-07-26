@@ -11,6 +11,7 @@ import { TurnsRepo } from "../src/store/turnsRepo.js";
 import { AgentCore } from "../src/core/core.js";
 import type { Config } from "../src/config.js";
 import type { TurnRequest, TurnResult } from "../src/core/agent.js";
+import type { DigestRunner } from "../src/core/digest.js";
 
 const HOUR = 60 * 60 * 1000;
 // pg-mem 의 Pool.query() 는 마이크로태스크가 아니라 매크로태스크(setImmediate) 단위로 풀린다
@@ -23,7 +24,7 @@ const flush = async () => {
 
 async function setup(over: {
   config?: Partial<Config>; mode?: "immediate" | "manual" | "throw" | "resume-fails";
-  imageFetch?: typeof fetch; hub?: { isConnected(userId: string): boolean };
+  imageFetch?: typeof fetch; hub?: { isConnected(userId: string): boolean }; digest?: DigestRunner;
 } = {}) {
   const db = await openTestDb();
   const repos = {
@@ -59,7 +60,7 @@ async function setup(over: {
   const bus = new EventBus();
   const core = new AgentCore({
     bus, config, runTurn, now: () => clock, repos, agentCwd: "/data/agent",
-    fetchImpl: over.imageFetch, hub: over.hub,
+    fetchImpl: over.imageFetch, hub: over.hub, digest: over.digest,
   });
   core.start();
   const published: AgentEvent[] = [];
@@ -482,6 +483,50 @@ describe("AgentCore — DM 세션 예약어(/새세션)", () => {
     expect(await t.repos.messages.countUserMessages("owner")).toBe(msgCountBefore); // 명령어는 기록되지 않았다
     const notices = t.published.filter((p) => p.type === "assistant_message");
     expect(notices.some((n) => /새 세션|세션.*시작|새로/.test((n as { text: string }).text))).toBe(true);
+  });
+});
+
+// Task 5(배선) — 정기 게시 예약어(/대회·/개발뉴스)는 세션 예약어(/새세션)와 같은 자리(ingest)에서
+// 갈라져 LLM 턴을 아예 거치지 않는다. setup() 은 DigestRunner 의 실제 구현을 인스턴스화하지 않고
+// { run } 만 흉내 낸 가짜를 주입한다 — private 필드를 가진 실제 클래스 타입과 구조가 달라 setup
+// 호출부에서 as any 로 넘긴다(대신 setup 내부 배선(over.digest → new AgentCore({ digest }))은
+// 타입 그대로 유지한다). 이 파일의 다른 테스트와 같은 패턴(pub + core.drain)을 그대로 따른다 —
+// send/notices/channelRef/runTurnCalls 라는 이름은 이 헬퍼엔 없으므로(calls/published/dmHint 로 대체).
+describe("AgentCore — 정기 게시 예약어", () => {
+  it("예약어를 받으면 LLM 턴을 돌리지 않고 DigestRunner 에 넘긴다", async () => {
+    const calls: Array<{ topic: string; channelRef: string }> = [];
+    const digest = { run: async (topic: string, channelRef: string) => { calls.push({ topic, channelRef }); } };
+    const t = await setup({ digest } as any);
+
+    pub(t.bus, dmHint("owner", "owner"), "/대회", 1);
+    await t.core.drain();
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].topic).toBe("contest");
+    expect(t.calls).toHaveLength(0); // 모델을 부르지 않는다
+  });
+
+  it("예약어를 친 그 채널로 답한다", async () => {
+    const calls: Array<{ topic: string; channelRef: string }> = [];
+    const digest = { run: async (topic: string, channelRef: string) => { calls.push({ topic, channelRef }); } };
+    const t = await setup({ digest } as any);
+    const hint = dmHint("owner", "owner");
+
+    pub(t.bus, hint, "/개발뉴스", 1);
+    await t.core.drain();
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].channelRef).toBe(hint.discordChannelId);
+  });
+
+  it("digest 가 주입되지 않았으면 안내만 하고 넘어간다", async () => {
+    const t = await setup(); // digest 미배선
+    pub(t.bus, dmHint("owner", "owner"), "/대회", 1);
+    await t.core.drain();
+
+    const notices = t.published.filter((e) => e.type === "system_notice");
+    expect(notices.length).toBeGreaterThan(0);
+    expect(t.calls).toHaveLength(0); // 모델도 부르지 않는다
   });
 });
 
