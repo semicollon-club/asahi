@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - **한국어.** 코드 주석·프롬프트·테스트 설명 전부 한국어.
-- **작업 디렉토리는 `agent/`** (동기화 스크립트만 리포 루트에서 실행).
+- **작업 디렉토리는 `agent/`** (동기화 스크립트도 `agent/` 에서 실행: `npm run sync-images`).
 - **봇에 새 런타임 의존성 금지.** 업로드는 스크립트가 `fetch`, 카탈로그는 기존 `pg`.
 - **마커 문법 고정:** `[표정:<감정>]`. 감정 이름은 폴더명 그대로이며 공백을 포함할 수 있다(`기본 무표정`, `빤히 응시`).
 - **감정 폴더 10종:** 기본 무표정 · 당황 · 멍함 · 빤히 응시 · 웃음 · 절망 · 졸림 · 혼란 · 홍조 · 화남. `임시` 는 감정이 아니므로 제외한다.
@@ -32,7 +32,7 @@
 | `agent/src/adapters/discord.ts` | 마커 해석 → embed 전송 + 대화별 간격 상한 |
 | `agent/src/core/persona.ts` | 감정 목록 주입 + 사용 지침 |
 | `agent/src/core/core.ts` · `agent/src/index.ts` | 감정 목록 배선 |
-| `scripts/sync-images.mjs` (신규) | 폴더 순회 → Storage 업로드 → 카탈로그 교체 |
+| `agent/scripts/sync-images.mjs` (신규) | 폴더 순회 → Storage 업로드 → 카탈로그 교체 |
 
 ---
 
@@ -290,7 +290,7 @@ cd agent && npx vitest run tests/characterImagesRepo.test.ts
 
 ```sql
 -- 캐릭터 표정 이미지 카탈로그. 실제 파일은 Supabase Storage 에 있고 여기엔 URL 만 둔다.
--- scripts/sync-images.mjs 가 image/ 를 훑어 전체를 교체한다(부분 갱신 없음).
+-- agent/scripts/sync-images.mjs 가 image/ 를 훑어 전체를 교체한다(부분 갱신 없음).
 CREATE TABLE IF NOT EXISTS character_images (
   id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   emotion TEXT NOT NULL,
@@ -784,21 +784,21 @@ git commit -m "feat(persona): 표정 목록 주입 + 사용 지침"
 ### Task 5: 동기화 스크립트
 
 **Files:**
-- Create: `scripts/sync-images.mjs`
+- Create: `agent/scripts/sync-images.mjs`
 - Modify: `.env.example`
 
 **Interfaces:**
-- Consumes: `character_images` 테이블 스키마 (Task 2). **레포 클래스는 쓰지 않는다** — 스크립트는 빌드 없이 `node scripts/sync-images.mjs` 로 바로 돌아가야 하므로 `pg` 로 직접 SQL 을 실행한다. `replaceAll` 과 같은 의미(DELETE 후 INSERT)를 트랜잭션 안에서 재현하되, 레포 쪽이 바뀌면 이쪽도 같이 봐야 한다는 점을 주석에 남긴다.
+- Consumes: `character_images` 테이블 스키마 (Task 2). **레포 클래스는 쓰지 않는다** — 스크립트는 빌드 없이 `cd agent && npm run sync-images` 로 바로 돌아가야 하므로 `pg` 로 직접 SQL 을 실행한다. `replaceAll` 과 같은 의미(DELETE 후 INSERT)를 트랜잭션 안에서 재현하되, 레포 쪽이 바뀌면 이쪽도 같이 봐야 한다는 점을 주석에 남긴다.
 - Produces: 없음
 
-리포 루트에서 실행한다. 유닛 테스트하지 않는다 — 실제 Storage 왕복이 본체이므로 수동 확인(Task 6 배포 후 확인)으로 검증한다.
+`agent/` 에서 실행한다(`npm run sync-images`). 유닛 테스트하지 않는다 — 실제 Storage 왕복이 본체이므로 수동 확인(Task 6 배포 후 확인)으로 검증한다.
 
 - [ ] **Step 1: `.env.example` 갱신**
 
 파일 끝에 추가한다.
 
 ```
-# ── 표정 이미지 동기화(scripts/sync-images.mjs) 전용 ──
+# ── 표정 이미지 동기화(agent/scripts/sync-images.mjs) 전용 ──
 # Supabase 프로젝트 URL. 예: https://xxxxx.supabase.co
 SUPABASE_URL=
 # Supabase service_role 키. Storage 업로드 권한이 필요하다. 절대 공개하지 않는다.
@@ -807,14 +807,14 @@ SUPABASE_SERVICE_KEY=
 
 - [ ] **Step 2: 스크립트 작성**
 
-`scripts/sync-images.mjs` 를 새로 만든다.
+`agent/scripts/sync-images.mjs` 를 새로 만든다.
 
 ```js
 #!/usr/bin/env node
 // 표정 이미지 동기화: image/<감정>/*.png 를 Supabase Storage 에 올리고
 // character_images 카탈로그를 통째로 갈아끼운다.
 //
-// 리포 루트에서 실행: node scripts/sync-images.mjs
+// 실행: cd agent && npm run sync-images
 // 필요 환경변수: DATABASE_URL, SUPABASE_URL, SUPABASE_SERVICE_KEY
 //
 // 이미지를 추가·교체·삭제한 뒤 이 스크립트만 다시 돌리면 된다. 재배포는 필요 없다.
@@ -827,7 +827,7 @@ import { fileURLToPath } from "node:url";
 import pg from "pg";
 import dotenv from "dotenv";
 
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 dotenv.config({ path: path.join(ROOT, ".env") });
 
 const BUCKET = "character-images";
@@ -941,7 +941,7 @@ main().catch((err) => {
 - [ ] **Step 3: 문법 확인**
 
 ```bash
-node --check scripts/sync-images.mjs
+cd agent && node --check scripts/sync-images.mjs
 ```
 
 기대: 출력 없음(문법 오류 없음). 실제 실행은 Supabase 버킷 생성 후 Task 6 에서 한다.
@@ -949,7 +949,7 @@ node --check scripts/sync-images.mjs
 - [ ] **Step 4: 커밋**
 
 ```bash
-git add scripts/sync-images.mjs .env.example
+git add agent/scripts/sync-images.mjs .env.example
 git commit -m "feat(scripts): 표정 이미지 Supabase Storage 동기화"
 ```
 
@@ -977,7 +977,7 @@ git commit -m "feat(scripts): 표정 이미지 Supabase Storage 동기화"
 
 ```markdown
 - **표정 이미지** — 모델이 답변에 `[표정:이름]` 마커를 쓰면 해당 표정 이미지를 embed 로 함께 보낸다.
-  이미지는 Supabase Storage 에, 카탈로그는 `character_images` 테이블에 있고 `scripts/sync-images.mjs`
+  이미지는 Supabase Storage 에, 카탈로그는 `character_images` 테이블에 있고 `agent/scripts/sync-images.mjs`
   로 갱신한다(재배포 불필요). 감정이 움직일 때만 쓰도록 프롬프트로 유도하고, 어댑터가 대화별
   120초 하한으로 남발을 막는다. 이모지 금지 규칙의 감정 표현 수단을 대신한다.
 ```
@@ -999,13 +999,13 @@ cd agent && npm test
 감정별 폴더 하나가 마커 하나에 대응한다. **폴더 이름이 그대로 `[표정:이름]` 의 이름이 된다** —
 공백이 들어간 이름(`기본 무표정`, `빤히 응시`)도 그대로 쓴다.
 
-- `임시/` 는 감정이 아니라 보관소다. 동기화에서 제외된다(`scripts/sync-images.mjs` 의 무시 목록).
+- `임시/` 는 감정이 아니라 보관소다. 동기화에서 제외된다(`agent/scripts/sync-images.mjs` 의 무시 목록).
 - 이미지가 하나도 없는 폴더는 카탈로그에 들어가지 않는다 — 모델이 부를 수 없는 표정을 알게 되는 걸 막는다.
 - 한 폴더에 여러 장을 두면 매번 무작위로 하나를 고르고, 직전에 쓴 장은 피한다.
 
-이미지를 추가·교체·삭제한 뒤에는 리포 루트에서 동기화를 돌린다. 재배포는 필요 없다.
+이미지를 추가·교체·삭제한 뒤에는 `agent/` 에서 동기화를 돌린다. 재배포는 필요 없다.
 
-    node scripts/sync-images.mjs
+    cd agent && npm run sync-images
 
 다만 **새로운 감정 폴더를 추가한 경우에는 봇을 재시작**해야 한다. 감정 목록은 기동 시 한 번만
 읽는다(기존 감정의 이미지 교체는 재시작 없이 즉시 반영된다).
@@ -1016,7 +1016,7 @@ cd agent && npm test
 배포 후 확인 항목을 추가한다.
 
 ```markdown
-- [ ] `node scripts/sync-images.mjs` 실행 → 업로드 장수와 감정별 집계가 실제 폴더와 맞는가
+- [ ] `cd agent && npm run sync-images` 실행 → 업로드 장수와 감정별 집계가 실제 폴더와 맞는가
 - [ ] 디스코드에서 `/새세션` 후, 감정이 움직일 만한 말을 걸어 표정이 붙는가
 - [ ] 연달아 대화해도 매번 이미지가 나오지는 않는가(120초 하한)
 - [ ] `[표정:...]` 마커가 텍스트에 그대로 보이는 경우가 없는가
@@ -1045,6 +1045,6 @@ git commit -m "docs: 표정 이미지 기능 반영"
 
 - [ ] Supabase 대시보드에서 **`character-images` 버킷을 만들고 public 으로 설정**한다. 서명 URL 은 만료가 있어 카탈로그에 담을 수 없다.
 - [ ] `.env` 에 `SUPABASE_URL`·`SUPABASE_SERVICE_KEY` 를 채운다.
-- [ ] 리포 루트에서 `node scripts/sync-images.mjs` 를 실행한다.
+- [ ] `cd agent && npm run sync-images` 를 실행한다.
 - [ ] Railway 재배포(또는 `pm2 restart`)로 봇을 재시작해 감정 목록을 읽게 한다. `[index] 표정 카탈로그: N종` 로그를 확인한다.
 - [ ] 디스코드에서 `/새세션` 후 `deploy/smoke-test.md` 의 새 항목을 훑는다.

@@ -266,3 +266,37 @@ describe("buildSystemPrompt — 캐릭터 시트 · 거짓말 경계", () => {
     }
   });
 });
+
+describe("buildSystemPrompt — 표정 이미지", () => {
+  const OWNER = { role: "owner", isPrivate: true, isOwner: true } as const;
+  const GUEST = { role: "allowed", isPrivate: true, isOwner: false } as const;
+  const SERVER = { role: "allowed", isPrivate: false, isOwner: false } as const;
+  const EMOTIONS = ["기본 무표정", "당황", "홍조"];
+
+  it("감정 목록이 있으면 마커 문법과 감정 이름이 프롬프트에 들어간다", () => {
+    const p = buildSystemPrompt({ ...OWNER, emotions: EMOTIONS });
+    expect(p).toMatch(/\[표정:/);
+    for (const e of EMOTIONS) expect(p).toContain(e);
+  });
+
+  it("전 채널에서 동일하게 제공된다", () => {
+    for (const ctx of [OWNER, GUEST, SERVER]) {
+      expect(buildSystemPrompt({ ...ctx, emotions: EMOTIONS })).toMatch(/\[표정:/);
+    }
+  });
+
+  it("감정 목록이 비었거나 없으면 표정 지침 자체가 빠진다", () => {
+    expect(buildSystemPrompt({ ...OWNER, emotions: [] })).not.toMatch(/\[표정:/);
+    expect(buildSystemPrompt(OWNER)).not.toMatch(/\[표정:/);
+  });
+
+  it("남발 금지 지침을 포함한다", () => {
+    const p = buildSystemPrompt({ ...OWNER, emotions: EMOTIONS });
+    expect(p).toMatch(/매 답변마다/);
+    expect(p).toMatch(/감정이 실제로/);
+  });
+
+  it("이모지 금지 규칙은 그대로 유지된다", () => {
+    expect(buildSystemPrompt({ ...OWNER, emotions: EMOTIONS })).toMatch(/이모지/);
+  });
+});

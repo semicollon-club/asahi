@@ -12,10 +12,10 @@ lastReviewed: 2026-07-26
 
 | 디렉토리/파일 | 책임 | 주요 파일 |
 | --- | --- | --- |
-| `adapters/` | 채널(현재는 discord.js) 실제 I/O. 들어온 이벤트를 라우팅 판단해 `user_message`로 발행하고, 코어가 발행한 `assistant_message`/`system_notice`/`progress`를 구독해 실제 전송·편집을 수행한다 | `discord.ts` |
-| `core/` | 대화 오케스트레이션(직렬화·한도 판단), SDK 턴 실행, 페르소나(시스템 프롬프트), 도구 정의·원격 도구 1차 경로 필터, 읽기전용 SQL 가드. `discord.js`에 의존하지 않는다(채널 불가지론) | `core.ts`, `agent.ts`, `persona.ts`, `tools.ts`, `remoteTools.ts`, `pathPermission.ts`, `paths.ts`, `sqlGuard.ts`, `turnPrep.ts`, `commands.ts`, `images.ts` |
+| `adapters/` | 채널(현재는 discord.js) 실제 I/O. 들어온 이벤트를 라우팅 판단해 `user_message`로 발행하고, 코어가 발행한 `assistant_message`/`system_notice`/`progress`를 구독해 실제 전송·편집을 수행한다. 표정 마커를 해석해 embed 로 함께 전송한다 | `discord.ts` |
+| `core/` | 대화 오케스트레이션(직렬화·한도 판단), SDK 턴 실행, 페르소나(시스템 프롬프트), 도구 정의·원격 도구 1차 경로 필터, 읽기전용 SQL 가드, 표정 마커 파싱. `discord.js`에 의존하지 않는다(채널 불가지론) | `core.ts`, `agent.ts`, `persona.ts`, `tools.ts`, `remoteTools.ts`, `pathPermission.ts`, `paths.ts`, `sqlGuard.ts`, `turnPrep.ts`, `commands.ts`, `images.ts`, `expressions.ts` |
 | `events/` | 어댑터↔코어를 분리하는 얇은 pub/sub 이벤트버스. 이벤트 타입 정의의 유일한 출처 | `bus.ts` |
-| `store/` | Postgres 영속 계층(레포지토리 패턴). 스키마 정의와 테이블별 CRUD/쿼리만 담당하며, 그 위 어떤 계층에도 의존하지 않는 최하위 레이어다 | `schema.ts`, `db.ts`, `usersRepo.ts`, `conversationsRepo.ts`, `participantsRepo.ts`, `messagesRepo.ts`, `summariesRepo.ts`, `memoriesRepo.ts`, `turnsRepo.ts`, `allowedDirsRepo.ts`, `introspectRepo.ts`, `settingsRepo.ts`, `allowedDirsMigration.ts` |
+| `store/` | Postgres 영속 계층(레포지토리 패턴). 스키마 정의와 테이블별 CRUD/쿼리만 담당하며, 그 위 어떤 계층에도 의존하지 않는 최하위 레이어다 | `schema.ts`, `db.ts`, `usersRepo.ts`, `conversationsRepo.ts`, `participantsRepo.ts`, `messagesRepo.ts`, `summariesRepo.ts`, `memoriesRepo.ts`, `turnsRepo.ts`, `allowedDirsRepo.ts`, `introspectRepo.ts`, `settingsRepo.ts`, `allowedDirsMigration.ts`, `characterImagesRepo.ts` |
 | `remote/` | 봇↔워커 WebSocket 전송 계층. `protocol.ts`(양쪽 공유 계약)·`hub.ts`(봇 쪽 서버)·`workerClient.ts`/`executors.ts`/`roots.ts`(워커 쪽). `core/` 의 순수 경로 헬퍼(`pathPermission.ts`의 `resolveRealOrNearestAncestor`, `paths.ts`의 `isPathWithinAny`)만 재사용하고 `discord.js`·`store/` 에는 의존하지 않는다 | `protocol.ts`, `hub.ts`, `workerClient.ts`, `executors.ts`, `roots.ts` |
 | `memory/` | 에이전트 작업 디렉토리(`agentCwd`)의 파일 기반 기억 스캐폴드(`MEMORY.md` 초기화). DB 기반 기억(`store/memoriesRepo.ts`의 remember/recall)과는 별개 개념이다 | `memory.ts` |
 | `config.ts`(디렉토리 아님, `src/` 최상위 파일) | 환경변수 로드·검증. 봇용 `loadConfig`/`Config`와 워커용 `loadWorkerConfig`/`WorkerConfig` 두 세트를 제공하며, 다른 모듈에 의존하지 않는다. 워커용 설정은 `databaseUrl`도 `model`도 갖지 않는다 — 워커는 이제 DB도 모델도 다루지 않는다(`docs/decisions/0006-thin-worker.md`) | `config.ts` |
@@ -25,6 +25,11 @@ lastReviewed: 2026-07-26
 조립하지만, 워커는 `remote`(`workerClient.ts`+`executors.ts`)와 `config`만 조립하며
 `store`·`events`·`adapters`에는 의존하지 않는다 — 워커는 디스코드에도 DB에도 붙지 않고,
 봇이 여는 허브에 아웃바운드 WebSocket으로 접속해 개별 도구 호출만 받아 실행한다.
+
+표정 마커(`[표정:이름]`)는 **표시 지시**일 뿐이다 — `core/expressions.ts`는 답변 텍스트에서 마커를
+떼어내 감정 이름만 넘길 뿐 이미지의 존재 자체를 모르고, 그 이름을 실제 이미지 URL로 바꿔 embed로
+전송하는 것은 전적으로 `adapters/discord.ts`의 몫이다. 이 경계 덕분에 향후 다른 채널(웹 UI 등)을
+추가해도 코어를 건드리지 않고 같은 마커를 다르게 렌더링할 수 있다.
 
 ## 허용 의존 방향
 

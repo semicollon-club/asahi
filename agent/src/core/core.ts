@@ -68,6 +68,9 @@ export class AgentCore {
   private ingestChains = new Map<string, Promise<void>>();
   private turnChains = new Map<string, Promise<void>>();
   private fetchImpl: typeof fetch;
+  // 카탈로그에 이미지가 있는 감정 이름들. 기동 시 한 번 읽어 넣는다(index.ts) — 생략되면 빈
+  // 배열로 취급되어 persona.ts 가 표정 지침 자체를 프롬프트에서 뺀다.
+  private emotions: string[];
   // FIX3(중요, 최종 리뷰): 능력 안내(persona.ts)가 실제 도구 상태를 반영하려면, systemPrompt 를
   // 만드는 시점(runTurn 호출 전)에 이미 "이번 턴에 워커가 연결돼 있는가"를 알아야 한다 — 그
   // 판정은 agent.ts 의 shouldConnectWorker 가 쓰는 것과 동일한 hub.isConnected(userId) 다.
@@ -76,7 +79,7 @@ export class AgentCore {
 
   constructor(deps: {
     bus: EventBus; config: Config; runTurn: TurnRunner; repos: CoreRepos; agentCwd: string; now?: () => number;
-    fetchImpl?: typeof fetch; hub?: { isConnected(userId: string): boolean };
+    fetchImpl?: typeof fetch; hub?: { isConnected(userId: string): boolean }; emotions?: string[];
   }) {
     this.bus = deps.bus;
     this.config = deps.config;
@@ -87,6 +90,7 @@ export class AgentCore {
     this.now = deps.now ?? Date.now;
     this.fetchImpl = deps.fetchImpl ?? fetch;
     this.hub = deps.hub;
+    this.emotions = deps.emotions ?? [];
   }
 
   start(): void {
@@ -227,7 +231,7 @@ export class AgentCore {
       // 다시 계산한다 — 두 계산이 어긋나면(예: 이 사이 워커가 끊기면) 프롬프트와 실제 도구가
       // 그 한 턴만 어긋날 수 있지만, "안내 자체가 없거나 늘 거짓"이었던 이전 버그보다는 낫다.
       const workerConnected = shouldConnectWorker({ isOwner, isPrivate: conv.isPrivate, userId }, this.hub);
-      const systemPrompt = buildSystemPrompt({ role, isPrivate: conv.isPrivate, isOwner, deployTarget: this.config.deployTarget, rapportStage, workerConnected });
+      const systemPrompt = buildSystemPrompt({ role, isPrivate: conv.isPrivate, isOwner, deployTarget: this.config.deployTarget, rapportStage, workerConnected, emotions: this.emotions });
       const onProgress = (u: ProgressUpdate) => {
         this.bus.publish({ type: "progress", channel: "discord", channelRef: conv.discordChannelId, text: formatProgress(u), ts: this.now() });
       };
@@ -344,7 +348,7 @@ export class AgentCore {
           // 한다 — 실제 hub 연결 상태를 여기서 다시 물어 true 가 나오더라도, 이 턴 자체는
           // noRemoteTools 때문에 fs_*/sh_exec 를 못 쓰므로 그 상태를 그대로 안내하면 FIX3 가
           // 고친 것과 같은 종류의 거짓 안내(도구는 없는데 있다고 말하는)가 새로 생긴다.
-          systemPrompt: buildSystemPrompt({ role, isPrivate: conv.isPrivate, isOwner, deployTarget: this.config.deployTarget, workerConnected: false }),
+          systemPrompt: buildSystemPrompt({ role, isPrivate: conv.isPrivate, isOwner, deployTarget: this.config.deployTarget, workerConnected: false, emotions: this.emotions }),
           resume: conv.sessionId, cwd: this.agentCwd,
           context: { role, isPrivate: conv.isPrivate, isOwner, userId: conv.primaryUserId, conversationId: conv.id },
           // FIX4: 유휴 요약은 사람이 지켜보지 않는 타이머로 돌고, 이전에 모델이 읽은 파일 등을

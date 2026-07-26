@@ -87,7 +87,7 @@ CREATE INDEX IF NOT EXISTS idx_character_images_emotion ON character_images(emot
 
 ### 3.3 동기화 스크립트
 
-`scripts/sync-images.mjs` 가 `image/` 를 순회한다.
+`agent/scripts/sync-images.mjs` 가 `image/` 를 순회한다.
 
 - `임시` 등 감정이 아닌 폴더는 **무시 목록**으로 건너뛴다. 목록은 스크립트 상단 상수로 두어 추가가 쉽게 한다.
 - 파일이 하나도 없는 폴더는 카탈로그에 넣지 않는다 — 모델이 없는 표정을 부르는 걸 막는다.
@@ -202,7 +202,7 @@ export function parseExpression(raw: string): ParsedExpression;
 
 ## 11. 배포 후 확인
 
-- [ ] `scripts/sync-images.mjs` 실행 → Storage 버킷과 `character_images` 행 수 확인
+- [ ] `cd agent && npm run sync-images` 실행 → Storage 버킷과 `character_images` 행 수 확인
 - [ ] 디스코드에서 `/새세션` (프롬프트 변경 반영)
 - [ ] 감정이 움직일 만한 말을 걸어 표정이 붙는지
 - [ ] 연속으로 대화해 상한이 걸려 이미지가 매번 나오지는 않는지

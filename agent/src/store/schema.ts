@@ -196,4 +196,14 @@ CREATE TABLE IF NOT EXISTS allowed_dirs (
   dir TEXT NOT NULL,
   PRIMARY KEY (user_id, dir)
 );
+
+-- 캐릭터 표정 이미지 카탈로그. 실제 파일은 Supabase Storage 에 있고 여기엔 URL 만 둔다.
+-- agent/scripts/sync-images.mjs 가 image/ 를 훑어 전체를 교체한다(부분 갱신 없음).
+CREATE TABLE IF NOT EXISTS character_images (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  emotion TEXT NOT NULL,
+  url TEXT NOT NULL,
+  created_ts BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_character_images_emotion ON character_images(emotion);
 `;
