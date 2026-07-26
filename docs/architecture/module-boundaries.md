@@ -18,7 +18,7 @@ lastReviewed: 2026-07-26
 | `store/` | Postgres 영속 계층(레포지토리 패턴). 스키마 정의와 테이블별 CRUD/쿼리만 담당하며, 그 위 어떤 계층에도 의존하지 않는 최하위 레이어다 | `schema.ts`, `db.ts`, `usersRepo.ts`, `conversationsRepo.ts`, `participantsRepo.ts`, `messagesRepo.ts`, `summariesRepo.ts`, `memoriesRepo.ts`, `turnsRepo.ts`, `allowedDirsRepo.ts`, `introspectRepo.ts`, `settingsRepo.ts`, `allowedDirsMigration.ts`, `characterImagesRepo.ts` |
 | `remote/` | 봇↔워커 WebSocket 전송 계층. `protocol.ts`(양쪽 공유 계약)·`hub.ts`(봇 쪽 서버)·`workerClient.ts`/`executors.ts`/`roots.ts`(워커 쪽). `core/` 의 순수 경로 헬퍼(`pathPermission.ts`의 `resolveRealOrNearestAncestor`, `paths.ts`의 `isPathWithinAny`)만 재사용하고 `discord.js`·`store/` 에는 의존하지 않는다 | `protocol.ts`, `hub.ts`, `workerClient.ts`, `executors.ts`, `roots.ts` |
 | `memory/` | 에이전트 작업 디렉토리(`agentCwd`)의 파일 기반 기억 스캐폴드(`MEMORY.md` 초기화). DB 기반 기억(`store/memoriesRepo.ts`의 remember/recall)과는 별개 개념이다 | `memory.ts` |
-| `config.ts`(디렉토리 아님, `src/` 최상위 파일) | 환경변수 로드·검증. 봇용 `loadConfig`/`Config`와 워커용 `loadWorkerConfig`/`WorkerConfig` 두 세트를 제공하며, 다른 모듈에 의존하지 않는다. 워커용 설정은 `databaseUrl`도 `model`도 갖지 않는다 — 워커는 이제 DB도 모델도 다루지 않는다(`docs/decisions/0006-thin-worker.md`) | `config.ts` |
+| `config.ts`(디렉토리 아님, `src/` 최상위 파일) | 환경변수 로드·검증. 봇용 `loadConfig`/`Config`와 워커용 `loadWorkerConfig`/`WorkerConfig` 두 세트를 제공한다. 값 검증을 위해 `remote/roots.ts`의 `isUnambiguousRoot`(WORKER_ROOTS 판정)와 `core/digest.ts`의 `DigestChannels`(타입 전용)를 임포트한다 — 판정 규칙을 두 곳에 복제하지 않기 위한 의도적 의존이다. 워커용 설정은 `databaseUrl`도 `model`도 갖지 않는다 — 워커는 이제 DB도 모델도 다루지 않는다(`docs/decisions/0006-thin-worker.md`) | `config.ts` |
 
 두 진입점(`index.ts` = 봇, `worker.ts` = 로컬 워커)은 위 디렉토리를 조립하는 컴포지션
 루트다. `index.ts`는 `adapters`+`core`+`store`+`events`+`config`+`remote`(허브)를 모두
@@ -58,7 +58,7 @@ lastReviewed: 2026-07-26
   `store`·`events`·`adapters`에는 의존하지 않는다 — `remote/roots.ts`가 워커 쪽 최종
   경로 판정에 이 헬퍼를 재사용하는 것이 유일한 접점이다.
 - `memory/memory.ts`는 `node:fs`/`node:path`만 쓰는 독립 유틸리티다.
-- `config.ts`는 다른 모듈에 의존하지 않는 최하위 설정 로더다.
+- `config.ts`는 설정 로더다. 예외적으로 `remote/roots.ts`(루트 형식 판정)와 `core/digest.ts`(타입 전용)에 의존한다 — 같은 판정 규칙을 설정 로드 시점과 실행 시점에 각각 복제하면 어긋나기 때문이다. 이 둘 말고는 어떤 모듈도 참조하지 않는다.
 
 ## 이벤트버스 계약: 4개 이벤트
 
