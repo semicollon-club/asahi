@@ -86,6 +86,19 @@ function pub(bus: EventBus, hint: ConversationHint, text: string, ts: number): v
   bus.publish({ type: "user_message", channel: "discord", channelRef: hint.discordChannelId, text, ts, hint });
 }
 
+// 예약어 조사의 채널별 동시 실행 가드를 테스트하려면 digest.run 이 끝나는 시점을 테스트가 직접
+// 제어해야 한다(즉시 resolve 되는 가짜로는 "진행 중" 상태를 관찰할 틈이 없다). resolve/reject 를
+// pending 배열로 노출해, 테스트가 원하는 시점에 하나씩 정확히 흘려보낸다.
+function manualDigest() {
+  const calls: Array<{ topic: string; channelRef: string }> = [];
+  const pending: Array<{ resolve: () => void; reject: (err: unknown) => void }> = [];
+  const run = (topic: string, channelRef: string): Promise<void> => {
+    calls.push({ topic, channelRef });
+    return new Promise<void>((resolve, reject) => { pending.push({ resolve, reject }); });
+  };
+  return { calls, pending, digest: { run } };
+}
+
 describe("AgentCore — 멀티유저/멀티대화", () => {
   it("소유자 DM 새 세션엔 개인+공용 기억, 서버 대화엔 공용만 주입한다(프라이버시 불변식)", async () => {
     const t = await setup();
@@ -527,6 +540,94 @@ describe("AgentCore — 정기 게시 예약어", () => {
     const notices = t.published.filter((e) => e.type === "system_notice");
     expect(notices.length).toBeGreaterThan(0);
     expect(t.calls).toHaveLength(0); // 모델도 부르지 않는다
+  });
+});
+
+// 리뷰 발견 — 예약어(/대회·/개발뉴스) 분기는 runConversationTurn 을 거치지 않아 turns.reserve(손님
+// 한도)를 타지 않았다. 손님이 예약어를 연타하면 이 앱에서 가장 비싼 턴(claude-opus·웹검색·
+// maxTurns:30)이 구독 한도 없이 무제한·무제한 동시 실행될 수 있었다. 아래는 (a) 손님 한도 적용과
+// (b) 채널별 동시 실행 방지, 두 수정 각각의 회귀 테스트다.
+describe("AgentCore — 정기 게시 예약어의 손님 한도·동시 실행 방지(리뷰 수정)", () => {
+  it("손님이 시간당 한도를 넘으면 조사 예약어도 거부되고 DigestRunner 는 호출되지 않는다", async () => {
+    const digestCalls: Array<{ topic: string; channelRef: string }> = [];
+    const digest = { run: async (topic: string, channelRef: string) => { digestCalls.push({ topic, channelRef }); } };
+    const t = await setup({ config: { maxTurnsPerHourPerUser: 0 }, digest } as any);
+
+    pub(t.bus, dmHint("guest", "allowed"), "/대회", 1);
+    await t.core.drain();
+
+    expect(digestCalls).toHaveLength(0); // 조사 자체가 시작되지 않는다
+    // runConversationTurn 의 손님 한도 거부와 완전히 같은 안내 문구를 그대로 재사용한다.
+    expect(t.published.find((e) => e.type === "system_notice")?.text).toContain("한도");
+  });
+
+  it("손님이 한도 이내면 조사 예약어가 정상 실행되고 DigestRunner 가 호출된다", async () => {
+    const digestCalls: Array<{ topic: string; channelRef: string }> = [];
+    const digest = { run: async (topic: string, channelRef: string) => { digestCalls.push({ topic, channelRef }); } };
+    const t = await setup({ digest } as any); // 기본 설정: 유저별 한도 20(충분히 여유)
+
+    pub(t.bus, dmHint("guest", "allowed"), "/대회", 1);
+    await t.core.drain();
+
+    expect(digestCalls).toHaveLength(1);
+    expect(digestCalls[0].topic).toBe("contest");
+    expect(t.published.find((e) => e.type === "system_notice" && e.text.includes("한도"))).toBeUndefined();
+  });
+
+  it("소유자는 조사 예약어를 몇 번 실행해도 한도의 영향을 받지 않는다", async () => {
+    const digestCalls: Array<{ topic: string; channelRef: string }> = [];
+    const digest = { run: async (topic: string, channelRef: string) => { digestCalls.push({ topic, channelRef }); } };
+    // 유저별·전역 한도를 0(즉시 거부되는 값)으로 둬도 소유자는 애초에 예약을 타지 않아야 한다.
+    const t = await setup({ config: { maxTurnsPerHourPerUser: 0, maxTurnsPerHourGlobal: 0 }, digest } as any);
+    const hint = dmHint("owner", "owner");
+
+    for (let i = 0; i < 4; i++) {
+      pub(t.bus, hint, "/대회", i + 1);
+      await t.core.drain();
+      await flush(); // 채널별 동시 실행 가드가 다음 반복 전에 풀리도록 대기(가짜 digest 는 즉시 끝남)
+    }
+
+    expect(digestCalls).toHaveLength(4); // 한도 0 인데도 4번 모두 실행됨(무제한)
+  });
+
+  it("같은 채널에서 조사가 진행 중이면 두 번째 예약어는 새 실행을 시작하지 않고 안내한다", async () => {
+    const { calls: digestCalls, pending, digest } = manualDigest();
+    const t = await setup({ digest } as any);
+    const hint = dmHint("owner", "owner"); // 소유자로 손님 한도 변수를 배제하고 동시성만 검증
+
+    pub(t.bus, hint, "/대회", 1);
+    await t.core.drain();
+    expect(digestCalls).toHaveLength(1); // 첫 조사가 시작되어 아직 끝나지 않음
+
+    pub(t.bus, hint, "/대회", 2);
+    await t.core.drain();
+    expect(digestCalls).toHaveLength(1); // 두 번째는 새로 시작되지 않는다
+    const notice = t.published.find((e) => e.type === "system_notice");
+    expect(notice).toBeDefined();
+    expect(notice?.text).toContain("이미");
+
+    pending[0].resolve(); // 정리(끝나지 않은 프라미스를 남기지 않는다)
+    await flush();
+  });
+
+  it("첫 조사가 끝나면(거부돼도) 그 채널에서 다시 예약어를 실행할 수 있다", async () => {
+    const { calls: digestCalls, pending, digest } = manualDigest();
+    const t = await setup({ digest } as any);
+    const hint = dmHint("owner", "owner");
+
+    pub(t.bus, hint, "/대회", 1);
+    await t.core.drain();
+    expect(digestCalls).toHaveLength(1);
+
+    pending[0].reject(new Error("조사 실패(테스트용)")); // digest.run 이 거부되는 경우(리뷰 지적: 가드 누수 위험)
+    await flush();
+
+    pub(t.bus, hint, "/대회", 2);
+    await t.core.drain();
+    expect(digestCalls).toHaveLength(2); // 실패로 끝나도 가드가 풀려 다음 실행이 시작된다
+
+    pending[1].resolve(); // 정리
+    await flush();
   });
 });
 
