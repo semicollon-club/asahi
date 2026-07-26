@@ -631,6 +631,24 @@ describe("AgentCore — 정기 게시 예약어의 손님 한도·동시 실행 
   });
 });
 
+// Task 6 — 예약어 안내(/help). 세션 예약어(/새세션)와 같은 자리(ingest)에서 갈라져 LLM 턴을
+// 아예 거치지 않는다. 이 파일의 다른 예약어 테스트(478번째 줄 부근)와 같은 패턴(pub + core.drain)을
+// 그대로 따른다 — setup() 에는 t.pub 필드가 없으므로 독립 함수 pub(bus, hint, text, ts) 를 쓴다.
+describe("AgentCore — /help", () => {
+  it("예약어 목록을 보내고 모델을 부르지 않는다", async () => {
+    const t = await setup();
+    pub(t.bus, dmHint("owner", "owner"), "/help", 1);
+    await t.core.drain();
+
+    expect(t.calls).toHaveLength(0); // 모델을 부르지 않는다
+    const notice = t.published.find((e) => e.type === "assistant_message");
+    expect(notice).toBeDefined();
+    const text = (notice as { text: string }).text;
+    expect(text).toContain("/새세션");
+    expect(text).toContain("/대회");
+  });
+});
+
 describe("AgentCore — 이미지 입력", () => {
   const fakeFetch = (async () => ({ ok: true, arrayBuffer: async () => new TextEncoder().encode("img").buffer }) as Response) as unknown as typeof fetch;
 

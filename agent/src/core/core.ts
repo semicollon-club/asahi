@@ -2,7 +2,7 @@ import type { EventBus, UserMessageEvent, ConversationHint } from "../events/bus
 import type { Config } from "../config.js";
 import { shouldConnectWorker, type TurnRunner, type TurnContext, type TurnResult, type ProgressUpdate } from "./agent.js";
 import { buildSystemPrompt, deriveRapportStage } from "./persona.js";
-import { parseSessionCommand, parseDigestCommand } from "./commands.js";
+import { parseSessionCommand, parseDigestCommand, parseHelpCommand, renderCommandHelp } from "./commands.js";
 import type { DigestRunner } from "./digest.js";
 import type { Role } from "../store/usersRepo.js";
 import type { UsersRepo } from "../store/usersRepo.js";
@@ -135,6 +135,12 @@ export class AgentCore {
     if (parseSessionCommand(text) === "reset") {
       await this.repos.conversations.setSession(conv.id, null, ts);
       this.bus.publish({ type: "assistant_message", channel: "discord", channelRef: conv.discordChannelId, text: "…알겠어. 새 세션으로 시작할게. 다음 메시지부터 새로 대화하자.", ts: this.now() });
+      return;
+    }
+
+    // 도움말: 예약어 목록만 보여준다. 모델을 부르지 않는다.
+    if (parseHelpCommand(text)) {
+      this.bus.publish({ type: "assistant_message", channel: "discord", channelRef: conv.discordChannelId, text: renderCommandHelp(), ts: this.now() });
       return;
     }
 
