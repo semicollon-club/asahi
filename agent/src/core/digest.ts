@@ -1,6 +1,11 @@
 // 정기 뉴스 게시. 실행 판정은 순수 함수로 떼어내 시각·기록만으로 결정하고,
 // 실제 실행(DigestRunner)은 같은 파일 아래쪽에 둔다.
 
+import type { TurnRunner } from "./agent.js";
+import type { EventBus } from "../events/bus.js";
+import type { SettingsRepo } from "../store/settingsRepo.js";
+import { buildSystemPrompt } from "./persona.js";
+
 export type DigestTopic = "contest" | "devnews";
 
 // KST 기준 게시 시각. 환경변수로 빼지 않는다 — 잘못 설정하면 조용히 안 도는 것보다
@@ -40,4 +45,80 @@ export function shouldRunDigest(
   const kst = new Date(nowUtcMs + KST_OFFSET_MS);
   if (kst.getUTCHours() < hourKst) return false;
   return lastRunDate !== kstDateString(nowUtcMs);
+}
+
+export type DigestChannels = Partial<Record<DigestTopic, string>>;
+
+const LAST_RUN_KEY = (topic: DigestTopic) => `digest.lastRun.${topic}`;
+const FAILED_TEXT = "…오늘은 못 찾았어. 나중에 다시 볼게.";
+
+export class DigestRunner {
+  private runTurn: TurnRunner;
+  private bus: EventBus;
+  private settings: SettingsRepo;
+  private agentCwd: string;
+  private channels: DigestChannels;
+  private emotions: string[];
+  private now: () => number;
+
+  constructor(deps: {
+    runTurn: TurnRunner; bus: EventBus; settings: SettingsRepo; agentCwd: string;
+    channels: DigestChannels; emotions?: string[]; now?: () => number;
+  }) {
+    this.runTurn = deps.runTurn;
+    this.bus = deps.bus;
+    this.settings = deps.settings;
+    this.agentCwd = deps.agentCwd;
+    this.channels = deps.channels;
+    this.emotions = deps.emotions ?? [];
+    this.now = deps.now ?? Date.now;
+  }
+
+  // 한 주제를 조사해 지정한 채널로 발행한다. 성공 여부를 돌려준다 —
+  // checkAndRun 이 이 값으로 기록 여부를 정한다. 예약어 경로는 값을 무시한다.
+  private async execute(topic: DigestTopic, channelRef: string): Promise<boolean> {
+    const spec = DIGEST_TOPICS[topic];
+    // 게시는 사용자 대화가 아니다. 공개 채널 계층(isOwner:false, isPrivate:false)으로 돌려
+    // PC 도구가 구조적으로 열리지 않게 한다 — 플래그로 빼는 게 아니라 그 계층에 애초에 없다.
+    const context = { role: "allowed" as const, isPrivate: false, isOwner: false, userId: "digest", conversationId: 0 };
+    let text = "";
+    let ok = false;
+    try {
+      const result = await this.runTurn({
+        prompt: spec.prompt,
+        systemPrompt: buildSystemPrompt({ role: "allowed", isPrivate: false, isOwner: false, emotions: this.emotions }),
+        cwd: this.agentCwd,
+        context,
+      });
+      text = result.text.trim();
+      ok = result.ok && text.length > 0;
+    } catch (err) {
+      console.error(`[digest] ${topic} 조사 실패:`, err);
+    }
+    this.bus.publish({
+      type: "assistant_message", channel: "discord", channelRef,
+      text: ok ? text : FAILED_TEXT, ts: this.now(),
+    });
+    return ok;
+  }
+
+  // 예약어 경로: 명령을 친 채널에 즉시 답한다. lastRun 을 건드리지 않는다 —
+  // 수동으로 한 번 봤다고 다음 날 아침 게시가 걸러지면 안 된다.
+  async run(topic: DigestTopic, channelRef: string): Promise<void> {
+    await this.execute(topic, channelRef);
+  }
+
+  // 스케줄 경로: 주제별로 판정해 실행하고, 성공한 것만 기록한다.
+  async checkAndRun(): Promise<void> {
+    for (const topic of Object.keys(DIGEST_TOPICS) as DigestTopic[]) {
+      const channelRef = this.channels[topic];
+      if (!channelRef) continue; // 채널 미설정 주제는 조용히 건너뛴다(부팅 시 한 번 안내한다)
+      const nowMs = this.now();
+      const last = await this.settings.get(LAST_RUN_KEY(topic));
+      if (!shouldRunDigest(nowMs, last)) continue;
+      const ok = await this.execute(topic, channelRef);
+      // 실패한 날은 기록하지 않아 다음 확인(1분 뒤)에서 다시 시도한다.
+      if (ok) await this.settings.set(LAST_RUN_KEY(topic), kstDateString(nowMs));
+    }
+  }
 }
