@@ -2,7 +2,7 @@
 // 표정 이미지 동기화: image/<감정>/*.png 를 Supabase Storage 에 올리고
 // character_images 카탈로그를 통째로 갈아끼운다.
 //
-// 리포 루트에서 실행: node scripts/sync-images.mjs
+// 실행: cd agent && npm run sync-images
 // 필요 환경변수: DATABASE_URL, SUPABASE_URL, SUPABASE_SERVICE_KEY
 //
 // 이미지를 추가·교체·삭제한 뒤 이 스크립트만 다시 돌리면 된다. 재배포는 필요 없다.
@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 import pg from "pg";
 import dotenv from "dotenv";
 
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 dotenv.config({ path: path.join(ROOT, ".env") });
 
 const BUCKET = "character-images";
