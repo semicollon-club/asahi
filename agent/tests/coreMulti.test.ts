@@ -11,6 +11,7 @@ import { TurnsRepo } from "../src/store/turnsRepo.js";
 import { AgentCore } from "../src/core/core.js";
 import type { Config } from "../src/config.js";
 import type { TurnRequest, TurnResult } from "../src/core/agent.js";
+import type { DigestRunner } from "../src/core/digest.js";
 
 const HOUR = 60 * 60 * 1000;
 // pg-mem 의 Pool.query() 는 마이크로태스크가 아니라 매크로태스크(setImmediate) 단위로 풀린다
@@ -23,7 +24,7 @@ const flush = async () => {
 
 async function setup(over: {
   config?: Partial<Config>; mode?: "immediate" | "manual" | "throw" | "resume-fails";
-  imageFetch?: typeof fetch; hub?: { isConnected(userId: string): boolean };
+  imageFetch?: typeof fetch; hub?: { isConnected(userId: string): boolean }; digest?: DigestRunner;
 } = {}) {
   const db = await openTestDb();
   const repos = {
@@ -59,7 +60,7 @@ async function setup(over: {
   const bus = new EventBus();
   const core = new AgentCore({
     bus, config, runTurn, now: () => clock, repos, agentCwd: "/data/agent",
-    fetchImpl: over.imageFetch, hub: over.hub,
+    fetchImpl: over.imageFetch, hub: over.hub, digest: over.digest,
   });
   core.start();
   const published: AgentEvent[] = [];
@@ -83,6 +84,33 @@ function threadHint(userId: string, channelId: string, role: "owner" | "allowed"
 }
 function pub(bus: EventBus, hint: ConversationHint, text: string, ts: number): void {
   bus.publish({ type: "user_message", channel: "discord", channelRef: hint.discordChannelId, text, ts, hint });
+}
+
+// 예약어 조사의 동시 실행 가드를 테스트하려면 digest.run 이 끝나는 시점을 테스트가 직접
+// 제어해야 한다(즉시 resolve 되는 가짜로는 "진행 중" 상태를 관찰할 틈이 없다). resolve/reject 를
+// pending 배열로 노출해, 테스트가 원하는 시점에 하나씩 정확히 흘려보낸다.
+//
+// 리뷰 수정(FIX1, 최종 리뷰 3차): 동시 실행 가드는 이제 AgentCore(옛 digestInFlight Set)가
+// 아니라 DigestRunner 내부(주제별 running Set)에 있다. AgentCore 는 run() 의 반환값
+// ({ started: boolean })만 보고 "이미 조사 중" 안내를 낼지 정한다 — 그 가드 자체가 실제로
+// 동작하는지는 digestRunner.test.ts 가 실물 DigestRunner 로 직접 검증한다. 이 가짜는 AgentCore
+// 쪽의 안내 로직만 겨냥하므로, 실물과 같은 모양(주제별 Set)으로 최소한만 흉내낸다.
+function manualDigest() {
+  const calls: Array<{ topic: string; channelRef: string }> = [];
+  const pending: Array<{ resolve: () => void; reject: (err: unknown) => void }> = [];
+  const running = new Set<string>();
+  const run = (topic: string, channelRef: string): Promise<{ started: boolean }> => {
+    if (running.has(topic)) return Promise.resolve({ started: false });
+    running.add(topic);
+    calls.push({ topic, channelRef });
+    return new Promise<{ started: boolean }>((resolve, reject) => {
+      pending.push({
+        resolve: () => { running.delete(topic); resolve({ started: true }); },
+        reject: (err) => { running.delete(topic); reject(err); },
+      });
+    });
+  };
+  return { calls, pending, digest: { run } };
 }
 
 describe("AgentCore — 멀티유저/멀티대화", () => {
@@ -482,6 +510,159 @@ describe("AgentCore — DM 세션 예약어(/새세션)", () => {
     expect(await t.repos.messages.countUserMessages("owner")).toBe(msgCountBefore); // 명령어는 기록되지 않았다
     const notices = t.published.filter((p) => p.type === "assistant_message");
     expect(notices.some((n) => /새 세션|세션.*시작|새로/.test((n as { text: string }).text))).toBe(true);
+  });
+});
+
+// Task 5(배선) — 정기 게시 예약어(/대회·/개발뉴스)는 세션 예약어(/새세션)와 같은 자리(ingest)에서
+// 갈라져 LLM 턴을 아예 거치지 않는다. setup() 은 DigestRunner 의 실제 구현을 인스턴스화하지 않고
+// { run } 만 흉내 낸 가짜를 주입한다 — private 필드를 가진 실제 클래스 타입과 구조가 달라 setup
+// 호출부에서 as any 로 넘긴다(대신 setup 내부 배선(over.digest → new AgentCore({ digest }))은
+// 타입 그대로 유지한다). 이 파일의 다른 테스트와 같은 패턴(pub + core.drain)을 그대로 따른다 —
+// send/notices/channelRef/runTurnCalls 라는 이름은 이 헬퍼엔 없으므로(calls/published/dmHint 로 대체).
+describe("AgentCore — 정기 게시 예약어", () => {
+  it("예약어를 받으면 LLM 턴을 돌리지 않고 DigestRunner 에 넘긴다", async () => {
+    const calls: Array<{ topic: string; channelRef: string }> = [];
+    const digest = { run: async (topic: string, channelRef: string) => { calls.push({ topic, channelRef }); return { started: true }; } };
+    const t = await setup({ digest } as any);
+
+    pub(t.bus, dmHint("owner", "owner"), "/대회", 1);
+    await t.core.drain();
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].topic).toBe("contest");
+    expect(t.calls).toHaveLength(0); // 모델을 부르지 않는다
+  });
+
+  it("예약어를 친 그 채널로 답한다", async () => {
+    const calls: Array<{ topic: string; channelRef: string }> = [];
+    const digest = { run: async (topic: string, channelRef: string) => { calls.push({ topic, channelRef }); return { started: true }; } };
+    const t = await setup({ digest } as any);
+    const hint = dmHint("owner", "owner");
+
+    pub(t.bus, hint, "/개발뉴스", 1);
+    await t.core.drain();
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].channelRef).toBe(hint.discordChannelId);
+  });
+
+  it("digest 가 주입되지 않았으면 안내만 하고 넘어간다", async () => {
+    const t = await setup(); // digest 미배선
+    pub(t.bus, dmHint("owner", "owner"), "/대회", 1);
+    await t.core.drain();
+
+    const notices = t.published.filter((e) => e.type === "system_notice");
+    expect(notices.length).toBeGreaterThan(0);
+    expect(t.calls).toHaveLength(0); // 모델도 부르지 않는다
+  });
+});
+
+// 리뷰 발견 — 예약어(/대회·/개발뉴스) 분기는 runConversationTurn 을 거치지 않아 turns.reserve(손님
+// 한도)를 타지 않았다. 손님이 예약어를 연타하면 이 앱에서 가장 비싼 턴(claude-opus·웹검색·
+// maxTurns:30)이 구독 한도 없이 무제한·무제한 동시 실행될 수 있었다. 아래는 (a) 손님 한도 적용과
+// (b) 동시 실행 방지, 두 수정 각각의 회귀 테스트다.
+// (b) 의 실제 가드(주제별 running Set)는 이제 DigestRunner 내부에 있다(FIX1, 최종 리뷰 3차 —
+// digestRunner.test.ts 가 실물로 검증). 여기서는 AgentCore 가 digest.run() 의 반환값
+// ({ started: boolean })을 보고 "이미 조사 중" 안내를 내는지만, manualDigest 가짜로 확인한다.
+describe("AgentCore — 정기 게시 예약어의 손님 한도·동시 실행 방지(리뷰 수정)", () => {
+  it("손님이 시간당 한도를 넘으면 조사 예약어도 거부되고 DigestRunner 는 호출되지 않는다", async () => {
+    const digestCalls: Array<{ topic: string; channelRef: string }> = [];
+    const digest = { run: async (topic: string, channelRef: string) => { digestCalls.push({ topic, channelRef }); return { started: true }; } };
+    const t = await setup({ config: { maxTurnsPerHourPerUser: 0 }, digest } as any);
+
+    pub(t.bus, dmHint("guest", "allowed"), "/대회", 1);
+    await t.core.drain();
+
+    expect(digestCalls).toHaveLength(0); // 조사 자체가 시작되지 않는다
+    // runConversationTurn 의 손님 한도 거부와 완전히 같은 안내 문구를 그대로 재사용한다.
+    expect(t.published.find((e) => e.type === "system_notice")?.text).toContain("한도");
+  });
+
+  it("손님이 한도 이내면 조사 예약어가 정상 실행되고 DigestRunner 가 호출된다", async () => {
+    const digestCalls: Array<{ topic: string; channelRef: string }> = [];
+    const digest = { run: async (topic: string, channelRef: string) => { digestCalls.push({ topic, channelRef }); return { started: true }; } };
+    const t = await setup({ digest } as any); // 기본 설정: 유저별 한도 20(충분히 여유)
+
+    pub(t.bus, dmHint("guest", "allowed"), "/대회", 1);
+    await t.core.drain();
+
+    expect(digestCalls).toHaveLength(1);
+    expect(digestCalls[0].topic).toBe("contest");
+    expect(t.published.find((e) => e.type === "system_notice" && e.text.includes("한도"))).toBeUndefined();
+  });
+
+  it("소유자는 조사 예약어를 몇 번 실행해도 한도의 영향을 받지 않는다", async () => {
+    const digestCalls: Array<{ topic: string; channelRef: string }> = [];
+    const digest = { run: async (topic: string, channelRef: string) => { digestCalls.push({ topic, channelRef }); return { started: true }; } };
+    // 유저별·전역 한도를 0(즉시 거부되는 값)으로 둬도 소유자는 애초에 예약을 타지 않아야 한다.
+    const t = await setup({ config: { maxTurnsPerHourPerUser: 0, maxTurnsPerHourGlobal: 0 }, digest } as any);
+    const hint = dmHint("owner", "owner");
+
+    for (let i = 0; i < 4; i++) {
+      pub(t.bus, hint, "/대회", i + 1);
+      await t.core.drain();
+      await flush(); // 동시 실행 가드가 다음 반복 전에 풀리도록 대기(가짜 digest 는 즉시 끝남)
+    }
+
+    expect(digestCalls).toHaveLength(4); // 한도 0 인데도 4번 모두 실행됨(무제한)
+  });
+
+  it("같은 채널에서 조사가 진행 중이면 두 번째 예약어는 새 실행을 시작하지 않고 안내한다", async () => {
+    const { calls: digestCalls, pending, digest } = manualDigest();
+    const t = await setup({ digest } as any);
+    const hint = dmHint("owner", "owner"); // 소유자로 손님 한도 변수를 배제하고 동시성만 검증
+
+    pub(t.bus, hint, "/대회", 1);
+    await t.core.drain();
+    expect(digestCalls).toHaveLength(1); // 첫 조사가 시작되어 아직 끝나지 않음
+
+    pub(t.bus, hint, "/대회", 2);
+    await t.core.drain();
+    expect(digestCalls).toHaveLength(1); // 두 번째는 새로 시작되지 않는다
+    const notice = t.published.find((e) => e.type === "system_notice");
+    expect(notice).toBeDefined();
+    expect(notice?.text).toContain("이미");
+
+    pending[0].resolve(); // 정리(끝나지 않은 프라미스를 남기지 않는다)
+    await flush();
+  });
+
+  it("첫 조사가 끝나면(거부돼도) 그 채널에서 다시 예약어를 실행할 수 있다", async () => {
+    const { calls: digestCalls, pending, digest } = manualDigest();
+    const t = await setup({ digest } as any);
+    const hint = dmHint("owner", "owner");
+
+    pub(t.bus, hint, "/대회", 1);
+    await t.core.drain();
+    expect(digestCalls).toHaveLength(1);
+
+    pending[0].reject(new Error("조사 실패(테스트용)")); // digest.run 이 거부되는 경우(리뷰 지적: 가드 누수 위험)
+    await flush();
+
+    pub(t.bus, hint, "/대회", 2);
+    await t.core.drain();
+    expect(digestCalls).toHaveLength(2); // 실패로 끝나도 가드가 풀려 다음 실행이 시작된다
+
+    pending[1].resolve(); // 정리
+    await flush();
+  });
+});
+
+// Task 6 — 예약어 안내(/help). 세션 예약어(/새세션)와 같은 자리(ingest)에서 갈라져 LLM 턴을
+// 아예 거치지 않는다. 이 파일의 다른 예약어 테스트(478번째 줄 부근)와 같은 패턴(pub + core.drain)을
+// 그대로 따른다 — setup() 에는 t.pub 필드가 없으므로 독립 함수 pub(bus, hint, text, ts) 를 쓴다.
+describe("AgentCore — /help", () => {
+  it("예약어 목록을 보내고 모델을 부르지 않는다", async () => {
+    const t = await setup();
+    pub(t.bus, dmHint("owner", "owner"), "/help", 1);
+    await t.core.drain();
+
+    expect(t.calls).toHaveLength(0); // 모델을 부르지 않는다
+    const notice = t.published.find((e) => e.type === "assistant_message");
+    expect(notice).toBeDefined();
+    const text = (notice as { text: string }).text;
+    expect(text).toContain("/새세션");
+    expect(text).toContain("/대회");
   });
 });
 

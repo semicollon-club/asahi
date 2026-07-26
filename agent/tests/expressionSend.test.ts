@@ -135,6 +135,7 @@ function makeConfig(): Config {
     model: "test-model",
     workerToken: "x".repeat(20),
     httpPort: 3000,
+    digestChannels: {},
   };
 }
 

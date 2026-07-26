@@ -9,6 +9,7 @@ import { AllowedDirsRepo } from "../src/store/allowedDirsRepo.js";
 import { IntrospectRepo } from "../src/store/introspectRepo.js";
 import {
   buildToolCtx, buildMultimodalMessage, shouldConnectWorker, buildRemoteCtx, resolveWorkerConnected,
+  resolveWebToolsEnabled,
   type TurnContext, type ToolRepos,
 } from "../src/core/agent.js";
 import { allowDirHandler, allowedToolsFor, type RuntimeInfo } from "../src/core/tools.js";
@@ -130,6 +131,33 @@ describe("resolveWorkerConnected — noRemoteTools 는 워커 연결 여부와 �
     // dir 관리 도구(FIX2 로 workerConnected 하나로 묶임)도 마찬가지로 닫힌다.
     expect(tools).not.toContain("mcp__asahi__allow_dir");
     // 기억·접근관리처럼 워커와 무관한 도구는 그대로 남는다(요약 자체는 대화 처리이므로).
+    expect(tools).toContain("mcp__asahi__remember");
+  });
+});
+
+// FIX3(중요, 최종 리뷰 3차) — 유휴 대화 요약 턴(core.ts 의 summarizeAndClose)은 noRemoteTools 로
+// fs_*/sh_exec 는 이미 막아 두었지만, WebSearch 는 SDK 내장 도구라 그 플래그의 영향을 받지
+// 않는다(agent.ts 의 builtinTools 는 별도 상수였다 — 리뷰 재현: noRemoteTools:true 인 실제
+// makeRunAgentTurn 호출에서도 allowedTools 에 WebSearch 가 그대로 나왔다). noRemoteTools 와
+// 똑같은 방식으로 noWebTools 를 뽑아, 이번 턴에 WebSearch 를 열지 판정한다.
+describe("resolveWebToolsEnabled — noWebTools 는 웹 검색을 별도로 강제로 닫는다(FIX3)", () => {
+  it("noWebTools 가 없으면(기본) 웹 도구가 열려 있다(회귀 없음)", () => {
+    expect(resolveWebToolsEnabled({})).toBe(true);
+  });
+
+  it("noWebTools=true 면 웹 도구가 닫힌다(유휴 요약 턴)", () => {
+    expect(resolveWebToolsEnabled({ noWebTools: true })).toBe(false);
+  });
+
+  it("noWebTools=false 를 명시해도 열려 있다(회귀 없음)", () => {
+    expect(resolveWebToolsEnabled({ noWebTools: false })).toBe(true);
+  });
+
+  it("FIX3 — noWebTools 인 요청은 allowedToolsFor 에 WebSearch 를 하나도 넘기지 않는다(유휴 요약 턴이 실제로 받는 도구 목록)", () => {
+    const webToolsEnabled = resolveWebToolsEnabled({ noWebTools: true });
+    const tools = allowedToolsFor("owner", true, true, "local", false, webToolsEnabled);
+    expect(tools).not.toContain("WebSearch");
+    // 기억·접근관리처럼 웹 검색과 무관한 도구는 그대로 남는다(요약 자체는 대화 처리이므로).
     expect(tools).toContain("mcp__asahi__remember");
   });
 });

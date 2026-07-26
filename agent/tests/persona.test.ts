@@ -34,6 +34,14 @@ describe("buildSystemPrompt", () => {
     expect(p).toMatch(/신뢰할 수 없는/);
   });
 
+  // FIX5(중요, 최종 리뷰 3차) — 이 브랜치로 모든 턴이 웹 검색 결과(신뢰할 수 없는 외부 콘텐츠)를
+  // 받게 됐는데, 이 규칙의 괄호 예시는 디스코드 채널 컨텍스트만 들고 있었다. 웹 검색 결과도
+  // 같은 위험군이라는 걸 명시한다(capability-model.md 가 이 규칙을 유일한 완화로 지목한다).
+  it("외부 관찰 콘텐츠 불신 규칙이 웹 검색 결과도 명시적으로 포함한다(FIX5)", () => {
+    const p = buildSystemPrompt({ role: "owner", isPrivate: true, isOwner: true });
+    expect(p).toMatch(/웹\s*검색/);
+  });
+
   // FIX3(최종 리뷰): 능력 안내는 이제 deployTarget 이 아니라 workerConnected 로 갈린다 — 실제
   // 파일 도구(fs_read 등)를 쓸 수 있는 상태를 검증하려면 workerConnected:true 를 명시해야 한다
   // (생략 시엔 "워커 미연결" 문구가 나온다 — 아래 별도 describe 블록에서 그 경로를 검증한다).

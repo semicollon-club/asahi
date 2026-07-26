@@ -15,6 +15,10 @@ import { isPathWithinAny, normalizeDir } from "./paths.js";
 export const TOOL_SERVER = "asahi";
 const t = (name: string): string => `mcp__${TOOL_SERVER}__${name}`;
 
+// SDK 내장 웹 검색. MCP 도구가 아니라 이름 그대로 allowedTools 에 들어간다.
+// WebFetch(임의 URL 페치)는 열지 않는다 — 지금 필요한 건 검색이고 노출 표면이 훨씬 넓다.
+const WEB_TOOLS = ["WebSearch"];
+
 // 자기인지(§Task4): 이 봇이 어떤 모델·SDK·배포 설정으로 동작 중인지. runtime_info 도구가 그대로 보고한다.
 export type RuntimeInfo = { model: string; sdkVersion: string; deployTarget: "local" | "cloud"; maxTurns: number };
 
@@ -204,6 +208,12 @@ export function allowedToolsFor(
   isOwner: boolean,
   deployTarget: "local" | "cloud" = "local",
   workerConnected = false,
+  // FIX3(중요, 최종 리뷰 3차): 웹 검색도 워커 원격 도구처럼 턴별로 열고 닫을 수 있어야 한다 —
+  // 유휴 요약 턴(core.ts 의 summarizeAndClose)은 사람이 지켜보지 않는 타이머로 돌고 이전에
+  // 심어졌을 수도 있는 프롬프트 인젝션을 담은 세션을 그대로 이어받는데, 요약은 검색이 필요
+  // 없으므로 WebSearch 를 열어 둘 이유가 없다(agent.ts 의 resolveWebToolsEnabled 가 이 값을
+  // 계산해 넘긴다). 기본값 true — 일반 대화·정기 게시는 이 인자를 생략해 기존 동작 그대로다.
+  webToolsEnabled = true,
 ): string[] {
   // 원격 도구는 워커 연결이 있을 때만 연다. 판정 축이 "어디서 실행 중인가"(deployTarget)가 아니라
   // "워커가 붙어 있는가"로 바뀐 것이 이 단계의 핵심이다 — cloud 에서도 워커만 붙으면 PC 작업이 된다.
@@ -213,16 +223,18 @@ export function allowedToolsFor(
   // 은 이 함수 안에서 더 이상 아무것도 분기하지 않는다(여전히 runtime_info 가 보고하는 배포
   // 정보로서는 의미가 있어 시그니처에는 남겨 둔다).
   const dirTools = workerConnected ? [t("allow_dir"), t("revoke_dir"), t("list_dirs")] : [];
+  const webTools = webToolsEnabled ? WEB_TOOLS : [];
   if (isOwner && isPrivate) {
     return [
       ...remote,
       t("remember"), t("recall"), t("character_fact"), t("manage_access"),
       ...dirTools,
       t("db_schema"), t("db_query"), t("runtime_info"),
+      ...webTools,
     ];
   }
-  if (isPrivate && (role === "owner" || role === "allowed")) return [t("remember"), t("recall"), t("character_fact")];
-  return [t("recall")];
+  if (isPrivate && (role === "owner" || role === "allowed")) return [t("remember"), t("recall"), t("character_fact"), ...webTools];
+  return [t("recall"), ...webTools];
 }
 
 // ── 인프로세스 MCP 서버(SDK) — handler 는 위 순수 함수를 감싼다 ──────────────

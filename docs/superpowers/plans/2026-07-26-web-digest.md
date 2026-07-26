@@ -861,7 +861,174 @@ git commit -m "feat: 정기 게시 배선 — 채널 설정·예약어 분기·�
 
 ---
 
-### Task 6: 문서
+### Task 6: `/help` — 예약어 안내
+
+**Files:**
+- Modify: `agent/src/core/commands.ts`
+- Modify: `agent/src/core/core.ts`
+- Test: `agent/tests/commands.test.ts`, `agent/tests/coreMulti.test.ts`
+
+**Interfaces:**
+- Consumes: 기존 예약어 테이블(`RESET_COMMANDS`, `DIGEST_COMMANDS`)
+- Produces:
+  - `COMMAND_HELP: ReadonlyArray<{ commands: readonly string[]; description: string }>`
+  - `parseHelpCommand(text: string): boolean`
+  - `renderCommandHelp(): string`
+
+예약어는 아무 표시가 없어 아는 사람만 쓴다. `/help` 로 목록을 보여준다.
+
+**이 태스크의 핵심은 안내문이 예약어 테이블에서 파생되게 만드는 것이다.** 손으로 적으면
+예약어를 추가하는 순간 조용히 어긋난다 — 그리고 그 어긋남은 아무도 눈치채지 못한다.
+`COMMAND_HELP` 는 파싱에 쓰이는 바로 그 상수들을 참조해 만들고, 테스트가 "파싱되는 모든
+예약어가 안내문에 등장하는가"를 검증한다.
+
+- [ ] **Step 1: 실패하는 테스트 작성**
+
+`agent/tests/commands.test.ts` 에 추가한다. 임포트에 `parseHelpCommand`·`renderCommandHelp`·`COMMAND_HELP` 를 더한다.
+
+```ts
+describe("parseHelpCommand", () => {
+  it("도움말 예약어를 인식한다", () => {
+    expect(parseHelpCommand("/help")).toBe(true);
+    expect(parseHelpCommand("/도움말")).toBe(true);
+    expect(parseHelpCommand("/명령어")).toBe(true);
+  });
+
+  it("앞뒤 공백과 대소문자를 무시한다", () => {
+    expect(parseHelpCommand("  /HELP  ")).toBe(true);
+  });
+
+  it("정확히 일치할 때만 인식한다", () => {
+    expect(parseHelpCommand("/help 알려줘")).toBe(false);
+    expect(parseHelpCommand("help")).toBe(false);
+    expect(parseHelpCommand("")).toBe(false);
+  });
+
+  it("다른 예약어와 서로 간섭하지 않는다", () => {
+    expect(parseHelpCommand("/새세션")).toBe(false);
+    expect(parseHelpCommand("/대회")).toBe(false);
+    expect(parseSessionCommand("/help")).toBeNull();
+    expect(parseDigestCommand("/help")).toBeNull();
+  });
+});
+
+describe("renderCommandHelp — 안내문이 실제 예약어와 어긋나지 않는다", () => {
+  it("파싱되는 모든 예약어가 안내문에 나온다", () => {
+    const help = renderCommandHelp();
+    // 안내문에 적힌 예약어를 전부 모아, 하나도 빠짐없이 실제로 파싱되는지 확인한다.
+    const listed = COMMAND_HELP.flatMap((g) => g.commands);
+    expect(listed.length).toBeGreaterThan(0);
+    for (const cmd of listed) {
+      expect(help).toContain(cmd);
+      const parsed = parseSessionCommand(cmd) !== null || parseDigestCommand(cmd) !== null || parseHelpCommand(cmd);
+      expect(parsed, `${cmd} 는 안내문에 있지만 파싱되지 않는다`).toBe(true);
+    }
+  });
+
+  it("세션·조사·도움말 예약어가 모두 안내문에 포함된다", () => {
+    const help = renderCommandHelp();
+    for (const cmd of ["/새세션", "/대회", "/개발뉴스", "/help"]) {
+      expect(help).toContain(cmd);
+    }
+  });
+
+  it("각 그룹에 설명이 붙어 있다", () => {
+    for (const g of COMMAND_HELP) {
+      expect(g.commands.length).toBeGreaterThan(0);
+      expect(g.description.length).toBeGreaterThan(5);
+    }
+  });
+});
+```
+
+- [ ] **Step 2: 실패 확인**
+
+```bash
+cd agent && npx vitest run tests/commands.test.ts
+```
+
+기대: FAIL — `parseHelpCommand` 등 임포트 불가.
+
+- [ ] **Step 3: `commands.ts` 구현**
+
+기존 `RESET_COMMANDS`·`DIGEST_COMMANDS` 는 건드리지 않는다. 아래를 파일 끝에 추가한다.
+
+```ts
+const HELP_COMMANDS = new Set(["/help", "/도움말", "/명령어"]);
+
+export function parseHelpCommand(text: string): boolean {
+  return HELP_COMMANDS.has(text.trim().toLowerCase());
+}
+
+// 안내문은 위 예약어 테이블에서 파생시킨다. 손으로 적으면 예약어를 추가하는 순간
+// 조용히 어긋나고, 그 어긋남은 아무도 눈치채지 못한다(테스트가 이 일치를 검증한다).
+export const COMMAND_HELP: ReadonlyArray<{ commands: readonly string[]; description: string }> = [
+  { commands: [...RESET_COMMANDS], description: "대화를 새 세션으로 시작한다. 성격이나 설정이 바뀐 뒤에 쓴다" },
+  { commands: ["/대회"], description: "코딩·CTF 대회 소식을 지금 조사해서 이 채널에 알려준다" },
+  { commands: ["/개발뉴스"], description: "개발 관련 소식을 지금 조사해서 이 채널에 알려준다" },
+  { commands: [...HELP_COMMANDS], description: "이 목록을 보여준다" },
+];
+
+export function renderCommandHelp(): string {
+  const lines = COMMAND_HELP.map((g) => `- ${g.commands.join(" · ")} — ${g.description}`);
+  return `쓸 수 있는 명령어야.\n\n${lines.join("\n")}\n\n그 외에는 그냥 말 걸면 돼.`;
+}
+```
+
+`DIGEST_COMMANDS` 의 키를 직접 펼치지 않고 `/대회`·`/개발뉴스` 를 나열하는 이유는 주제별로
+설명이 다르기 때문이다. 테스트가 "안내문의 모든 예약어가 실제로 파싱되는가"를 검증하므로,
+주제를 추가하고 안내문에 빠뜨리면 그 테스트가 잡지 못한다 — 반대 방향(파싱되는데 안내문에
+없음)은 §Step 1 의 두 번째 테스트가 주요 예약어에 한해 막는다. 주제가 늘면 그 목록도 함께 늘린다.
+
+- [ ] **Step 4: `core.ts` 분기 추가**
+
+임포트에 `parseHelpCommand`·`renderCommandHelp` 를 더하고, `parseDigestCommand` 분기 **바로 앞**에
+넣는다. 도움말은 모델을 부르지 않으므로 한도와 무관하다.
+
+```ts
+    // 도움말: 예약어 목록만 보여준다. 모델을 부르지 않는다.
+    if (parseHelpCommand(text)) {
+      this.bus.publish({ type: "assistant_message", channel: "discord", channelRef: conv.discordChannelId, text: renderCommandHelp(), ts: this.now() });
+      return;
+    }
+```
+
+- [ ] **Step 5: `coreMulti.test.ts` 에 분기 테스트 추가**
+
+이 파일의 기존 `setup()` 헬퍼를 재사용한다. 반환 필드 이름은 파일을 읽고 맞춘다.
+
+```ts
+describe("AgentCore — /help", () => {
+  it("예약어 목록을 보내고 모델을 부르지 않는다", async () => {
+    const t = await setup();
+    await t.pub(/* 이 파일의 기존 방식대로 "/help" 를 보낸다 */);
+    // 발행된 assistant_message 에 주요 예약어가 들어 있는지 확인
+    // 그리고 runTurn 호출 수가 0 인지 확인
+  });
+});
+```
+
+위 골격의 주석 자리는 **파일의 실제 헬퍼 사용법에 맞춰 채운다.** 검증할 내용은 둘이다 —
+`/help` 응답에 `/새세션`·`/대회` 가 들어 있고, 모델 호출이 0건이다.
+
+- [ ] **Step 6: 통과 확인**
+
+```bash
+cd agent && npx vitest run tests/commands.test.ts tests/coreMulti.test.ts && npm test && npx tsc --noEmit
+```
+
+기대: 0 failed, 1 skipped. tsc 클린.
+
+- [ ] **Step 7: 커밋**
+
+```bash
+git add agent/src/core/commands.ts agent/src/core/core.ts agent/tests/commands.test.ts agent/tests/coreMulti.test.ts
+git commit -m "feat(core): /help — 예약어 목록 안내"
+```
+
+---
+
+### Task 7: 문서
 
 **Files:**
 - Modify: `docs/security/capability-model.md`

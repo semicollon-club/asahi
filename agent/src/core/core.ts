@@ -2,7 +2,8 @@ import type { EventBus, UserMessageEvent, ConversationHint } from "../events/bus
 import type { Config } from "../config.js";
 import { shouldConnectWorker, type TurnRunner, type TurnContext, type TurnResult, type ProgressUpdate } from "./agent.js";
 import { buildSystemPrompt, deriveRapportStage } from "./persona.js";
-import { parseSessionCommand } from "./commands.js";
+import { parseSessionCommand, parseDigestCommand, parseHelpCommand, renderCommandHelp } from "./commands.js";
+import type { DigestRunner } from "./digest.js";
 import type { Role } from "../store/usersRepo.js";
 import type { UsersRepo } from "../store/usersRepo.js";
 import type { ConversationsRepo, Conversation } from "../store/conversationsRepo.js";
@@ -76,10 +77,20 @@ export class AgentCore {
   // 판정은 agent.ts 의 shouldConnectWorker 가 쓰는 것과 동일한 hub.isConnected(userId) 다.
   // 선택值(옵셔널)인 이유: 워커 배선이 없는 환경(테스트 등)에서는 늘 워커 미연결로 간주된다.
   private hub?: { isConnected(userId: string): boolean };
+  // 정기 게시(조사) 실행기. 옵셔널인 이유는 hub 와 같다 — 배선이 없는 환경(테스트 등)에서는
+  // 예약어를 받아도 실행할 대상이 없으므로 ingest 가 안내만 하고 넘어간다.
+  // FIX1(치명, 최종 리뷰 3차): 예전엔 여기(AgentCore)에 예약어 전용 채널별 동시 실행 가드
+  // (digestInFlight Set)를 따로 뒀다 — 그런데 스케줄 경로(index.ts 의 checkAndRun 타이머)는
+  // 이 가드를 전혀 거치지 않아, 이전 틱의 턴이 안 끝난 채 다음 틱이 오면 같은 주제로 새 턴을
+  // 또 시작하는 훨씬 심각한 재진입을 막지 못했다(리뷰 재현: 5틱 중 5턴 시작 — 매일 아침의
+  // 정상 경로였다). 가드를 DigestRunner 내부(주제별 running Set)로 옮겨 checkAndRun·run 양쪽이
+  // 같은 가드를 공유하게 했으므로, 이 필드는 삭제한다 — run() 의 반환값({ started: boolean })만
+  // 보고 아래 ingest 에서 안내 여부를 정한다.
+  private digest?: DigestRunner;
 
   constructor(deps: {
     bus: EventBus; config: Config; runTurn: TurnRunner; repos: CoreRepos; agentCwd: string; now?: () => number;
-    fetchImpl?: typeof fetch; hub?: { isConnected(userId: string): boolean }; emotions?: string[];
+    fetchImpl?: typeof fetch; hub?: { isConnected(userId: string): boolean }; emotions?: string[]; digest?: DigestRunner;
   }) {
     this.bus = deps.bus;
     this.config = deps.config;
@@ -91,6 +102,7 @@ export class AgentCore {
     this.fetchImpl = deps.fetchImpl ?? fetch;
     this.hub = deps.hub;
     this.emotions = deps.emotions ?? [];
+    this.digest = deps.digest;
   }
 
   start(): void {
@@ -125,6 +137,65 @@ export class AgentCore {
     if (parseSessionCommand(text) === "reset") {
       await this.repos.conversations.setSession(conv.id, null, ts);
       this.bus.publish({ type: "assistant_message", channel: "discord", channelRef: conv.discordChannelId, text: "…알겠어. 새 세션으로 시작할게. 다음 메시지부터 새로 대화하자.", ts: this.now() });
+      return;
+    }
+
+    // 도움말: 예약어 목록만 보여준다. 모델을 부르지 않는다.
+    if (parseHelpCommand(text)) {
+      this.bus.publish({ type: "assistant_message", channel: "discord", channelRef: conv.discordChannelId, text: renderCommandHelp(), ts: this.now() });
+      return;
+    }
+
+    // 정기 게시 예약어: 명령을 친 그 채널에 즉시 답한다. 스케줄의 lastRun 은 건드리지 않는다.
+    // LLM 턴 체인(turnChains)·메시지 저장은 여전히 거치지 않지만(아래 참가자 upsert/저장보다 앞에
+    // 두는 이유), 손님 한도(turns.reserve)는 반드시 통과시킨다 — 이 조사 턴은 claude-opus·웹검색·
+    // maxTurns:30 으로 이 앱에서 가장 비싼 턴이라, 예약어로 이 검사를 건너뛰면 구독 한도 보호가
+    // 완전히 무력화된다(리뷰 발견: 손님이 예약어를 연타해 무제한·동시 다발로 조사를 돌릴 수 있었음).
+    const digestTopic = parseDigestCommand(text);
+    if (digestTopic) {
+      if (!this.digest) {
+        this.bus.publish({ type: "system_notice", channel: "discord", channelRef: conv.discordChannelId, text: "지금은 조사 기능이 꺼져 있어요.", ts: this.now() });
+        return;
+      }
+      // 손님 한도: runConversationTurn 의 예약(아래 참고)과 완전히 같은 모양·한도·거부 문구를
+      // 그대로 재사용한다(§8 불변식 유지, 새 한도값·문구를 만들지 않는다). 소유자는 신원
+      // (userId===ownerId) 기준으로 기존 정책대로 무제한 — 예약 자체를 생략한다.
+      const isOwner = hint.userId === this.ownerId;
+      if (!isOwner) {
+        const reserved = await this.repos.turns.reserve({
+          userId: hint.userId, conversationId: conv.id, kind: "proactive", ts: this.now(),
+          perUserLimit: this.config.maxTurnsPerHourPerUser, globalLimit: this.config.maxTurnsPerHourGlobal,
+          ownerReserve: 0, isOwner: false, windowMs: HOUR_MS,
+        });
+        if (!reserved) {
+          await this.notify(conv, "구독 한도 보호를 위해 잠시 쉬고 있어요. 1시간 안에 다시 시도해 주세요.");
+          return;
+        }
+      }
+
+      // FIX1(치명, 최종 리뷰 3차): 같은 주제의 동시 실행 방지는 더 이상 여기(AgentCore)의 몫이
+      // 아니다 — DigestRunner 내부의 주제별 running Set 이 checkAndRun(스케줄)·run(예약어) 양쪽에
+      // 똑같이 적용된다(이전엔 여기 채널별 Set 만 예약어 경로를 막았고, 스케줄이 겹쳐 도는 훨씬
+      // 심각한 재진입은 전혀 막지 못했다). run() 은 이제 시작 여부를 { started } 로 돌려주므로,
+      // 여기서는 그 결과만 보고 "이미 조사 중" 안내를 낼지 정한다 — 손님 몫은 이미 위에서
+      // 예약했으므로, 겹쳐서 거부돼도 되돌려주지 않는다(가장 비싼 턴이 두 번 도는 것보다는
+      // 손님의 몫 하나를 쓰는 편이 훨씬 싸다).
+      //
+      // digest 를 지역 상수로 캡처해야 아래 클로저에서 undefined 가 아닌 타입으로 좁혀진다
+      // (this.digest 는 위에서 이미 존재함을 확인했지만, TS 는 클로저 안에서 this 필드의 좁힘을
+      // 유지하지 않는다).
+      const digest = this.digest;
+      const channelRef = conv.discordChannelId;
+      void (async () => {
+        try {
+          const { started } = await digest.run(digestTopic, channelRef);
+          if (!started) {
+            this.bus.publish({ type: "system_notice", channel: "discord", channelRef, text: "지금 같은 주제로 이미 조사 중이에요. 끝나면 다시 시도해 주세요.", ts: this.now() });
+          }
+        } catch (err) {
+          console.error("[core] 조사 실행 오류:", err);
+        }
+      })();
       return;
     }
 
@@ -356,6 +427,12 @@ export class AgentCore {
           // 연결 여부·소유자 신원과 무관하게 원격 도구(fs_*/sh_exec, FIX2 로 같은 축에 묶인
           // allow_dir 등)를 강제로 닫는다.
           noRemoteTools: true,
+          // FIX3(중요, 최종 리뷰 3차): noRemoteTools 는 이름 그대로 원격 도구 축만 잠그고 SDK
+          // 내장 WebSearch 는 건드리지 않는다 — 이 브랜치로 모든 턴이 웹 검색을 갖게 되면서, 이
+          // 무인 요약 턴도 실제로는 WebSearch 를 그대로 쓸 수 있었다(리뷰 재현: db_schema/
+          // db_query 로 소유자 DB 전체를 읽을 수 있는 턴에 외부로 내보낼 통로까지 열려 있었던
+          // 셈). 요약은 이미 끝난 대화를 요약할 뿐 검색이 필요 없으므로, 별도 플래그로 함께 닫는다.
+          noWebTools: true,
         });
         if (result.ok && result.text.trim().length > 0) {
           await this.repos.summaries.insert({

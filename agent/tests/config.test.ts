@@ -190,3 +190,22 @@ describe("model 구성(Opus 4.8 기본, 봇 설정 전용 — 워커는 더 이�
     expect(loadConfig({ ...base, ANTHROPIC_MODEL: "claude-sonnet-5" } as NodeJS.ProcessEnv).model).toBe("claude-sonnet-5");
   });
 });
+
+describe("정기 게시 채널 설정", () => {
+  const base = { DATABASE_URL: "postgres://x", DISCORD_TOKEN: "d", DISCORD_OWNER_ID: "o", WORKER_TOKEN: "w".repeat(32) };
+
+  it("두 채널 ID 를 읽는다", () => {
+    const c = loadConfig({ ...base, DIGEST_CONTEST_CHANNEL_ID: "C1", DIGEST_DEVNEWS_CHANNEL_ID: "C2" } as NodeJS.ProcessEnv);
+    expect(c.digestChannels).toEqual({ contest: "C1", devnews: "C2" });
+  });
+
+  it("설정되지 않은 주제는 키 자체가 없다", () => {
+    const c = loadConfig({ ...base, DIGEST_CONTEST_CHANNEL_ID: "C1" } as NodeJS.ProcessEnv);
+    expect(c.digestChannels.contest).toBe("C1");
+    expect(c.digestChannels.devnews).toBeUndefined();
+  });
+
+  it("둘 다 없어도 기동에는 지장이 없다(빈 객체)", () => {
+    expect(loadConfig(base as NodeJS.ProcessEnv).digestChannels).toEqual({});
+  });
+});
