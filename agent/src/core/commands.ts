@@ -1,3 +1,5 @@
+import type { DigestTopic } from "./digest.js";
+
 // 소유자(또는 허용 사용자)가 대화에서 세션을 수동으로 초기화하는 예약어 명령을 판별하는 순수 함수.
 // 앞 슬래시를 요구해 일반 대화와 확실히 구분한다(대소문자·앞뒤 공백 무시, 정확히 일치할 때만).
 // 배경: 활발히 쓰는 DM 은 같은 SDK 세션을 계속 resume 하는데, resume 은 세션 생성 시점의
@@ -11,4 +13,15 @@ export type SessionCommand = "reset";
 export function parseSessionCommand(text: string): SessionCommand | null {
   const t = text.trim().toLowerCase();
   return RESET_COMMANDS.has(t) ? "reset" : null;
+}
+
+// 정기 게시를 즉시 실행하는 예약어. 세션 예약어와 같은 규칙 — 앞 슬래시를 요구하고
+// 앞뒤 공백을 무시한 뒤 정확히 일치할 때만 인식한다(일반 대화와 확실히 구분).
+const DIGEST_COMMANDS: Record<string, DigestTopic> = {
+  "/대회": "contest",
+  "/개발뉴스": "devnews",
+};
+
+export function parseDigestCommand(text: string): DigestTopic | null {
+  return DIGEST_COMMANDS[text.trim().toLowerCase()] ?? null;
 }
