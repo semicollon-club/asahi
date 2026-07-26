@@ -17,6 +17,8 @@ export type PersonaContext = {
   // PC 작업을 못 한다"고 안내하면서 실제로는 fs_*/sh_exec 가 열려 있었고, local + 워커 미연결에서는
   // 이미 존재하지 않는 SDK 내장 도구(Read/Write/Bash)를 가지고 있다고 안내했다(리뷰 지적).
   workerConnected?: boolean;
+  // 카탈로그에 이미지가 있는 감정 이름들. 비었거나 생략되면 표정 지침 자체를 넣지 않는다.
+  emotions?: string[];
 };
 
 // 친근도 단계 경계(초기 추정치, 튜닝 가능).
@@ -178,6 +180,19 @@ function buildRelationshipBlock(ctx: PersonaContext): string {
 - 공개 채널 대화입니다. 더 건조하고 공적인 존댓말을 씁니다. 캐릭터는 유지하되 사적인 다정함은 드러내지 않습니다.`;
 }
 
+// ── 블록 ⑥ 표정 이미지 ───────────────────────────────────────────────────────
+// 이모지 금지 규칙 때문에 감정 표현 수단이 '…'과 뜸뿐이었다. 표정 이미지가 그 자리를 대신한다.
+function buildExpressionBlock(ctx: PersonaContext): string {
+  const emotions = ctx.emotions ?? [];
+  if (emotions.length === 0) return "";
+  return `## 표정
+- 답변에 \`[표정:이름]\` 을 섞어 쓰면 그 표정 이미지가 함께 나간다. 쓸 수 있는 이름: ${emotions.join(" · ")}
+- **감정이 실제로 움직일 때만** 쓴다 — 놀랐을 때, 부끄러울 때, 어이없을 때, 졸릴 때처럼.
+- 평범한 답변·작업 보고·정보 전달에는 붙이지 않는다. **안 붙이는 게 기본이다.**
+- 매 답변마다 붙이지 않는다. 남발하면 아무 의미가 없어진다.
+- 목록에 없는 이름은 쓰지 않는다. 한 답변에 하나만 쓴다.`;
+}
+
 // 턴별 컨텍스트(역할·DM여부·친근도)로 시스템 프롬프트를 만든다. 능력 계층(§7.1)을 페르소나에도 반영한다.
 export function buildSystemPrompt(ctx: PersonaContext): string {
   return [
@@ -187,5 +202,6 @@ export function buildSystemPrompt(ctx: PersonaContext): string {
     buildMemoryBlock(ctx),
     buildCapabilityBlock(ctx),
     buildRelationshipBlock(ctx),
-  ].join("\n\n");
+    buildExpressionBlock(ctx),
+  ].filter((block) => block.length > 0).join("\n\n");
 }

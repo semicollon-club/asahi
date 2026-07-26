@@ -17,6 +17,7 @@ import { TurnsRepo } from "./store/turnsRepo.js";
 import { AllowedDirsRepo } from "./store/allowedDirsRepo.js";
 import { SettingsRepo } from "./store/settingsRepo.js";
 import { IntrospectRepo } from "./store/introspectRepo.js";
+import { CharacterImagesRepo } from "./store/characterImagesRepo.js";
 import { backfillLegacyAllowedDirs } from "./store/allowedDirsMigration.js";
 import { AgentCore } from "./core/core.js";
 import { makeRunAgentTurn } from "./core/agent.js";
@@ -110,12 +111,22 @@ async function main() {
   const agentCwd = path.resolve(config.dataDir, "..", "agent-cwd");
   fs.mkdirSync(agentCwd, { recursive: true });
   const runTurn = makeRunAgentTurn({ memories: repos.memories, users: repos.users, allowedDirs: repos.allowedDirs, introspect: repos.introspect }, config.deployTarget, config.model, hub);
+
+  const characterImages = new CharacterImagesRepo(db);
+  // 감정 목록은 기동 시 한 번 읽는다. 이미지를 추가하고 동기화 스크립트를 돌려도
+  // 새 감정은 봇 재시작 후에 프롬프트에 반영된다(기존 감정의 이미지 교체는 즉시 반영).
+  const emotions = await characterImages.emotions().catch((err) => {
+    console.error("[index] 표정 카탈로그 조회 실패 — 표정 기능 없이 계속합니다:", err);
+    return [] as string[];
+  });
+  console.log(`[index] 표정 카탈로그: ${emotions.length}종`);
+
   // FIX3(최종 리뷰): core.ts 도 hub 를 받아 능력 안내(persona.ts)에 "이번 턴에 워커가 실제로
   // 연결돼 있는가"를 반영한다(agent.ts 의 shouldConnectWorker 와 같은 판정, 같은 hub 인스턴스).
-  const core = new AgentCore({ bus, config, runTurn, repos, agentCwd, hub });
+  const core = new AgentCore({ bus, config, runTurn, repos, agentCwd, hub, emotions });
   core.start();
 
-  const discord = new DiscordAdapter({ bus, config, users, conversations });
+  const discord = new DiscordAdapter({ bus, config, users, conversations, characterImages });
   await discord.start();
 
   await core.recoverPending(); // 크래시로 남은 미처리 메시지 재개
