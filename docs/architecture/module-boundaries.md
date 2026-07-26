@@ -34,16 +34,22 @@ lastReviewed: 2026-07-26
 정기 게시(`core/digest.ts`의 `DigestRunner`)가 실행하는 턴은 대화 행(conversation row)에도
 세션 이어붙이기(resume)에도 묶이지 않는 유일한 턴이다 — 스케줄(`checkAndRun`)이든 예약어
 (`run`)든 매번 새 세션으로 실행하고, 결과만 기존 `assistant_message` 이벤트 경로를 그대로 타
-목적지 채널로 나간다. 예약어 경로는 `core.ts`의 `ingest`가 메시지 처리 과정에서 그 채널의
-대화 행을 여전히 조회·생성하지만(손님 한도 예약에 `conv.id`를 쓴다), `DigestRunner` 자신은
-그 행을 전혀 참조하지 않는다.
+목적지 채널로 나간다. 예약어 경로는 호출 지점에 따라 갈린다: 스레드·DM 안에서 부르면
+`core.ts`의 `ingest`가 평소처럼 `resolveConversation`으로 그 채널의 대화 행을 조회·생성한 뒤
+(손님 한도 예약에 `conv.id`를 쓴다) `startDigestCommand`를 부른다. 반면 **일반 채널에서 멘션
+없이 부르면**(`commandOnly` 힌트) `ingest`는 `resolveConversation`을 아예 호출하지 않고
+`conv: null`로 곧장 `startDigestCommand`를 부른다 — 손님 한도 예약도 `conversationId: null`로
+이뤄진다. 이 채널이 대화로 굳어(`decideRoute`의 `hasConversation`) 이후 모든 메시지에 봇이
+답하기 시작하는 것을 막는, `commandOnly` 경로의 핵심 불변식이다. `DigestRunner` 자신은 두
+경우 모두 대화 행을 전혀 참조하지 않는다.
 
 ## 허용 의존 방향
 
 기본 방향은 `adapters → core → store`다.
 
-- `adapters`는 `core`(이미지 타입 등)·`store`(레포 타입)·`events`·`config`를 알아도
-  된다. `discord.js`를 임포트하는 유일한 디렉토리다.
+- `adapters`는 `core`(이미지 타입, `expressions.ts`의 마커 파싱, `commands.ts`의
+  `isChannelCommand` 등)·`store`(레포 타입)·`events`·`config`를 알아도 된다. `discord.js`를
+  임포트하는 유일한 디렉토리다.
 - `core`는 `store`(레포)·`config`·`events`(이벤트 타입)를 알아도 되지만, **`discord.js`를
   임포트하지 않는다**(채널 불가지론). `core/`·`store/`·`events/`·`remote/`·`memory/`
   전체를 검색해도 `discord.js`/`discord-api` 문자열은 등장하지 않는다 — 오직
@@ -76,7 +82,9 @@ lastReviewed: 2026-07-26
 `ConversationHint`(`user_message` 전용 부가 필드): `kind`("dm"|"thread"),
 `discordChannelId`, `originMessageId?`, `guildId?`, `parentChannelId?`, `isPrivate`,
 `primaryUserId`(대화 상대), `userId`(이번 발화자), `role`("owner"|"allowed" —
-`blocked`/미등록은 애초에 이벤트가 발행되지 않는다), `discordMessageId`.
+`blocked`/미등록은 애초에 이벤트가 발행되지 않는다), `discordMessageId`, `commandOnly?`(정확히
+`true`이거나 필드 자체가 없음 — 일반 채널에서 멘션 없이 받은 예약어 힌트임을 표시한다. 코어는
+이 필드가 있으면 대화 행을 조회·생성하지 않고 그 자리에서 처리하고 끝낸다).
 
 실제 표시(전송·편집)는 항상 어댑터의 책임이다 — 코어는 이벤트만 발행하고 디스코드 API를
 전혀 몰라도 된다. 이 구조 덕분에 향후 다른 채널(웹 UI 등)을 추가할 때도 코어를 건드리지

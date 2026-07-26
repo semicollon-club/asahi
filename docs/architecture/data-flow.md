@@ -22,12 +22,14 @@ lastReviewed: 2026-07-13
 
 1. role 조회(`users.getRole`)와 그 채널의 기존 대화 존재 여부(`conversations.getByChannelId`)를 확인한다.
 2. 순수 함수 `decideRoute(incoming, role, hasConversation)`을 호출한다. 이 함수는 부수효과가
-   전혀 없어 유닛테스트하기 쉽게 분리돼 있으며, 다음 다섯 가지 중 하나로 판정한다.
+   전혀 없어 유닛테스트하기 쉽게 분리돼 있으며, 다음 여섯 가지 중 하나로 판정한다.
    - `ignore` — role이 `owner`/`allowed`가 아니면(미등록·blocked) 무조건 무시(응답 게이트).
    - `dm` — DM.
    - `thread-existing` — 이미 `conversations` 행이 있는 스레드/채널(멘션 불필요, 대화 지속).
    - `thread-create` — 일반 채널에서 봇이 직접 `@멘션`됨 → 새 스레드 생성.
    - `adopt-thread` — 아직 대화가 아닌 스레드에서 `@멘션`됨 → 그 스레드를 채택.
+   - `channel-command` — 일반 채널에서 멘션 없이 예약어(`/대회`·`/개발뉴스`·`/help`)만 보냄 →
+     스레드도 대화도 만들지 않고 그 자리에서 처리(`core/commands.ts`의 `isChannelCommand`).
 3. `ignore`가 아니면 `resolveHint`로 라우팅 결정을 `ConversationHint`(대화 매핑 힌트)로
    바꾼다. `thread-create`만 스레드 생성이라는 부수효과를 가지며, 실패 시(권한 부족 등)
    원 채널을 그대로 대화로 채택하는 인플레이스 폴백을 쓴다.
@@ -51,15 +53,21 @@ lastReviewed: 2026-07-13
 
 ### ingest 체인 — durable 저장(짧다)
 
-`ingest(hint, ts, text, images)`가 하는 일은 다음과 같다(`core.ts:126`).
+`ingest(hint, ts, text, images)`가 하는 일은 다음과 같다(`core.ts:132`).
 
-1. `resolveConversation`으로 대화 행을 확정한다(멱등: `discord_channel_id` →
-   `origin_message_id` → 없으면 생성). 유휴로 닫혔던 대화면 `active`로 재활성한다.
-2. 예약어 세션 명령(`/새세션` 등)이면 LLM 턴 없이 세션만 리셋하고 즉시 종료한다.
-3. 참가자를 upsert하고, **`processed=false`로 사용자 메시지를 먼저 저장**한다
+1. `hint.commandOnly`(일반 채널에서 멘션 없이 받은 예약어)면 대화 행을 조회·생성하지 않고
+   그 자리에서 바로 처리한 뒤 반환한다 — `/help`면 안내를 발행하고, 조사 예약어(`/대회`·
+   `/개발뉴스`)면 `conv: null`로 `startDigestCommand`를 호출한다. 아래 2~5단계(대화 조회·
+   메시지 저장·turn 체인 enqueue)는 전혀 거치지 않는다 — 이 채널이 대화로 굳어 이후 모든
+   메시지에 봇이 답하기 시작하는 것을 막는 이 경로의 핵심 불변식이다.
+2. (`commandOnly`가 아니면) `resolveConversation`으로 대화 행을 확정한다(멱등:
+   `discord_channel_id` → `origin_message_id` → 없으면 생성). 유휴로 닫혔던 대화면
+   `active`로 재활성한다.
+3. 예약어 세션 명령(`/새세션` 등)이면 LLM 턴 없이 세션만 리셋하고 즉시 종료한다.
+4. 참가자를 upsert하고, **`processed=false`로 사용자 메시지를 먼저 저장**한다
    (`messages.insert(..., processed: false)`). 저장하는 내용은 이미지가 있어도 원문
    재주입 없이 마커(`buildImageMarker`)만 남긴다.
-4. 저장이 끝나면 이 대화의 실제 LLM 처리를 **turn 체인**에 새로 enqueue하고 반환한다.
+5. 저장이 끝나면 이 대화의 실제 LLM 처리를 **turn 체인**에 새로 enqueue하고 반환한다.
 
 ingest 자체는 DB insert 한두 번 정도로 짧기 때문에, 채널별로 직렬화해도 버스트가 금방
 소진되어 도착한 메시지가 모두 빠르게 durable 저장된다.

@@ -7,6 +7,7 @@ import type { UsersRepo, Role } from "../store/usersRepo.js";
 import type { ConversationsRepo } from "../store/conversationsRepo.js";
 import { filterImageAttachments, type ImageRef } from "../core/images.js";
 import { parseExpression } from "../core/expressions.js";
+import { isChannelCommand } from "../core/commands.js";
 import type { CharacterImagesRepo } from "../store/characterImagesRepo.js";
 
 export function chunkMessage(text: string, max = 2000): string[] {
@@ -88,7 +89,8 @@ export type RouteDecision =
   | { kind: "dm" }                // 그 사용자 DM 대화
   | { kind: "thread-existing" }   // 이미 conversations 행이 있는 스레드(또는 폴백 채널)
   | { kind: "thread-create" }     // 일반 채널 @멘션 → 새 스레드 생성
-  | { kind: "adopt-thread" };     // 아직 대화 아닌 스레드에서 @멘션 → 그 스레드 채택
+  | { kind: "adopt-thread" }      // 아직 대화 아닌 스레드에서 @멘션 → 그 스레드 채택
+  | { kind: "channel-command" };  // 일반 채널의 예약어(멘션 없이) → 스레드도 대화도 만들지 않고 처리
 
 export function decideRoute(i: Incoming, role: Role, hasConversation: boolean): RouteDecision {
   // 응답 게이트: owner/allowed 만. 미등록·blocked·컨텍스트 작성자 불문 무시.
@@ -102,6 +104,10 @@ export function decideRoute(i: Incoming, role: Role, hasConversation: boolean): 
   // 일반(비스레드) 채널
   if (hasConversation) return { kind: "thread-existing" };   // 스레드 생성 폴백으로 채택된 채널 등
   if (i.mentionsBot) return { kind: "thread-create" };
+  // 멘션 없는 예약어(/대회·/개발뉴스·/help): 지금까지는 여기서 무시돼 코어까지 닿지도 못했고,
+  // 쓰려면 봇을 멘션해 스레드를 연 뒤 그 안에서 쳐야 했다 — 뉴스가 스레드에 갇혀 밖에서 안 보였다.
+  // 대화를 만들지 않는 경로로 통과시킨다(commandOnly 힌트). 문자열 비교라 LLM 턴 비용은 없다.
+  if (isChannelCommand(i.content)) return { kind: "channel-command" };
   return { kind: "ignore" };
 }
 
@@ -305,6 +311,11 @@ export class DiscordAdapter {
         return { ...common, kind: "thread", discordChannelId: i.channelId, originMessageId: i.messageId, isPrivate: false, primaryUserId: i.userId };
       case "thread-create":
         return this.createThreadHint(i, common);
+      case "channel-command":
+        // 부수효과 없음: 스레드를 만들지 않고 채널을 그대로 가리킨다. kind:"thread" 는 서버
+        // 컨텍스트(isPrivate:false)라는 뜻일 뿐이고, commandOnly 때문에 코어가 이 힌트로
+        // conversations 행을 만들지 않으므로 이 채널이 봇 대화로 굳지 않는다.
+        return { ...common, kind: "thread", discordChannelId: i.channelId, isPrivate: false, primaryUserId: i.userId, commandOnly: true };
     }
   }
 
@@ -533,6 +544,23 @@ export class DiscordAdapter {
       }
     } catch (err) {
       console.error("[discord] 전송 실패:", err);
+    }
+  }
+
+  // FIX2(중요, 머지 전 리뷰): 정기 게시 채널(DIGEST_CONTEST_CHANNEL_ID 등)이 잘못된 ID 이거나
+  // 봇에게 채널을 볼 권한이 없으면, 지금까지는 그 사실이 "매 조사 성공 뒤 전송이 조용히
+  // 실패"로만 드러났다(위 send() 의 catch 는 로그 한 줄만 남긴다) — 사용자는 리다이렉트
+  // 안내("...에 올릴게")를 받고 기다리다가 그냥 아무것도 못 받는다. index.ts 가 기동 시(로그인
+  // 직후) 설정된 각 정기 게시 채널에 대해 이 메서드로 한 번 확인해, 접근 불가면 이름 있는
+  // 경고를 남긴다. 일시적으로 못 보는 채널 때문에 봇 전체가 멈추면 안 되므로 예외를 던지지
+  // 않고 boolean 으로만 알린다 — send() 와 동일하게 fetch 실패(권한 없음·잘못된 ID 등)를 여기서
+  // 격리한다.
+  async canReachChannel(channelId: string): Promise<boolean> {
+    try {
+      const channel = await this.client.channels.fetch(channelId);
+      return !!channel && channel.isSendable();
+    } catch {
+      return false;
     }
   }
 

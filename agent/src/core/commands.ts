@@ -22,8 +22,15 @@ const DIGEST_COMMANDS: Record<string, DigestTopic> = {
   "/개발뉴스": "devnews",
 };
 
+// FIX1(치명, 머지 전 리뷰) — DIGEST_COMMANDS 는 평범한 객체 리터럴이라 `DIGEST_COMMANDS[key] ?? null`
+// 는 key 가 "constructor"·"__proto__"·"toString"·"hasOwnProperty"·"valueOf" 처럼 Object.prototype
+// 이 물려주는 이름이면 그 상속된(모두 truthy 한) 값을 그대로 돌려준다 — `??`는 null/undefined 에만
+// 반응하므로 걸러내지 못한다. isChannelCommand 를 거쳐 decideRoute 까지 이 값이 올라가면, 손님이
+// 그냥 "constructor" 라고만 쳐도 채널 명령으로 오인식돼 조사가 시작되려다 실패했다(리뷰 재현).
+// Object.hasOwn 으로 그 객체 "자신의" 키인지 먼저 확인해 상속 키는 애초에 조회하지 않는다.
 export function parseDigestCommand(text: string): DigestTopic | null {
-  return DIGEST_COMMANDS[text.trim().toLowerCase()] ?? null;
+  const key = text.trim().toLowerCase();
+  return Object.hasOwn(DIGEST_COMMANDS, key) ? DIGEST_COMMANDS[key] : null;
 }
 
 // 예약어 목록 안내(/help). 세션·조사 예약어와 같은 규칙 — 앞 슬래시를 요구하고 앞뒤 공백·대소문자를
@@ -34,12 +41,28 @@ export function parseHelpCommand(text: string): boolean {
   return HELP_COMMANDS.has(text.trim().toLowerCase());
 }
 
+// 대화(스레드·DM) 없이 일반 채널에서 그 자리에서 처리할 수 있는 예약어인가.
+//
+// 배경: 어댑터는 일반 채널의 멘션 없는 메시지를 전부 무시한다(decideRoute). 무시하지 않으려면
+// 그 채널을 대화로 채택해야 하는데, 그러면 conversations 행이 생겨 이후 그 채널의 모든 메시지에
+// 봇이 답하기 시작한다. 그래서 "대화를 만들지 않고 그 자리에서 끝나는 명령"만 따로 통과시킨다.
+//
+// /새세션 은 제외한다 — 초기화할 세션이 있어야 의미가 있고, 대화가 없는 채널에는 리셋할 대상
+// 자체가 없다(스레드·DM 안에서는 지금까지처럼 그대로 동작한다).
+export function isChannelCommand(text: string): boolean {
+  return parseHelpCommand(text) || parseDigestCommand(text) !== null;
+}
+
 // 안내문은 위 예약어 테이블에서 파생시킨다. 손으로 적으면 예약어를 추가하는 순간
 // 조용히 어긋나고, 그 어긋남은 아무도 눈치채지 못한다(테스트가 이 일치를 검증한다).
 export const COMMAND_HELP: ReadonlyArray<{ commands: readonly string[]; description: string }> = [
   { commands: [...RESET_COMMANDS], description: "대화를 새 세션으로 시작한다. 성격이나 설정이 바뀐 뒤에 쓴다" },
-  { commands: ["/대회"], description: "코딩·CTF 대회 소식을 지금 조사해서 이 채널에 알려준다" },
-  { commands: ["/개발뉴스"], description: "개발 관련 소식을 지금 조사해서 이 채널에 알려준다" },
+  // FIX6(사소, 머지 전 리뷰): 결과가 항상 "대회 소식 채널"에 올라가는 건 아니다 — DM 에서 부르거나
+  // 지정 채널(DIGEST_CONTEST_CHANNEL_ID 등)이 설정돼 있지 않으면 명령을 친 곳에 그대로 온다
+  // (core.ts 의 startDigestCommand). 조건부 목적지를 그대로 반영해 안내문이 실제 동작과 어긋나지
+  // 않게 한다.
+  { commands: ["/대회"], description: "코딩·CTF 대회 소식을 지금 조사한다. 지정 채널이 있으면 그리로, DM이거나 없으면 여기로 온다" },
+  { commands: ["/개발뉴스"], description: "개발 관련 소식을 지금 조사한다. 지정 채널이 있으면 그리로, DM이거나 없으면 여기로 온다" },
   { commands: [...HELP_COMMANDS], description: "이 목록을 보여준다" },
 ];
 

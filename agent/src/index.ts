@@ -21,12 +21,20 @@ import { CharacterImagesRepo } from "./store/characterImagesRepo.js";
 import { backfillLegacyAllowedDirs } from "./store/allowedDirsMigration.js";
 import { AgentCore } from "./core/core.js";
 import { makeRunAgentTurn } from "./core/agent.js";
-import { DigestRunner, DIGEST_TOPICS } from "./core/digest.js";
+import { DigestRunner, DIGEST_TOPICS, type DigestTopic } from "./core/digest.js";
 import { DiscordAdapter } from "./adapters/discord.js";
 
 // 비밀값(.env)은 리포 루트(agent/ 바깥, data/ 와 같은 위치)에서 읽는다.
 dotenv.config({ path: path.resolve("..", ".env") });
 dotenv.config();
+
+// FIX2(중요, 머지 전 리뷰): 정기 게시 채널 접근 불가를 경고할 때 env 변수 이름을 콕 집어 알리기
+// 위한 매핑. config.ts 의 digestChannels 조립(DIGEST_CONTEST_CHANNEL_ID/DIGEST_DEVNEWS_CHANNEL_ID)과
+// 짝을 맞춘다 — 이 상수 자체는 고정된 두 키(DigestTopic)로만 인덱싱되므로 사용자 입력과 무관하다.
+const DIGEST_CHANNEL_ENV_VAR: Record<DigestTopic, string> = {
+  contest: "DIGEST_CONTEST_CHANNEL_ID",
+  devnews: "DIGEST_DEVNEWS_CHANNEL_ID",
+};
 
 async function main() {
   const config = loadConfig();
@@ -128,10 +136,6 @@ async function main() {
     runTurn, bus, settings: new SettingsRepo(db), agentCwd,
     channels: config.digestChannels, emotions,
   });
-  for (const topic of Object.keys(DIGEST_TOPICS)) {
-    const set = config.digestChannels[topic as keyof typeof config.digestChannels];
-    console.log(`[index] 정기 게시 ${topic}: ${set ? `채널 ${set}` : "채널 미설정 — 스케줄 건너뜀"}`);
-  }
 
   // FIX3(최종 리뷰): core.ts 도 hub 를 받아 능력 안내(persona.ts)에 "이번 턴에 워커가 실제로
   // 연결돼 있는가"를 반영한다(agent.ts 의 shouldConnectWorker 와 같은 판정, 같은 hub 인스턴스).
@@ -140,6 +144,27 @@ async function main() {
 
   const discord = new DiscordAdapter({ bus, config, users, conversations, characterImages });
   await discord.start();
+
+  // 정기 게시 채널 설정 로그 + FIX2(중요, 머지 전 리뷰): 로그인 이후로 옮겨, 설정된 채널마다
+  // 봇이 실제로 접근할 수 있는지(canReachChannel) 확인한다 — 로그인 전에는 channels.fetch 자체가
+  // 실패해 여기서 확인할 수 없다. 채널 ID 오타·권한 누락은 이 확인이 없으면 매 조사 성공 뒤
+  // 전송 실패로만 나타나(discord.ts 의 send() catch) 로그 한 줄에 묻힌다 — 사용자는 리다이렉트
+  // 안내("...에 올릴게")를 받고 기다리다가 그냥 아무것도 못 받는다. 일시적으로 못 보는 채널
+  // 때문에 봇 전체가 멈추면 안 되므로 치명적으로 취급하지 않는다(경고만 남기고 계속 진행).
+  for (const topic of Object.keys(DIGEST_TOPICS) as DigestTopic[]) {
+    const channelId = config.digestChannels[topic];
+    if (!channelId) {
+      console.log(`[index] 정기 게시 ${topic}: 채널 미설정 — 스케줄 건너뜀`);
+      continue;
+    }
+    console.log(`[index] 정기 게시 ${topic}: 채널 ${channelId}`);
+    if (!(await discord.canReachChannel(channelId))) {
+      console.warn(
+        `[index] 정기 게시 채널에 접근할 수 없습니다 — ${DIGEST_CHANNEL_ENV_VAR[topic]}=${channelId}. ` +
+          `채널 ID 가 올바른지, 봇이 그 채널을 볼 권한이 있는지 확인하세요.`,
+      );
+    }
+  }
 
   await core.recoverPending(); // 크래시로 남은 미처리 메시지 재개
 
