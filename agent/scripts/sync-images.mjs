@@ -10,6 +10,7 @@
 // 봇을 재시작해야 모델이 그 표정을 알게 된다.
 
 import fs from "node:fs";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
@@ -60,8 +61,14 @@ function collect() {
   return out;
 }
 
-// Storage 는 경로에 한글이 들어가도 되지만 URL 인코딩이 필요하다.
-const objectPath = (emotion, file) => `${encodeURIComponent(emotion)}/${encodeURIComponent(file)}`;
+// Supabase Storage 는 객체 키에 한글을 허용하지 않는다. URL 인코딩해서 보내도 서버가
+// 디코딩한 뒤 검증하므로 소용이 없다(InvalidKey). 그래서 키는 이름을 해시한 ASCII 로 만든다.
+//
+// 해시는 결정적이라 같은 파일을 다시 올리면 같은 키가 되고, x-upsert 로 덮어써진다 —
+// 재실행해도 스토리지에 사본이 쌓이지 않는다. 한글 감정 이름은 키가 아니라 DB 카탈로그의
+// emotion 컬럼에 그대로 들어가며, 모델의 마커가 대조하는 건 그쪽이다.
+const short = (s) => createHash("sha1").update(s, "utf8").digest("hex").slice(0, 12);
+const objectPath = (emotion, file) => `${short(emotion)}/${short(file)}${path.extname(file).toLowerCase()}`;
 
 async function upload(item) {
   const p = objectPath(item.emotion, item.file);
@@ -97,6 +104,19 @@ async function main() {
   const client = new pg.Client({ connectionString: DATABASE_URL });
   await client.connect();
   try {
+    // 테이블을 여기서도 보장한다. 정본은 agent/src/store/schema.ts 이고 봇이 기동할 때 만들지만,
+    // 이 스크립트는 봇보다 먼저 돌 수 있다(첫 셋업이 정확히 그 상황이다). 둘 다 IF NOT EXISTS 라
+    // 어느 쪽이 먼저 돌든 결과가 같다 — schema.ts 를 고치면 이쪽도 같이 고칠 것.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS character_images (
+        id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        emotion TEXT NOT NULL,
+        url TEXT NOT NULL,
+        created_ts BIGINT NOT NULL
+      );
+    `);
+    await client.query("CREATE INDEX IF NOT EXISTS idx_character_images_emotion ON character_images(emotion)");
+
     await client.query("BEGIN");
     await client.query("DELETE FROM character_images");
     const ts = Date.now();
