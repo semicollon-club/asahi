@@ -13,7 +13,7 @@ lastReviewed: 2026-07-26
 | 디렉토리/파일 | 책임 | 주요 파일 |
 | --- | --- | --- |
 | `adapters/` | 채널(현재는 discord.js) 실제 I/O. 들어온 이벤트를 라우팅 판단해 `user_message`로 발행하고, 코어가 발행한 `assistant_message`/`system_notice`/`progress`를 구독해 실제 전송·편집을 수행한다. 표정 마커를 해석해 embed 로 함께 전송한다 | `discord.ts` |
-| `core/` | 대화 오케스트레이션(직렬화·한도 판단), SDK 턴 실행, 페르소나(시스템 프롬프트), 도구 정의·원격 도구 1차 경로 필터, 읽기전용 SQL 가드, 표정 마커 파싱. `discord.js`에 의존하지 않는다(채널 불가지론) | `core.ts`, `agent.ts`, `persona.ts`, `tools.ts`, `remoteTools.ts`, `pathPermission.ts`, `paths.ts`, `sqlGuard.ts`, `turnPrep.ts`, `commands.ts`, `images.ts`, `expressions.ts` |
+| `core/` | 대화 오케스트레이션(직렬화·한도 판단), SDK 턴 실행, 페르소나(시스템 프롬프트), 도구 정의·원격 도구 1차 경로 필터, 읽기전용 SQL 가드, 표정 마커 파싱, 정기 게시(주제 정의·실행 판정·실행). `discord.js`에 의존하지 않는다(채널 불가지론) | `core.ts`, `agent.ts`, `persona.ts`, `tools.ts`, `remoteTools.ts`, `pathPermission.ts`, `paths.ts`, `sqlGuard.ts`, `turnPrep.ts`, `commands.ts`, `images.ts`, `expressions.ts`, `digest.ts` |
 | `events/` | 어댑터↔코어를 분리하는 얇은 pub/sub 이벤트버스. 이벤트 타입 정의의 유일한 출처 | `bus.ts` |
 | `store/` | Postgres 영속 계층(레포지토리 패턴). 스키마 정의와 테이블별 CRUD/쿼리만 담당하며, 그 위 어떤 계층에도 의존하지 않는 최하위 레이어다 | `schema.ts`, `db.ts`, `usersRepo.ts`, `conversationsRepo.ts`, `participantsRepo.ts`, `messagesRepo.ts`, `summariesRepo.ts`, `memoriesRepo.ts`, `turnsRepo.ts`, `allowedDirsRepo.ts`, `introspectRepo.ts`, `settingsRepo.ts`, `allowedDirsMigration.ts`, `characterImagesRepo.ts` |
 | `remote/` | 봇↔워커 WebSocket 전송 계층. `protocol.ts`(양쪽 공유 계약)·`hub.ts`(봇 쪽 서버)·`workerClient.ts`/`executors.ts`/`roots.ts`(워커 쪽). `core/` 의 순수 경로 헬퍼(`pathPermission.ts`의 `resolveRealOrNearestAncestor`, `paths.ts`의 `isPathWithinAny`)만 재사용하고 `discord.js`·`store/` 에는 의존하지 않는다 | `protocol.ts`, `hub.ts`, `workerClient.ts`, `executors.ts`, `roots.ts` |
@@ -30,6 +30,13 @@ lastReviewed: 2026-07-26
 떼어내 감정 이름만 넘길 뿐 이미지의 존재 자체를 모르고, 그 이름을 실제 이미지 URL로 바꿔 embed로
 전송하는 것은 전적으로 `adapters/discord.ts`의 몫이다. 이 경계 덕분에 향후 다른 채널(웹 UI 등)을
 추가해도 코어를 건드리지 않고 같은 마커를 다르게 렌더링할 수 있다.
+
+정기 게시(`core/digest.ts`의 `DigestRunner`)가 실행하는 턴은 대화 행(conversation row)에도
+세션 이어붙이기(resume)에도 묶이지 않는 유일한 턴이다 — 스케줄(`checkAndRun`)이든 예약어
+(`run`)든 매번 새 세션으로 실행하고, 결과만 기존 `assistant_message` 이벤트 경로를 그대로 타
+목적지 채널로 나간다. 예약어 경로는 `core.ts`의 `ingest`가 메시지 처리 과정에서 그 채널의
+대화 행을 여전히 조회·생성하지만(손님 한도 예약에 `conv.id`를 쓴다), `DigestRunner` 자신은
+그 행을 전혀 참조하지 않는다.
 
 ## 허용 의존 방향
 
