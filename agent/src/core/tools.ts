@@ -15,6 +15,10 @@ import { isPathWithinAny, normalizeDir } from "./paths.js";
 export const TOOL_SERVER = "asahi";
 const t = (name: string): string => `mcp__${TOOL_SERVER}__${name}`;
 
+// SDK 내장 웹 검색. MCP 도구가 아니라 이름 그대로 allowedTools 에 들어간다.
+// WebFetch(임의 URL 페치)는 열지 않는다 — 지금 필요한 건 검색이고 노출 표면이 훨씬 넓다.
+const WEB_TOOLS = ["WebSearch"];
+
 // 자기인지(§Task4): 이 봇이 어떤 모델·SDK·배포 설정으로 동작 중인지. runtime_info 도구가 그대로 보고한다.
 export type RuntimeInfo = { model: string; sdkVersion: string; deployTarget: "local" | "cloud"; maxTurns: number };
 
@@ -219,10 +223,11 @@ export function allowedToolsFor(
       t("remember"), t("recall"), t("character_fact"), t("manage_access"),
       ...dirTools,
       t("db_schema"), t("db_query"), t("runtime_info"),
+      ...WEB_TOOLS,
     ];
   }
-  if (isPrivate && (role === "owner" || role === "allowed")) return [t("remember"), t("recall"), t("character_fact")];
-  return [t("recall")];
+  if (isPrivate && (role === "owner" || role === "allowed")) return [t("remember"), t("recall"), t("character_fact"), ...WEB_TOOLS];
+  return [t("recall"), ...WEB_TOOLS];
 }
 
 // ── 인프로세스 MCP 서버(SDK) — handler 는 위 순수 함수를 감싼다 ──────────────

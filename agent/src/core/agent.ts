@@ -203,7 +203,9 @@ export function makeRunAgentTurn(
     // (builtinTools=[] 이 SDK 내장 도구를 전부 닫는다). 경로 검사는 이제 워커(remote/roots.ts)가 최종
     // 권한을 갖는다 — 이 프로세스는 내장 도구를 안 여니 canUseTool 로 판정할 대상 자체가 없다.
     const preApprovedTools = allowedTools;
-    const builtinTools: string[] = [];
+    // SDK 내장 도구는 웹 검색만 연다. 파일/Bash 는 원격 도구(fs_*·sh_exec)가 대신하므로
+    // 내장 쪽은 계속 닫아 둔다 — 열면 봇 컨테이너의 파일시스템을 건드리게 된다.
+    const builtinTools: string[] = ["WebSearch"];
 
     let sessionId: string | undefined;
     let text = "";

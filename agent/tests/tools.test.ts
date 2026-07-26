@@ -282,18 +282,20 @@ describe("allowedToolsFor — 능력 계층(§7.1)", () => {
     }
   });
 
-  it("손님 DM 은 remember/recall/character_fact 만(파일·manage_access·Bash·dir 도구 없음)", () => {
+  // Task 3(웹 검색 개방)로 WebSearch 가 모든 계층에 추가돼 이 계층의 정확 배열도 갱신했다 —
+  // 다른 항목은 그대로고 WebSearch 만 늘었다.
+  it("손님 DM 은 remember/recall/character_fact 와 WebSearch 만(파일·manage_access·Bash·dir 도구 없음)", () => {
     const tools = allowedToolsFor("allowed", true, false);
-    expect(tools).toEqual(["mcp__asahi__remember", "mcp__asahi__recall", "mcp__asahi__character_fact"]);
+    expect(tools).toEqual(["mcp__asahi__remember", "mcp__asahi__recall", "mcp__asahi__character_fact", "WebSearch"]);
     expect(tools).not.toContain("Read");
     expect(tools).not.toContain("Bash");
     expect(tools).not.toContain("mcp__asahi__manage_access");
     expect(tools).not.toContain("mcp__asahi__allow_dir");
   });
 
-  it("서버 턴은 recall(공용)만 — 개인기억 저장·PC 도구·dir 도구 불가", () => {
-    expect(allowedToolsFor("owner", false, false)).toEqual(["mcp__asahi__recall"]);
-    expect(allowedToolsFor("allowed", false, false)).toEqual(["mcp__asahi__recall"]);
+  it("서버 턴은 recall(공용)과 WebSearch 만 — 개인기억 저장·PC 도구·dir 도구 불가", () => {
+    expect(allowedToolsFor("owner", false, false)).toEqual(["mcp__asahi__recall", "WebSearch"]);
+    expect(allowedToolsFor("allowed", false, false)).toEqual(["mcp__asahi__recall", "WebSearch"]);
   });
 
   it("deployTarget 을 생략하거나 'local' 로 주면 기존(로컬) 동작과 완전히 동일하다", () => {
@@ -305,7 +307,7 @@ describe("allowedToolsFor — 능력 계층(§7.1)", () => {
   // FIX2 갱신(최종 리뷰): 아래 결과 자체(이 셋이 빠짐)는 그대로지만, 진짜 이유가 바뀌었다 —
   // deployTarget="cloud" 자체가 아니라 workerConnected 가 기본값 false 라서다. 바로 아래 두
   // 테스트가 FIX2 의 핵심(워커만 연결되면 cloud 에서도 dir 관리 도구가 열린다)을 직접 확인한다.
-  it("deployTarget='cloud' + 소유자 DM + 워커 미연결이면 PC 도구(파일·Bash·dir 관리)를 빼고 remember/recall/character_fact/manage_access/db_schema/db_query/runtime_info 만 남는다", () => {
+  it("deployTarget='cloud' + 소유자 DM + 워커 미연결이면 PC 도구(파일·Bash·dir 관리)를 빼고 remember/recall/character_fact/manage_access/db_schema/db_query/runtime_info/WebSearch 만 남는다", () => {
     const tools = allowedToolsFor("owner", true, true, "cloud");
     expect(tools).toEqual([
       "mcp__asahi__remember",
@@ -315,6 +317,7 @@ describe("allowedToolsFor — 능력 계층(§7.1)", () => {
       "mcp__asahi__db_schema",
       "mcp__asahi__db_query",
       "mcp__asahi__runtime_info",
+      "WebSearch",
     ]);
     expect(tools).not.toContain("Read");
     expect(tools).not.toContain("Write");
@@ -348,9 +351,9 @@ describe("allowedToolsFor — 능력 계층(§7.1)", () => {
   });
 
   it("deployTarget='cloud' 라도 손님 DM·서버는 로컬과 동일(영향 없음)", () => {
-    expect(allowedToolsFor("allowed", true, false, "cloud")).toEqual(["mcp__asahi__remember", "mcp__asahi__recall", "mcp__asahi__character_fact"]);
-    expect(allowedToolsFor("owner", false, false, "cloud")).toEqual(["mcp__asahi__recall"]);
-    expect(allowedToolsFor("allowed", false, false, "cloud")).toEqual(["mcp__asahi__recall"]);
+    expect(allowedToolsFor("allowed", true, false, "cloud")).toEqual(["mcp__asahi__remember", "mcp__asahi__recall", "mcp__asahi__character_fact", "WebSearch"]);
+    expect(allowedToolsFor("owner", false, false, "cloud")).toEqual(["mcp__asahi__recall", "WebSearch"]);
+    expect(allowedToolsFor("allowed", false, false, "cloud")).toEqual(["mcp__asahi__recall", "WebSearch"]);
   });
 });
 
@@ -511,6 +514,33 @@ describe("allowedToolsFor — 원격 도구 노출", () => {
     for (const t of ["mcp__asahi__remember", "mcp__asahi__recall", "mcp__asahi__manage_access"]) {
       expect(off).toContain(t);
       expect(on).toContain(t);
+    }
+  });
+});
+
+describe("allowedToolsFor — 웹 검색", () => {
+  const WS = "WebSearch";
+
+  it("모든 계층에 WebSearch 가 포함된다", () => {
+    expect(allowedToolsFor("owner", true, true, "local", true)).toContain(WS);
+    expect(allowedToolsFor("owner", true, true, "cloud", true)).toContain(WS);
+    expect(allowedToolsFor("owner", true, true, "local", false)).toContain(WS);
+    expect(allowedToolsFor("allowed", true, false, "local", false)).toContain(WS);
+    expect(allowedToolsFor("allowed", false, false, "local", false)).toContain(WS);
+  });
+
+  it("게시 작업 컨텍스트(공개 채널 계층)는 recall 과 WebSearch 만 받는다", () => {
+    const tools = allowedToolsFor("allowed", false, false, "cloud", false);
+    expect(tools.sort()).toEqual(["WebSearch", "mcp__asahi__recall"]);
+  });
+
+  it("WebFetch 는 어느 계층에도 없다", () => {
+    for (const t of [
+      allowedToolsFor("owner", true, true, "local", true),
+      allowedToolsFor("allowed", true, false, "local", false),
+      allowedToolsFor("allowed", false, false, "local", false),
+    ]) {
+      expect(t).not.toContain("WebFetch");
     }
   });
 });
