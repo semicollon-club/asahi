@@ -16,7 +16,7 @@ lastReviewed: 2026-07-28
 - **워커(개인·공유)** — 소유자 PC 또는 동아리 공용 미니PC에서 실행되며, 봇이 모델의 파일/셸
   도구 호출을 원격으로 요청하면 그 도구 하나만 실행해 결과를 돌려준다. 디스코드에도 DB에도
   붙지 않는다. 각 워커는 `workers` 테이블(레지스트리)에 등록된 자기 고유의 id와 해시된
-  토큰을 갖는다(`npm run register-worker`로 발급, 토큰은 그 자리에서 한 번만 보인다). 절차는
+  토큰을 갖는다(`npx tsx src/scripts/registerWorker.ts`로 발급, 토큰은 그 자리에서 한 번만 보인다). 절차는
   `deploy/worker-셋업.md` 참고.
 - **Supabase Postgres** — 봇만 접속하는 정본 상태 저장소(유저·대화·기억). `worker_jobs`/
   `worker_heartbeats` 테이블은 옛 위임 모델의 흔적으로 DDL만 남아 있고 미사용이다. 로컬 PM2는

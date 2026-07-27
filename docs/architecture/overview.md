@@ -44,7 +44,7 @@ Agent SDK 세션으로 직접 실행한다** — 위임이라는 개념은 이�
 `agent/src/store/workersRepo.ts`)에 등록된 자기 고유의 `id`와 `kind`(`personal`|`shared`)를
 가지며, 갖고 있는 자격증명은 그 워커 자신의 토큰(`WORKER_TOKEN`) 하나뿐이다
 (`agent/src/config.ts`의 `loadWorkerConfig`는 `databaseUrl`도 `model`도 요구하지 않는다).
-워커 등록·토큰 발급은 `npm run register-worker`(`agent/src/scripts/registerWorker.ts`)로
+워커 등록·토큰 발급은 `npx tsx src/scripts/registerWorker.ts`(`agent/src/scripts/registerWorker.ts`)로
 하며, 발급된 토큰은 그 자리에서 한 번만 출력되고 DB에는 해시만 남는다(절차는
 `deploy/worker-셋업.md` 참고). 기동하면 `HUB_URL`(봇의 `/worker` WebSocket 주소)로 아웃바운드
 연결을 열고, `hello` 프레임으로 자신의 `workerId`·토큰·자신이 노출할 폴더 목록

@@ -50,7 +50,7 @@ Supabase Postgres에 있으므로 컨테이너 자체는 상태를 갖지 않는
 
 **`WORKER_TOKEN` 은 이 표에 없다 — 봇(이 서비스)은 더 이상 그 변수를 읽지 않는다.** 워커 인증은
 `workers` 레지스트리 테이블(`DATABASE_URL` 이 가리키는 바로 그 Postgres 안)에서 이뤄진다 —
-워커마다 별도로 `npm run register-worker` 로 등록해 고유 토큰을 발급받는다. 이 봇을 배포한
+워커마다 별도로 `npx tsx src/scripts/registerWorker.ts` 로 등록해 고유 토큰을 발급받는다. 이 봇을 배포한
 뒤 반드시 [deploy/worker-셋업.md](worker-셋업.md) 의 "워커 등록" 절차를 함께 따라야 워커가
 붙을 수 있다(아래 "cloud 배포 시 동작 차이" 참고).
 
@@ -127,8 +127,8 @@ PC 작업이 필요하면 워커(`agent/src/worker.ts`)를 소유자 PC 또는 �
 
 ```powershell
 cd agent
-npm run register-worker -- --id owner-laptop --kind personal --user <소유자 디스코드 ID>
-npm run register-worker -- --id semicolon-shared --kind shared --label "동아리 미니PC"
+npx tsx src/scripts/registerWorker.ts --id owner-laptop --kind personal --user <소유자 디스코드 ID>
+npx tsx src/scripts/registerWorker.ts --id semicolon-shared --kind shared --label "동아리 미니PC"
 ```
 
 발급된 토큰은 콘솔에 한 번만 출력되고 DB 에는 해시만 남는다 — 그 자리에서 옮겨 적어 워커 쪽

@@ -52,7 +52,7 @@ ONLY 쓰기거부** 항목은 테스트용 인메모리 Postgres(pg-mem)가 트�
   최종 거부한다 — 어느 경로든 실제 데이터는 절대 바뀌지 않는다. **이 항목은 pg-mem 유닛
   테스트로 재현 불가하여 실 Supabase 스모크로만 검증 가능**(`docs/status/STATUS.md` 참고).
 
-- [ ] **워커 등록·인증** — `npm run register-worker` 로 미니PC 워커를 등록하고 출력된 두 값을
+- [ ] **워커 등록·인증** — `npx tsx src/scripts/registerWorker.ts` 로 미니PC 워커를 등록하고 출력된 두 값을
   미니PC `.env` 에 넣어 워커를 띄운다.
   기대 결과: 워커 콘솔에 `준비됨`, 봇 로그에 그 워커 id 가 찍힌다.
 

@@ -1,7 +1,13 @@
 // 워커 등록·토큰 발급 CLI. 토큰은 여기서 한 번만 출력되고 DB 에는 해시만 들어간다.
 //
-// 실행: cd agent && npm run register-worker -- --id semicolon-shared --kind shared --label "동아리 미니PC"
-//       cd agent && npm run register-worker -- --id owner-laptop --kind personal --user 123456789
+// 실행: cd agent && npx tsx src/scripts/registerWorker.ts --id semicolon-shared --kind shared --label "동아리 미니PC"
+//       cd agent && npx tsx src/scripts/registerWorker.ts --id owner-laptop --kind personal --user 123456789
+//
+// npm run 으로 부르지 말 것. `npm run register-worker -- --id X` 처럼 -- 뒤에 둬도 npm 이
+// --id/--kind/--user 를 자기 설정으로 가로채(경고: Unknown cli config "--id") 값만 위치 인자로
+// 넘긴다 — 스크립트에는 플래그가 하나도 도착하지 않아 "--id 가 필요합니다" 로 끝난다(실측).
+// package.json 의 register-worker 스크립트는 발견용으로만 남겨 뒀고, 인자 없이 부르면 아래
+// USAGE 가 올바른 형태를 알려준다.
 //
 // sync-images.mjs 와 달리 .mjs 가 아니라 TS 인 이유는 WorkersRepo·스키마를 그대로 가져다 쓰기
 // 위해서다 — 해시 방식이나 컬럼 이름을 스크립트가 따로 적어 두면 본체와 갈린다.
@@ -19,8 +25,19 @@ function arg(name: string): string | undefined {
   return i >= 0 ? process.argv[i + 1] : undefined;
 }
 
+const USAGE = `
+사용법 (npm run 이 아니라 npx tsx 로 직접 부른다):
+  cd agent
+  npx tsx src/scripts/registerWorker.ts --id owner-laptop     --kind personal --user <디스코드 id>
+  npx tsx src/scripts/registerWorker.ts --id semicolon-shared --kind shared   --label "동아리 미니PC"
+`;
+
+// 인자 오류에는 반드시 올바른 호출 형태를 함께 보여준다. npm run 으로 부르면 플래그가 통째로
+// 사라져 정확히 이 경로로 떨어지는데, 그때 "--id 가 필요합니다" 만 보면 방금 --id 를 분명히 준
+// 사용자는 무엇이 잘못됐는지 알 길이 없다(실제로 그렇게 막혔다).
 function fail(msg: string): never {
   console.error(msg);
+  console.error(USAGE);
   process.exit(1);
 }
 

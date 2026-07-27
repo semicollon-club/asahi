@@ -63,7 +63,7 @@ npm run dev
 워커(`agent/src/worker.ts`)는 소유자 PC 또는 동아리 공용 미니PC에서 파일/Bash 같은 PC 작업을
 대신 실행해주는 별도 프로세스다(하이브리드 구조는 [docs/architecture/overview.md](docs/architecture/overview.md)
 참고, `docs/decisions/0007-multi-worker-routing.md`). 먼저 워커를 레지스트리에 등록해 토큰을
-발급받는다(`cd agent && npm run register-worker -- --id <이름> --kind personal --user <소유자
+발급받는다(`cd agent && npx tsx src/scripts/registerWorker.ts --id <이름> --kind personal --user <소유자
 디스코드 ID>` — 공용 워커는 `--kind shared`로, `--user`는 생략). 그 뒤 `.env`에 `WORKER_ID`
 (등록한 `--id`와 같은 값)·`WORKER_TOKEN`(등록 시 콘솔에 한 번만 출력된 토큰)·`HUB_URL`·
 `WORKER_ROOTS`를 채우고 `npm run worker`로 실행한다. 자세한 건

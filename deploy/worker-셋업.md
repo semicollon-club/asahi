@@ -39,9 +39,9 @@ DM·서버)는 동아리 **공유** 워커. 이 문서는 워커 한 대(개인�
 
 ```powershell
 cd agent
-npm run register-worker -- --id <이름> --kind personal --user <담당자 디스코드 id>
+npx tsx src/scripts/registerWorker.ts --id <이름> --kind personal --user <담당자 디스코드 id>
 # 공용 워커는 --kind shared 로, --user 는 생략한다
-npm run register-worker -- --id semicolon-shared --kind shared --label "동아리 미니PC"
+npx tsx src/scripts/registerWorker.ts --id semicolon-shared --kind shared --label "동아리 미니PC"
 ```
 
 - `--id`는 사람이 정하는 식별자다(`owner-laptop`, `semicolon-shared` 등) — 로그에 그대로
