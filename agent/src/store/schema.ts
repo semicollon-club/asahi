@@ -206,4 +206,19 @@ CREATE TABLE IF NOT EXISTS character_images (
   created_ts BIGINT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_character_images_emotion ON character_images(emotion);
+
+-- 워커 신원의 정본. 워커는 hello 프레임에 자기 id 와 토큰을 실어 보내고, 허브가 여기서 행을
+-- 찾아 token_hash 를 대조한다(remote/hub.ts). 평문 토큰은 저장하지 않는다 — 발급 시점에
+-- 스크립트가 한 번 출력할 뿐이다.
+-- kind: 'personal' 이면 user_id 가 담당 사용자, 'shared' 면 NULL(동아리 공용 기계).
+CREATE TABLE IF NOT EXISTS workers (
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL,
+  user_id TEXT,
+  token_hash TEXT NOT NULL,
+  label TEXT,
+  created_ts BIGINT NOT NULL,
+  last_seen_ts BIGINT
+);
+CREATE INDEX IF NOT EXISTS idx_workers_user ON workers(user_id);
 `;
