@@ -268,6 +268,50 @@ describe("allow_dir/revoke_dir/list_dir 도구(§원격개발 A2, FIX2: 워커 r
   });
 });
 
+// 최종 pre-merge 리뷰 FIX1(치명) — 이 세 핸들러는 remoteToolHandler(remoteTools.ts)의 1차 필터와
+// 달리 그동안 repo 호출을 try/catch 로 감싸지 않았다. allowed_dirs 가 옛 컬럼 모양일 때(리뷰가
+// 실제로 재현한 상황 — schema.test.ts 의 "allowed_dirs 레거시 전환" 참고) 뿐 아니라 그 외 어떤
+// DB 오류(연결 끊김 등)에도 드라이버가 던진 원문 SQL 오류가 그대로 디스코드 채팅으로 노출됐다.
+// 여기서는 리포 자체를 던지는 스텁으로 바꿔, "무엇이 실패를 일으켰는지"와 무관하게 항상 한국어
+// 안내 문자열로 돌아오는지만 확인한다(schema.test.ts 쪽은 실제 컬럼 오류로 이 경로에 도달하는
+// 것을 확인하고, 여기는 그 도달 이후의 처리 자체를 확인한다).
+describe("allow_dir/revoke_dir/list_dir — repo 실패는 원문 오류가 아니라 한국어 안내로 돌아온다(최종 pre-merge 리뷰 FIX1)", () => {
+  const dbError = () => Promise.reject(new Error('column "worker_id" does not exist'));
+
+  it("allow_dir — repo.add 가 reject 해도 던지지 않고 한국어 안내 문구로 돌아온다", async () => {
+    const owner = await ctx({
+      isOwner: true, isPrivate: true,
+      remote: { roots: [os.tmpdir()], call: async () => ({ ok: true, content: "" }), workerId: "owner-laptop" },
+    });
+    owner.repos.allowedDirs = { add: dbError, list: async () => [], remove: async () => {} } as any;
+    const out = await allowDirHandler(owner, { path: os.tmpdir() });
+    expect(out).toContain("오류");
+    expect(out).toContain("worker_id");
+  });
+
+  it("revoke_dir — repo.remove 가 reject 해도 던지지 않고 한국어 안내 문구로 돌아온다", async () => {
+    const owner = await ctx({
+      isOwner: true, isPrivate: true,
+      remote: { roots: [os.tmpdir()], call: async () => ({ ok: true, content: "" }), workerId: "owner-laptop" },
+    });
+    owner.repos.allowedDirs = { add: async () => {}, list: async () => [], remove: dbError } as any;
+    const out = await revokeDirHandler(owner, { path: os.tmpdir() });
+    expect(out).toContain("오류");
+    expect(out).toContain("worker_id");
+  });
+
+  it("list_dirs — repo.list 가 reject 해도 던지지 않고 한국어 안내 문구로 돌아온다", async () => {
+    const owner = await ctx({
+      isOwner: true, isPrivate: true,
+      remote: { roots: [os.tmpdir()], call: async () => ({ ok: true, content: "" }), workerId: "owner-laptop" },
+    });
+    owner.repos.allowedDirs = { add: async () => {}, list: dbError, remove: async () => {} } as any;
+    const out = await listDirsHandler(owner);
+    expect(out).toContain("오류");
+    expect(out).toContain("worker_id");
+  });
+});
+
 describe("allowedToolsFor — 능력 계층(§7.1)", () => {
   // Task 7(원격 워커 배선)부터 owner-DM(local) 은 SDK 내장 파일/Bash 도구를 더 이상 받지 않는다 —
   // core/agent.ts 가 builtinTools=[] 로 그 도구들을 아예 닫으므로, 예전처럼 allowedTools 목록에

@@ -2,8 +2,18 @@
 // 순수 함수만 둔다(소켓·fs 없음) — 그래야 실제 연결 없이 테스트할 수 있다.
 
 // workerId: "나는 누구의 워커다"가 아니라 "나는 어느 워커다". 허브가 이 값으로 workers 행을
-// 찾아 토큰 해시를 대조한다. 옛 형식(userId)은 파서가 거부하므로 구버전 워커는 조용히 붙지 못하고
-// 명확히 실패한다 — 이게 의도된 동작이다.
+// 찾아 토큰 해시를 대조한다.
+//
+// 최종 pre-merge 리뷰 FIX6(사소) — 옛 형식(userId)을 보내는 구버전 워커가 실제로 어떻게 되는지는
+// "조용히 붙지 못하고 명확히 실패한다"가 아니다. parseFrame 은 workerId 가 없는 hello 를 그냥
+// null 로 거부하고, hub.ts 는 그 null 을 다른 깨진 프레임과 똑같이 취급해 denied 프레임 없이
+// 소켓만 끊는다(handleConnection 의 `if (!frame) { terminate(); return; }`). denied 를 한 번도
+// 받지 못한 워커는 재시도를 멈출 이유가 없으므로, workerClient.ts 는 그 연결 종료를 평범한
+// 끊김으로 보고 고정 간격(기본 3초)마다 조용히 재연결한다 — 매번 같은 옛 형식 hello 를 다시
+// 보내고 다시 끊기는 무한 루프이지, 한 번에 끝나는 "명확한 실패"가 아니다. 사람이 알아채려면
+// "거부됨" 로그가 아니라 "연결이 끊겨 재시도합니다"가 반복되는 로그를 봐야 한다. 이상적이지는
+// 않지만 비용은 제한적이다 — 시도당 TCP 연결 하나와 JSON 파싱 한 번뿐이고, 프레임이 아예
+// 파싱되지 않으므로 레지스트리 조회(DB 왕복)까지는 가지도 않는다.
 export type WorkerHello = { type: "hello"; token: string; workerId: string; roots: string[] };
 export type HubReady = { type: "ready" };
 export type HubDenied = { type: "denied"; reason: string };

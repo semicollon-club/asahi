@@ -1,4 +1,3 @@
-import path from "node:path";
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import type { Role } from "../store/usersRepo.js";
@@ -152,7 +151,15 @@ export async function allowDirHandler(ctx: ToolCtx, args: { path: string }): Pro
     return `워커의 작업 폴더 밖 경로예요. 워커에 열린 폴더: ${roots.join(", ")}`;
   }
   const norm = normalizeDir(args.path);
-  await ctx.repos.allowedDirs.add(ctx.remote.workerId, norm);
+  // FIX1(치명, 최종 pre-merge 리뷰): 이 아래는 실제 DB 호출이라 reject 할 수 있다 — remoteToolHandler
+  // (remoteTools.ts)의 1차 필터는 같은 종류의 호출을 처음부터 try/catch 로 감싸 fail closed 로
+  // 처리하는데, 이 세 dir 핸들러만 그 관례를 벗어나 있었다. 감싸지 않으면 드라이버가 던진 원문
+  // SQL 오류(예: 컬럼이 없다는 오류)가 그대로 디스코드 채팅으로 노출된다.
+  try {
+    await ctx.repos.allowedDirs.add(ctx.remote.workerId, norm);
+  } catch (e) {
+    return `허용 폴더 추가 중 오류가 발생했어요: ${e instanceof Error ? e.message : String(e)}`;
+  }
   return `허용 폴더에 추가했어요: ${norm}`;
 }
 
@@ -161,15 +168,33 @@ export async function revokeDirHandler(ctx: ToolCtx, args: { path: string }): Pr
   // allowDirHandler 와 같은 이유의 방어: allowed_dirs 가 workerId 로 저장되므로, 워커가 연결돼
   // 있지 않으면 어느 워커 몫에서 지울지 자체를 알 수 없다(예전엔 ctx.userId 라 항상 값이 있었다).
   if (!ctx.remote) return "워커가 연결돼 있지 않아요.";
-  await ctx.repos.allowedDirs.remove(ctx.remote.workerId, args.path);
-  return `허용 폴더에서 제거했어요: ${path.resolve(args.path)}`;
+  // FIX6(사소, 최종 pre-merge 리뷰): 이 안내 문구는 그동안 args.path 를 이 파일 상단에서 그대로
+  // import 한 host-platform path.resolve 로 다시 계산했다 — DELETE 자체는 allowedDirsRepo.remove
+  // 내부의 normalizeDir(대상 경로 자신의 플레이버를 따름, paths.ts)로 정규화되는데, 안내 문구만
+  // host 플랫폼 기준이었던 셈이다. 리눅스로 배포된 봇이 윈도우 워커 경로를 다루면 삭제 자체는
+  // 정확히 성공하고도 "/app/C:\ws\..." 처럼 실제로 지운 값과 다른(그리고 틀린) 경로를 보고했다.
+  const norm = normalizeDir(args.path);
+  // FIX1(치명, 최종 pre-merge 리뷰) — allowDirHandler 와 같은 이유로 감싼다.
+  try {
+    await ctx.repos.allowedDirs.remove(ctx.remote.workerId, args.path);
+  } catch (e) {
+    return `허용 폴더 제거 중 오류가 발생했어요: ${e instanceof Error ? e.message : String(e)}`;
+  }
+  return `허용 폴더에서 제거했어요: ${norm}`;
 }
 
 export async function listDirsHandler(ctx: ToolCtx): Promise<string> {
   if (!canManagePc(ctx)) return OWNER_ONLY;
   // revokeDirHandler 와 같은 이유(위 주석 참고).
   if (!ctx.remote) return "워커가 연결돼 있지 않아요.";
-  const dirs = await ctx.repos.allowedDirs.list(ctx.remote.workerId);
+  // FIX1(치명, 최종 pre-merge 리뷰) — allowDirHandler 와 같은 이유로 감싼다. 문구는
+  // remoteToolHandler(remoteTools.ts)의 같은 종류 실패와 동일하게 맞춘다.
+  let dirs: string[];
+  try {
+    dirs = await ctx.repos.allowedDirs.list(ctx.remote.workerId);
+  } catch (e) {
+    return `허용 폴더 확인 중 오류가 발생했어요: ${e instanceof Error ? e.message : String(e)}`;
+  }
   if (dirs.length === 0) return "허용된 폴더가 없어요.";
   return dirs.map((d) => `- ${d}`).join("\n");
 }

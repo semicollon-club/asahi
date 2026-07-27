@@ -465,4 +465,36 @@ describe("remoteToolHandler — 공유 기계에서 사용자별 격리", () => 
       expect(realCalls(calls)).toHaveLength(1);
     });
   });
+
+  // 최종 pre-merge 리뷰 FIX2(중요) — extractCandidatePaths(pathPermission.ts)가 후보 경로를
+  // node:path 의 기본 export(host 프로세스의 process.platform 을 따름)로 계산하면, 리눅스
+  // (Railway)에 배포된 봇이 윈도우 워커의 손님 폴더에서 리터럴 접두가 있는 흔한 상대 glob
+  // (예: 'src/**/*.ts' — 모델이 가장 자연스럽게 만드는 모양)을 받을 때마다 정상 호출을 "허용된
+  // 폴더 밖"으로 오거부했다(리뷰 재현: node:path 를 posix 로 동작시키고 cwd 를 '/app' 로 고정해
+  // 확인 — 이 파일 위쪽의 다른 테스트는 전부 '**/*.ts' 처럼 리터럴 접두가 없는 패턴만 쓰므로 이
+  // 버그를 건드리지 않았다). pathPermission.test.ts 가 extractCandidatePaths 단위로 고정한 것과
+  // 같은 사실을, 여기서는 remoteToolHandler 를 통해 실제로 허브까지 도달하는지(그리고 탈출
+  // 시도는 여전히 막히는지)를 손님·공유 워커 시나리오 그대로 재확인한다.
+  describe("손님의 리터럴 접두 있는 상대 glob 은 정상적으로 허브에 도달한다(최종 pre-merge 리뷰 FIX2, 리뷰 재현)", () => {
+    it("fs_glob — path=자기 폴더 + pattern='src/**/*.ts'(리터럴 접두 있는 흔한 상대 패턴) → 허브를 부른다", async () => {
+      const { ctx, calls } = ctxFor({ isOwner: false, isPrivate: false, userId: "111", dirs: ["C:\\ws"], workerKind: "shared" });
+      const out = await remoteToolHandler(ctx, "fs_glob", { path: "C:\\ws\\111", pattern: "src/**/*.ts" });
+      expect(realCalls(calls)).toHaveLength(1);
+      expect(out).not.toContain("허용된 폴더 밖");
+    });
+
+    it("fs_grep — path=자기 폴더 + glob='src/*.ts' → 허브를 부른다(Grep 쪽도 동일한 계산을 탄다)", async () => {
+      const { ctx, calls } = ctxFor({ isOwner: false, isPrivate: false, userId: "111", dirs: ["C:\\ws"], workerKind: "shared" });
+      const out = await remoteToolHandler(ctx, "fs_grep", { pattern: "TODO", path: "C:\\ws\\111", glob: "src/*.ts" });
+      expect(realCalls(calls)).toHaveLength(1);
+      expect(out).not.toContain("허용된 폴더 밖");
+    });
+
+    it("대조군 — 같은 상대 패턴 모양이라도 상위 탈출(예: '../222/*.ts')은 여전히 거부된다", async () => {
+      const { ctx, calls } = ctxFor({ isOwner: false, isPrivate: false, userId: "111", dirs: ["C:\\ws"], workerKind: "shared" });
+      const out = await remoteToolHandler(ctx, "fs_glob", { path: "C:\\ws\\111", pattern: "../222/*.ts" });
+      expect(out).toContain("허용된 폴더 밖");
+      expect(realCalls(calls)).toHaveLength(0);
+    });
+  });
 });

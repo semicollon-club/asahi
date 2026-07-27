@@ -191,7 +191,12 @@ CREATE TABLE IF NOT EXISTS worker_heartbeats (
 
 -- 워커별로 원격 작업을 허용한 폴더 목록. 예전에는 user_id 키였는데, "한 사람 = 한 대"가
 -- 성립할 때만 맞는 전제였다 — 공용 워커가 생기면서 폴더는 사람이 아니라 기계에 속한다는
--- 사실에 맞췄다. 마이그레이션은 하지 않는다(옛 행은 소유자 폴더 몇 개뿐이라 재등록이 싸다).
+-- 사실에 맞췄다. 옛 user_id 행의 값 자체는 옮기지 않는다(옛 행은 소유자 폴더 몇 개뿐이라
+-- 재등록이 이관 코드보다 싸다) — 다만 CREATE TABLE IF NOT EXISTS 는 이미 존재하는 테이블에는
+-- 아무 효과가 없어(최종 pre-merge 리뷰 FIX1), 옛 모양 그대로 있는 DB 는 이 한 문장만으로는
+-- 절대 새 모양이 되지 못한다. db.ts 의 convertLegacyAllowedDirs 가 initSchema 맨 앞에서
+-- 부팅마다 옛 모양(user_id 컬럼 있음·worker_id 없음)을 감지해 통째로 버려, 아래 CREATE TABLE
+-- IF NOT EXISTS 가 실제로 새 모양을 만들 수 있게 한다.
 CREATE TABLE IF NOT EXISTS allowed_dirs (
   worker_id TEXT NOT NULL,
   dir TEXT NOT NULL,

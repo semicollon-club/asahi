@@ -22,7 +22,10 @@ export async function openDb(connectionString: string): Promise<Db> {
 
 // 테스트: pg-mem 인메모리 DB 위에 pg 호환 Pool 을 만들어 스키마를 보장한다.
 // 기존 코드가 `openDb(":memory:")` 를 많이 쓰던 것을 대체하는 통로 — 테스트는 이걸 쓴다.
-export async function openTestDb(): Promise<Db> {
+// beforeSchema: initSchema 가 실행되기 "전" 원하는 DDL/행을 미리 심어 둘 훅이다(FIX1 회귀
+// 테스트 전용 — 예: 리팩터 전 스키마를 재현해 마이그레이션 로직을 검증한다). 생략하면 기존과
+// 동일하게 빈 pg-mem 위에 바로 initSchema 를 태운다.
+export async function openTestDb(opts?: { beforeSchema?: (db: Db) => Promise<void> }): Promise<Db> {
   const { newDb, DataType } = await import("pg-mem");
   const mem = newDb({ autoCreateForeignKeyIndices: true });
 
@@ -58,13 +61,47 @@ export async function openTestDb(): Promise<Db> {
 
   const { Pool: MemPool } = mem.adapters.createPg();
   const pool = new MemPool() as Db;
+  if (opts?.beforeSchema) await opts.beforeSchema(pool);
   await initSchema(pool);
   return pool;
 }
 
 async function initSchema(db: Db): Promise<void> {
+  await convertLegacyAllowedDirs(db);
   await db.query(SCHEMA_SQL);
   await setSchemaVersion(db, Math.max(await getSchemaVersion(db), SCHEMA_VERSION));
+}
+
+// FIX1(치명, 최종 pre-merge 리뷰): allowed_dirs 의 PK 를 (user_id, dir) 에서 (worker_id, dir) 로
+// 바꾼 DDL(09a4eb9)은 `CREATE TABLE IF NOT EXISTS` 라서, 이 봇을 한 번이라도 띄운 적 있는 모든
+// DB 에서 그대로 no-op 이다 — worker_id 컬럼이 영원히 생기지 않고, allow_dir/revoke_dir/list_dirs
+// 와 fs_* 1차 필터가 전부 "column worker_id does not exist" 로 깨진다(리뷰 재현 — 행이 0개인 빈
+// 테이블에서도 재현된다. 컬럼 해석은 행 수와 무관하다). 설계 결정(§5.2, allowedDirsRepo.ts 주석)은
+// "옛 행은 버리고 워커 등록 후 allow_dir 로 재등록"이므로, 옛 모양의 테이블을 감지하면 여기서 직접
+// 버리고 새로 만든다 — 운영자가 수동으로 처리해야 하는 절차로 남기지 않는다.
+//
+// DO $$ … $$ / ALTER TABLE … RENAME COLUMN 대신 information_schema 조회 + 조건부 DROP 을 쓴 이유는
+// pg-mem(테스트 DB) 스파이크로 실측했다: pg-mem 은 정보 스키마 조회는 지원하지만, ① 같은 이름의
+// 테이블이 이미 있는 상태에서 `CREATE TABLE IF NOT EXISTS` 를 다시 실행하면(모양이 같든 다르든)
+// "AST 일부를 읽지 못했다"는 내부 오류를 던지고, ② `DROP TABLE` 은 그 테이블의 암묵적 PK 인덱스
+// (`<table>_pkey`)를 카탈로그에서 지우지 않아 곧이은 재생성이 "relation already exists" 로
+// 실패하며, ③ `RENAME COLUMN` 은 컬럼 이름은 바꾸지만 PK 제약이 그 이름을 따라가지 않아
+// `ON CONFLICT (worker_id, dir)` 이 깨진다. 아래 순서(DROP TABLE 뒤 그 암묵적 인덱스까지 명시적으로
+// DROP)는 이 세 가지를 전부 피해 pg-mem 에서도, 실제 Postgres 에서도 동일하게 동작한다 — 실제
+// Postgres 에서는 DROP TABLE 이 이미 그 인덱스를 지우므로 `DROP INDEX IF EXISTS` 는 단순 no-op 이다.
+//
+// 멱등성은 판정 조건 자체가 보장한다 — 변환 후에는 worker_id 컬럼이 이미 있으므로 이 함수는 두
+// 번째 이후 부팅에서 SELECT 한 번만 하고 즉시 반환한다(그 사이 쌓인 새 행에는 손대지 않는다).
+export async function convertLegacyAllowedDirs(db: Db): Promise<void> {
+  const r = await db.query(
+    `SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'allowed_dirs'`,
+  );
+  const columns = new Set((r.rows as { column_name: string }[]).map((row) => row.column_name));
+  if (columns.size === 0) return; // 테이블이 아직 없음 — 아래 SCHEMA_SQL 이 새 모양으로 만든다.
+  if (columns.has("worker_id")) return; // 이미 새 모양(변환 완료 또는 신규 설치) — no-op.
+  // 여기 도달하면 옛 모양(user_id, dir)이다 — 설계상 버려도 되는 옛 소유자 폴더 몇 개뿐이다.
+  await db.query(`DROP TABLE IF EXISTS allowed_dirs`);
+  await db.query(`DROP INDEX IF EXISTS allowed_dirs_pkey`);
 }
 
 export async function getSchemaVersion(db: Db): Promise<number> {
