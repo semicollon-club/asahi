@@ -189,12 +189,13 @@ CREATE TABLE IF NOT EXISTS worker_heartbeats (
   last_ts BIGINT NOT NULL
 );
 
--- 사용자별 허용 폴더(원격 개발 작업 대상). 기존 owner.allowedDirs 단일 settings 키를 대체한다 —
--- 소유자는 지금까지처럼 자신의 userId(config.ownerId) 로 저장/조회되어 동작이 그대로다.
+-- 워커별로 원격 작업을 허용한 폴더 목록. 예전에는 user_id 키였는데, "한 사람 = 한 대"가
+-- 성립할 때만 맞는 전제였다 — 공용 워커가 생기면서 폴더는 사람이 아니라 기계에 속한다는
+-- 사실에 맞췄다. 마이그레이션은 하지 않는다(옛 행은 소유자 폴더 몇 개뿐이라 재등록이 싸다).
 CREATE TABLE IF NOT EXISTS allowed_dirs (
-  user_id TEXT NOT NULL,
+  worker_id TEXT NOT NULL,
   dir TEXT NOT NULL,
-  PRIMARY KEY (user_id, dir)
+  PRIMARY KEY (worker_id, dir)
 );
 
 -- 캐릭터 표정 이미지 카탈로그. 실제 파일은 Supabase Storage 에 있고 여기엔 URL 만 둔다.

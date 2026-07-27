@@ -38,6 +38,9 @@ export type ToolCtx = {
   remote?: {
     call(tool: string, args: Record<string, unknown>): Promise<{ ok: boolean; content: string }>;
     roots: string[];
+    // 이 턴이 쓰는 워커의 id. allowed_dirs 가 워커 기준이 되면서 필요해졌다 —
+    // "누가 물어보는가"(ctx.userId)와 "어느 기계인가"(이 값)는 이제 다른 축이다.
+    workerId: string;
   };
 };
 
@@ -121,25 +124,34 @@ const OWNER_DM_ONLY = "이 작업은 소유자 DM에서만 할 수 있어요.";
 // 겹 — 위 canManagePc 와 별개로, 이건 "누가"가 아니라 "어디"의 문제다).
 export async function allowDirHandler(ctx: ToolCtx, args: { path: string }): Promise<string> {
   if (!canManagePc(ctx)) return OWNER_DM_ONLY;
-  const roots = ctx.remote?.roots ?? [];
-  if (roots.length === 0) return "워커가 연결돼 있지 않거나 워커에 열린 작업 폴더가 없어요.";
+  // ctx.remote 부재·roots 없음을 하나의 조건으로 합쳐 판정한다(기존과 동일한 거부 조건) —
+  // 이렇게 하면 이 줄을 지난 뒤로는 TS 가 ctx.remote 를 항상 정의된 값으로 좁혀 준다(strict
+  // null checks). allowed_dirs 는 이제 workerId 로 저장하므로 그 아래에서 ctx.remote.workerId 를
+  // 그냥 쓸 수 있어야 한다.
+  if (!ctx.remote || ctx.remote.roots.length === 0) return "워커가 연결돼 있지 않거나 워커에 열린 작업 폴더가 없어요.";
+  const roots = ctx.remote.roots;
   if (!isPathWithinAny(args.path, roots)) {
     return `워커의 작업 폴더 밖 경로예요. 워커에 열린 폴더: ${roots.join(", ")}`;
   }
   const norm = normalizeDir(args.path);
-  await ctx.repos.allowedDirs.add(ctx.userId, norm);
+  await ctx.repos.allowedDirs.add(ctx.remote.workerId, norm);
   return `허용 폴더에 추가했어요: ${norm}`;
 }
 
 export async function revokeDirHandler(ctx: ToolCtx, args: { path: string }): Promise<string> {
   if (!canManagePc(ctx)) return OWNER_DM_ONLY;
-  await ctx.repos.allowedDirs.remove(ctx.userId, args.path);
+  // allowDirHandler 와 같은 이유의 방어: allowed_dirs 가 workerId 로 저장되므로, 워커가 연결돼
+  // 있지 않으면 어느 워커 몫에서 지울지 자체를 알 수 없다(예전엔 ctx.userId 라 항상 값이 있었다).
+  if (!ctx.remote) return "워커가 연결돼 있지 않아요.";
+  await ctx.repos.allowedDirs.remove(ctx.remote.workerId, args.path);
   return `허용 폴더에서 제거했어요: ${path.resolve(args.path)}`;
 }
 
 export async function listDirsHandler(ctx: ToolCtx): Promise<string> {
   if (!canManagePc(ctx)) return OWNER_DM_ONLY;
-  const dirs = await ctx.repos.allowedDirs.list(ctx.userId);
+  // revokeDirHandler 와 같은 이유(위 주석 참고).
+  if (!ctx.remote) return "워커가 연결돼 있지 않아요.";
+  const dirs = await ctx.repos.allowedDirs.list(ctx.remote.workerId);
   if (dirs.length === 0) return "허용된 폴더가 없어요.";
   return dirs.map((d) => `- ${d}`).join("\n");
 }

@@ -117,16 +117,16 @@ describe("manage_access 도구", () => {
 // 이제는 그 사용자의 워커가 hello 프레임으로 알려온 실제 작업 폴더(ctx.remote.roots)만을 문자열
 // 포함 검사로 대조한다 — 존재 여부·실경로 확인은 워커 쪽(remote/roots.ts 의 checkPath)이 실제
 // 파일 접근 시점에 이미 하고 있다(이중 방어의 두 번째 겹, 위 "경로 게이팅" 참고).
-describe("allow_dir/revoke_dir/list_dir 도구(§원격개발 A2, FIX2: 워커 roots 기준 재검증) — 소유자 DM 전용, ctx.userId 별로 저장", () => {
+describe("allow_dir/revoke_dir/list_dir 도구(§원격개발 A2, FIX2: 워커 roots 기준 재검증) — 소유자 DM 전용, 워커(ctx.remote.workerId) 별로 저장", () => {
   it("소유자 DM 에서 워커의 작업 폴더(roots) 안 경로를 허용하면 list 에 반영된다", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "asahi-allowdir-"));
     const owner = await ctx({
       isOwner: true, isPrivate: true,
-      remote: { roots: [os.tmpdir()], call: async () => ({ ok: true, content: "" }) },
+      remote: { roots: [os.tmpdir()], call: async () => ({ ok: true, content: "" }), workerId: "owner-laptop" },
     });
     const out = await allowDirHandler(owner, { path: dir });
     expect(out).toContain(path.resolve(dir));
-    expect(await owner.repos.allowedDirs.list(owner.userId)).toEqual([path.resolve(dir)]);
+    expect(await owner.repos.allowedDirs.list("owner-laptop")).toEqual([path.resolve(dir)]);
     expect(await listDirsHandler(owner)).toContain(path.resolve(dir));
   });
 
@@ -143,12 +143,12 @@ describe("allow_dir/revoke_dir/list_dir 도구(§원격개발 A2, FIX2: 워커 r
     const workerRoot = fs.mkdtempSync(path.join(os.tmpdir(), "asahi-workerroot-"));
     const owner = await ctx({
       isOwner: true, isPrivate: true,
-      remote: { roots: [workerRoot], call: async () => ({ ok: true, content: "" }) },
+      remote: { roots: [workerRoot], call: async () => ({ ok: true, content: "" }), workerId: "owner-laptop" },
     });
     const out = await allowDirHandler(owner, { path: dir }); // dir 는 workerRoot 의 형제 — roots 밖
     expect(out).toContain("밖");
     expect(out).toContain(workerRoot);
-    expect(await owner.repos.allowedDirs.list(owner.userId)).toEqual([]);
+    expect(await owner.repos.allowedDirs.list("owner-laptop")).toEqual([]);
   });
 
   it("FIX2 — 존재 여부는 더 이상 봇이 검사하지 않는다(워커와 다른 머신이라 확인 불가) — roots 안이면 실존하지 않아도 등록된다", async () => {
@@ -158,32 +158,48 @@ describe("allow_dir/revoke_dir/list_dir 도구(§원격개발 A2, FIX2: 워커 r
     const bogus = path.join(workerRoot, "does-not-exist-xyz");
     const owner = await ctx({
       isOwner: true, isPrivate: true,
-      remote: { roots: [workerRoot], call: async () => ({ ok: true, content: "" }) },
+      remote: { roots: [workerRoot], call: async () => ({ ok: true, content: "" }), workerId: "owner-laptop" },
     });
     const out = await allowDirHandler(owner, { path: bogus });
     expect(out).toContain(path.resolve(bogus));
-    expect(await owner.repos.allowedDirs.list(owner.userId)).toEqual([path.resolve(bogus)]);
+    expect(await owner.repos.allowedDirs.list("owner-laptop")).toEqual([path.resolve(bogus)]);
   });
 
   it("revoke_dir 은 허용 목록에서 제거한다", async () => {
-    const owner = await ctx({ isOwner: true, isPrivate: true });
+    const owner = await ctx({
+      isOwner: true, isPrivate: true,
+      remote: { roots: [os.tmpdir()], call: async () => ({ ok: true, content: "" }), workerId: "owner-laptop" },
+    });
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "asahi-revokedir-"));
-    await owner.repos.allowedDirs.add(owner.userId, dir);
+    await owner.repos.allowedDirs.add("owner-laptop", dir);
     const out = await revokeDirHandler(owner, { path: dir });
-    expect(await owner.repos.allowedDirs.list(owner.userId)).toEqual([]);
+    expect(await owner.repos.allowedDirs.list("owner-laptop")).toEqual([]);
     expect(out).toContain(path.resolve(dir));
   });
 
   it("list_dir 은 비어있으면 안내 문구를 반환한다", async () => {
-    const owner = await ctx({ isOwner: true, isPrivate: true });
+    const owner = await ctx({
+      isOwner: true, isPrivate: true,
+      remote: { roots: [os.tmpdir()], call: async () => ({ ok: true, content: "" }), workerId: "owner-laptop" },
+    });
     expect(await listDirsHandler(owner)).toContain("없어요");
+  });
+
+  // allowed_dirs 가 워커 기준으로 바뀌면서 revoke_dir/list_dir 도 "어느 워커 몫인지" 를 알아야
+  // 동작할 수 있게 됐다 — allowDirHandler 가 이미 갖고 있던 "워커 미연결 시 거부" 분기를 두
+  // 핸들러에도 맞춰 추가했다(예전엔 ctx.userId 를 썼으므로 워커 연결 여부와 무관하게 항상 값이
+  // 있었다).
+  it("워커가 연결돼 있지 않으면 revoke_dir/list_dir 도 거부한다(allowed_dirs 가 워커 기준이라 어느 워커 몫인지 알 수 없다)", async () => {
+    const owner = await ctx({ isOwner: true, isPrivate: true }); // remote 미설정
+    expect(await revokeDirHandler(owner, { path: "C:\\proj\\a" })).toContain("워커");
+    expect(await listDirsHandler(owner)).toContain("워커");
   });
 
   it("손님 DM 에서는 세 도구 모두 거부하고 아무것도 바꾸지 않는다", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "asahi-guest-"));
     const guest = await ctx({
       isOwner: false, isPrivate: true,
-      remote: { roots: [os.tmpdir()], call: async () => ({ ok: true, content: "" }) },
+      remote: { roots: [os.tmpdir()], call: async () => ({ ok: true, content: "" }), workerId: "guest-worker" },
     });
     expect(await allowDirHandler(guest, { path: dir })).toContain("소유자");
     expect(await guest.repos.allowedDirs.list(guest.userId)).toEqual([]);
@@ -197,7 +213,7 @@ describe("allow_dir/revoke_dir/list_dir 도구(§원격개발 A2, FIX2: 워커 r
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "asahi-ownerserver-"));
     const ownerServer = await ctx({
       isOwner: true, isPrivate: false,
-      remote: { roots: [os.tmpdir()], call: async () => ({ ok: true, content: "" }) },
+      remote: { roots: [os.tmpdir()], call: async () => ({ ok: true, content: "" }), workerId: "owner-laptop" },
     });
     expect(await allowDirHandler(ownerServer, { path: dir })).toContain("소유자");
     expect(await ownerServer.repos.allowedDirs.list(ownerServer.userId)).toEqual([]);
@@ -213,20 +229,23 @@ describe("allow_dir/revoke_dir/list_dir 도구(§원격개발 A2, FIX2: 워커 r
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "asahi-fix6-stray-"));
     const guest = await ctx({
       isOwner: false, isPrivate: true, userId: "guest",
-      remote: { roots: [os.tmpdir()], call: async () => ({ ok: true, content: "" }) },
+      remote: { roots: [os.tmpdir()], call: async () => ({ ok: true, content: "" }), workerId: "guest-worker" },
     });
     (guest as unknown as Record<string, unknown>).ownWorkstation = true; // 과거엔 이 값으로 게이트를 통과했다
     expect(await allowDirHandler(guest, { path: dir })).toContain("소유자");
     expect(await guest.repos.allowedDirs.list(guest.userId)).toEqual([]);
   });
 
-  it("허용 폴더는 ctx.userId 별로 격리된다 — 다른 사용자의 허용 목록에 서로 영향 없음", async () => {
+  it("허용 폴더는 워커(ctx.remote.workerId) 별로 격리된다 — 같은 소유자라도 다른 워커의 목록에 서로 영향 없음", async () => {
+    // 이 태스크의 핵심 회귀: 예전엔 ctx.userId 로 격리됐지만, 이제는 "같은 사람이 서로 다른
+    // 기계(예: 소유자의 노트북 vs 동아리방 공용 PC)에서 연결해도 허용 폴더가 섞이면 안 된다"가
+    // 기준이다 — 그래서 userId 는 두 컨텍스트에서 동일하게 두고 workerId 만 다르게 준다.
     const db = await openTestDb();
     const repos = { memories: new MemoriesRepo(db), users: new UsersRepo(db), allowedDirs: new AllowedDirsRepo(db) };
     const runtime = { model: "claude-opus-4-8", sdkVersion: "0.3.207", deployTarget: "local" as const, maxTurns: 30 };
-    const remote = { roots: [os.tmpdir()], call: async () => ({ ok: true, content: "" }) };
-    const ownerA: ToolCtx = { repos, role: "owner", isPrivate: true, isOwner: true, userId: "ownerA", conversationId: 1, runtime, remote } as unknown as ToolCtx;
-    const ownerB: ToolCtx = { repos, role: "owner", isPrivate: true, isOwner: true, userId: "ownerB", conversationId: 1, runtime, remote } as unknown as ToolCtx;
+    const call = async () => ({ ok: true, content: "" });
+    const ownerA: ToolCtx = { repos, role: "owner", isPrivate: true, isOwner: true, userId: "owner", conversationId: 1, runtime, remote: { roots: [os.tmpdir()], call, workerId: "owner-laptop" } } as unknown as ToolCtx;
+    const ownerB: ToolCtx = { repos, role: "owner", isPrivate: true, isOwner: true, userId: "owner", conversationId: 1, runtime, remote: { roots: [os.tmpdir()], call, workerId: "semicolon-shared" } } as unknown as ToolCtx;
     const dirA = fs.mkdtempSync(path.join(os.tmpdir(), "asahi-userA-"));
     const dirB = fs.mkdtempSync(path.join(os.tmpdir(), "asahi-userB-"));
 
