@@ -13,7 +13,8 @@
 - 스펙 정본: `docs/superpowers/specs/2026-07-27-multi-worker-design.md`. 충돌하면 스펙이 이긴다.
 - 주석·커밋 메시지·사용자 노출 문구는 **모두 한국어**.
 - `core/` 는 `discord.js` 를 import 하지 않는다. 새 의존성을 추가하지 않는다.
-- 베이스라인: `cd agent && npm test` → **584 passed / 1 skipped**. 매 태스크 후 실패 0 을 유지한다.
+- 베이스라인: `cd agent && npm test` → **584 passed / 1 skipped**. 매 태스크 후 **테스트 실패 0** 을 유지한다.
+- `npx tsc --noEmit` 은 Task 2·5 의 끝에서 **의도적으로 빨갛다**(프레임·스키마를 먼저 바꾸고 그 소비자를 다음 태스크가 고치는 구조). 그 두 곳은 각 태스크가 어떤 오류가 남는지 명시한다. 나머지 태스크 끝에서는 반드시 무출력이어야 한다.
 - `npx tsc --noEmit` 은 `include: ["src"]` 라 `tests/` 를 검사하지 않는다. 테스트 픽스처의 타입 오류는 tsc 가 아니라 실행으로만 드러난다 — `Config`/`ToolCtx` 리터럴을 만들 때 필드 누락에 주의한다.
 - 워커 쪽 최종 경로 관문(`agent/src/remote/roots.ts` 의 `checkPath`)은 **이 계획에서 수정하지 않는다**.
 - `sh_exec` 는 경로로 봉쇄되지 않는다(의도된 설계). 이 계획은 그 사실을 바꾸지 않는다.
@@ -378,7 +379,7 @@ try {
 - [ ] **Step 8: 전체 검증**
 
 Run: `cd agent && npm test && npx tsc --noEmit && npm run build`
-Expected: 597 passed / 1 skipped, tsc 무출력, 빌드 성공
+Expected: 실패 0(베이스라인 584 + 이 태스크가 추가한 테스트 수), 1 skipped, tsc 무출력, 빌드 성공
 
 - [ ] **Step 9: 커밋**
 
