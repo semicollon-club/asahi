@@ -130,6 +130,67 @@ describe("buildSystemPrompt — 능력 안내는 deployTarget 이 아니라 work
   });
 });
 
+// 최종 리뷰 FIX4(사소하지만 "안내와 실제 도구가 어긋남" 결함 유형) — Task 7 로 서버 채널의
+// 소유자·손님(DM·서버)도 워커가 연결되면 fs_*/sh_exec(+소유자는 allow_dir 등)를 받게 됐는데,
+// 이 블록은 그 두 갈래를 여전히 "PC 작업을 하지 않습니다/못 합니다"로 고정 안내하고 있었다.
+// 세 경우(owner-DM/owner-서버/손님) 모두 workerConnected 로 안내가 실제 도구 보유와 일치해야 한다.
+describe("buildSystemPrompt — 능력 안내가 실제 도구 보유와 어긋나지 않는다(최종 리뷰 FIX4)", () => {
+  it("서버 채널의 소유자 + 워커 연결 시 파일·셸 도구와 폴더 관리(allow_dir) 안내를 포함한다", () => {
+    const p = buildSystemPrompt({ role: "owner", isPrivate: false, isOwner: true, workerConnected: true });
+    const cap = capabilitySection(p);
+    expect(cap).toMatch(/fs_read/);
+    expect(cap).toMatch(/sh_exec/);
+    expect(cap).toMatch(/allow_dir/);
+  });
+
+  it("서버 채널의 소유자 + 워커 연결 시에도 DM 전용 도구(manage_access/db_schema/db_query)는 언급하지 않는다", () => {
+    const p = buildSystemPrompt({ role: "owner", isPrivate: false, isOwner: true, workerConnected: true });
+    const cap = capabilitySection(p);
+    expect(cap).not.toMatch(/manage_access/);
+    expect(cap).not.toMatch(/db_query/);
+  });
+
+  it("서버 채널의 소유자 + 워커 미연결(기본값)이면 파일·셸 도구 이름을 언급하지 않고, recall 은 된다고 안내한다", () => {
+    const p = buildSystemPrompt({ role: "owner", isPrivate: false, isOwner: true });
+    const cap = capabilitySection(p);
+    expect(cap).not.toMatch(/fs_read|sh_exec|allow_dir/);
+    expect(cap).toMatch(/recall/);
+  });
+
+  it("손님(DM) + 워커 연결 시 파일·셸 도구 안내를 포함하고, 폴더 관리 도구는 언급하지 않는다(관리자 전용)", () => {
+    const p = buildSystemPrompt({ role: "allowed", isPrivate: true, isOwner: false, workerConnected: true });
+    expect(p).toMatch(/fs_read/);
+    expect(p).toMatch(/sh_exec/);
+    expect(p).not.toMatch(/allow_dir|revoke_dir|list_dirs/);
+    expect(p).not.toMatch(/manage_access/);
+  });
+
+  it("손님(서버) + 워커 연결 시에도 파일·셸 도구 안내를 포함하고, 폴더 관리 도구는 언급하지 않는다", () => {
+    const p = buildSystemPrompt({ role: "allowed", isPrivate: false, isOwner: false, workerConnected: true });
+    expect(p).toMatch(/fs_read/);
+    expect(p).toMatch(/sh_exec/);
+    expect(p).not.toMatch(/allow_dir|revoke_dir|list_dirs/);
+  });
+
+  it("손님은 워커 연결 여부와 무관하게 manage_access·폴더 관리 도구를 절대 언급하지 않는다(회귀 유지)", () => {
+    for (const isPrivate of [true, false]) {
+      for (const workerConnected of [true, false]) {
+        const p = buildSystemPrompt({ role: "allowed", isPrivate, isOwner: false, workerConnected });
+        expect(p).not.toMatch(/manage_access/);
+        expect(p).not.toMatch(/allow_dir|revoke_dir|list_dirs/);
+      }
+    }
+  });
+
+  it("손님 DM·서버 모두 워커 미연결(기본값)이면 기존처럼 파일·셸 도구 이름을 언급하지 않는다(회귀 없음)", () => {
+    const dm = buildSystemPrompt({ role: "allowed", isPrivate: true, isOwner: false });
+    const server = buildSystemPrompt({ role: "allowed", isPrivate: false, isOwner: false });
+    for (const p of [dm, server]) {
+      expect(p).not.toMatch(/fs_read|fs_write|fs_edit|fs_glob|fs_grep|sh_exec/);
+    }
+  });
+});
+
 describe("deriveRapportStage", () => {
   it("10 미만이면 0(서먹)", () => {
     expect(deriveRapportStage(0)).toBe(0);

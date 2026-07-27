@@ -256,5 +256,22 @@ export function makeExecutors(roots: string[]): Executors {
         });
       });
     },
+
+    // Task 8: 손님의 개인 폴더를 만들기 위한 실행기. 모델이 부르는 도구가 아니다 — REMOTE_TOOL_NAMES
+    // (core/remoteTools.ts)에 넣지 않아 모델에게는 아예 보이지 않고, 봇이 손님의 첫 원격 호출
+    // 직전에 remoteToolHandler 에서 직접 끼워 넣는다. 다른 fs_* 와 완전히 동일한 gate(위 참고)를
+    // 거친다 — 이 실행기만을 위한 예외 경로(별도 검사 로직)를 만들지 않는다.
+    async fs_mkdir(args) {
+      const g = gate(args.path);
+      if (!g.ok) return g.res;
+      try {
+        // recursive:true 는 폴더가 이미 있어도 에러 없이 성공한다 — 이 실행기는 멱등이어야
+        // 하므로(매 호출마다 불려도 안전해야 한다) 그 동작이 그대로 맞다.
+        await fs.mkdir(g.path, { recursive: true });
+        return { ok: true, content: "(완료)" };
+      } catch (e) {
+        return { ok: false, content: `폴더를 만들지 못했어요: ${e instanceof Error ? e.message : String(e)}` };
+      }
+    },
   };
 }

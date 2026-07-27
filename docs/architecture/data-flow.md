@@ -1,5 +1,5 @@
 ---
-lastReviewed: 2026-07-13
+lastReviewed: 2026-07-28
 ---
 
 # 메시지 데이터 흐름 (수명주기)
@@ -48,12 +48,12 @@ lastReviewed: 2026-07-13
 
 코어는 채널(`discordChannelId`)별 직렬 처리를 **ingest 체인**과 **turn 체인**, 두 개의
 독립된 `Map<string, Promise<void>>`로 나눠서 관리한다(`ingestChains`, `turnChains`,
-`core.ts:77` 부근). 두 체인 모두 같은 `discordChannelId`를 키로 쓰지만 서로 다른 큐이므로,
+`core.ts:70` 부근). 두 체인 모두 같은 `discordChannelId`를 키로 쓰지만 서로 다른 큐이므로,
 한쪽이 밀려도 다른 쪽 진행을 막지 않는다.
 
 ### ingest 체인 — durable 저장(짧다)
 
-`ingest(hint, ts, text, images)`가 하는 일은 다음과 같다(`core.ts:132`).
+`ingest(hint, ts, text, images)`가 하는 일은 다음과 같다(`core.ts:142`).
 
 1. `hint.commandOnly`(일반 채널에서 멘션 없이 받은 예약어)면 대화 행을 조회·생성하지 않고
    그 자리에서 바로 처리한 뒤 반환한다 — `/help`면 안내를 발행하고, 조사 예약어(`/대회`·
@@ -88,7 +88,7 @@ turn 체인에 들어간 `runConversationTurn(convId, userId, role, text, messag
 저장은 LLM 턴의 길이와 무관하게 항상 빠르게 끝나므로, 크래시가 나더라도 "저장은 됐지만
 아직 처리는 안 된" 메시지만 남고 그 메시지는 반드시 `recoverPending`이 재개할 수 있다.
 
-## 3단계 — turn 처리: 한도, 위임, 직접 실행
+## 3단계 — turn 처리: 한도와 실행
 
 `runConversationTurn`은 대화별 신원(`isOwner = userId === config.ownerId`, role이 아니라
 신원으로 판정)에 따라 갈라진다.
@@ -100,17 +100,31 @@ turn 체인에 들어간 `runConversationTurn(convId, userId, role, text, messag
   전역 직렬 지점을 만들어, 두 요청이 동시에 카운트를 읽고 둘 다 한도 통과로 착각하는 경합을
   막는다. 예약 실패면 한도 안내 메시지만 보내고 턴 자체를 종료한다.
 
-한도 통과 후(또는 소유자라 처음부터 무제한), 다음 조건을 **모두** 만족하면 이 봇이 직접
-처리하지 않고 소유자의 로컬 워커에 위임한다(`delegateToWorker`, `core.ts:229`): 이미지
-없음, 소유자 신원, DM(사적 대화), 워커 온라인(하트비트 cutoff 30초 이내). 위임 시
-`jobs.enqueue`로 `worker_jobs` 큐에 job을 넣고 완료까지 폴링하며 진행상황을 그대로 디스코드로
-흘려보낸다 — 이 경로에서는 메시지 저장·세션 갱신을 워커가 이미 끝낸 뒤이므로 코어는 결과를
-`publish`만 한다. 네 조건 중 하나라도 어긋나면(서버/스레드 대화, 손님, 워커 오프라인,
-이미지 포함 턴 등) 코어가 자신의 SDK 세션으로 `runTurn`을 **직접** 실행하고, 성공하면
-`assistant_message`로 응답을, 실패하면 `system_notice`로 오류 안내를 발행한다. 위임/직접
-실행 어느 경로든 **turn 처리가 끝나면(성공·실패·예외 모두) `finally`에서
-`messages.markProcessed(messageId)`를 호출**해 그 사용자 메시지를 `processed=true`로
-닫는다.
+한도 통과 후(또는 소유자라 처음부터 무제한), **코어는 예외 없이 자신의 SDK 세션으로
+`runTurn`을 직접 실행한다** — 대화 턴 전체를 다른 프로세스에 넘기는 위임은 존재하지 않는다
+(`docs/decisions/0006-thin-worker.md`로 이미 제거됐다. 이 문서의 옛 판이 서술하던
+`delegateToWorker`/`worker_jobs` 큐 기반 위임은 그보다도 이전 모델이며 지금 코드베이스
+어디에도 없다). 성공하면 `assistant_message`로 응답을, 실패하면 `system_notice`로 오류
+안내를 발행한다. 이미지가 있어도 처리 경로가 갈라지지 않는다 — `runTurn` 호출 전에 이미지를
+다운로드해 멀티모달 프롬프트에 실을 뿐이다.
+
+`runConversationTurn`은 `runTurn`을 부르기 직전에 `resolveTurnWorker`
+(`agent/src/core/agent.ts`)를 한 번 호출해 `workerConnected`(이 턴에 실제로 붙는 워커가
+있는가)를 구하고, 그 값을 페르소나 시스템 프롬프트(`buildSystemPrompt`)의 능력 안내에
+싣는다 — "PC 작업이 가능하다"는 안내가 실제 도구 노출과 어긋나지 않게 하기 위해서다.
+**다만 이건 안내용 계산이다**: 실제로 어느 도구가 열리고 어느 워커로 호출이 나가는지는
+`runTurn`(`agent/src/core/agent.ts`의 `makeRunAgentTurn`)이 같은 `resolveTurnWorker` 판정을
+내부에서 독립적으로 다시 계산해 정한다. `resolveTurnWorker`는 `resolveWorkerSelector`
+(`agent/src/core/workerSelect.ts`)의 "어디서 말하느냐가 어느 기계냐를 정한다" 규칙으로 이
+턴이 개인 워커(소유자 DM)를 쓸지 공유 워커(그 외 전부)를 쓸지 고르고, `WorkersRepo` 레지스트리
+(`agent/src/store/workersRepo.ts`)로 실제 `workerId`를 찾은 뒤 `hub.isConnected(workerId)`로
+연결 여부를 확인한다. 워커 자체의 인증(연결 시점의 `hello` → 레지스트리 조회 → `ready`/
+`denied`)과 도구 호출 하나하나가 워커로 전달되는 경로는 이 문서의 범위 밖이다 —
+`docs/architecture/overview.md` "원격 도구 호출" 절, `docs/security/capability-model.md`를
+참고한다.
+
+턴 처리가 끝나면(성공·실패·예외 모두) **`finally`에서 `messages.markProcessed(messageId)`를
+호출**해 그 사용자 메시지를 `processed=true`로 닫는다.
 
 ## 크래시 복구 불변식
 
@@ -120,16 +134,14 @@ turn 체인에 들어간 `runConversationTurn(convId, userId, role, text, messag
 - **저장 시점**: ingest 체인의 `messages.insert`가 `processed=false`로 행을 만드는 순간이
   "이 메시지는 반드시 처리된다"는 계약의 시작점이다. 이 insert가 끝난 뒤에 프로세스가
   죽어도, 메시지는 DB에 남아 있다.
-- **재개 시점**: 부팅 시 `AgentCore.recoverPending()`(`core.ts:379`)이
+- **재개 시점**: 부팅 시 `AgentCore.recoverPending()`(`core.ts:436`)이
   `messages.unprocessedUserMessages()`(`processed=false`인 user 메시지 전체, id 오름차순)를
   조회해 각 메시지를 그 대화의 **turn 체인에 직접** enqueue한다(ingest 체인을 다시 거치지
   않는다 — 이미 저장은 끝났으므로). role이 더 이상 `owner`/`allowed`가 아니면(예: 그 사이
   차단됨) 처리 없이 바로 `markProcessed`로 닫는다.
 
 즉 ingest가 끝난 시점부터 turn이 `finally`에서 `markProcessed`를 호출하는 시점까지의
-구간에서 프로세스가 죽어도, 그 메시지는 다음 부팅 때 정확히 한 번 더 재개된다(위임된 턴은
-`jobs.enqueue`가 `message_id` 유니크 인덱스로 멱등화되어 있어 재개해도 job이 중복 생성되지
-않는다).
+구간에서 프로세스가 죽어도, 그 메시지는 다음 부팅 때 정확히 한 번 더 재개된다.
 
 ## 시퀀스 다이어그램
 
@@ -142,8 +154,8 @@ sequenceDiagram
     participant DB as Postgres(messages)
     participant Turn as AgentCore(turn 체인)
     participant Turns as TurnsRepo
-    participant W as 로컬 워커
-    participant LLM as runTurn(SDK)
+    participant LLM as runTurn(SDK, agent.ts)
+    participant W as 워커(연결된 경우만)
 
     D->>A: messageCreate
     A->>A: inboundChains(channelId) 직렬화
@@ -161,14 +173,13 @@ sequenceDiagram
         Note over Turn: 한도 예약 생략(무제한)
     end
 
-    alt 소유자 DM + 이미지 없음 + 워커 온라인
-        Turn->>W: delegateToWorker(job enqueue)
-        W-->>Turn: 진행(progress)/완료(done) 폴링
-    else 그 외 전부
-        Turn->>LLM: runTurn(prompt, resume?)
-        LLM-->>Turn: TurnResult(성공/실패)
-        Turn->>DB: messages.insert(assistant)
+    Turn->>LLM: runTurn(prompt, resume?) — 항상 직접 실행(위임 없음)
+    opt 모델이 fs_*/sh_exec 를 호출하고 이 턴에 워커가 연결돼 있으면
+        LLM->>W: 도구 호출 1건(resolveTurnWorker 가 정한 워커로)
+        W-->>LLM: 결과
     end
+    LLM-->>Turn: TurnResult(성공/실패)
+    Turn->>DB: messages.insert(assistant)
 
     Turn->>DB: markProcessed(messageId)
     Turn->>Bus: publish(assistant_message | system_notice)
@@ -179,5 +190,5 @@ sequenceDiagram
 
 ## 관련 문서
 
-- 3-프로세스 토폴로지·위임 규칙 전체: `overview.md`
+- 3-프로세스 토폴로지 전체, 위임이 없는 이유, 워커 인증·원격 도구 호출 상세: `overview.md`
 - 능력 계층·도구 게이팅: `docs/security/capability-model.md`

@@ -1,4 +1,3 @@
-import path from "node:path";
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import type { Role } from "../store/usersRepo.js";
@@ -6,6 +5,7 @@ import type { UsersRepo } from "../store/usersRepo.js";
 import type { MemoriesRepo, Memory } from "../store/memoriesRepo.js";
 import type { AllowedDirsRepo } from "../store/allowedDirsRepo.js";
 import type { IntrospectRepo } from "../store/introspectRepo.js";
+import type { WorkerKind } from "../store/workersRepo.js";
 import { assertReadOnlySql, formatQueryResult } from "./sqlGuard.js";
 import { CHARACTER_FACT_LIMIT } from "./turnPrep.js";
 import { REMOTE_TOOL_NAMES, remoteToolHandler } from "./remoteTools.js";
@@ -38,19 +38,31 @@ export type ToolCtx = {
   remote?: {
     call(tool: string, args: Record<string, unknown>): Promise<{ ok: boolean; content: string }>;
     roots: string[];
+    // 이 턴이 쓰는 워커의 id. allowed_dirs 가 워커 기준이 되면서 필요해졌다 —
+    // "누가 물어보는가"(ctx.userId)와 "어느 기계인가"(이 값)는 이제 다른 축이다.
+    workerId: string;
+    // Task 7: 그 워커가 개인(personal, 소유자의 개인 기계)인지 공유(shared, 동아리방 공용 PC 처럼
+    // 여러 사람이 함께 쓰는 기계)인지. remoteToolHandler(remoteTools.ts)가 scopeDirs 로 허용
+    // 폴더를 사용자별 하위 폴더로 좁힐지 정하는 데 쓴다 — 공유 워커에서만 손님을 좁히고, 개인
+    // 워커는 좁히지 않는다(resolveWorkerSelector 규칙상 개인 워커엔 애초에 그 소유자만 붙는다).
+    workerKind: WorkerKind;
   };
 };
 
-// PC 관리 도구(allow_dir/revoke_dir/list_dirs)를 쓸 수 있는 신원인지: 소유자 DM 뿐이다.
-// 서버/스레드(비공개 아님)는 물론, 손님 DM 도 항상 거부한다.
+// PC 관리 도구(allow_dir/revoke_dir/list_dirs)를 쓸 수 있는 신원인지: 소유자뿐이다.
+// Task 7 이전에는 소유자 DM(ctx.isPrivate && ctx.isOwner)만 통과했다 — 그땐 워커가 곧 소유자의
+// 개인 기계였으니 DM 밖에서는 관리할 대상 자체가 없었다. 이제 소유자는 서버 채널에서도 공유
+// 기계(동아리 공용 PC)에 연결되고, 그 기계의 관리자 역시 소유자다 — 그래서 isPrivate 조건을
+// 뺐다. 손님은 DM 이든 서버든 항상 거부한다: 공유 기계 안에서 자기 하위 폴더를 다루는 것(scopeDirs)
+// 과, 그 기계의 허용 폴더 "목록 자체"를 바꾸는 것은 서로 다른 권한이고 후자는 관리자 전용이다.
 // FIX6(사소하지만 함정, 최종 리뷰): 예전엔 ctx.ownWorkstation===true(손님이 자기 PC 워커 위에서
 // 도는 턴)도 통과시켰다 — 그 값을 채우던 유일한 생산자(worker/jobRunner.ts)는 이미 삭제되어
 // 항상 undefined 였던 죽은 분기였고, 그 분기가 전제하던 경로 강제(canUseTool)도 이미 사라진
 // 상태라 "혹시라도 이 필드가 다시 채워지면" 손님 DM 이 경로 게이트 없이 폴더 관리 도구를 얻는
 // 잠재적 함정이었다(리뷰 지적). 필드 자체(ToolCtx.ownWorkstation)를 삭제해 이 분기가 되살아날
-// 여지를 없앴다.
+// 여지를 없앴다 — isOwner 하나만 보는 지금도 이 사실은 그대로다.
 function canManagePc(ctx: ToolCtx): boolean {
-  return ctx.isPrivate && ctx.isOwner;
+  return ctx.isOwner;
 }
 
 // ── 순수 핸들러(테스트 대상) ────────────────────────────────────────────────
@@ -108,8 +120,16 @@ export async function manageAccessHandler(ctx: ToolCtx, args: { userId: string; 
   return `${args.userId} 님의 접근 권한을 '${args.role}'(으)로 설정했어요.`;
 }
 
-// 원격 개발 워크플로우(Phase A): 소유자 DM 전용 게이트 — 실제 경로 제한(canUseTool)은 별도 태스크(A3)의 몫이다.
+// 원격 개발 워크플로우(Phase A): 소유자 DM 전용 게이트(isOwnerDm, db_schema/db_query/runtime_info/
+// manage_access 가 쓴다) — 실제 경로 제한(canUseTool)은 별도 태스크(A3)의 몫이다. 이 문구는 문자
+// 그대로 "DM 에서만"이 맞다 — 이 셋은 봇 자신에 대한 권한이라 Task 7 이후에도 DM 전용 그대로다.
 const OWNER_DM_ONLY = "이 작업은 소유자 DM에서만 할 수 있어요.";
+
+// PC 관리 도구(allow_dir/revoke_dir/list_dirs, canManagePc 가 쓴다) 전용 거부 문구. Task 7 로
+// canManagePc 가 isOwner 만 보게 되면서(서버의 소유자도 공유 기계를 관리할 수 있다) "DM 에서만"
+// 이라는 문구가 더 이상 맞지 않는다 — 소유자는 서버에서도 이 도구를 쓸 수 있으므로, 그 경우까지
+// 포괄하는 "소유자만"으로 표현한다.
+const OWNER_ONLY = "이 작업은 소유자만 할 수 있어요.";
 
 // FIX2(치명, 최종 리뷰): 예전엔 fs.statSync/fs.realpathSync 로 이 경로를 "봇 프로세스의"
 // 파일시스템에서 검증했다 — 클라우드 배포(Railway 컨테이너)는 물론, 워커가 봇과 다른 머신에서
@@ -120,26 +140,61 @@ const OWNER_DM_ONLY = "이 작업은 소유자 DM에서만 할 수 있어요.";
 // (remote/roots.ts 의 checkPath)이 실제 파일 접근 시점에 이미 하고 있다(이중 방어의 두 번째
 // 겹 — 위 canManagePc 와 별개로, 이건 "누가"가 아니라 "어디"의 문제다).
 export async function allowDirHandler(ctx: ToolCtx, args: { path: string }): Promise<string> {
-  if (!canManagePc(ctx)) return OWNER_DM_ONLY;
-  const roots = ctx.remote?.roots ?? [];
-  if (roots.length === 0) return "워커가 연결돼 있지 않거나 워커에 열린 작업 폴더가 없어요.";
+  if (!canManagePc(ctx)) return OWNER_ONLY;
+  // ctx.remote 부재·roots 없음을 하나의 조건으로 합쳐 판정한다(기존과 동일한 거부 조건) —
+  // 이렇게 하면 이 줄을 지난 뒤로는 TS 가 ctx.remote 를 항상 정의된 값으로 좁혀 준다(strict
+  // null checks). allowed_dirs 는 이제 workerId 로 저장하므로 그 아래에서 ctx.remote.workerId 를
+  // 그냥 쓸 수 있어야 한다.
+  if (!ctx.remote || ctx.remote.roots.length === 0) return "워커가 연결돼 있지 않거나 워커에 열린 작업 폴더가 없어요.";
+  const roots = ctx.remote.roots;
   if (!isPathWithinAny(args.path, roots)) {
     return `워커의 작업 폴더 밖 경로예요. 워커에 열린 폴더: ${roots.join(", ")}`;
   }
   const norm = normalizeDir(args.path);
-  await ctx.repos.allowedDirs.add(ctx.userId, norm);
+  // FIX1(치명, 최종 pre-merge 리뷰): 이 아래는 실제 DB 호출이라 reject 할 수 있다 — remoteToolHandler
+  // (remoteTools.ts)의 1차 필터는 같은 종류의 호출을 처음부터 try/catch 로 감싸 fail closed 로
+  // 처리하는데, 이 세 dir 핸들러만 그 관례를 벗어나 있었다. 감싸지 않으면 드라이버가 던진 원문
+  // SQL 오류(예: 컬럼이 없다는 오류)가 그대로 디스코드 채팅으로 노출된다.
+  try {
+    await ctx.repos.allowedDirs.add(ctx.remote.workerId, norm);
+  } catch (e) {
+    return `허용 폴더 추가 중 오류가 발생했어요: ${e instanceof Error ? e.message : String(e)}`;
+  }
   return `허용 폴더에 추가했어요: ${norm}`;
 }
 
 export async function revokeDirHandler(ctx: ToolCtx, args: { path: string }): Promise<string> {
-  if (!canManagePc(ctx)) return OWNER_DM_ONLY;
-  await ctx.repos.allowedDirs.remove(ctx.userId, args.path);
-  return `허용 폴더에서 제거했어요: ${path.resolve(args.path)}`;
+  if (!canManagePc(ctx)) return OWNER_ONLY;
+  // allowDirHandler 와 같은 이유의 방어: allowed_dirs 가 workerId 로 저장되므로, 워커가 연결돼
+  // 있지 않으면 어느 워커 몫에서 지울지 자체를 알 수 없다(예전엔 ctx.userId 라 항상 값이 있었다).
+  if (!ctx.remote) return "워커가 연결돼 있지 않아요.";
+  // FIX6(사소, 최종 pre-merge 리뷰): 이 안내 문구는 그동안 args.path 를 이 파일 상단에서 그대로
+  // import 한 host-platform path.resolve 로 다시 계산했다 — DELETE 자체는 allowedDirsRepo.remove
+  // 내부의 normalizeDir(대상 경로 자신의 플레이버를 따름, paths.ts)로 정규화되는데, 안내 문구만
+  // host 플랫폼 기준이었던 셈이다. 리눅스로 배포된 봇이 윈도우 워커 경로를 다루면 삭제 자체는
+  // 정확히 성공하고도 "/app/C:\ws\..." 처럼 실제로 지운 값과 다른(그리고 틀린) 경로를 보고했다.
+  const norm = normalizeDir(args.path);
+  // FIX1(치명, 최종 pre-merge 리뷰) — allowDirHandler 와 같은 이유로 감싼다.
+  try {
+    await ctx.repos.allowedDirs.remove(ctx.remote.workerId, args.path);
+  } catch (e) {
+    return `허용 폴더 제거 중 오류가 발생했어요: ${e instanceof Error ? e.message : String(e)}`;
+  }
+  return `허용 폴더에서 제거했어요: ${norm}`;
 }
 
 export async function listDirsHandler(ctx: ToolCtx): Promise<string> {
-  if (!canManagePc(ctx)) return OWNER_DM_ONLY;
-  const dirs = await ctx.repos.allowedDirs.list(ctx.userId);
+  if (!canManagePc(ctx)) return OWNER_ONLY;
+  // revokeDirHandler 와 같은 이유(위 주석 참고).
+  if (!ctx.remote) return "워커가 연결돼 있지 않아요.";
+  // FIX1(치명, 최종 pre-merge 리뷰) — allowDirHandler 와 같은 이유로 감싼다. 문구는
+  // remoteToolHandler(remoteTools.ts)의 같은 종류 실패와 동일하게 맞춘다.
+  let dirs: string[];
+  try {
+    dirs = await ctx.repos.allowedDirs.list(ctx.remote.workerId);
+  } catch (e) {
+    return `허용 폴더 확인 중 오류가 발생했어요: ${e instanceof Error ? e.message : String(e)}`;
+  }
   if (dirs.length === 0) return "허용된 폴더가 없어요.";
   return dirs.map((d) => `- ${d}`).join("\n");
 }
@@ -177,31 +232,33 @@ export async function runtimeInfoHandler(ctx: ToolCtx): Promise<string> {
 }
 
 // ── 턴별 도구셋(능력 계층, §7.1) ────────────────────────────────────────────
-// owner-DM → 기억 + 접근관리 + db_schema/db_query/runtime_info, + 워커가 연결돼 있으면 원격
-// 파일/셸 도구(fs_*/sh_exec)와 허용폴더 관리 도구(allow_dir/revoke_dir/list_dirs)까지.
-// 손님 DM → 기억(본인)만. 서버 → recall(공용)만.
-// Task 7(원격 워커 배선): owner-DM 분기에서 SDK 내장 파일/Bash 도구(Read/Write/Edit/Glob/Grep/Bash)를
-// 뺐다 — core/agent.ts 가 builtinTools=[] 로 그 도구들을 아예 닫아버리므로, 여기 목록에 이름을 남겨봐야
-// 실행할 대상이 없는 허수아비 항목이 된다(있지도 않은 능력을 있다고 보고하는 셈). 실제 파일/셸 작업은
-// 워커가 연결돼 있을 때만 원격 도구(mcp__asahi__fs_*·sh_exec)로 한다.
-// FIX2(치명, 최종 리뷰): allow_dir/revoke_dir/list_dirs 도 이제 workerConnected 하나로만
-// 결정한다 — deployTarget 으로 가르던 예전 판정을 없앴다. 예전엔 deployTarget="cloud"(Railway
-// 조각2, 소유자 PC 가 없는 컨테이너 실행)면 owner-DM 이라도 이 셋을 항상 뺐는데, fs_*/sh_exec 는
-// 이미 workerConnected 기준(cloud 라도 워커만 연결되면 열림)이라 "cloud + 워커 연결"에서
-// fs_read 는 되는데 그 전제조건인 allow_dir 자체가 없어 allowed_dirs 를 영원히 못 채우는 모순이
-// 있었다(리뷰 재현 — 배포 가이드는 DEPLOY_TARGET=cloud 를 강제하면서 allow_dir 를 쓰라고
-// 안내했다). 이제 local/cloud 어느 쪽도 "워커가 지금 연결돼 있는가" 하나로 판단한다 —
-// allowDirHandler 자신은 실행 시점에 ctx.remote.roots(워커가 hello 로 알려온 실제 폴더)로
-// 재검증한다(봇 프로세스의 로컬 파일시스템은 더 이상 보지 않는다).
-// workerConnected(원격 워커 1단계): owner-DM 분기(이제 local/cloud 구분 없이 하나)에 원격 도구
-// 6종과 dir 관리 도구 3종을 함께 연다. 손님 DM·서버 분기는 그대로 둔다 — 1단계 원격 도구는
-// 소유자 전용이다.
+// Task 7(워커 라우팅) 이후의 계층 요약 — "어디서 말하느냐가 어느 기계냐를 정한다"(workerSelect.ts
+// 의 resolveWorkerSelector). 예전엔 원격 도구 자체가 owner-DM 전용이었지만, 이제는 그렇지 않다:
+// - 소유자 DM: 기억 전체 + 접근관리 + db_schema/db_query/runtime_info(전부 봇 자신에 대한
+//   권한이라 DM 전용을 유지) + 워커(그 소유자의 개인 기계)가 연결돼 있으면 원격 파일/셸
+//   도구(fs_*/sh_exec)와 허용폴더 관리 도구(allow_dir/revoke_dir/list_dirs)까지.
+// - 소유자(서버 채널): 공유 기계(동아리 공용 PC)의 관리자다. recall + 워커가 연결돼 있으면
+//   원격 도구와 dir 관리 도구까지 그대로 받는다. DB·접근관리는 주지 않는다 — 그건 기계가
+//   아니라 봇 자신에 대한 권한이라 공개 채널에서 열 이유가 없다.
+// - 손님(DM·서버 공통): 항상 공유 기계로 연결된다. DM 이면 기억(본인)까지, 아니면 recall(공용)만.
+//   워커가 연결돼 있으면 원격 도구도 받는다(remoteToolHandler 의 scopeDirs 가 자기 하위 폴더로
+//   좁힌다) — 다만 dir 관리 도구는 절대 받지 않는다. 공유 목록 자체를 바꾸는 건 관리자만 한다.
+// SDK 내장 파일/Bash 도구(Read/Write/Edit/Glob/Grep/Bash)는 어느 분기에도 없다 — core/agent.ts 가
+// builtinTools=[] 로 그 도구들을 아예 닫아버리므로, 여기 목록에 이름을 남겨봐야 실행할 대상이
+// 없는 허수아비 항목이 된다(있지도 않은 능력을 있다고 보고하는 셈). 실제 파일/셸 작업은 워커가
+// 연결돼 있을 때만 원격 도구(mcp__asahi__fs_*·sh_exec)로 한다.
+// FIX2(치명, 최종 리뷰): dir 관리 도구는 deployTarget 이 아니라 workerConnected(+isOwner, Task 7)
+// 로 결정한다 — 예전엔 deployTarget="cloud"(Railway 조각2, 소유자 PC 가 없는 컨테이너 실행)면
+// owner-DM 이라도 이 셋을 항상 뺐는데, fs_*/sh_exec 는 이미 workerConnected 기준(cloud 라도
+// 워커만 연결되면 열림)이라 "cloud + 워커 연결"에서 fs_read 는 되는데 그 전제조건인 allow_dir
+// 자체가 없어 allowed_dirs 를 영원히 못 채우는 모순이 있었다(리뷰 재현). allowDirHandler 자신은
+// 실행 시점에 ctx.remote.roots(워커가 hello 로 알려온 실제 폴더)로 재검증한다(봇 프로세스의
+// 로컬 파일시스템은 더 이상 보지 않는다).
 // FIX6(사소하지만 함정, 최종 리뷰): 이 함수가 예전에 갖고 있던 ownWorkstation 분기(손님이라도
-// 자기 PC 전권으로 SDK 내장 파일/Bash 를 여는 경로)는 Task 8 에서 이미 제거됐고, 이번에 그
-// 분기가 참조하던 ToolCtx.ownWorkstation/TurnContext.ownWorkstation 필드 자체도 완전히
-// 삭제했다 — 생산자 없는 죽은 필드를 남겨 두면, 훗날 누군가 실수로(혹은 무심코) 그 필드를 다시
-// 채우는 코드를 추가할 때 canManagePc 가 경로 강제 없이 손님에게 폴더 관리 도구를 열어주는
-// 잠재적 함정이 있었다.
+// 자기 PC 전권으로 SDK 내장 파일/Bash 를 여는 경로)는 이미 제거됐고, 그 분기가 참조하던
+// ToolCtx.ownWorkstation/TurnContext.ownWorkstation 필드 자체도 완전히 삭제했다 — 생산자 없는
+// 죽은 필드를 남겨 두면, 훗날 누군가 실수로(혹은 무심코) 그 필드를 다시 채우는 코드를 추가할 때
+// canManagePc 가 경로 강제 없이 손님에게 폴더 관리 도구를 열어주는 잠재적 함정이 있었다.
 export function allowedToolsFor(
   role: Role,
   isPrivate: boolean,
@@ -217,11 +274,18 @@ export function allowedToolsFor(
 ): string[] {
   // 원격 도구는 워커 연결이 있을 때만 연다. 판정 축이 "어디서 실행 중인가"(deployTarget)가 아니라
   // "워커가 붙어 있는가"로 바뀐 것이 이 단계의 핵심이다 — cloud 에서도 워커만 붙으면 PC 작업이 된다.
-  // 1단계는 소유자 DM 전용으로 좁힌다 — 아래 owner-DM 분기 외에는 추가하지 않는다.
+  // Task 7: 원격 도구는 더 이상 소유자 전용이 아니다 — 아래 네 분기(owner-DM/owner-서버/
+  // 손님-DM/손님-서버) 모두 workerConnected 만 보고 remote 를 splice 한다. 계층을 가르는 건
+  // 그 뒤에 붙는 다른 도구들(기억·DB·접근관리·dir 관리)이다.
   const remote = workerConnected ? REMOTE_TOOL_NAMES.map((n) => t(n)) : [];
-  // FIX2: dir 관리 도구도 remote 와 정확히 같은 조건(workerConnected)으로 연다 — deployTarget
-  // 은 이 함수 안에서 더 이상 아무것도 분기하지 않는다(여전히 runtime_info 가 보고하는 배포
-  // 정보로서는 의미가 있어 시그니처에는 남겨 둔다).
+  // 최종 리뷰 FIX5(사소) — dirTools 는 아래 owner 두 분기(owner-DM·owner-서버)에만 스플라이스된다
+  // (:262-273). 손님이 받는 분기(세 번째·네 번째 return)는 dirTools 자체를 참조하지 않으므로,
+  // 이 상수의 조건에 && isOwner 를 넣어도 결과는 절대 달라지지 않았다 — 죽은 조건이었는데, 그
+  // 조건이 마치 손님을 막는 관문인 것처럼 comment 가 오해를 유발했다(리뷰 지적: "그 조건이 안
+  // 하는 일을 한다고 주장하는 comment 를 남기지 마라"). 손님이 이 셋을 못 받는 진짜 이유는
+  // "그 분기가 애초에 안 쓴다"는 구조 자체다 — 실행 시점에는 canManagePc(아래 dir 핸들러들이
+  // 다시 확인)가 같은 기준(isOwner)으로 한 번 더 막는다. 공유 기계의 허용 폴더 "목록 자체를
+  // 바꾸는" 권한은 관리자(소유자)만 갖는다는 사실 자체는 그대로다.
   const dirTools = workerConnected ? [t("allow_dir"), t("revoke_dir"), t("list_dirs")] : [];
   const webTools = webToolsEnabled ? WEB_TOOLS : [];
   if (isOwner && isPrivate) {
@@ -233,8 +297,14 @@ export function allowedToolsFor(
       ...webTools,
     ];
   }
-  if (isPrivate && (role === "owner" || role === "allowed")) return [t("remember"), t("recall"), t("character_fact"), ...webTools];
-  return [t("recall"), ...webTools];
+  // 소유자가 서버에 있으면 공유 기계 + 관리자 권한(폴더 관리 포함). DB·접근관리는 DM 전용을
+  // 유지한다 — 그건 기계가 아니라 봇 자신에 대한 권한이라 공개 채널에서 열 이유가 없다.
+  if (isOwner) return [...remote, t("recall"), ...dirTools, ...webTools];
+  // 손님: DM 이든 서버든 공유 기계로 간다. 폴더 관리는 주지 않는다.
+  if (isPrivate && (role === "owner" || role === "allowed")) {
+    return [...remote, t("remember"), t("recall"), t("character_fact"), ...webTools];
+  }
+  return [...remote, t("recall"), ...webTools];
 }
 
 // ── 인프로세스 MCP 서버(SDK) — handler 는 위 순수 함수를 감싼다 ──────────────

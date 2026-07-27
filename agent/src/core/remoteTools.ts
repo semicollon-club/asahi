@@ -1,21 +1,11 @@
 import { isPathWithinAny } from "./paths.js";
 import { extractCandidatePaths } from "./pathPermission.js";
+import { scopeDirs } from "./workerSelect.js";
 import type { ToolCtx } from "./tools.js";
 
 // 워커에서 실행되는 원격 도구 이름. SDK 내장 Read/Write/Edit/Glob/Grep/Bash 를 대체한다.
 // 이름을 달리 지은 이유: 내장 도구와 이름이 겹치면 어느 쪽이 도는지 알 수 없다.
 export const REMOTE_TOOL_NAMES = ["fs_read", "fs_write", "fs_edit", "fs_glob", "fs_grep", "sh_exec"] as const;
-
-// 원격 개발 워크플로우는 1단계 한정 소유자 DM 전용이다. tools.ts 의 다른 특권 핸들러들과
-// 같은 문구로 거부해 사용자에게는 하나의 일관된 목소리로 보이게 한다.
-const OWNER_DM_ONLY = "이 작업은 소유자 DM에서만 할 수 있어요.";
-
-// tools.ts 의 isOwnerDm 과 완전히 동일한 판정이다. 그쪽 함수를 그대로 가져다 쓰지 못하는 이유는
-// tools.ts 가 이미 이 모듈(remoteTools.ts)을 import 하고 있어서다 — 역방향 import 는 순환 참조가
-// 된다. 로직만 그대로 복제한다(한쪽이 바뀌면 반드시 같이 바꿔야 한다).
-function isOwnerDm(ctx: ToolCtx): boolean {
-  return ctx.isOwner && ctx.isPrivate;
-}
 
 // 인자에서 1차 필터를 걸 경로를 뽑는다(fs_read/fs_write/fs_edit 용 — fs_glob/fs_grep 은 아래
 // LOCAL_TOOL_NAME 경로로 별도 처리한다). sh_exec 는 경로 인자가 없으므로 대상이 아니다 — 뿐만
@@ -48,30 +38,30 @@ const LOCAL_TOOL_NAME: Partial<Record<string, string>> = { fs_glob: "Glob", fs_g
 // 원격 호출은 실패해도 예외를 던지지 않는다 — 도구 하나의 실패가 턴 전체를 죽이면
 // 모델이 다른 방법을 시도하거나 사용자에게 알릴 기회 자체가 사라진다.
 //
-// 신원 재확인은 allowedToolsFor(능력 계층)와 독립적으로 다시 한다. ctx.remote 는 "워커 연결
-// 여부"만으로 채워질 수 있어(허브 쪽 배선은 이 턴이 공개 채널인지 모른다) allowedToolsFor 가
-// 이번 턴에 도구 이름을 안 줬다는 사실 하나에만 기대면, 그 산정이 어긋나는 순간(예: 소유자가
-// 공개 서버 채널에서 말했는데도 ctx.remote 가 채워지는 배선 버그) sh_exec 로 가는 마지막
-// 방어선이 SDK 의 allowed-tools 검사 하나만 남는다. 그래서 다른 특권 핸들러(dbQueryHandler 등의
-// isOwnerDm, allowDirHandler 등의 canManagePc)처럼 핸들러 자신이 다시 확인한다.
+// 신원 재확인은 이제 "ctx.remote 가 있는가" 하나다. 예전에는 isOwnerDm 을 여기서 다시 확인했지만,
+// 그 판정은 워커가 소유자 DM 전용이던 시절의 것이다. 지금은 어느 기계를 쓸지 자체가
+// resolveTurnWorker(agent.ts) 의 결과이고, 그 결과가 ctx.remote 로 나타난다 — 도구 목록과
+// 핸들러가 같은 하나의 판정을 공유하므로 "도구는 보이는데 실행은 거부"가 생기지 않는다.
+// 권한 차이는 아래 scopeDirs 가 만든다(손님은 자기 폴더로 좁혀진다).
 //
 // 경로 검사는 두 겹이다 — 단, fs_read/fs_write/fs_edit/fs_glob/fs_grep 에 한해서다. 여기(봇)는
-// 사용자가 allow_dir 로 관리하는 목록에 대한 1차 필터로, 왕복 전에 빠르게 거르고 안내 문구를
-// 낸다. 최종 판정은 워커(remote/roots.ts)가 한다 — realpath·심볼릭 링크·실제 존재 여부를 아는
-// 건 파일시스템을 가진 그쪽뿐이다. sh_exec 는 이 두 겹 중 어느 쪽에도 속하지 않는다(FIX6 — 문서만
-// 바로잡을 뿐 동작은 원래도 이랬다): 셸 명령은 경로 인자 자체가 없어 위 필터가 적용될 대상이 없고,
-// 워커 쪽(executors.ts)도 sh_exec 는 roots 로 판정하지 않는다 — 유일한 경계는 실행 시 cwd
-// (roots[0])와 워커 프로세스를 돌리는 OS 계정의 권한뿐이다. 셸을 "경로"로 봉쇄하려는 시도는 하지
-// 않는다 — 셸은 애초에 경로 판정이 성립하지 않는다(파이프·서브셸·PATH 탐색 등으로 얼마든지
-// 우회된다).
+// 사용자가 allow_dir 로 관리하는 목록(scopeDirs 로 좁혀진 뒤)에 대한 1차 필터로, 왕복 전에
+// 빠르게 거르고 안내 문구를 낸다. 최종 판정은 워커(remote/roots.ts)가 한다 — realpath·심볼릭
+// 링크·실제 존재 여부를 아는 건 파일시스템을 가진 그쪽뿐이다. sh_exec 는 이 두 겹 중 어느 쪽에도
+// 속하지 않는다(FIX6 — 문서만 바로잡을 뿐 동작은 원래도 이랬다): 셸 명령은 경로 인자 자체가 없어
+// 위 필터가 적용될 대상이 없고, 워커 쪽(executors.ts)도 sh_exec 는 roots 로 판정하지 않는다 —
+// 유일한 경계는 실행 시 cwd(roots[0])와 워커 프로세스를 돌리는 OS 계정의 권한뿐이다. 셸을
+// "경로"로 봉쇄하려는 시도는 하지 않는다 — 셸은 애초에 경로 판정이 성립하지 않는다(파이프·
+// 서브셸·PATH 탐색 등으로 얼마든지 우회된다). Task 7 로 손님도 공유 기계에서 sh_exec 를 받게
+// 되면서 이 한계는 그대로 손님에게도 적용된다 — 공유 기계의 셸 접근은 애초에 폴더 격리로
+// 완전히 봉쇄할 수 있는 종류의 권한이 아니다(문서화된, 받아들여진 위험).
 export async function remoteToolHandler(
   ctx: ToolCtx,
   tool: string,
   args: Record<string, unknown>,
 ): Promise<string> {
-  if (!isOwnerDm(ctx)) return OWNER_DM_ONLY;
-
-  if (!ctx.remote) return "지금은 워커가 연결돼 있지 않아 PC 작업을 할 수 없어요.";
+  const remote = ctx.remote;
+  if (!remote) return "지금은 워커가 연결돼 있지 않아 PC 작업을 할 수 없어요.";
 
   const singlePathArg = pathArgOf(args);
   const localTool = LOCAL_TOOL_NAME[tool];
@@ -92,15 +82,43 @@ export async function remoteToolHandler(
     // 해진다. 판정 불가 상태의 안전한 기본값은 거부다(fail closed).
     if (!ctx.repos?.allowedDirs) return "허용 폴더 목록을 확인할 수 없어 요청을 거부했어요.";
 
+    // Task 7: allowed_dirs 는 워커(remote.workerId) 기준으로 저장된다 — 같은 사람이라도 기계가
+    // 다르면(소유자의 노트북 vs 동아리 공용 PC) 목록이 섞이면 안 된다. scopeDirs 가 그 목록을
+    // 이 사용자 몫으로 좁힌다 — 공유 워커의 손님은 자기 하위 폴더로, 개인 워커거나 소유자면
+    // 그대로(관리자는 좁히지 않는다). scopeDirs(→joinUnderRoot)는 ctx.userId 를 경로 조각으로
+    // 그대로 쓰므로, Discord 스노플레이크가 아닌 값(예: 크래프트한 조각)이 오면 예외를 던진다 —
+    // 아래 catch 가 허용 폴더 확인 오류와 동일하게 fail closed 로 처리한다.
     let allowed: string[];
     try {
-      allowed = await ctx.repos.allowedDirs.list(ctx.userId);
+      const dirs = await ctx.repos.allowedDirs.list(remote.workerId);
+      allowed = scopeDirs(dirs, { workerKind: remote.workerKind, isOwner: ctx.isOwner, userId: ctx.userId });
     } catch (e) {
       // allowedDirs.list 는 실제 DB 호출이라 reject 할 수 있다(아래 허브 콜과 달리 "절대
-      // reject 하지 않는다"는 보장이 없다) — 여기서 잡아 문자열로 바꾼다.
+      // reject 하지 않는다"는 보장이 없다) — 여기서 잡아 문자열로 바꾼다. scopeDirs 가 잘못된
+      // 경로 조각을 거부해 던지는 예외도 여기서 같은 방식으로 잡힌다.
       return `허용 폴더 확인 중 오류가 발생했어요: ${e instanceof Error ? e.message : String(e)}`;
     }
     if (allowed.length === 0) return "먼저 allow_dir 로 작업할 폴더를 허용해 주세요.";
+
+    // Task 8: 손님의 개인 폴더는 첫 접근 때 만든다("1인당 1폴더"가 규칙이라 없다고 거부할 이유가
+    // 없다). 모델에게 시키지 않고 봇이 직접 끼워 넣는다 — 모델이 fs_write 나 sh_exec 로 제각각
+    // 만들게 두면 실패 처리도 제각각이 된다. 개인 워커·소유자는 대상이 아니다: 개인 워커는 애초에
+    // 그 소유자 한 명 몫이라 "손님용 하위 폴더" 개념이 없고, 소유자는 scopeDirs 가 좁히지 않으므로
+    // allowed[0]이 "그 사람의 폴더" 하나로 특정되지 않는다(관리자 권한으로 아무 폴더나 다룬다).
+    //
+    // 이 호출은 매 fs_* 호출(경로 검사를 타는 도구는 전부)마다 반복된다 — "최초 1회만" 판정하는
+    // 캐시를 일부러 두지 않았다. fs_mkdir(recursive:true)은 이미 있으면 그대로 성공하는 멱등
+    // 연산이라 반복 호출 자체에 부작용이 없고, 캐시를 두면 "그 사이 누군가 그 폴더를 지웠다"는
+    // 경우를 다음 호출까지 놓친다 — 상태 없이 매번 확인하는 쪽이 더 단순하고 더 안전하다. 비용은
+    // 워커 왕복 한 번인데, 이미 각 fs_* 호출 자체가 워커 왕복이므로 자릿수가 하나 늘 뿐이다.
+    //
+    // 실패해도 그냥 진행한다(.catch(() => {})): 이 생성은 편의를 위한 사전 준비일 뿐 요청의
+    // 일부가 아니다 — 실패하는 이유(권한, 디스크 오류 등)는 뒤이은 진짜 호출에서도 똑같이
+    // 겪을 테니 거기서 한 번만 사용자에게 보고되면 충분하고, 준비 단계의 실패로 요청 자체를
+    // 막을 이유는 없다.
+    if (remote.workerKind === "shared" && !ctx.isOwner) {
+      await remote.call("fs_mkdir", { path: allowed[0] }).catch(() => {});
+    }
 
     // FIX6: fs_glob/fs_grep 은 path·pattern(fs_grep 은 +glob) 양쪽에서 후보 경로를 뽑는다
     // (extractCandidatePaths 가 path 생략 시 allowed[0] 기본값까지 포함해 처리한다). 나머지
@@ -127,7 +145,7 @@ export async function remoteToolHandler(
 
   let r: { ok: boolean; content: string };
   try {
-    r = await ctx.remote.call(tool, args);
+    r = await remote.call(tool, args);
   } catch (e) {
     // WorkerHub.call 은 reject 하지 않도록 설계돼 있지만, 그 보장이 깨지는 경우까지 대비한다 —
     // "절대 던지지 않는다"는 이 함수 자신의 계약이므로 방어를 이중으로 둔다.

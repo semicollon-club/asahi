@@ -16,8 +16,10 @@ describe("워커 실행기", () => {
   });
   afterEach(() => fs.rmSync(root, { recursive: true, force: true }));
 
-  it("도구 6개를 정확히 노출한다", () => {
-    expect(Object.keys(ex).sort()).toEqual(["fs_edit", "fs_glob", "fs_grep", "fs_read", "fs_write", "sh_exec"]);
+  it("도구 7개를 정확히 노출한다", () => {
+    // Task 8: fs_mkdir 추가. 모델이 부르는 도구 목록(REMOTE_TOOL_NAMES)에는 안 들어가지만, 워커
+    // 실행기 자체는 다른 fs_* 와 나란히 이 객체에 존재한다.
+    expect(Object.keys(ex).sort()).toEqual(["fs_edit", "fs_glob", "fs_grep", "fs_mkdir", "fs_read", "fs_write", "sh_exec"]);
   });
 
   it("fs_read 는 줄번호를 붙여 읽는다", async () => {
@@ -130,6 +132,39 @@ describe("워커 실행기", () => {
     fs.writeFileSync(p, "가".repeat(OUTPUT_MAX * 2));
     const r = await ex.fs_read({ path: p });
     expect(r.content.length).toBeLessThanOrEqual(OUTPUT_MAX + 200);
+  });
+
+  // Task 8: 손님의 개인 폴더를 만드는 전용 실행기. 모델이 부르는 도구가 아니라(REMOTE_TOOL_NAMES
+  // 밖) 봇이 remoteTools.ts 에서 직접 끼워 넣는다 — 그래서 다른 fs_* 와 동일한 gate(경로 검사)만
+  // 검증하면 되고, 별도의 권한·존재 규칙은 없다.
+  describe("fs_mkdir", () => {
+    it("루트 안에 폴더를 만든다", async () => {
+      const target = path.join(root, "111");
+      const r = await ex.fs_mkdir({ path: target });
+      expect(r.ok).toBe(true);
+      expect(fs.existsSync(target)).toBe(true);
+    });
+
+    it("이미 있으면 성공으로 취급한다(멱등)", async () => {
+      const target = path.join(root, "111");
+      await ex.fs_mkdir({ path: target });
+      expect((await ex.fs_mkdir({ path: target })).ok).toBe(true);
+    });
+
+    it("중간 경로가 없어도 만든다", async () => {
+      const target = path.join(root, "a", "b", "c");
+      expect((await ex.fs_mkdir({ path: target })).ok).toBe(true);
+      expect(fs.existsSync(target)).toBe(true);
+    });
+
+    it("루트 밖은 거부한다 — 다른 fs_* 와 같은 관문을 거친다", async () => {
+      const r = await ex.fs_mkdir({ path: path.join(root, "..", "탈출") });
+      expect(r.ok).toBe(false);
+    });
+
+    it("path 가 없으면 거부한다", async () => {
+      expect((await ex.fs_mkdir({})).ok).toBe(false);
+    });
   });
 
   // fs_glob·fs_grep 는 glob 패턴 자체에 절대경로나 '..' 를 담아 루트 밖을 가리킬 수 있으므로,

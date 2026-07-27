@@ -126,34 +126,41 @@ describe("FIX6 — fs_glob·fs_grep 는 path 가 없어도, pattern 이 벗어�
   });
 });
 
-// ── FIX1: 핸들러 자체의 신원 재확인(allowedToolsFor 와 독립) ─────────────────
-// ctx.remote 는 "워커 연결 여부"만 보고 채워질 수 있어(허브 배선은 이 턴이 공개 채널인지 모른다),
-// allowedToolsFor 가 이번 턴에 도구를 안 줬다는 사실 하나에만 기대면 안 된다. 핸들러 자신이
-// dbQueryHandler 등의 isOwnerDm/allowDirHandler 등의 canManagePc 처럼 다시 신원을 확인해야 한다.
-describe("FIX1 — 핸들러 자체의 신원 재확인", () => {
-  it("손님 DM 은 거부하고 허브를 부르지 않는다", async () => {
+// ── Task 7: 신원 재확인은 이제 "ctx.remote 가 있는가" 하나다(옛 FIX1 의 isOwnerDm 재확인은
+// 삭제됨) ───────────────────────────────────────────────────────────────────────────────
+// 예전엔 이 핸들러가 isOwnerDm 으로 신원을 독립적으로 재확인해, 손님·공개 서버 채널을 여기서도
+// 한 번 더 거부했다(allowedToolsFor 와 별개의 방어선). 그 방어선이 지금은 사라졌다 — 대신 "어느
+// 기계를, 그것이 있기는 한가"를 agent.ts 의 resolveTurnWorker 단 한 곳에서 정하고, 그 결과가
+// ctx.remote 로 나타난다. 도구 목록(allowedToolsFor)과 이 핸들러가 서로 다른 판정을 쓰면
+// "보이는데 실행은 거부"가 생기므로, 이제 둘 다 ctx.remote 의 존재 여부 하나만 본다 — 손님도,
+// 공개 서버 채널의 소유자도 ctx.remote 가 채워져 있으면(agent.ts 가 이미 워커가 있다고 판정했다는
+// 뜻) 그대로 허브를 부른다. 권한 차이(손님은 자기 폴더만)는 아래 "공유 기계에서 사용자별 격리"
+// 가 확인하는 scopeDirs 가 만든다.
+describe("신원 재확인은 이제 ctx.remote 존재 여부 하나다(옛 FIX1 의 isOwnerDm 재확인 삭제 — Task 7)", () => {
+  it("손님이라도 ctx.remote 가 있으면(agent.ts 가 이미 판정한 결과) 허브를 부른다", async () => {
     let called = false;
     const ctx = ({
-      remote: { call: async () => { called = true; return { ok: true, content: "본문" }; } },
+      remote: { call: async () => { called = true; return { ok: true, content: "본문" }; }, roots: [], workerId: "shared-worker", workerKind: "shared" },
       isOwner: false, isPrivate: true, userId: "guest",
     } as unknown as ToolCtx);
-    const out = await remoteToolHandler(ctx, "sh_exec", { command: "ls" });
-    expect(called).toBe(false);
-    expect(out).toContain("소유자");
+    await remoteToolHandler(ctx, "sh_exec", { command: "ls" });
+    expect(called).toBe(true);
   });
 
-  it("공개 서버 채널은 소유자여도 거부하고 허브를 부르지 않는다", async () => {
-    // 리뷰가 지적한 시나리오: 소유자의 워커가 연결돼 있어 ctx.remote 는 채워지지만, 이 턴 자체는
-    // 공개 서버 채널이다(isPrivate=false) — allowedToolsFor 가 도구를 안 줘도 handler 는 그와
-    // 무관하게 독립적으로 거부해야 한다.
+  it("공개 서버 채널의 소유자도 ctx.remote 가 있으면 허브를 부른다(공유 기계의 관리자)", async () => {
     let called = false;
     const ctx = ({
-      remote: { call: async () => { called = true; return { ok: true, content: "본문" }; } },
+      remote: { call: async () => { called = true; return { ok: true, content: "본문" }; }, roots: [], workerId: "shared-worker", workerKind: "shared" },
       isOwner: true, isPrivate: false, userId: "owner",
     } as unknown as ToolCtx);
+    await remoteToolHandler(ctx, "sh_exec", { command: "ls" });
+    expect(called).toBe(true);
+  });
+
+  it("ctx.remote 가 없으면 신원과 무관하게 거부한다(agent.ts 의 판정이 이미 '워커 없음'으로 정한 것)", async () => {
+    const ctx = ({ isOwner: true, isPrivate: true, userId: "owner" } as unknown as ToolCtx); // remote 자체가 없음
     const out = await remoteToolHandler(ctx, "sh_exec", { command: "ls" });
-    expect(called).toBe(false);
-    expect(out).toContain("소유자");
+    expect(out).toContain("워커가 연결돼 있지 않아");
   });
 });
 
@@ -328,5 +335,166 @@ describe("FIX1(치명, 최종 리뷰) — path 생략 시 허브로 나가는 ar
     const ctx = withDirs(["/w/proj"], { call: async (_tool, args) => { seen.push(args); return { ok: true, content: "" }; } });
     await remoteToolHandler(ctx, "sh_exec", { command: "ls" });
     expect(seen).toEqual([{ command: "ls" }]);
+  });
+});
+
+// Task 7(워커 라우팅): 공유 기계(shared)에서는 손님마다 자기 하위 폴더로 좁혀진다(scopeDirs) —
+// 이 설계의 핵심 불변식은 "손님이 남의 하위 폴더를 못 본다"는 것이다. 개인 워커(personal)나
+// 소유자는 좁히지 않는다(관리자는 전체를 본다).
+describe("remoteToolHandler — 공유 기계에서 사용자별 격리", () => {
+  function ctxFor(o: { isOwner: boolean; isPrivate: boolean; userId: string; dirs: string[]; workerKind: "personal" | "shared" }) {
+    const calls: Array<{ tool: string; args: Record<string, unknown> }> = [];
+    const ctx = {
+      repos: { allowedDirs: { list: async () => o.dirs } },
+      role: o.isOwner ? "owner" : "allowed",
+      isPrivate: o.isPrivate, isOwner: o.isOwner, userId: o.userId, conversationId: 1,
+      runtime: {} as any,
+      remote: {
+        workerId: o.workerKind === "shared" ? "semicolon-shared" : "owner-laptop",
+        workerKind: o.workerKind,
+        roots: o.dirs,
+        call: async (tool: string, args: Record<string, unknown>) => { calls.push({ tool, args }); return { ok: true, content: "ok" }; },
+      },
+    } as any;
+    return { ctx, calls };
+  }
+
+  // Task 8: 손님(!isOwner) + 공유 워커(shared) 조합에서는 remoteToolHandler 가 실제 요청 전에
+  // fs_mkdir 준비 호출을 하나 더 끼워 넣는다(아래 "손님의 개인 폴더 자동 생성" 참고) — 그 요청이
+  // 결국 거부되더라도(자기 폴더 밖을 가리켜서 등) 준비 호출 자체는 이미 나간 뒤다. 그래서 이 아래
+  // 테스트들은 calls 전체 개수 대신 fs_mkdir 을 제외한 "실제 도구 호출" 개수만 센다 — 세는 대상이
+  // 바뀌는 것이지, 각 테스트가 원래 검증하려던 것(허용 여부)은 그대로다.
+  const realCalls = (calls: Array<{ tool: string; args: Record<string, unknown> }>) =>
+    calls.filter((c) => c.tool !== "fs_mkdir");
+
+  it("손님이 남의 폴더를 읽으려 하면 거부한다 — 이 설계의 핵심 불변식", async () => {
+    const { ctx, calls } = ctxFor({ isOwner: false, isPrivate: false, userId: "111", dirs: ["C:\\ws"], workerKind: "shared" });
+    const out = await remoteToolHandler(ctx, "fs_read", { path: "C:\\ws\\222\\secret.txt" });
+    expect(out).toContain("허용된 폴더 밖");
+    expect(realCalls(calls)).toHaveLength(0);
+  });
+
+  it("손님이 자기 폴더 안을 읽는 것은 통과한다", async () => {
+    const { ctx, calls } = ctxFor({ isOwner: false, isPrivate: false, userId: "111", dirs: ["C:\\ws"], workerKind: "shared" });
+    await remoteToolHandler(ctx, "fs_read", { path: "C:\\ws\\111\\my.txt" });
+    expect(realCalls(calls)).toHaveLength(1);
+  });
+
+  it("손님이 상위 참조로 빠져나가려 하면 거부한다", async () => {
+    const { ctx, calls } = ctxFor({ isOwner: false, isPrivate: false, userId: "111", dirs: ["C:\\ws"], workerKind: "shared" });
+    const out = await remoteToolHandler(ctx, "fs_read", { path: "C:\\ws\\111\\..\\222\\secret.txt" });
+    expect(out).toContain("허용된 폴더 밖");
+    expect(realCalls(calls)).toHaveLength(0);
+  });
+
+  it("소유자는 공유 기계에서 남의 폴더도 읽는다(관리자)", async () => {
+    const { ctx, calls } = ctxFor({ isOwner: true, isPrivate: false, userId: "owner", dirs: ["C:\\ws"], workerKind: "shared" });
+    await remoteToolHandler(ctx, "fs_read", { path: "C:\\ws\\222\\any.txt" });
+    expect(calls).toHaveLength(1);
+  });
+
+  it("path 를 생략한 fs_grep 은 손님의 하위 폴더가 주입된다", async () => {
+    const { ctx, calls } = ctxFor({ isOwner: false, isPrivate: false, userId: "111", dirs: ["C:\\ws"], workerKind: "shared" });
+    await remoteToolHandler(ctx, "fs_grep", { pattern: "TODO" });
+    // calls[0] 은 이제 Task 8 의 fs_mkdir 준비 호출이다 — 이 테스트가 실제로 보려는 건 fs_grep
+    // 호출에 주입된 path 이므로 tool 로 정확히 찾는다(위치로 세면 fs_mkdir 의 path 가 우연히
+    // 같은 값이라 실수로도 통과해버린다).
+    const grepCall = calls.find((c) => c.tool === "fs_grep");
+    expect(grepCall?.args.path).toBe("C:\\ws\\111");
+  });
+
+  // Task 8: 손님의 개인 폴더 자동 생성 — 공유 기계에서 손님(!isOwner)의 첫 원격 도구 호출 전에
+  // fs_mkdir 을 한 번 끼워 넣는다. "1인당 1폴더"가 규칙이라 그 폴더가 없다고 거부할 이유가 없고,
+  // 모델에게 만들게 시키면(fs_write·sh_exec 등) 실패 처리가 제각각이 되므로 봇이 직접 보장한다.
+  it("손님의 첫 호출 전에 개인 폴더를 만든다", async () => {
+    const { ctx, calls } = ctxFor({ isOwner: false, isPrivate: false, userId: "111", dirs: ["C:\\ws"], workerKind: "shared" });
+    await remoteToolHandler(ctx, "fs_read", { path: "C:\\ws\\111\\a.txt" });
+    expect(calls[0]).toEqual({ tool: "fs_mkdir", args: { path: "C:\\ws\\111" } });
+    expect(calls[1].tool).toBe("fs_read");
+  });
+
+  it("소유자에게는 폴더를 만들지 않는다", async () => {
+    const { ctx, calls } = ctxFor({ isOwner: true, isPrivate: false, userId: "owner", dirs: ["C:\\ws"], workerKind: "shared" });
+    await remoteToolHandler(ctx, "fs_read", { path: "C:\\ws\\a.txt" });
+    expect(calls.every((c) => c.tool !== "fs_mkdir")).toBe(true);
+  });
+
+  it("개인 워커에서는 폴더를 만들지 않는다", async () => {
+    const { ctx, calls } = ctxFor({ isOwner: true, isPrivate: true, userId: "owner", dirs: ["C:\\dev"], workerKind: "personal" });
+    await remoteToolHandler(ctx, "fs_read", { path: "C:\\dev\\a.txt" });
+    expect(calls.every((c) => c.tool !== "fs_mkdir")).toBe(true);
+  });
+
+  it("워커가 없으면 안내하고 호출하지 않는다", async () => {
+    const { ctx } = ctxFor({ isOwner: false, isPrivate: false, userId: "111", dirs: ["C:\\ws"], workerKind: "shared" });
+    delete (ctx as any).remote;
+    expect(await remoteToolHandler(ctx, "fs_read", { path: "C:\\ws\\111\\a" })).toContain("워커가 연결돼 있지 않아");
+  });
+
+  // 최종 리뷰 FIX1(치명) — 손님이 glob 메타문자로 시작하는 pattern/glob 으로 상위 탈출을 시도하면
+  // (예: "**/../../222/*.txt") literalPrefixOfGlobPattern 이 리터럴 접두를 빈 문자열로 계산해
+  // 후보가 하나도 안 나왔다 — path 만 검사되고(자기 폴더라 legal) args 는 그대로 워커로 넘어가,
+  // 워커가 실제로 그 glob 을 풀어 다른 회원의 폴더(222)를 노출했다(리뷰 재현: fs_grep 이 파일
+  // 내용까지 돌려줬다). 봇 쪽 1차 필터가 허브를 부르기 전에 반드시 거부해야 한다.
+  describe("손님의 glob 메타문자-시작 상위 탈출은 허브를 부르기 전에 거부된다(최종 리뷰 FIX1, 리뷰 재현)", () => {
+    it("fs_grep — glob:'**/../../222/*.txt' (path 는 자기 폴더) → 허브를 부르지 않고 거부한다", async () => {
+      const { ctx, calls } = ctxFor({ isOwner: false, isPrivate: false, userId: "111", dirs: ["C:\\ws"], workerKind: "shared" });
+      const out = await remoteToolHandler(ctx, "fs_grep", { pattern: ".", path: "C:\\ws\\111", glob: "**/../../222/*.txt" });
+      expect(out).toContain("허용된 폴더 밖");
+      // Task 8: fs_mkdir 준비 호출은 이 거부보다 먼저 나가므로 제외하고 센다(위 realCalls 참고).
+      expect(realCalls(calls)).toHaveLength(0);
+    });
+
+    it("fs_grep — glob:'**/../../222/*' (path 생략) → 허브를 부르지 않고 거부한다", async () => {
+      const { ctx, calls } = ctxFor({ isOwner: false, isPrivate: false, userId: "111", dirs: ["C:\\ws"], workerKind: "shared" });
+      const out = await remoteToolHandler(ctx, "fs_grep", { pattern: ".", glob: "**/../../222/*" });
+      expect(out).toContain("허용된 폴더 밖");
+      expect(realCalls(calls)).toHaveLength(0);
+    });
+
+    it("fs_glob — pattern:'**/../../222/*.txt' (path 는 자기 폴더) → 허브를 부르지 않고 거부한다", async () => {
+      const { ctx, calls } = ctxFor({ isOwner: false, isPrivate: false, userId: "111", dirs: ["C:\\ws"], workerKind: "shared" });
+      const out = await remoteToolHandler(ctx, "fs_glob", { path: "C:\\ws\\111", pattern: "**/../../222/*.txt" });
+      expect(out).toContain("허용된 폴더 밖");
+      expect(realCalls(calls)).toHaveLength(0);
+    });
+
+    it("대조군 — 평범한 재귀 glob('**/*.ts')은 자기 폴더 안에서 정상적으로 허브를 부른다(회귀 없음)", async () => {
+      const { ctx, calls } = ctxFor({ isOwner: false, isPrivate: false, userId: "111", dirs: ["C:\\ws"], workerKind: "shared" });
+      await remoteToolHandler(ctx, "fs_glob", { path: "C:\\ws\\111", pattern: "**/*.ts" });
+      expect(realCalls(calls)).toHaveLength(1);
+    });
+  });
+
+  // 최종 pre-merge 리뷰 FIX2(중요) — extractCandidatePaths(pathPermission.ts)가 후보 경로를
+  // node:path 의 기본 export(host 프로세스의 process.platform 을 따름)로 계산하면, 리눅스
+  // (Railway)에 배포된 봇이 윈도우 워커의 손님 폴더에서 리터럴 접두가 있는 흔한 상대 glob
+  // (예: 'src/**/*.ts' — 모델이 가장 자연스럽게 만드는 모양)을 받을 때마다 정상 호출을 "허용된
+  // 폴더 밖"으로 오거부했다(리뷰 재현: node:path 를 posix 로 동작시키고 cwd 를 '/app' 로 고정해
+  // 확인 — 이 파일 위쪽의 다른 테스트는 전부 '**/*.ts' 처럼 리터럴 접두가 없는 패턴만 쓰므로 이
+  // 버그를 건드리지 않았다). pathPermission.test.ts 가 extractCandidatePaths 단위로 고정한 것과
+  // 같은 사실을, 여기서는 remoteToolHandler 를 통해 실제로 허브까지 도달하는지(그리고 탈출
+  // 시도는 여전히 막히는지)를 손님·공유 워커 시나리오 그대로 재확인한다.
+  describe("손님의 리터럴 접두 있는 상대 glob 은 정상적으로 허브에 도달한다(최종 pre-merge 리뷰 FIX2, 리뷰 재현)", () => {
+    it("fs_glob — path=자기 폴더 + pattern='src/**/*.ts'(리터럴 접두 있는 흔한 상대 패턴) → 허브를 부른다", async () => {
+      const { ctx, calls } = ctxFor({ isOwner: false, isPrivate: false, userId: "111", dirs: ["C:\\ws"], workerKind: "shared" });
+      const out = await remoteToolHandler(ctx, "fs_glob", { path: "C:\\ws\\111", pattern: "src/**/*.ts" });
+      expect(realCalls(calls)).toHaveLength(1);
+      expect(out).not.toContain("허용된 폴더 밖");
+    });
+
+    it("fs_grep — path=자기 폴더 + glob='src/*.ts' → 허브를 부른다(Grep 쪽도 동일한 계산을 탄다)", async () => {
+      const { ctx, calls } = ctxFor({ isOwner: false, isPrivate: false, userId: "111", dirs: ["C:\\ws"], workerKind: "shared" });
+      const out = await remoteToolHandler(ctx, "fs_grep", { pattern: "TODO", path: "C:\\ws\\111", glob: "src/*.ts" });
+      expect(realCalls(calls)).toHaveLength(1);
+      expect(out).not.toContain("허용된 폴더 밖");
+    });
+
+    it("대조군 — 같은 상대 패턴 모양이라도 상위 탈출(예: '../222/*.ts')은 여전히 거부된다", async () => {
+      const { ctx, calls } = ctxFor({ isOwner: false, isPrivate: false, userId: "111", dirs: ["C:\\ws"], workerKind: "shared" });
+      const out = await remoteToolHandler(ctx, "fs_glob", { path: "C:\\ws\\111", pattern: "../222/*.ts" });
+      expect(out).toContain("허용된 폴더 밖");
+      expect(realCalls(calls)).toHaveLength(0);
+    });
   });
 });

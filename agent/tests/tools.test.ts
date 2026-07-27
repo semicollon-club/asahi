@@ -117,16 +117,16 @@ describe("manage_access 도구", () => {
 // 이제는 그 사용자의 워커가 hello 프레임으로 알려온 실제 작업 폴더(ctx.remote.roots)만을 문자열
 // 포함 검사로 대조한다 — 존재 여부·실경로 확인은 워커 쪽(remote/roots.ts 의 checkPath)이 실제
 // 파일 접근 시점에 이미 하고 있다(이중 방어의 두 번째 겹, 위 "경로 게이팅" 참고).
-describe("allow_dir/revoke_dir/list_dir 도구(§원격개발 A2, FIX2: 워커 roots 기준 재검증) — 소유자 DM 전용, ctx.userId 별로 저장", () => {
+describe("allow_dir/revoke_dir/list_dir 도구(§원격개발 A2, FIX2: 워커 roots 기준 재검증) — 소유자 DM 전용, 워커(ctx.remote.workerId) 별로 저장", () => {
   it("소유자 DM 에서 워커의 작업 폴더(roots) 안 경로를 허용하면 list 에 반영된다", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "asahi-allowdir-"));
     const owner = await ctx({
       isOwner: true, isPrivate: true,
-      remote: { roots: [os.tmpdir()], call: async () => ({ ok: true, content: "" }) },
+      remote: { roots: [os.tmpdir()], call: async () => ({ ok: true, content: "" }), workerId: "owner-laptop" },
     });
     const out = await allowDirHandler(owner, { path: dir });
     expect(out).toContain(path.resolve(dir));
-    expect(await owner.repos.allowedDirs.list(owner.userId)).toEqual([path.resolve(dir)]);
+    expect(await owner.repos.allowedDirs.list("owner-laptop")).toEqual([path.resolve(dir)]);
     expect(await listDirsHandler(owner)).toContain(path.resolve(dir));
   });
 
@@ -143,12 +143,12 @@ describe("allow_dir/revoke_dir/list_dir 도구(§원격개발 A2, FIX2: 워커 r
     const workerRoot = fs.mkdtempSync(path.join(os.tmpdir(), "asahi-workerroot-"));
     const owner = await ctx({
       isOwner: true, isPrivate: true,
-      remote: { roots: [workerRoot], call: async () => ({ ok: true, content: "" }) },
+      remote: { roots: [workerRoot], call: async () => ({ ok: true, content: "" }), workerId: "owner-laptop" },
     });
     const out = await allowDirHandler(owner, { path: dir }); // dir 는 workerRoot 의 형제 — roots 밖
     expect(out).toContain("밖");
     expect(out).toContain(workerRoot);
-    expect(await owner.repos.allowedDirs.list(owner.userId)).toEqual([]);
+    expect(await owner.repos.allowedDirs.list("owner-laptop")).toEqual([]);
   });
 
   it("FIX2 — 존재 여부는 더 이상 봇이 검사하지 않는다(워커와 다른 머신이라 확인 불가) — roots 안이면 실존하지 않아도 등록된다", async () => {
@@ -158,32 +158,48 @@ describe("allow_dir/revoke_dir/list_dir 도구(§원격개발 A2, FIX2: 워커 r
     const bogus = path.join(workerRoot, "does-not-exist-xyz");
     const owner = await ctx({
       isOwner: true, isPrivate: true,
-      remote: { roots: [workerRoot], call: async () => ({ ok: true, content: "" }) },
+      remote: { roots: [workerRoot], call: async () => ({ ok: true, content: "" }), workerId: "owner-laptop" },
     });
     const out = await allowDirHandler(owner, { path: bogus });
     expect(out).toContain(path.resolve(bogus));
-    expect(await owner.repos.allowedDirs.list(owner.userId)).toEqual([path.resolve(bogus)]);
+    expect(await owner.repos.allowedDirs.list("owner-laptop")).toEqual([path.resolve(bogus)]);
   });
 
   it("revoke_dir 은 허용 목록에서 제거한다", async () => {
-    const owner = await ctx({ isOwner: true, isPrivate: true });
+    const owner = await ctx({
+      isOwner: true, isPrivate: true,
+      remote: { roots: [os.tmpdir()], call: async () => ({ ok: true, content: "" }), workerId: "owner-laptop" },
+    });
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "asahi-revokedir-"));
-    await owner.repos.allowedDirs.add(owner.userId, dir);
+    await owner.repos.allowedDirs.add("owner-laptop", dir);
     const out = await revokeDirHandler(owner, { path: dir });
-    expect(await owner.repos.allowedDirs.list(owner.userId)).toEqual([]);
+    expect(await owner.repos.allowedDirs.list("owner-laptop")).toEqual([]);
     expect(out).toContain(path.resolve(dir));
   });
 
   it("list_dir 은 비어있으면 안내 문구를 반환한다", async () => {
-    const owner = await ctx({ isOwner: true, isPrivate: true });
+    const owner = await ctx({
+      isOwner: true, isPrivate: true,
+      remote: { roots: [os.tmpdir()], call: async () => ({ ok: true, content: "" }), workerId: "owner-laptop" },
+    });
     expect(await listDirsHandler(owner)).toContain("없어요");
+  });
+
+  // allowed_dirs 가 워커 기준으로 바뀌면서 revoke_dir/list_dir 도 "어느 워커 몫인지" 를 알아야
+  // 동작할 수 있게 됐다 — allowDirHandler 가 이미 갖고 있던 "워커 미연결 시 거부" 분기를 두
+  // 핸들러에도 맞춰 추가했다(예전엔 ctx.userId 를 썼으므로 워커 연결 여부와 무관하게 항상 값이
+  // 있었다).
+  it("워커가 연결돼 있지 않으면 revoke_dir/list_dir 도 거부한다(allowed_dirs 가 워커 기준이라 어느 워커 몫인지 알 수 없다)", async () => {
+    const owner = await ctx({ isOwner: true, isPrivate: true }); // remote 미설정
+    expect(await revokeDirHandler(owner, { path: "C:\\proj\\a" })).toContain("워커");
+    expect(await listDirsHandler(owner)).toContain("워커");
   });
 
   it("손님 DM 에서는 세 도구 모두 거부하고 아무것도 바꾸지 않는다", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "asahi-guest-"));
     const guest = await ctx({
       isOwner: false, isPrivate: true,
-      remote: { roots: [os.tmpdir()], call: async () => ({ ok: true, content: "" }) },
+      remote: { roots: [os.tmpdir()], call: async () => ({ ok: true, content: "" }), workerId: "guest-worker" },
     });
     expect(await allowDirHandler(guest, { path: dir })).toContain("소유자");
     expect(await guest.repos.allowedDirs.list(guest.userId)).toEqual([]);
@@ -193,15 +209,20 @@ describe("allow_dir/revoke_dir/list_dir 도구(§원격개발 A2, FIX2: 워커 r
     expect(await listDirsHandler(guest)).toContain("소유자");
   });
 
-  it("서버(비공개 아님)에서는 소유자여도 세 도구 모두 거부한다", async () => {
+  // Task 7: 이 테스트는 예전엔 "서버(비공개 아님)에서는 소유자여도 세 도구 모두 거부한다"였다 —
+  // 그땐 워커가 곧 소유자의 개인 기계였으니 DM 밖에서는 관리할 대상 자체가 없다는 전제였다.
+  // 이제 소유자는 서버 채널에서도 공유 기계(동아리 공용 PC)에 연결되고, 그 기계의 관리자
+  // 역시 소유자다(canManagePc 가 isOwner 만 본다) — 그래서 이제는 반대로 "허용한다"를 확인한다.
+  it("서버(비공개 아님)에서도 소유자면 세 도구 모두 허용한다(공유 기계의 관리자 — Task 7 반전)", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "asahi-ownerserver-"));
     const ownerServer = await ctx({
       isOwner: true, isPrivate: false,
-      remote: { roots: [os.tmpdir()], call: async () => ({ ok: true, content: "" }) },
+      remote: { roots: [os.tmpdir()], call: async () => ({ ok: true, content: "" }), workerId: "shared-worker", workerKind: "shared" },
     });
-    expect(await allowDirHandler(ownerServer, { path: dir })).toContain("소유자");
-    expect(await ownerServer.repos.allowedDirs.list(ownerServer.userId)).toEqual([]);
-    expect(await listDirsHandler(ownerServer)).toContain("소유자");
+    const out = await allowDirHandler(ownerServer, { path: dir });
+    expect(out).toContain(path.resolve(dir));
+    expect(await ownerServer.repos.allowedDirs.list("shared-worker")).toEqual([path.resolve(dir)]);
+    expect(await listDirsHandler(ownerServer)).toContain(path.resolve(dir));
   });
 
   // FIX6(사소하지만 함정, 최종 리뷰) — canManagePc 는 예전에 ctx.isPrivate && (ctx.isOwner ||
@@ -213,20 +234,23 @@ describe("allow_dir/revoke_dir/list_dir 도구(§원격개발 A2, FIX2: 워커 r
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "asahi-fix6-stray-"));
     const guest = await ctx({
       isOwner: false, isPrivate: true, userId: "guest",
-      remote: { roots: [os.tmpdir()], call: async () => ({ ok: true, content: "" }) },
+      remote: { roots: [os.tmpdir()], call: async () => ({ ok: true, content: "" }), workerId: "guest-worker" },
     });
     (guest as unknown as Record<string, unknown>).ownWorkstation = true; // 과거엔 이 값으로 게이트를 통과했다
     expect(await allowDirHandler(guest, { path: dir })).toContain("소유자");
     expect(await guest.repos.allowedDirs.list(guest.userId)).toEqual([]);
   });
 
-  it("허용 폴더는 ctx.userId 별로 격리된다 — 다른 사용자의 허용 목록에 서로 영향 없음", async () => {
+  it("허용 폴더는 워커(ctx.remote.workerId) 별로 격리된다 — 같은 소유자라도 다른 워커의 목록에 서로 영향 없음", async () => {
+    // 이 태스크의 핵심 회귀: 예전엔 ctx.userId 로 격리됐지만, 이제는 "같은 사람이 서로 다른
+    // 기계(예: 소유자의 노트북 vs 동아리방 공용 PC)에서 연결해도 허용 폴더가 섞이면 안 된다"가
+    // 기준이다 — 그래서 userId 는 두 컨텍스트에서 동일하게 두고 workerId 만 다르게 준다.
     const db = await openTestDb();
     const repos = { memories: new MemoriesRepo(db), users: new UsersRepo(db), allowedDirs: new AllowedDirsRepo(db) };
     const runtime = { model: "claude-opus-4-8", sdkVersion: "0.3.207", deployTarget: "local" as const, maxTurns: 30 };
-    const remote = { roots: [os.tmpdir()], call: async () => ({ ok: true, content: "" }) };
-    const ownerA: ToolCtx = { repos, role: "owner", isPrivate: true, isOwner: true, userId: "ownerA", conversationId: 1, runtime, remote } as unknown as ToolCtx;
-    const ownerB: ToolCtx = { repos, role: "owner", isPrivate: true, isOwner: true, userId: "ownerB", conversationId: 1, runtime, remote } as unknown as ToolCtx;
+    const call = async () => ({ ok: true, content: "" });
+    const ownerA: ToolCtx = { repos, role: "owner", isPrivate: true, isOwner: true, userId: "owner", conversationId: 1, runtime, remote: { roots: [os.tmpdir()], call, workerId: "owner-laptop" } } as unknown as ToolCtx;
+    const ownerB: ToolCtx = { repos, role: "owner", isPrivate: true, isOwner: true, userId: "owner", conversationId: 1, runtime, remote: { roots: [os.tmpdir()], call, workerId: "semicolon-shared" } } as unknown as ToolCtx;
     const dirA = fs.mkdtempSync(path.join(os.tmpdir(), "asahi-userA-"));
     const dirB = fs.mkdtempSync(path.join(os.tmpdir(), "asahi-userB-"));
 
@@ -241,6 +265,50 @@ describe("allow_dir/revoke_dir/list_dir 도구(§원격개발 A2, FIX2: 워커 r
     await revokeDirHandler(ownerA, { path: dirA });
     expect(await listDirsHandler(ownerA)).toContain("없어요");
     expect(await listDirsHandler(ownerB)).toContain(path.resolve(dirB)); // 영향 없음
+  });
+});
+
+// 최종 pre-merge 리뷰 FIX1(치명) — 이 세 핸들러는 remoteToolHandler(remoteTools.ts)의 1차 필터와
+// 달리 그동안 repo 호출을 try/catch 로 감싸지 않았다. allowed_dirs 가 옛 컬럼 모양일 때(리뷰가
+// 실제로 재현한 상황 — schema.test.ts 의 "allowed_dirs 레거시 전환" 참고) 뿐 아니라 그 외 어떤
+// DB 오류(연결 끊김 등)에도 드라이버가 던진 원문 SQL 오류가 그대로 디스코드 채팅으로 노출됐다.
+// 여기서는 리포 자체를 던지는 스텁으로 바꿔, "무엇이 실패를 일으켰는지"와 무관하게 항상 한국어
+// 안내 문자열로 돌아오는지만 확인한다(schema.test.ts 쪽은 실제 컬럼 오류로 이 경로에 도달하는
+// 것을 확인하고, 여기는 그 도달 이후의 처리 자체를 확인한다).
+describe("allow_dir/revoke_dir/list_dir — repo 실패는 원문 오류가 아니라 한국어 안내로 돌아온다(최종 pre-merge 리뷰 FIX1)", () => {
+  const dbError = () => Promise.reject(new Error('column "worker_id" does not exist'));
+
+  it("allow_dir — repo.add 가 reject 해도 던지지 않고 한국어 안내 문구로 돌아온다", async () => {
+    const owner = await ctx({
+      isOwner: true, isPrivate: true,
+      remote: { roots: [os.tmpdir()], call: async () => ({ ok: true, content: "" }), workerId: "owner-laptop" },
+    });
+    owner.repos.allowedDirs = { add: dbError, list: async () => [], remove: async () => {} } as any;
+    const out = await allowDirHandler(owner, { path: os.tmpdir() });
+    expect(out).toContain("오류");
+    expect(out).toContain("worker_id");
+  });
+
+  it("revoke_dir — repo.remove 가 reject 해도 던지지 않고 한국어 안내 문구로 돌아온다", async () => {
+    const owner = await ctx({
+      isOwner: true, isPrivate: true,
+      remote: { roots: [os.tmpdir()], call: async () => ({ ok: true, content: "" }), workerId: "owner-laptop" },
+    });
+    owner.repos.allowedDirs = { add: async () => {}, list: async () => [], remove: dbError } as any;
+    const out = await revokeDirHandler(owner, { path: os.tmpdir() });
+    expect(out).toContain("오류");
+    expect(out).toContain("worker_id");
+  });
+
+  it("list_dirs — repo.list 가 reject 해도 던지지 않고 한국어 안내 문구로 돌아온다", async () => {
+    const owner = await ctx({
+      isOwner: true, isPrivate: true,
+      remote: { roots: [os.tmpdir()], call: async () => ({ ok: true, content: "" }), workerId: "owner-laptop" },
+    });
+    owner.repos.allowedDirs = { add: async () => {}, list: dbError, remove: async () => {} } as any;
+    const out = await listDirsHandler(owner);
+    expect(out).toContain("오류");
+    expect(out).toContain("worker_id");
   });
 });
 
@@ -503,9 +571,14 @@ describe("allowedToolsFor — 원격 도구 노출", () => {
     expect(allowedToolsFor("owner", true, true, "local")).not.toContain(RT);
   });
 
-  it("손님 DM·서버 채널에는 워커가 연결돼 있어도 노출하지 않는다(1단계는 소유자 전용)", () => {
-    expect(allowedToolsFor("allowed", true, false, "local", true)).not.toContain(RT);
-    expect(allowedToolsFor("allowed", false, false, "local", true)).not.toContain(RT);
+  // Task 7: 예전엔 "1단계는 소유자 전용"이라 손님에게 원격 도구를 절대 주지 않았다. 이제는
+  // 위치가 어느 기계냐를 정한다(workerSelect.ts) — 손님도 DM·서버 어디서든 공유 기계에 연결되면
+  // 원격 도구를 받는다. 격리는 여기(도구 목록)가 아니라 remoteToolHandler 의 scopeDirs 가
+  // 맡는다(자기 하위 폴더 밖은 읽지 못한다 — remoteTools.test.ts 의 "공유 기계에서 사용자별
+  // 격리" 참고).
+  it("손님 DM·서버 채널도 워커가 연결되면 원격 도구를 받는다(공유 기계로 연결 — Task 7 반전)", () => {
+    expect(allowedToolsFor("allowed", true, false, "local", true)).toContain(RT);
+    expect(allowedToolsFor("allowed", false, false, "local", true)).toContain(RT);
   });
 
   it("기억·접근관리 도구는 워커 연결 여부와 무관하다", () => {
@@ -562,5 +635,43 @@ describe("allowedToolsFor — 웹 검색", () => {
     expect(tools).toContain("mcp__asahi__remember");
     expect(tools).toContain("mcp__asahi__fs_read");
     expect(tools).toContain("mcp__asahi__manage_access");
+  });
+});
+
+// Task 7(워커 라우팅): 원격 도구는 더 이상 owner-DM 전용이 아니다 — "어디서 말하느냐가 어느
+// 기계냐를 정한다"(workerSelect.ts). 공개 서버·손님 DM 은 공유 기계(동아리 공용 PC)로 연결되고,
+// 폴더 관리(allow_dir 등)만 관리자(소유자) 전용으로 남는다.
+describe("allowedToolsFor — 공유 워커로 계층이 넓어진다", () => {
+  const remoteNames = ["fs_read", "fs_write", "fs_edit", "fs_glob", "fs_grep", "sh_exec"];
+  const hasRemote = (tools: string[]) => remoteNames.every((n) => tools.some((t) => t.endsWith(n)));
+
+  it("공개 서버 + 워커 연결이면 원격 도구가 열린다(예전엔 무조건 닫혔다)", () => {
+    expect(hasRemote(allowedToolsFor("allowed", false, false, "local", true))).toBe(true);
+  });
+
+  it("공개 서버 + 워커 미연결이면 열리지 않는다", () => {
+    expect(hasRemote(allowedToolsFor("allowed", false, false, "local", false))).toBe(false);
+  });
+
+  it("손님 DM + 워커 연결이면 열린다(공유 워커로 간다)", () => {
+    expect(hasRemote(allowedToolsFor("allowed", true, false, "local", true))).toBe(true);
+  });
+
+  it("손님에게는 폴더 관리 도구를 주지 않는다 — 워커가 연결돼 있어도", () => {
+    const tools = allowedToolsFor("allowed", false, false, "local", true);
+    expect(tools.some((t) => t.endsWith("allow_dir"))).toBe(false);
+    expect(tools.some((t) => t.endsWith("revoke_dir"))).toBe(false);
+  });
+
+  it("소유자는 서버에서도 폴더 관리 도구를 갖는다", () => {
+    const tools = allowedToolsFor("owner", false, true, "local", true);
+    expect(tools.some((t) => t.endsWith("allow_dir"))).toBe(true);
+  });
+
+  it("손님에게는 DB·접근관리 도구를 여전히 주지 않는다", () => {
+    const tools = allowedToolsFor("allowed", true, false, "local", true);
+    for (const n of ["db_query", "db_schema", "manage_access", "runtime_info"]) {
+      expect(tools.some((t) => t.endsWith(n))).toBe(false);
+    }
   });
 });

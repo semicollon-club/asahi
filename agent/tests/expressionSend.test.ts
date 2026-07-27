@@ -133,7 +133,6 @@ function makeConfig(): Config {
     ownerReserve: 10,
     deployTarget: "local",
     model: "test-model",
-    workerToken: "x".repeat(20),
     httpPort: 3000,
     digestChannels: {},
   };

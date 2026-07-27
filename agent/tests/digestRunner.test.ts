@@ -72,6 +72,61 @@ async function makeManual(over: Partial<{ channels: Record<string, string>; now:
   return { runner, settings, sent, runTurnCalls, pending, setClock: (t: number) => { clock = t; } };
 }
 
+// ── 최종 리뷰 FIX2(치명) — 정기 게시 턴은 공유 워커가 연결돼 있어도 원격 도구를 받으면 안 된다 ──
+// execute() 가 구성하는 context(isOwner:false, isPrivate:false)는 Task 7 이전엔 원격 도구가
+// 구조적으로 없던 계층이었지만, 이제는 그 계층도 공유 워커가 연결되면 fs_*/sh_exec 를 받는다
+// (tools.ts 의 allowedToolsFor). 사람이 지켜보지 않는 타이머로 돌며 신뢰할 수 없는 웹 검색
+// 결과를 그대로 읽어들이는 이 턴에 셸 접근까지 열려 있으면 안 되므로, runTurn 요청에
+// noRemoteTools:true 를 실어야 한다(agent.ts 의 resolveTurnWorker 가 이 값을 보면 워커 연결
+// 여부·registry/hub 조회 자체를 건너뛰고 무조건 null 로 처리한다).
+describe("DigestRunner — 정기 게시 턴은 원격 도구를 받지 않는다(최종 리뷰 FIX2)", () => {
+  it("run(예약어) 이 runTurn 에 noRemoteTools:true 를 싣는다", async () => {
+    const db = await openTestDb();
+    const settings = new SettingsRepo(db);
+    const bus = new EventBus();
+    const requests: Array<{ noRemoteTools?: boolean; noWebTools?: boolean }> = [];
+    const runner = new DigestRunner({
+      runTurn: async (req) => {
+        requests.push(req);
+        return { text: "오늘의 소식", ok: true, sessionId: "s" };
+      },
+      bus, settings, agentCwd: "/tmp",
+      channels: { contest: "C1", devnews: "C2" },
+      now: () => AFTER_SEVEN,
+    });
+
+    await runner.run("contest", "C1");
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0].noRemoteTools).toBe(true);
+  });
+
+  it("checkAndRun(스케줄) 이 runTurn 에 noRemoteTools:true 를 싣는다 — 웹 검색(noWebTools)은 그대로 열어 둔다", async () => {
+    const db = await openTestDb();
+    const settings = new SettingsRepo(db);
+    const bus = new EventBus();
+    const requests: Array<{ noRemoteTools?: boolean; noWebTools?: boolean }> = [];
+    const runner = new DigestRunner({
+      runTurn: async (req) => {
+        requests.push(req);
+        return { text: "오늘의 소식", ok: true, sessionId: "s" };
+      },
+      bus, settings, agentCwd: "/tmp",
+      channels: { contest: "C1", devnews: "C2" },
+      now: () => AFTER_SEVEN,
+    });
+
+    await runner.checkAndRun();
+
+    expect(requests).toHaveLength(2); // contest·devnews 둘 다
+    for (const req of requests) {
+      expect(req.noRemoteTools).toBe(true);
+      // 이 턴의 목적 자체가 웹 검색이므로 noWebTools 는 세우지 않는다(유휴 요약 턴과의 차이).
+      expect(req.noWebTools).not.toBe(true);
+    }
+  });
+});
+
 describe("DigestRunner.run — 즉시 실행", () => {
   it("결과를 지정한 채널로 발행한다", async () => {
     const { runner, sent } = await make();

@@ -15,10 +15,10 @@ import { SummariesRepo } from "./store/summariesRepo.js";
 import { MemoriesRepo } from "./store/memoriesRepo.js";
 import { TurnsRepo } from "./store/turnsRepo.js";
 import { AllowedDirsRepo } from "./store/allowedDirsRepo.js";
+import { WorkersRepo } from "./store/workersRepo.js";
 import { SettingsRepo } from "./store/settingsRepo.js";
 import { IntrospectRepo } from "./store/introspectRepo.js";
 import { CharacterImagesRepo } from "./store/characterImagesRepo.js";
-import { backfillLegacyAllowedDirs } from "./store/allowedDirsMigration.js";
 import { AgentCore } from "./core/core.js";
 import { makeRunAgentTurn } from "./core/agent.js";
 import { DigestRunner, DIGEST_TOPICS, type DigestTopic } from "./core/digest.js";
@@ -54,16 +54,15 @@ async function main() {
     turns: new TurnsRepo(db),
     allowedDirs,
     introspect: new IntrospectRepo(db),
+    workers: new WorkersRepo(db),
   };
   // 소유자를 users(owner)로 보장 — 게이트 통과 기본값.
   await users.upsert(config.ownerId, { role: "owner" });
 
-  // 리뷰 #6(LOW): allowed_dirs 테이블 도입 전 owner.allowedDirs 단일 settings 키에 저장돼 있던
-  // 소유자 허용 폴더를 이전한다(멱등이라 부팅마다 호출해도 안전).
-  await backfillLegacyAllowedDirs(new SettingsRepo(db), allowedDirs, config.ownerId);
-
-  // 워커 허브: 워커가 아웃바운드로 붙는 유일한 표면. 토큰 인증을 통과하지 못하면 즉시 끊는다.
-  const hub = new WorkerHub({ token: config.workerToken, ownerId: config.ownerId });
+  // 워커 허브: 워커가 아웃바운드로 붙는 유일한 표면. Task 4: 봇 전체가 공유하던 단일 토큰 대신,
+  // workers 테이블(레지스트리)에서 워커별 해시 토큰을 조회해 인증한다(hub.ts 의 WorkerRegistry) —
+  // 인증을 통과하지 못하면 즉시 끊는다.
+  const hub = new WorkerHub({ registry: repos.workers });
 
   // FIX9(사소): 예전엔 모든 경로·메서드에 무조건 200 "ok" 를 돌려줘, 이 서버가 뭘 하는 프로세스인지
   // 외부에서 스캔하기 쉬웠다. 헬스체크 전용 경로만 응답하고 나머지는 404 한다 — /worker 는 ws 가
@@ -119,7 +118,7 @@ async function main() {
   // 에이전트 cwd 는 소스가 아닌 데이터 영역에 둔다 — 에이전트가 소스 트리를 훑지 않도록(1단계 점검 지적).
   const agentCwd = path.resolve(config.dataDir, "..", "agent-cwd");
   fs.mkdirSync(agentCwd, { recursive: true });
-  const runTurn = makeRunAgentTurn({ memories: repos.memories, users: repos.users, allowedDirs: repos.allowedDirs, introspect: repos.introspect }, config.deployTarget, config.model, hub);
+  const runTurn = makeRunAgentTurn({ memories: repos.memories, users: repos.users, allowedDirs: repos.allowedDirs, introspect: repos.introspect }, config.deployTarget, config.model, repos.workers, hub);
 
   const characterImages = new CharacterImagesRepo(db);
   // 감정 목록은 기동 시 한 번 읽는다. 이미지를 추가하고 동기화 스크립트를 돌려도
@@ -138,8 +137,10 @@ async function main() {
   });
 
   // FIX3(최종 리뷰): core.ts 도 hub 를 받아 능력 안내(persona.ts)에 "이번 턴에 워커가 실제로
-  // 연결돼 있는가"를 반영한다(agent.ts 의 shouldConnectWorker 와 같은 판정, 같은 hub 인스턴스).
-  const core = new AgentCore({ bus, config, runTurn, repos, agentCwd, hub, emotions, digest });
+  // 연결돼 있는가"를 반영한다(agent.ts 의 resolveTurnWorker 와 같은 판정, 같은 hub 인스턴스).
+  // registry(Task 7): resolveTurnWorker 가 hub.isConnected 를 부르기 전에 실제 workerId 를
+  // 찾는 데 쓴다 — repos.workers 를 makeRunAgentTurn 과 동일하게 그대로 넘긴다.
+  const core = new AgentCore({ bus, config, runTurn, repos, agentCwd, hub, registry: repos.workers, emotions, digest });
   core.start();
 
   const discord = new DiscordAdapter({ bus, config, users, conversations, characterImages });

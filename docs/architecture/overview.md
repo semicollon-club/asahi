@@ -1,5 +1,5 @@
 ---
-lastReviewed: 2026-07-26
+lastReviewed: 2026-07-28
 ---
 
 # 아키텍처 개요
@@ -29,27 +29,40 @@ Agent SDK 세션으로 직접 실행한다** — 위임이라는 개념은 이�
 
 `agent/src/config.ts`의 `loadConfig`가 환경변수 `DEPLOY_TARGET`을 읽어 `deployTarget`을
 결정하는데, 정확히 `"cloud"`일 때만 `cloud`로 판정한다(그 외 미설정·오타는 모두 `local`).
-이 값은 지금은 `allow_dir`/`revoke_dir`/`list_dirs`(허용 폴더 관리 도구)의 노출 여부만
-가른다 — 파일/셸 작업 자체의 가용성은 더 이상 `deployTarget`이 아니라 아래 "워커 연결"
-여부가 결정한다(`docs/security/capability-model.md` 참고). 컨테이너 자체는
+`allowedToolsFor`(`agent/src/core/tools.ts`)는 이 값을 인자로 받지만 함수 본문 어디에서도
+분기에 쓰지 않는다 — 파일/셸 작업(`fs_*`/`sh_exec`)과 허용 폴더 관리 도구(`allow_dir`/
+`revoke_dir`/`list_dirs`) 모두 지금은 오직 아래 "워커 연결" 여부(`workerConnected`)만으로
+결정된다. `deployTarget`은 `runtime_info` 도구가 보고하는 배포 정보로만 의미가 남아 있어
+시그니처에는 그대로 있다(`docs/security/capability-model.md` 참고). 컨테이너 자체는
 무상태(stateless)다 — 재배포되어도 대화·기억은 Supabase Postgres에 남아 있으므로 데이터가
 사라지지 않는다.
 
-### 로컬 워커 (`agent/src/worker.ts`)
+### 워커 (`agent/src/worker.ts`) — 개인 워커·공유 워커
 
-소유자 PC에서 실행되는 별도 프로세스다. 디스코드에도 DB에도 붙지 않는다 — 갖고 있는
-자격증명은 `WORKER_TOKEN` 문자열 하나뿐이다(`agent/src/config.ts`의 `loadWorkerConfig`는
-`databaseUrl`도 `model`도 요구하지 않는다). 기동하면 `HUB_URL`(봇의 `/worker` WebSocket
-주소)로 아웃바운드 연결을 열고, `hello` 프레임으로 토큰과 자신이 노출할 폴더 목록
-(`WORKER_ROOTS`)을 보낸다(`agent/src/remote/workerClient.ts`). 봇이 토큰을 검증하고
-`ready`를 돌려주면 콘솔에 `준비됨`이 찍힌다. 그 뒤로는 봇이 보내는 개별 도구 호출(`call`
-프레임)을 실행기(`agent/src/remote/executors.ts`)로 실행하고 결과(`result` 프레임)를
-돌려주는 것 말고는 아무것도 하지 않는다 — 대화 이력도, 시스템 프롬프트도, SDK 세션도 워커
-쪽에는 없다.
+소유자 PC(또는 동아리 공용 미니PC 등 소유자가 지정한 다른 기계)에서 실행되는 별도
+프로세스다. 디스코드에도 DB에도 붙지 않는다. 각 워커는 `workers` 테이블(레지스트리,
+`agent/src/store/workersRepo.ts`)에 등록된 자기 고유의 `id`와 `kind`(`personal`|`shared`)를
+가지며, 갖고 있는 자격증명은 그 워커 자신의 토큰(`WORKER_TOKEN`) 하나뿐이다
+(`agent/src/config.ts`의 `loadWorkerConfig`는 `databaseUrl`도 `model`도 요구하지 않는다).
+워커 등록·토큰 발급은 `npm run register-worker`(`agent/src/scripts/registerWorker.ts`)로
+하며, 발급된 토큰은 그 자리에서 한 번만 출력되고 DB에는 해시만 남는다(절차는
+`deploy/worker-셋업.md` 참고). 기동하면 `HUB_URL`(봇의 `/worker` WebSocket 주소)로 아웃바운드
+연결을 열고, `hello` 프레임으로 자신의 `workerId`·토큰·자신이 노출할 폴더 목록
+(`WORKER_ROOTS`)을 보낸다(`agent/src/remote/workerClient.ts`). 허브는 `workerId`로
+레지스트리를 조회해 토큰 해시를 대조하고, 성공하면 `ready`를 돌려준다 — 워커 콘솔에
+`준비됨`이 찍힌다. 그 뒤로는 봇이 보내는 개별 도구 호출(`call` 프레임)을 실행기
+(`agent/src/remote/executors.ts`)로 실행하고 결과(`result` 프레임)를 돌려주는 것 말고는
+아무것도 하지 않는다 — 대화 이력도, 시스템 프롬프트도, SDK 세션도 워커 쪽에는 없다.
+
+허브는 동시에 여러 워커의 연결을 유지한다(`workerId`로 키잉) — 소유자의 개인 워커와 동아리
+공유 워커가 동시에 붙어 있는 것이 1단계의 정상 상태다. 같은 `workerId`로 재연결하면
+이전 연결만 정리된다(`dropExisting`) — 다른 워커의 연결에는 영향이 없다.
 
 연결이 끊기면 고정 간격(기본 3초, 지수 백오프 아님)으로 재연결을 시도한다
 (`agent/src/remote/workerClient.ts`). 인증에 실패(`denied`)하면 재연결 자체를 멈추고
 사람이 설정을 고치길 기다린다 — 토큰이 틀렸는데 계속 재시도해 봐야 결과가 같기 때문이다.
+"등록되지 않은 `workerId`"와 "토큰 불일치"는 같은 거부 문구로 응답된다(인증 오라클 방지,
+`agent/src/remote/hub.ts`의 `DENIED_REASON`).
 
 ### Supabase Postgres (정본 상태)
 
@@ -67,27 +80,38 @@ Agent SDK 세션으로 직접 실행한다** — 위임이라는 개념은 이�
 대신 인프로세스 MCP 도구 6종(`fs_read`/`fs_write`/`fs_edit`/`fs_glob`/`fs_grep`/`sh_exec`,
 `agent/src/core/tools.ts`)을 호출한다 — 내장 도구는 `builtinTools: []`로 아예 닫혀 있다
 (`agent/src/core/agent.ts`). 이 도구들의 핸들러(`agent/src/core/remoteTools.ts`의
-`remoteToolHandler`)는 신원을 재확인하고 경로를 1차로 거른 뒤, `WorkerHub.call`
-(`agent/src/remote/hub.ts`)로 그 사용자의 워커에게 도구 이름과 인자를 실어 보내고 결과를
-기다린다.
+`remoteToolHandler`)는 이 턴에 워커가 배선돼 있는지(`ctx.remote`) 확인하고 경로를 1차로
+거른 뒤, `WorkerHub.call`(`agent/src/remote/hub.ts`)로 그 턴이 쓰는 워커에게 도구 이름과
+인자를 실어 보내고 결과를 기다린다.
 
-- **연결 여부가 도구 노출을 결정한다** — `shouldConnectWorker`(`agent/src/core/agent.ts`)가
-  `isOwner && isPrivate && hub.isConnected(userId)`를 매 턴 판정해, 참이면 `ctx.remote`를
-  채우고 `allowedToolsFor`에 원격 도구를 포함시킨다. 거짓이면(워커 오프라인, 또는 소유자
-  DM이 아님) 원격 도구 자체가 도구셋에 나타나지 않는다. 판정은 **턴 시작 시점**에 한 번
-  이뤄진다 — 턴 도중 연결이 끊기면 이후 개별 도구 호출이 실패로 돌아올 뿐, 이미 시작된
-  턴을 중단시키지는 않는다.
+- **연결 여부가 도구 노출을 결정한다** — `resolveTurnWorker`(`agent/src/core/agent.ts`)가
+  매 턴 이 턴이 쓸 워커를 정한다: `resolveWorkerSelector`(`agent/src/core/workerSelect.ts`)의
+  "어디서 말하느냐가 어느 기계냐를 정한다" 규칙(소유자 DM → 그 소유자의 개인 워커, 그 외
+  전부 — 소유자의 서버 채널·손님의 DM·서버 — → 공유 워커)으로 개인/공유를 고르고,
+  `WorkersRepo` 레지스트리로 실제 `workerId`를 찾은 뒤 `hub.isConnected(workerId)`로 연결
+  여부를 확인한다. 연결돼 있으면 `ctx.remote`를 채우고 `allowedToolsFor`에 원격 도구를
+  포함시킨다. 연결돼 있지 않으면 원격 도구 자체가 도구셋에 나타나지 않는다. 판정은 **턴
+  시작 시점**에 한 번 이뤄진다 — 턴 도중 연결이 끊기면 이후 개별 도구 호출이 실패로 돌아올
+  뿐, 이미 시작된 턴을 중단시키지는 않는다.
 - **타임아웃은 도구 하나만 실패시킨다** — `WorkerHub.call`은 기본 120초 안에 응답이 없으면
   그 호출만 실패로 모델에 돌려준다(`ok: false`). 턴 전체가 죽지 않으므로 모델이 다른
   방법을 시도하거나 사용자에게 실패를 알릴 수 있다.
-- **경로 검사는 두 겹** — 봇 쪽 `allowed_dirs` 1차 필터와 워커 쪽 `WORKER_ROOTS` 최종
-  판정을 모두 통과해야 한다. `sh_exec`는 경로 인자가 없어 이 두 겹 어디에도 속하지 않는다
-  — 실행 시 작업 디렉토리와 워커 프로세스의 OS 권한만이 경계다. 자세한 내용은
+- **경로 검사는 두 겹, 손님은 한 겹 더 좁혀진다** — 봇 쪽 `allowed_dirs`(그 워커 기준) 1차
+  필터와 워커 쪽 `WORKER_ROOTS` 최종 판정을 모두 통과해야 한다. 공유 워커에서 손님(소유자가
+  아닌 사용자)은 `scopeDirs`(`agent/src/core/workerSelect.ts`)가 1차 필터의 허용 폴더를
+  자기 하위 폴더(`<루트>/<디스코드 userId>/`)로 더 좁힌다 — 소유자는 관리자이므로 좁히지
+  않는다. `sh_exec`는 경로 인자가 없어 이 필터·스코프 어디에도 속하지 않는다 — 손님이라도
+  실행 시 작업 디렉토리와 워커 프로세스의 OS 권한만이 경계다. 자세한 내용은
   `docs/security/capability-model.md` "경로 게이팅" 참고.
-- **1단계는 소유자 전용, 워커 하나** — `WORKER_TOKEN`은 사용자별이 아니라 고정값 하나이고,
-  허브는 동시에 소유자의 워커 연결 하나만 유지한다(`agent/src/remote/hub.ts`의
-  `dropExisting` — 같은 신원으로 재연결하면 이전 연결을 밀어낸다). 손님용 워커·사용자별
-  토큰은 2단계 몫이다.
+- **1단계는 개인 워커 + 공유 워커, 워커별 토큰** — 각 워커는 `workers` 테이블에 등록된
+  자기 고유의 `id`와 해시된 토큰을 갖는다(`docs/superpowers/specs/
+  2026-07-27-multi-worker-design.md`). 소유자는 자신의 개인 워커(DM)와 동아리 공유 워커
+  (서버 채널)를 함께 쓰고, 손님은 DM·서버 어디서든 그 공유 워커의 본인 폴더로만 좁혀진다.
+  허브는 워커별로 동시에 여러 연결을 유지하며, 같은 `workerId`로 재연결하면 그 워커의
+  이전 연결만 정리된다(`agent/src/remote/hub.ts`의 `dropExisting`). 손님이 자기 PC에
+  개인 워커를 두는 것은 여전히 지원하지 않는다 — 소유자의 구독으로 도는 작업이 소유자가
+  보지 못하는 기계에서 벌어지는 것을 피하기 위한 의도된 설계다(§2.1,
+  `docs/superpowers/specs/2026-07-27-multi-worker-design.md`).
 
 ## 위임이 사라진 자리
 
@@ -120,9 +144,11 @@ Agent SDK 세션으로 직접 실행한다** — 위임이라는 개념은 이�
 ```mermaid
 flowchart LR
   U[Discord DM/스레드/채널] --> B["봇\nindex.ts · AgentCore · SDK 세션\n(+ /worker 허브)"]
-  B <--> DB[(Supabase Postgres\n정본 상태 — 봇만 접속)]
-  W["로컬 워커\nworker.ts · 실행기 전용\n(WORKER_TOKEN 하나)"] -- "아웃바운드 WebSocket(hello)" --> B
-  B -- "도구 호출(fs_*/sh_exec) → 결과" --> W
+  B <--> DB[(Supabase Postgres\n정본 상태 + workers 레지스트리 — 봇만 접속)]
+  W1["개인 워커\nworker.ts · 소유자 PC\n(kind=personal)"] -- "아웃바운드 WebSocket\nhello: workerId+토큰" --> B
+  W2["공유 워커\nworker.ts · 동아리 미니PC\n(kind=shared)"] -- "아웃바운드 WebSocket\nhello: workerId+토큰" --> B
+  B -- "도구 호출(fs_*/sh_exec) → 결과" --> W1
+  B -- "도구 호출(fs_*/sh_exec) → 결과" --> W2
 ```
 
 ## 관련 문서
@@ -133,6 +159,4 @@ flowchart LR
 - 현재 라이브 상태·미완 항목: `docs/status/STATUS.md`
 - 배포 절차: `deploy/railway-셋업.md`, `deploy/worker-셋업.md`, `deploy/다른-PC-셋업.md`
 - 메시지 하나의 저장·직렬화 경로(이 문서가 다루지 않는 ingest/turn 체인 상세):
-  `docs/architecture/data-flow.md`(주의: 위임 관련 서술은 이 얇은 워커 전환 이전 버전이라
-  아직 갱신되지 않았다 — `AgentCore.runConversationTurn`이 항상 직접 실행한다는 이 문서의
-  서술이 우선한다)
+  `docs/architecture/data-flow.md`

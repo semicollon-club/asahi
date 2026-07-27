@@ -3,8 +3,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
-  decidePathPermission, isPathGatedTool, extractCandidatePaths, resolveRealOrNearestAncestor,
+  isPathGatedTool, extractCandidatePaths, resolveRealOrNearestAncestor,
 } from "../src/core/pathPermission.js";
+import { isPathWithinAny } from "../src/core/paths.js";
 
 describe("isPathGatedTool — 경로 집행 대상 판정", () => {
   it("파일계열·Bash 는 대상이다", () => {
@@ -24,112 +25,12 @@ describe("isPathGatedTool — 경로 집행 대상 판정", () => {
   });
 });
 
-describe("decidePathPermission — 순수 판정 함수", () => {
-  it("파일도구·허용폴더 내부 경로면 allow", () => {
-    const result = decidePathPermission("Read", ["C:\\proj\\a\\file.txt"], {
-      isOwnerDm: true,
-      allowedDirs: ["C:\\proj\\a"],
-    });
-    expect(result).toEqual({ behavior: "allow" });
-  });
-
-  it("파일도구·허용폴더 밖 경로면 deny(경로를 메시지에 포함)", () => {
-    const result = decidePathPermission("Write", ["C:\\other\\file.txt"], {
-      isOwnerDm: true,
-      allowedDirs: ["C:\\proj\\a"],
-    });
-    expect(result.behavior).toBe("deny");
-    expect((result as { message: string }).message).toContain("C:\\other\\file.txt");
-  });
-
-  it("여러 경로 중 하나라도 밖이면 deny", () => {
-    const result = decidePathPermission("Edit", ["C:\\proj\\a\\ok.txt", "C:\\proj\\b\\bad.txt"], {
-      isOwnerDm: true,
-      allowedDirs: ["C:\\proj\\a"],
-    });
-    expect(result.behavior).toBe("deny");
-  });
-
-  it("허용폴더가 비어있으면(파일도구) deny", () => {
-    const result = decidePathPermission("Read", ["C:\\proj\\a\\file.txt"], {
-      isOwnerDm: true,
-      allowedDirs: [],
-    });
-    expect(result.behavior).toBe("deny");
-    expect((result as { message: string }).message).toContain("allow_dir");
-  });
-
-  it("손님 DM(isOwnerDm=false) 이면 허용폴더·경로 상관없이 deny", () => {
-    const result = decidePathPermission("Read", ["C:\\proj\\a\\file.txt"], {
-      isOwnerDm: false,
-      allowedDirs: ["C:\\proj\\a"],
-    });
-    expect(result.behavior).toBe("deny");
-    expect((result as { message: string }).message).toContain("소유자 DM");
-  });
-
-  it("비파일·비Bash 도구(mcp__asahi__remember 등)는 항상 allow", () => {
-    expect(decidePathPermission("mcp__asahi__remember", [], { isOwnerDm: false, allowedDirs: [] }))
-      .toEqual({ behavior: "allow" });
-    expect(decidePathPermission("WebSearch", ["C:\\anything"], { isOwnerDm: true, allowedDirs: [] }))
-      .toEqual({ behavior: "allow" });
-  });
-
-  describe("Bash", () => {
-    it("소유자 DM·허용폴더 있음·경로가 허용폴더 내부면 allow", () => {
-      const result = decidePathPermission("Bash", ["C:\\proj\\a\\sub"], {
-        isOwnerDm: true,
-        allowedDirs: ["C:\\proj\\a"],
-      });
-      expect(result).toEqual({ behavior: "allow" });
-    });
-
-    it("경로 없이(빈 배열) 소유자 DM·허용폴더 있음이면 allow(cwd 내부로 간주)", () => {
-      const result = decidePathPermission("Bash", [], {
-        isOwnerDm: true,
-        allowedDirs: ["C:\\proj\\a"],
-      });
-      expect(result).toEqual({ behavior: "allow" });
-    });
-
-    it("blockedPath 가 허용폴더 밖이면 deny", () => {
-      const result = decidePathPermission("Bash", ["C:\\other"], {
-        isOwnerDm: true,
-        allowedDirs: ["C:\\proj\\a"],
-      });
-      expect(result.behavior).toBe("deny");
-    });
-
-    it("허용폴더가 비어있으면 경로 유무와 상관없이 deny", () => {
-      expect(decidePathPermission("Bash", [], { isOwnerDm: true, allowedDirs: [] }).behavior).toBe("deny");
-      expect(decidePathPermission("Bash", ["C:\\proj\\a"], { isOwnerDm: true, allowedDirs: [] }).behavior).toBe("deny");
-    });
-
-    it("소유자 DM 이 아니면 경로 유무와 상관없이 deny", () => {
-      expect(decidePathPermission("Bash", [], { isOwnerDm: false, allowedDirs: ["C:\\proj\\a"] }).behavior).toBe("deny");
-    });
-
-    it("dangerouslyDisableSandbox=true 면 소유자 DM·허용폴더 내부라도 무조건 deny(보안리뷰 #2)", () => {
-      const result = decidePathPermission("Bash", ["C:\\proj\\a\\sub"], {
-        isOwnerDm: true,
-        allowedDirs: ["C:\\proj\\a"],
-        dangerouslyDisableSandbox: true,
-      });
-      expect(result.behavior).toBe("deny");
-    });
-
-    it("dangerouslyDisableSandbox 가 없거나 false 면 기존 판정을 그대로 따른다", () => {
-      expect(
-        decidePathPermission("Bash", ["C:\\proj\\a\\sub"], {
-          isOwnerDm: true,
-          allowedDirs: ["C:\\proj\\a"],
-          dangerouslyDisableSandbox: false,
-        }),
-      ).toEqual({ behavior: "allow" });
-    });
-  });
-});
-
+// decidePathPermission(옛 canUseTool 전용 최종 allow/deny 판정 함수)은 최종 pre-merge 리뷰
+// FIX6 에서 삭제했다 — grep 으로 확인한 프로덕션 호출자가 이 파일과 테스트뿐이었다(canUseTool
+// 자체가 얇은 워커 전환으로 이미 삭제됨). 남겨 두면 "PC 작업은 소유자 DM에서만 가능해요"라는,
+// 이 브랜치가 뒤집은 정책을 그대로 반환하는 죽은 함수가 재사용의 근거처럼 보일 위험이 있었다.
+// 그 함수가 검증하던 "후보 경로가 허용 폴더 안인가"는 지금 프로덕션이 실제로 쓰는 판정
+// (remoteToolHandler 의 isPathWithinAny 호출)로 아래 통합 테스트를 다시 썼다.
 describe("extractCandidatePaths — canUseTool 입력에서 경로 추출", () => {
   it("Read/Write/Edit 는 file_path 를 뽑는다", () => {
     expect(extractCandidatePaths("Read", { file_path: "C:\\a\\b.txt" })).toEqual(["C:\\a\\b.txt"]);
@@ -218,6 +119,86 @@ describe("extractCandidatePaths — canUseTool 입력에서 경로 추출", () =
     });
   });
 
+  // 최종 리뷰 FIX1(치명) — literalPrefixOfGlobPattern 은 "첫 메타문자 이전"만 리터럴로 본다.
+  // 패턴이 메타문자로 시작하면(예: "**/../../222/*.txt") 리터럴 접두가 통째로 빈 문자열이 되어
+  // 그 뒤의 ".." 가 후보 추출에서 완전히 빠졌다(리뷰 재현: 손님이 이 형태로 다른 회원의 폴더를
+  // 읽었다). 메타문자가 어디 있든 ".." 세그먼트가 있으면 항상 벗어난 후보를 만들어야 한다.
+  describe("Glob/Grep pattern·glob 의 상위 탈출은 메타문자 위치와 무관하게 차단된다(최종 리뷰 FIX1)", () => {
+    const base = "C:\\proj\\a";
+
+    it("Glob: '**/../x' — 메타문자(**)로 시작해도 벗어난 후보를 만든다", () => {
+      const result = extractCandidatePaths("Glob", { path: base, pattern: "**/../x" });
+      expect(result).toContain(path.resolve(base, ".."));
+    });
+
+    it("Glob: '*/../x' — 단일 메타문자(*)로 시작해도 벗어난 후보를 만든다", () => {
+      const result = extractCandidatePaths("Glob", { path: base, pattern: "*/../x" });
+      expect(result).toContain(path.resolve(base, ".."));
+    });
+
+    it("Glob: '[a]/../x' — 문자 클래스로 시작해도 벗어난 후보를 만든다", () => {
+      const result = extractCandidatePaths("Glob", { path: base, pattern: "[a]/../x" });
+      expect(result).toContain(path.resolve(base, ".."));
+    });
+
+    it("Glob: '{a,b}/../x' — 브레이스로 시작해도 벗어난 후보를 만든다", () => {
+      const result = extractCandidatePaths("Glob", { path: base, pattern: "{a,b}/../x" });
+      expect(result).toContain(path.resolve(base, ".."));
+    });
+
+    it("Glob: 선행 '..'(메타문자 없음) — 기존에도 리터럴 접두로 잡혔지만 회귀로 다시 확인", () => {
+      const result = extractCandidatePaths("Glob", { path: base, pattern: "../x" });
+      expect(result).toContain(path.resolve(base, "../x"));
+    });
+
+    it("Grep: glob='**/../x' — 메타문자로 시작해도 벗어난 후보를 만든다", () => {
+      const result = extractCandidatePaths("Grep", { pattern: "foo", path: base, glob: "**/../x" });
+      expect(result).toContain(path.resolve(base, ".."));
+    });
+
+    it("Grep: glob='*/../x' — 단일 메타문자로 시작해도 벗어난 후보를 만든다", () => {
+      const result = extractCandidatePaths("Grep", { pattern: "foo", path: base, glob: "*/../x" });
+      expect(result).toContain(path.resolve(base, ".."));
+    });
+
+    it("Grep: glob='[a]/../x' — 문자 클래스로 시작해도 벗어난 후보를 만든다", () => {
+      const result = extractCandidatePaths("Grep", { pattern: "foo", path: base, glob: "[a]/../x" });
+      expect(result).toContain(path.resolve(base, ".."));
+    });
+
+    it("Grep: glob='{a,b}/../x' — 브레이스로 시작해도 벗어난 후보를 만든다", () => {
+      const result = extractCandidatePaths("Grep", { pattern: "foo", path: base, glob: "{a,b}/../x" });
+      expect(result).toContain(path.resolve(base, ".."));
+    });
+
+    it("Grep: 선행 '..'(메타문자 없음) — 기존에도 리터럴 접두로 잡혔지만 회귀로 다시 확인", () => {
+      const result = extractCandidatePaths("Grep", { pattern: "foo", path: base, glob: "../x" });
+      expect(result).toContain(path.resolve(base, "../x"));
+    });
+
+    // decidePathPermission 삭제(최종 pre-merge 리뷰 FIX6)로, "이 후보가 실제로 허용 폴더 판정에서
+    // deny/allow 로 이어지는가"는 이제 프로덕션이 실제로 쓰는 판정 함수(paths.ts 의
+    // isPathWithinAny — remoteToolHandler 가 그대로 호출한다)로 직접 확인한다.
+    it("긍정 사례 — 평범한 재귀 글롭('**/*.ts')은 상위 탈출 후보를 추가하지 않고 그대로 통과한다", () => {
+      const candidates = extractCandidatePaths("Glob", { path: base, pattern: "**/*.ts" });
+      expect(candidates).toEqual([base]);
+      expect(candidates.every((c) => isPathWithinAny(c, [base]))).toBe(true);
+    });
+
+    it("긍정 사례 — 메타문자 시작 패턴의 상위 탈출 후보는 허용 폴더 밖으로 판정된다", () => {
+      for (const pattern of ["**/../x", "*/../x", "[a]/../x", "{a,b}/../x"]) {
+        const candidates = extractCandidatePaths("Glob", { path: base, pattern });
+        expect(candidates.some((c) => !isPathWithinAny(c, [base]))).toBe(true);
+      }
+    });
+
+    it("'..' 를 포함하지 않는 일반 문자열(예: '..hidden')은 오탐하지 않는다", () => {
+      // 세그먼트 경계 밖의 '..'(리터럴 디렉토리 이름의 일부)는 상위 탈출로 취급하지 않는다.
+      const result = extractCandidatePaths("Glob", { path: base, pattern: "*/foo..bar/x" });
+      expect(result).not.toContain(path.resolve(base, ".."));
+    });
+  });
+
   describe("후보가 비면 cwd 를 후보로 넣는다(보안리뷰 #3)", () => {
     it("Bash: blockedPath 없고 cwd 있으면 cwd 를 후보로", () => {
       expect(extractCandidatePaths("Bash", { command: "ls" }, undefined, "C:\\proj\\a")).toEqual(["C:\\proj\\a"]);
@@ -236,43 +217,99 @@ describe("extractCandidatePaths — canUseTool 입력에서 경로 추출", () =
     });
   });
 
-  describe("통합: extractCandidatePaths → decidePathPermission (보안리뷰 #1/#3 시나리오)", () => {
+  describe("통합: extractCandidatePaths → isPathWithinAny (보안리뷰 #1/#3 시나리오, 프로덕션이 실제로 쓰는 판정)", () => {
     const allowedDirs = ["C:\\proj\\a"];
+    const anyOutside = (candidates: string[]) => candidates.some((c) => !isPathWithinAny(c, allowedDirs));
 
     it("Glob {pattern: 절대경로}(path 없음) → 허용폴더 밖이면 deny", () => {
       const candidates = extractCandidatePaths("Glob", { pattern: "C:\\other\\**" });
-      const result = decidePathPermission("Glob", candidates, { isOwnerDm: true, allowedDirs });
-      expect(result.behavior).toBe("deny");
+      expect(anyOutside(candidates)).toBe(true);
     });
 
     it("Glob {path: 허용, pattern: '../../x/**'} → 밖이면 deny", () => {
       const candidates = extractCandidatePaths("Glob", { path: "C:\\proj\\a", pattern: "../../x/**" });
-      const result = decidePathPermission("Glob", candidates, { isOwnerDm: true, allowedDirs });
-      expect(result.behavior).toBe("deny");
+      expect(anyOutside(candidates)).toBe(true);
     });
 
     it("FIX1 — Grep {path: 허용, glob: '../../x/**'} → 밖이면 deny", () => {
       const candidates = extractCandidatePaths("Grep", { pattern: "foo", path: "C:\\proj\\a", glob: "../../x/**" });
-      const result = decidePathPermission("Grep", candidates, { isOwnerDm: true, allowedDirs });
-      expect(result.behavior).toBe("deny");
+      expect(anyOutside(candidates)).toBe(true);
     });
 
     it("Glob {path: 허용, pattern: 'sub/**'} → 안이면 allow", () => {
       const candidates = extractCandidatePaths("Glob", { path: "C:\\proj\\a", pattern: "sub/**" });
-      const result = decidePathPermission("Glob", candidates, { isOwnerDm: true, allowedDirs });
-      expect(result).toEqual({ behavior: "allow" });
+      expect(anyOutside(candidates)).toBe(false);
     });
 
     it("후보가 빈 경우 cwd 로 대체되고, cwd 가 밖이면 deny", () => {
       const candidates = extractCandidatePaths("Bash", { command: "ls" }, undefined, "C:\\other");
-      const result = decidePathPermission("Bash", candidates, { isOwnerDm: true, allowedDirs });
-      expect(result.behavior).toBe("deny");
+      expect(anyOutside(candidates)).toBe(true);
     });
 
     it("후보가 빈 경우 cwd 로 대체되고, cwd 가 안이면 allow", () => {
       const candidates = extractCandidatePaths("Bash", { command: "ls" }, undefined, "C:\\proj\\a\\sub");
-      const result = decidePathPermission("Bash", candidates, { isOwnerDm: true, allowedDirs });
-      expect(result).toEqual({ behavior: "allow" });
+      expect(anyOutside(candidates)).toBe(false);
+    });
+  });
+
+  // 최종 pre-merge 리뷰 FIX2(중요) — extractCandidatePaths 는 이제 대상 문자열의 생김새로
+  // 플레이버를 고른다(paths.ts 의 pathFlavorOf 재사용, isPathWithin 이 이미 쓰는 것과 같은 원칙).
+  // 이전에는 node:path 의 기본 export(host 프로세스의 process.platform 을 따름)를 그대로 썼다 —
+  // 봇은 리눅스(Railway)에서 돌고 base(허용 폴더·워커 루트)는 윈도우 워커의 경로일 수 있어,
+  // 리눅스 host 에서 `path.resolve("C:\\ws\\111", "src")` 를 부르면 역슬래시가 구분자로 인식되지
+  // 않아 완전히 엉뚱한 값이 나왔다(리뷰 재현: fs_glob(path=손님 루트, pattern='src/**/*.ts') 가
+  // 정상 호출인데도 "허용된 폴더 밖"으로 거부됐다). 아래 기대값은 host `path.resolve` 로 만들지
+  // 않고 문자열 리터럴로 직접 적는다 — host `path.resolve` 로 기대값을 만들면 이 테스트를 도는
+  // 기계가 우연히 같은 플레이버일 때만 통과하는, 바로 그 함정에 빠진다(이 리포의 CI/개발 환경이
+  // 어느 플랫폼이든 이 describe 는 항상 같은 결과를 내야 한다).
+  describe("extractCandidatePaths 는 대상 경로의 플레이버를 따른다 — host 플랫폼과 무관하다(최종 pre-merge 리뷰 FIX2)", () => {
+    it("윈도우 스타일 base + 상대 pattern → 윈도우 규칙으로 결합한다(host 가 POSIX 여도)", () => {
+      const result = extractCandidatePaths("Glob", { path: String.raw`C:\ws\111`, pattern: "src/**/*.ts" });
+      expect(result).toContain(String.raw`C:\ws\111\src`);
+    });
+
+    it("윈도우 스타일 base + 상위 탈출 pattern → 윈도우 규칙으로 부모를 계산한다", () => {
+      const result = extractCandidatePaths("Glob", { path: String.raw`C:\ws\111`, pattern: "**/../x" });
+      expect(result).toContain(String.raw`C:\ws`);
+    });
+
+    it("POSIX 스타일 base + 상대 pattern → POSIX 규칙으로 결합한다", () => {
+      const result = extractCandidatePaths("Glob", { path: "/srv/ws/111", pattern: "src/**/*.ts" });
+      expect(result).toContain("/srv/ws/111/src");
+    });
+
+    it("POSIX 스타일 base + 상위 탈출 pattern → POSIX 규칙으로 부모를 계산한다", () => {
+      const result = extractCandidatePaths("Glob", { path: "/srv/ws/111", pattern: "**/../x" });
+      expect(result).toContain("/srv/ws");
+    });
+
+    it("path 생략 + 윈도우 스타일 cwd(allowed[0] 대체값) → 윈도우 규칙을 따른다", () => {
+      const result = extractCandidatePaths("Glob", { pattern: "src/**/*.ts" }, undefined, String.raw`C:\ws\111`);
+      expect(result).toContain(String.raw`C:\ws\111\src`);
+    });
+
+    it("Grep 의 glob 인자도 동일하게 대상 플레이버를 따른다(fs_grep 경로)", () => {
+      const result = extractCandidatePaths("Grep", { pattern: "TODO", path: String.raw`C:\ws\111`, glob: "src/*.ts" });
+      expect(result).toContain(String.raw`C:\ws\111\src`);
+    });
+
+    it("literal 자체가 절대경로면(예: pattern 이 통째로 다른 드라이브를 가리킴) base 의 플레이버와 무관하게 literal 자신의 플레이버를 따른다", () => {
+      // base 는 POSIX 모양이지만 pattern 의 리터럴 접두 자신은 윈도우 절대경로다 — literal 이
+      // 스스로 밝히는 플레이버가 이긴다(paths.ts 의 normalizeDir 과 같은 원칙).
+      const result = extractCandidatePaths("Glob", { path: "/srv/ws", pattern: String.raw`C:\other\**` });
+      expect(result).toContain(String.raw`C:\other`);
+    });
+
+    it("실제 리뷰 시나리오 재현 — 손님 루트(윈도우)에서 path 지정 + 평범한 상대 glob 은 자기 폴더 안으로 판정된다", () => {
+      const guestRoot = String.raw`C:\ws\111`;
+      const candidates = extractCandidatePaths("Glob", { path: guestRoot, pattern: "src/**/*.ts" });
+      expect(candidates.every((c) => isPathWithinAny(c, [guestRoot]))).toBe(true);
+    });
+
+    it("실제 리뷰 시나리오 재현 — 같은 상황에서 상위 탈출 시도는 여전히 허용 폴더 밖으로 판정된다", () => {
+      const guestRoot = String.raw`C:\ws\111`;
+      const candidates = extractCandidatePaths("Glob", { path: guestRoot, pattern: "**/../222/*.txt" });
+      expect(candidates.some((c) => !isPathWithinAny(c, [guestRoot]))).toBe(true);
     });
   });
 });

@@ -14,7 +14,7 @@ export type ClientSocket = {
 export type WorkerClientOpts = {
   connect: () => ClientSocket;
   token: string;
-  userId: string;
+  workerId: string;
   roots: string[];
   executors: Executors;
   onStatus?: (s: string) => void;
@@ -43,7 +43,7 @@ export function startWorkerClient(opts: WorkerClientOpts): { stop(): void } {
       if (current !== socket) return;
       status("연결됨 — 인증 중");
       try {
-        socket.send(encodeFrame({ type: "hello", token: opts.token, userId: opts.userId, roots: opts.roots }));
+        socket.send(encodeFrame({ type: "hello", token: opts.token, workerId: opts.workerId, roots: opts.roots }));
       } catch (err) {
         // 아래 result·pong 전송과 같은 이유로 감싼다 — send 가 동기적으로 던지면 이 콜백 밖으로
         // 튀어나가 unhandled 예외로 프로세스를 죽일 수 있다.

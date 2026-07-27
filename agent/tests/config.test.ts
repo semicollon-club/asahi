@@ -1,12 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { loadConfig, loadWorkerConfig } from "../src/config.js";
 
-// FIX2: WORKER_TOKEN 이 이제 필수 + 최소 길이 검증 대상이라, 이 값과 무관한 기존 테스트들도
-// loadConfig 를 통과하려면 "충분히 긴" 토큰이 base 에 있어야 한다(다른 필수 env 와 같은 이유로
-// base 에 이미 DISCORD_TOKEN 등이 있는 것과 동일한 패턴).
-const LONG_WORKER_TOKEN = "a".repeat(32);
-
-const base = { DISCORD_TOKEN: "tok", DISCORD_OWNER_ID: "123", DATABASE_URL: "postgres://localhost/test", WORKER_TOKEN: LONG_WORKER_TOKEN };
+const base = { DISCORD_TOKEN: "tok", DISCORD_OWNER_ID: "123", DATABASE_URL: "postgres://localhost/test" };
 
 describe("loadConfig", () => {
   it("필수값이 있으면 기본값과 함께 로드된다", () => {
@@ -79,28 +74,6 @@ describe("loadConfig", () => {
   });
 });
 
-// FIX2(치명): 빈 WORKER_TOKEN 은 "누구나 소유자의 워커" 로 인증되는 사고로 이어진다(hub.ts 가 그
-// 값과 '!==' 로만 비교했다) — 다른 필수 env 변수처럼 시작 시점에 명확히 실패해야 한다. 짧은(추측
-// 가능한) 토큰도 사실상 같은 문제라 최소 길이까지 함께 검증한다.
-describe("FIX2 — WORKER_TOKEN 은 필수이며 최소 길이를 만족해야 한다", () => {
-  it("WORKER_TOKEN 이 없으면(빈 문자열 포함) 시작 시점에 실패한다", () => {
-    const { WORKER_TOKEN, ...withoutToken } = base;
-    expect(() => loadConfig(withoutToken)).toThrow(/WORKER_TOKEN/);
-    expect(() => loadConfig({ ...base, WORKER_TOKEN: "" })).toThrow(/WORKER_TOKEN/);
-  });
-
-  it("WORKER_TOKEN 이 너무 짧으면(예: 5자) 시작 시점에 실패한다", () => {
-    expect(() => loadConfig({ ...base, WORKER_TOKEN: "short" })).toThrow(/WORKER_TOKEN/);
-  });
-
-  it("WORKER_TOKEN 이 충분히 길면 통과한다(경계값)", () => {
-    // 실제 최소 길이 상수는 config.ts 내부에만 있으므로, 여기서는 "짧으면 실패·충분히 길면 통과"라는
-    // 관찰 가능한 경계 동작만 검증한다(내부 상수 값 자체를 재구현해 두 번째 기준을 만들지 않는다).
-    expect(() => loadConfig({ ...base, WORKER_TOKEN: LONG_WORKER_TOKEN })).not.toThrow();
-    expect(loadConfig({ ...base, WORKER_TOKEN: LONG_WORKER_TOKEN }).workerToken).toBe(LONG_WORKER_TOKEN);
-  });
-});
-
 // Task 7(배선): 워커가 얇은 클라이언트(DB·모델·세션 없음, 허브에 붙는 소켓+도구 실행뿐)로
 // 바뀌면서 WorkerConfig 자체가 통째로 교체됐다 — 옛 loadWorkerConfig 테스트(databaseUrl·
 // workerSecret·dataDir·memoryDir·sessionIdleMinutes·model)는 더 이상 존재하지 않는 필드를
@@ -112,19 +85,18 @@ describe("얇은 워커 설정(Task 7 — 워커는 DB·모델·세션을 다루
   const ROOT_A = process.platform === "win32" ? "C:\\a" : "/a";
   const ROOT_B = process.platform === "win32" ? "C:\\b" : "/b";
 
-  it("봇 설정에 WORKER_TOKEN 과 PORT 가 실린다", () => {
-    const c = loadConfig({ ...base, WORKER_TOKEN: LONG_WORKER_TOKEN, PORT: "8080" } as NodeJS.ProcessEnv);
-    expect(c.workerToken).toBe(LONG_WORKER_TOKEN);
+  it("봇 설정에 PORT 가 실린다(워커 인증은 더 이상 봇 설정을 거치지 않는다)", () => {
+    const c = loadConfig({ ...base, PORT: "8080" } as NodeJS.ProcessEnv);
     expect(c.httpPort).toBe(8080);
   });
 
   it("PORT 를 생략하면 기본값 3000", () => {
-    expect(loadConfig({ ...base, WORKER_TOKEN: LONG_WORKER_TOKEN } as NodeJS.ProcessEnv).httpPort).toBe(3000);
+    expect(loadConfig(base as NodeJS.ProcessEnv).httpPort).toBe(3000);
   });
 
   it("워커 설정은 DATABASE_URL 이 아니라 HUB_URL·WORKER_TOKEN·WORKER_ROOTS 를 요구한다", () => {
     const w = loadWorkerConfig({
-      DISCORD_OWNER_ID: "o", WORKER_USER_ID: "o",
+      DISCORD_OWNER_ID: "o", WORKER_ID: "o",
       HUB_URL: "wss://h/worker", WORKER_TOKEN: "wt", WORKER_ROOTS: `${ROOT_A},${ROOT_B}`,
     } as NodeJS.ProcessEnv);
     expect(w.hubUrl).toBe("wss://h/worker");
@@ -139,19 +111,19 @@ describe("얇은 워커 설정(Task 7 — 워커는 DB·모델·세션을 다루
   // 검사되는지를 각각 독립적으로 확인한다.
   it("워커 설정에서 HUB_URL 이 빠지면 시작 시점에 실패한다", () => {
     expect(() => loadWorkerConfig({
-      DISCORD_OWNER_ID: "o", WORKER_USER_ID: "o", WORKER_TOKEN: "wt", WORKER_ROOTS: ROOT_A,
+      DISCORD_OWNER_ID: "o", WORKER_ID: "o", WORKER_TOKEN: "wt", WORKER_ROOTS: ROOT_A,
     } as NodeJS.ProcessEnv)).toThrow(/HUB_URL/);
   });
 
   it("워커 설정에서 WORKER_TOKEN 이 빠지면 시작 시점에 실패한다", () => {
     expect(() => loadWorkerConfig({
-      DISCORD_OWNER_ID: "o", WORKER_USER_ID: "o", HUB_URL: "wss://h/worker", WORKER_ROOTS: ROOT_A,
+      DISCORD_OWNER_ID: "o", WORKER_ID: "o", HUB_URL: "wss://h/worker", WORKER_ROOTS: ROOT_A,
     } as NodeJS.ProcessEnv)).toThrow(/WORKER_TOKEN/);
   });
 
   it("워커 설정에서 WORKER_ROOTS 가 빠지면 시작 시점에 실패한다", () => {
     expect(() => loadWorkerConfig({
-      DISCORD_OWNER_ID: "o", WORKER_USER_ID: "o", HUB_URL: "wss://h/worker", WORKER_TOKEN: "wt",
+      DISCORD_OWNER_ID: "o", WORKER_ID: "o", HUB_URL: "wss://h/worker", WORKER_TOKEN: "wt",
     } as NodeJS.ProcessEnv)).toThrow(/WORKER_ROOTS/);
   });
 
@@ -160,14 +132,14 @@ describe("얇은 워커 설정(Task 7 — 워커는 DB·모델·세션을 다루
   // 통과했는데 모든 도구 호출을 거부하는 워커가 조용히 뜬다.
   it("WORKER_ROOTS 에 절대경로가 아닌 항목이 있으면 시작 시점에 실패한다", () => {
     expect(() => loadWorkerConfig({
-      DISCORD_OWNER_ID: "o", WORKER_USER_ID: "o",
+      DISCORD_OWNER_ID: "o", WORKER_ID: "o",
       HUB_URL: "wss://h/worker", WORKER_TOKEN: "wt", WORKER_ROOTS: "relative/path",
     } as NodeJS.ProcessEnv)).toThrow(/WORKER_ROOTS/);
   });
 
   it("WORKER_ROOTS 여러 개 중 하나라도 절대경로가 아니면 전부 거부한다", () => {
     expect(() => loadWorkerConfig({
-      DISCORD_OWNER_ID: "o", WORKER_USER_ID: "o",
+      DISCORD_OWNER_ID: "o", WORKER_ID: "o",
       HUB_URL: "wss://h/worker", WORKER_TOKEN: "wt", WORKER_ROOTS: `${ROOT_A},relative/path`,
     } as NodeJS.ProcessEnv)).toThrow(/WORKER_ROOTS/);
   });
@@ -176,7 +148,7 @@ describe("얇은 워커 설정(Task 7 — 워커는 DB·모델·세션을 다루
     "윈도우에서 드라이브 문자·UNC 없이 구분자로만 시작하는 WORKER_ROOTS 는 거부한다(모호한 경로, remote/roots.ts 와 동일 기준)",
     () => {
       expect(() => loadWorkerConfig({
-        DISCORD_OWNER_ID: "o", WORKER_USER_ID: "o",
+        DISCORD_OWNER_ID: "o", WORKER_ID: "o",
         HUB_URL: "wss://h/worker", WORKER_TOKEN: "wt", WORKER_ROOTS: "/workspace",
       } as NodeJS.ProcessEnv)).toThrow(/WORKER_ROOTS/);
     },
@@ -184,7 +156,7 @@ describe("얇은 워커 설정(Task 7 — 워커는 DB·모델·세션을 다루
 });
 
 describe("model 구성(Opus 4.8 기본, 봇 설정 전용 — 워커는 더 이상 model 을 다루지 않는다)", () => {
-  const base = { DISCORD_TOKEN: "t", DISCORD_OWNER_ID: "1", DATABASE_URL: "postgres://x", WORKER_TOKEN: LONG_WORKER_TOKEN };
+  const base = { DISCORD_TOKEN: "t", DISCORD_OWNER_ID: "1", DATABASE_URL: "postgres://x" };
   it("loadConfig: 기본 모델은 claude-opus-4-8, ANTHROPIC_MODEL 로 재정의된다", () => {
     expect(loadConfig({ ...base } as NodeJS.ProcessEnv).model).toBe("claude-opus-4-8");
     expect(loadConfig({ ...base, ANTHROPIC_MODEL: "claude-sonnet-5" } as NodeJS.ProcessEnv).model).toBe("claude-sonnet-5");
@@ -192,7 +164,7 @@ describe("model 구성(Opus 4.8 기본, 봇 설정 전용 — 워커는 더 이�
 });
 
 describe("정기 게시 채널 설정", () => {
-  const base = { DATABASE_URL: "postgres://x", DISCORD_TOKEN: "d", DISCORD_OWNER_ID: "o", WORKER_TOKEN: "w".repeat(32) };
+  const base = { DATABASE_URL: "postgres://x", DISCORD_TOKEN: "d", DISCORD_OWNER_ID: "o" };
 
   it("두 채널 ID 를 읽는다", () => {
     const c = loadConfig({ ...base, DIGEST_CONTEST_CHANNEL_ID: "C1", DIGEST_DEVNEWS_CHANNEL_ID: "C2" } as NodeJS.ProcessEnv);
@@ -207,5 +179,40 @@ describe("정기 게시 채널 설정", () => {
 
   it("둘 다 없어도 기동에는 지장이 없다(빈 객체)", () => {
     expect(loadConfig(base as NodeJS.ProcessEnv).digestChannels).toEqual({});
+  });
+});
+
+// Task 4(배선): 워커 신원이 WORKER_USER_ID(디스코드 사용자 ID 공유)에서 WORKER_ID(레지스트리에
+// 등록된 워커 자신의 id)로 바뀐다 — register-worker 가 발급한 id 를 그대로 쓴다.
+describe("워커 설정 — WORKER_ID", () => {
+  const base = {
+    DISCORD_OWNER_ID: "owner", WORKER_ID: "semicolon-shared",
+    WORKER_TOKEN: "x".repeat(40), HUB_URL: "wss://h/worker", WORKER_ROOTS: "C:\\ws",
+  };
+
+  it("WORKER_ID 를 읽는다", () => {
+    expect(loadWorkerConfig(base).workerId).toBe("semicolon-shared");
+  });
+
+  it("WORKER_ID 가 없으면 기동에 실패한다", () => {
+    const { WORKER_ID, ...without } = base;
+    expect(() => loadWorkerConfig(without)).toThrow(/WORKER_ID/);
+  });
+
+  it("옛 WORKER_USER_ID 만 있으면 실패한다 — 조용히 무시하지 않는다", () => {
+    const { WORKER_ID, ...without } = base;
+    expect(() => loadWorkerConfig({ ...without, WORKER_USER_ID: "123" })).toThrow(/WORKER_ID/);
+  });
+});
+
+// Task 4: 워커 신원이 DB(workers 테이블)로 옮겨가면서, 봇 프로세스 자체는 더 이상 워커 인증에 쓸
+// 공유 비밀을 가질 필요가 없다 — 허브가 접속마다 레지스트리(WorkersRepo)를 조회해 해시를 비교한다.
+describe("봇 설정 — WORKER_TOKEN 제거", () => {
+  it("WORKER_TOKEN 없이도 봇 설정이 로드된다(워커 신원은 이제 DB 에 있다)", () => {
+    const cfg = loadConfig({
+      DISCORD_TOKEN: "t", DISCORD_OWNER_ID: "o", DATABASE_URL: "postgres://x",
+    });
+    expect(cfg.ownerId).toBe("o");
+    expect("workerToken" in cfg).toBe(false);
   });
 });
