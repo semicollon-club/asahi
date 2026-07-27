@@ -14,12 +14,6 @@ function positiveNumberEnv(env: NodeJS.ProcessEnv, key: string, def: number): nu
   return n;
 }
 
-// FIX2(치명): WORKER_TOKEN 은 "누가 소유자의 워커인가"를 가르는 유일한 인증 수단이다. 비어 있거나
-// 너무 짧으면(추측 가능) hub.ts 가 아무 hello 나 소유자 워커로 인증해버릴 수 있다 — 실제로
-// env.WORKER_TOKEN || "" 인 채로 기동되면 빈 문자열끼리 비교돼 누구나 인증됐다(리뷰 재현). 다른
-// 필수 환경변수처럼 시작 시점에 명확히 실패시킨다.
-const MIN_WORKER_TOKEN_LENGTH = 20;
-
 export type Config = {
   discordToken: string;
   ownerId: string;
@@ -38,26 +32,17 @@ export type Config = {
   deployTarget: "local" | "cloud";
   model: string;
   // 하이브리드 조각3 2단계(원격 워커): 봇은 워커가 아웃바운드로 붙는 허브(WorkerHub)를 이 포트에 띄운다.
-  workerToken: string;   // 워커 인증 토큰(WORKER_TOKEN). 워커 쪽과 같은 값이어야 한다.
+  // Task 4: 워커 인증은 이제 봇의 공유 비밀(WORKER_TOKEN)이 아니라 workers 테이블(레지스트리)에서
+  // 워커별로 조회한다 — 그래서 Config 에는 더 이상 토큰 필드가 없다(index.ts 가 WorkersRepo 를 hub 에 넘긴다).
   httpPort: number;      // 워커 허브 WS 를 붙일 HTTP 포트. Railway 는 PORT 를 주입한다.
   // 정기 게시 목적지. 주제별로 설정하며, 없는 주제는 스케줄에서 건너뛴다(예약어로는 실행 가능).
   digestChannels: DigestChannels;
 };
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
-  // FIX2: WORKER_TOKEN 도 다른 필수값과 동일하게 "없으면(빈 문자열 포함) 시작 시점에 실패"로
-  // 취급한다 — 예전엔 이 목록에서 빠져 있어 env.WORKER_TOKEN || "" 로 조용히 빈 문자열이 됐다.
-  const missing = ["DISCORD_TOKEN", "DISCORD_OWNER_ID", "DATABASE_URL", "WORKER_TOKEN"].filter((k) => !env[k]);
+  const missing = ["DISCORD_TOKEN", "DISCORD_OWNER_ID", "DATABASE_URL"].filter((k) => !env[k]);
   if (missing.length > 0) {
     throw new Error(`환경변수 누락: ${missing.join(", ")} — .env 파일을 확인하세요 (.env.example 참고)`);
-  }
-  const workerToken = env.WORKER_TOKEN as string;
-  if (workerToken.length < MIN_WORKER_TOKEN_LENGTH) {
-    throw new Error(
-      `WORKER_TOKEN 이 너무 짧습니다(최소 ${MIN_WORKER_TOKEN_LENGTH}자 필요, 현재 ${workerToken.length}자) — ` +
-        `무작위로 생성한 긴 문자열을 쓰세요(예: openssl rand -hex 32). 짧거나 빈 토큰은 그 값을 아는(또는 ` +
-        `추측한) 사람 누구나 소유자의 워커인 척 접속해 파일·셸 작업을 가로챌 수 있게 만듭니다.`,
-    );
   }
   // 런타임 데이터의 기본 경로는 앱(agent/) 바깥, 리포 루트의 data/ 아래에 둔다.
   // cwd 는 agent/ (npm 스크립트와 PM2 cwd 기준). DATA_DIR / MEMORY_DIR 로 재정의 가능.
@@ -75,7 +60,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     ownerReserve: positiveNumberEnv(env, "OWNER_RESERVE", 10),
     deployTarget: env.DEPLOY_TARGET === "cloud" ? "cloud" : "local",
     model: env.ANTHROPIC_MODEL || "claude-opus-4-8",
-    workerToken,
     httpPort: positiveNumberEnv(env, "PORT", 3000),
     digestChannels: {
       ...(env.DIGEST_CONTEST_CHANNEL_ID ? { contest: env.DIGEST_CONTEST_CHANNEL_ID } : {}),
@@ -88,15 +72,18 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 // 워커는 이제 DB 도, 모델도, 세션도 다루지 않는다(Task 7: 판단·기억·세션은 전부 허브(봇) 쪽에 있고,
 // 이 프로세스는 허브에 아웃바운드 WebSocket 을 열어 도구 호출을 받아 실행하는 얇은 클라이언트다).
 export type WorkerConfig = {
-  ownerId: string;       // DISCORD_OWNER_ID — hello 로 보낼 신원
-  workerUserId: string;  // WORKER_USER_ID — 이 워커가 담당하는 사용자
+  workerId: string;      // WORKER_ID — register-worker 가 발급한 이 워커 자신의 식별자. hello 로 보낼 신원
   workerToken: string;   // WORKER_TOKEN — 허브 인증
   hubUrl: string;        // HUB_URL — Railway 허브 WebSocket 주소(wss://.../worker)
   roots: string[];       // WORKER_ROOTS — 이 워커가 노출할 폴더(쉼표 구분). 최종 경로 관문의 기준
 };
 
+// Task 4: 워커는 이제 소유자가 누구인지 알 필요가 없다(신원·권한 판단은 허브 쪽에 있다) —
+// 그래서 DISCORD_OWNER_ID 는 워커 필수 목록에서 빠진다. 옛 WORKER_USER_ID(담당 사용자 공유)도
+// WORKER_ID(레지스트리에 등록된 이 워커 자신의 id)로 교체된다 — 두 이름을 혼동해 옛 값만 넣고
+// 조용히 통과하는 사고를 막기 위해 WORKER_ID 를 정확히 요구한다.
 export function loadWorkerConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
-  const missing = ["DISCORD_OWNER_ID", "WORKER_USER_ID", "WORKER_TOKEN", "HUB_URL", "WORKER_ROOTS"].filter((k) => !env[k]);
+  const missing = ["WORKER_ID", "WORKER_TOKEN", "HUB_URL", "WORKER_ROOTS"].filter((k) => !env[k]);
   if (missing.length > 0) {
     throw new Error(`환경변수 누락: ${missing.join(", ")} — .env 파일을 확인하세요 (.env.example 참고)`);
   }
@@ -113,8 +100,7 @@ export function loadWorkerConfig(env: NodeJS.ProcessEnv = process.env): WorkerCo
     );
   }
   return {
-    ownerId: env.DISCORD_OWNER_ID as string,
-    workerUserId: env.WORKER_USER_ID as string,
+    workerId: env.WORKER_ID as string,
     workerToken: env.WORKER_TOKEN as string,
     hubUrl: env.HUB_URL as string,
     roots,

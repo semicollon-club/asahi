@@ -63,7 +63,7 @@ function main() {
     const client = startWorkerClient({
       connect,
       token: config.workerToken,
-      userId: config.workerUserId,
+      workerId: config.workerId,
       roots: config.roots,
       executors,
       onStatus: (s) => console.log(`[worker] ${s}`),

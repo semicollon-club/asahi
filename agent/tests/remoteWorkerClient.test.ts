@@ -26,7 +26,7 @@ const executors: Executors = {
 describe("워커 클라이언트", () => {
   it("연결되면 hello 를 먼저 보낸다", () => {
     const s = fakeSocket();
-    const c = startWorkerClient({ connect: () => s.sock, token: "t", userId: "owner", roots: ["/w"], executors });
+    const c = startWorkerClient({ connect: () => s.sock, token: "t", workerId: "owner", roots: ["/w"], executors });
     s.open();
     expect(s.sent[0]).toEqual({ type: "hello", token: "t", workerId: "owner", roots: ["/w"] });
     c.stop();
@@ -34,7 +34,7 @@ describe("워커 클라이언트", () => {
 
   it("call 을 받으면 실행기를 돌리고 같은 id 로 result 를 보낸다", async () => {
     const s = fakeSocket();
-    const c = startWorkerClient({ connect: () => s.sock, token: "t", userId: "owner", roots: ["/w"], executors });
+    const c = startWorkerClient({ connect: () => s.sock, token: "t", workerId: "owner", roots: ["/w"], executors });
     s.open();
     s.recv({ type: "ready" });
     s.recv({ type: "call", id: "7", tool: "fs_read", args: { path: "/w/a.txt" } });
@@ -46,7 +46,7 @@ describe("워커 클라이언트", () => {
 
   it("모르는 도구는 ok=false 로 응답한다", async () => {
     const s = fakeSocket();
-    const c = startWorkerClient({ connect: () => s.sock, token: "t", userId: "owner", roots: ["/w"], executors });
+    const c = startWorkerClient({ connect: () => s.sock, token: "t", workerId: "owner", roots: ["/w"], executors });
     s.open();
     s.recv({ type: "call", id: "8", tool: "없는도구", args: {} });
     await vi.waitFor(() => expect(s.sent.some((f) => f.type === "result")).toBe(true));
@@ -56,7 +56,7 @@ describe("워커 클라이언트", () => {
 
   it("실행기가 예외를 던져도 result 로 실패를 돌려준다(프로세스가 죽지 않는다)", async () => {
     const s = fakeSocket();
-    const c = startWorkerClient({ connect: () => s.sock, token: "t", userId: "owner", roots: ["/w"], executors });
+    const c = startWorkerClient({ connect: () => s.sock, token: "t", workerId: "owner", roots: ["/w"], executors });
     s.open();
     s.recv({ type: "call", id: "9", tool: "boom", args: {} });
     await vi.waitFor(() => expect(s.sent.some((f) => f.type === "result")).toBe(true));
@@ -66,7 +66,7 @@ describe("워커 클라이언트", () => {
 
   it("denied 를 받으면 재연결하지 않는다", async () => {
     const connect = vi.fn(() => fakeSocket().sock);
-    const c = startWorkerClient({ connect, token: "t", userId: "owner", roots: ["/w"], executors, retryDelayMs: 5 });
+    const c = startWorkerClient({ connect, token: "t", workerId: "owner", roots: ["/w"], executors, retryDelayMs: 5 });
     const first = connect.mock.results[0].value as ClientSocket;
     let onMsg: ((raw: string) => void) | undefined;
     first.onMessage = (cb) => { onMsg = cb; };
@@ -78,7 +78,7 @@ describe("워커 클라이언트", () => {
   it("연결이 끊기면 재연결을 시도한다", async () => {
     const sockets: ReturnType<typeof fakeSocket>[] = [];
     const connect = () => { const s = fakeSocket(); sockets.push(s); return s.sock; };
-    const c = startWorkerClient({ connect, token: "t", userId: "owner", roots: ["/w"], executors, retryDelayMs: 5 });
+    const c = startWorkerClient({ connect, token: "t", workerId: "owner", roots: ["/w"], executors, retryDelayMs: 5 });
     sockets[0].open();
     sockets[0].drop();
     await vi.waitFor(() => expect(sockets.length).toBeGreaterThan(1));
@@ -88,7 +88,7 @@ describe("워커 클라이언트", () => {
   it("stop 후에는 재연결하지 않는다", async () => {
     const sockets: ReturnType<typeof fakeSocket>[] = [];
     const connect = () => { const s = fakeSocket(); sockets.push(s); return s.sock; };
-    const c = startWorkerClient({ connect, token: "t", userId: "owner", roots: ["/w"], executors, retryDelayMs: 5 });
+    const c = startWorkerClient({ connect, token: "t", workerId: "owner", roots: ["/w"], executors, retryDelayMs: 5 });
     sockets[0].open();
     c.stop();
     sockets[0].drop();
@@ -106,7 +106,7 @@ describe("워커 클라이언트", () => {
       syncBoom: () => { throw new Error("동기 터짐"); },
     };
     const c = startWorkerClient({
-      connect: () => s.sock, token: "t", userId: "owner", roots: ["/w"], executors: syncThrowExecutors,
+      connect: () => s.sock, token: "t", workerId: "owner", roots: ["/w"], executors: syncThrowExecutors,
     });
     s.open();
     expect(() => s.recv({ type: "call", id: "10", tool: "syncBoom", args: {} })).not.toThrow();
@@ -119,7 +119,7 @@ describe("워커 클라이언트", () => {
     const s = fakeSocket();
     const statuses: string[] = [];
     const c = startWorkerClient({
-      connect: () => s.sock, token: "t", userId: "owner", roots: ["/w"], executors,
+      connect: () => s.sock, token: "t", workerId: "owner", roots: ["/w"], executors,
       onStatus: (m) => statuses.push(m),
     });
     s.open();
@@ -139,7 +139,7 @@ describe("워커 클라이언트", () => {
     const execFn = vi.fn(async () => ({ ok: true, content: "실행됨" }));
     const deniedExecutors: Executors = { fs_read: execFn };
     const c = startWorkerClient({
-      connect: () => s.sock, token: "t", userId: "owner", roots: ["/w"], executors: deniedExecutors,
+      connect: () => s.sock, token: "t", workerId: "owner", roots: ["/w"], executors: deniedExecutors,
     });
     s.open();
     s.recv({ type: "denied", reason: "테스트 거부" });
@@ -153,7 +153,7 @@ describe("워커 클라이언트", () => {
 
   it("stop 이후 open 이 뒤늦게 발생해도 hello 를 보내지 않는다", () => {
     const s = fakeSocket();
-    const c = startWorkerClient({ connect: () => s.sock, token: "t", userId: "owner", roots: ["/w"], executors });
+    const c = startWorkerClient({ connect: () => s.sock, token: "t", workerId: "owner", roots: ["/w"], executors });
     // 아직 실제 소켓의 open 이벤트가 오기 전에 stop() 이 먼저 호출된 뒤, 뒤늦게 open 이 발생하는
     // 경우를 흉내낸다 — 인증 토큰이 담긴 hello 가 나가면 안 된다.
     c.stop();
@@ -166,7 +166,7 @@ describe("워커 클라이언트", () => {
     const execFn = vi.fn(async () => ({ ok: true, content: "실행됨" }));
     const stoppedExecutors: Executors = { fs_read: execFn };
     const c = startWorkerClient({
-      connect: () => s.sock, token: "t", userId: "owner", roots: ["/w"], executors: stoppedExecutors,
+      connect: () => s.sock, token: "t", workerId: "owner", roots: ["/w"], executors: stoppedExecutors,
     });
     s.open();
     c.stop();
@@ -186,7 +186,7 @@ describe("워커 클라이언트", () => {
         }),
     };
     const c = startWorkerClient({
-      connect: () => s.sock, token: "t", userId: "owner", roots: ["/w"], executors: slowExecutors,
+      connect: () => s.sock, token: "t", workerId: "owner", roots: ["/w"], executors: slowExecutors,
     });
     s.open();
     s.recv({ type: "call", id: "22", tool: "slow", args: {} });
@@ -202,7 +202,7 @@ describe("워커 클라이언트", () => {
     const statuses: string[] = [];
     s.sock.send = () => { throw new Error("연결 끊김"); };
     const c = startWorkerClient({
-      connect: () => s.sock, token: "t", userId: "owner", roots: ["/w"], executors,
+      connect: () => s.sock, token: "t", workerId: "owner", roots: ["/w"], executors,
       onStatus: (m) => statuses.push(m),
     });
     expect(() => s.open()).not.toThrow();
