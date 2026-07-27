@@ -3,14 +3,23 @@ import { WorkerHub, type HubSocket } from "../src/remote/hub.js";
 import { encodeFrame, parseFrame, type Frame } from "../src/remote/protocol.js";
 import { hashWorkerToken } from "../src/store/workersRepo.js";
 
-function fakeSocket() {
+// asyncClose(리뷰 지적 M5·I1b): 기본 가짜는 close() 가 그 자리에서 onClose 를 불러 "닫으면
+// 즉시 닫힌다"고 가정한다. 실제 ws 는 그렇지 않다 — close() 는 닫아 달라는 요청일 뿐이고
+// (readyState=CLOSING) 'close' 이벤트는 상대가 응답해야 오며 최대 30초까지 걸린다. 그 사이
+// 상대는 계속 프레임을 보낼 수 있다. 그래서 "닫았으니 정리됐겠지" 를 단정하는 테스트는
+// 기본 가짜로는 가짜의 동작을 검증하게 된다. 닫힘 경쟁을 다루는 테스트만 이 모드를 쓴다.
+function fakeSocket(opts: { asyncClose?: boolean } = {}) {
   const sent: Frame[] = [];
   let onMsg: (raw: string) => void = () => {};
   let onCls: () => void = () => {};
   let closed = false;
   const sock: HubSocket = {
     send: (d) => { const f = parseFrame(d); if (f) sent.push(f); },
-    close: () => { closed = true; onCls(); },
+    close: () => {
+      if (closed) return;
+      closed = true;
+      if (!opts.asyncClose) onCls();
+    },
     onMessage: (cb) => { onMsg = cb; },
     onClose: (cb) => { onCls = cb; },
   };
@@ -19,6 +28,8 @@ function fakeSocket() {
     get closed() { return closed; },
     recv: (f: Frame) => onMsg(encodeFrame(f)),
     recvRaw: (raw: string) => onMsg(raw),
+    // asyncClose 모드에서 상대가 실제로 연결을 끊은 시점을 테스트가 직접 정한다.
+    fireClose: () => onCls(),
   };
 }
 
@@ -421,5 +432,147 @@ describe("WorkerHub — 워커 레지스트리 인증", () => {
     expect(s1.closed).toBe(true);
     expect(hub.isConnected("w1")).toBe(true);
     expect(hub.rootsOf("w1")).toEqual(["/b"]);
+  });
+});
+
+// 리뷰(opus, T3)가 변이 실험으로 찾은 미고정 불변식들. 아래 각 테스트는 hub.ts 에서 해당
+// 검사를 지우면 반드시 빨간불이 되어야 한다 — 리뷰 시점에는 두 검사를 지워도 28개가 전부
+// 통과했다.
+describe("WorkerHub — 리뷰가 찾은 미고정 불변식", () => {
+  it("등록되지 않은 workerId 는 빈 토큰으로도 인증되지 않는다", async () => {
+    // 대조값 흉내(NOT_FOUND_HASH)가 예전엔 hashWorkerToken("") 이라, 빈 토큰이 해시 비교를
+    // 통과하고 최종 판정의 row !== null 하나만이 완전 우회를 막고 있었다.
+    const hub = new WorkerHub({ registry: fakeRegistry({}) });
+    const s = fakeSocket();
+    hub.handleConnection(s.sock);
+    s.recv({ type: "hello", token: "", workerId: "공격자가고른아무id", roots: ["C:/"] });
+    await flush();
+
+    expect(hub.isConnected("공격자가고른아무id")).toBe(false);
+    expect(s.sent).not.toContainEqual({ type: "ready" });
+    expect(s.closed).toBe(true);
+  });
+
+  it("등록된 워커라도 빈 토큰은 거부한다", async () => {
+    const hub = new WorkerHub({ registry: fakeRegistry({ w1: hashWorkerToken("real") }) });
+    const s = fakeSocket();
+    hub.handleConnection(s.sock);
+    s.recv({ type: "hello", token: "", workerId: "w1", roots: ["/ws"] });
+    await flush();
+
+    expect(hub.isConnected("w1")).toBe(false);
+  });
+
+  it("같은 workerId 의 옛 소켓이 보낸 result 는 무시된다", async () => {
+    // hub.ts 의 conn.socket !== socket 검사를 지우면 이 테스트가 빨간불이 된다.
+    // 그 검사가 없으면 교체된 옛 연결이 새 연결의 대기 호출을 대신 완료시킬 수 있다.
+    const registry = fakeRegistry({ w1: hashWorkerToken("t") });
+    const hub = new WorkerHub({ registry });
+
+    const s1 = fakeSocket();
+    hub.handleConnection(s1.sock);
+    s1.recv({ type: "hello", token: "t", workerId: "w1", roots: ["/a"] });
+    await flush();
+
+    const s2 = fakeSocket();
+    hub.handleConnection(s2.sock);
+    s2.recv({ type: "hello", token: "t", workerId: "w1", roots: ["/b"] });
+    await flush();
+
+    // 새 연결(s2)로 호출을 건다.
+    const pending = hub.call("w1", "fs_read", { path: "/b/x" });
+    // 교체된 옛 연결(s1)이 그 호출 id 로 결과를 흘려보낸다.
+    s1.recv({ type: "result", id: "1", ok: true, content: "옛 소켓이 가로챈 응답" });
+    await flush();
+
+    // 옛 소켓의 응답으로 완료되면 안 된다 — 타임아웃으로 끝나야 정상이다.
+    const settled = await Promise.race([pending, flush().then(() => "미완료" as const)]);
+    expect(settled).toBe("미완료");
+  });
+
+  it("거부된 소켓은 다시 hello 를 보낼 수 없다(레지스트리 재조회 없음)", async () => {
+    // 실제 ws 의 close() 는 즉시 닫히지 않으므로, 거부 후 상대는 계속 보낼 수 있다.
+    // 시도마다 DB 왕복이면 공개 리스너에 인증 전 부하를 무제한으로 걸 수 있다.
+    let lookups = 0;
+    const registry = {
+      getById: async (id: string) => { lookups++; return id === "w1" ? { tokenHash: hashWorkerToken("t") } : null; },
+      touchLastSeen: async () => {},
+    };
+    const hub = new WorkerHub({ registry });
+    const s = fakeSocket({ asyncClose: true });
+    hub.handleConnection(s.sock);
+
+    for (let i = 0; i < 5; i++) {
+      s.recv({ type: "hello", token: "틀림", workerId: "w1", roots: ["/ws"] });
+      await flush();
+    }
+
+    expect(lookups).toBe(1);
+    expect(s.sent.filter((f) => f.type === "denied")).toHaveLength(1);
+  });
+});
+
+describe("WorkerHub — 실제 ws 처럼 close 가 즉시 끝나지 않을 때", () => {
+  it("조회 중 close() 된 소켓은 인증이 뒤늦게 성공해도 등록되지 않는다", async () => {
+    // 실제 ws 재현: close() 는 CLOSING 으로만 바꾸고 'close' 이벤트는 나중에 온다.
+    // 예전 구조는 authenticate() 안에서 이미 conns 에 넣은 뒤 되돌리는 방식이라, 프로덕션에서는
+    // socketClosed 가 false 여서 되돌리기 자체가 돌지 않았다(리뷰가 실제 ws 로 측정).
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const registry = {
+      getById: async () => { await gate; return { tokenHash: hashWorkerToken("t") }; },
+      touchLastSeen: async () => {},
+    };
+    const hub = new WorkerHub({ registry });
+    const s = fakeSocket({ asyncClose: true });
+    hub.handleConnection(s.sock);
+
+    s.recv({ type: "hello", token: "t", workerId: "w1", roots: ["/ws"] });
+    // 조회 중 다른 프레임이 도착해 소켓이 닫힌다(close 이벤트는 아직 오지 않는다).
+    s.recv({ type: "ping" });
+    expect(s.closed).toBe(true);
+
+    release();
+    await flush();
+
+    expect(hub.isConnected("w1")).toBe(false);
+    expect(s.sent).not.toContainEqual({ type: "ready" });
+    expect(s.sent).not.toContainEqual({ type: "pong" });
+  });
+
+  it("죽은 연결의 늦은 인증이 그 사이 자리를 차지한 산 연결을 쫓아내지 않는다", async () => {
+    let releaseA!: () => void;
+    const gateA = new Promise<void>((r) => { releaseA = r; });
+    let first = true;
+    const registry = {
+      getById: async () => {
+        if (first) { first = false; await gateA; }
+        return { tokenHash: hashWorkerToken("t") };
+      },
+      touchLastSeen: async () => {},
+    };
+    const hub = new WorkerHub({ registry });
+
+    const a = fakeSocket({ asyncClose: true });
+    hub.handleConnection(a.sock);
+    a.recv({ type: "hello", token: "t", workerId: "w1", roots: ["/a"] });
+    a.recv({ type: "ping" }); // 조회 중 프레임 → A 는 닫힌다
+    expect(a.closed).toBe(true);
+
+    // B 가 정상적으로 같은 workerId 를 차지한다.
+    const b = fakeSocket();
+    hub.handleConnection(b.sock);
+    b.recv({ type: "hello", token: "t", workerId: "w1", roots: ["/b"] });
+    await flush();
+    expect(hub.isConnected("w1")).toBe(true);
+    expect(hub.rootsOf("w1")).toEqual(["/b"]);
+
+    // 이제 A 의 조회가 뒤늦게 끝난다.
+    releaseA();
+    await flush();
+
+    expect(hub.isConnected("w1")).toBe(true);
+    expect(hub.rootsOf("w1")).toEqual(["/b"]);
+    expect(b.closed).toBe(false);
   });
 });
