@@ -218,6 +218,85 @@ describe("extractCandidatePaths — canUseTool 입력에서 경로 추출", () =
     });
   });
 
+  // 최종 리뷰 FIX1(치명) — literalPrefixOfGlobPattern 은 "첫 메타문자 이전"만 리터럴로 본다.
+  // 패턴이 메타문자로 시작하면(예: "**/../../222/*.txt") 리터럴 접두가 통째로 빈 문자열이 되어
+  // 그 뒤의 ".." 가 후보 추출에서 완전히 빠졌다(리뷰 재현: 손님이 이 형태로 다른 회원의 폴더를
+  // 읽었다). 메타문자가 어디 있든 ".." 세그먼트가 있으면 항상 벗어난 후보를 만들어야 한다.
+  describe("Glob/Grep pattern·glob 의 상위 탈출은 메타문자 위치와 무관하게 차단된다(최종 리뷰 FIX1)", () => {
+    const base = "C:\\proj\\a";
+
+    it("Glob: '**/../x' — 메타문자(**)로 시작해도 벗어난 후보를 만든다", () => {
+      const result = extractCandidatePaths("Glob", { path: base, pattern: "**/../x" });
+      expect(result).toContain(path.resolve(base, ".."));
+    });
+
+    it("Glob: '*/../x' — 단일 메타문자(*)로 시작해도 벗어난 후보를 만든다", () => {
+      const result = extractCandidatePaths("Glob", { path: base, pattern: "*/../x" });
+      expect(result).toContain(path.resolve(base, ".."));
+    });
+
+    it("Glob: '[a]/../x' — 문자 클래스로 시작해도 벗어난 후보를 만든다", () => {
+      const result = extractCandidatePaths("Glob", { path: base, pattern: "[a]/../x" });
+      expect(result).toContain(path.resolve(base, ".."));
+    });
+
+    it("Glob: '{a,b}/../x' — 브레이스로 시작해도 벗어난 후보를 만든다", () => {
+      const result = extractCandidatePaths("Glob", { path: base, pattern: "{a,b}/../x" });
+      expect(result).toContain(path.resolve(base, ".."));
+    });
+
+    it("Glob: 선행 '..'(메타문자 없음) — 기존에도 리터럴 접두로 잡혔지만 회귀로 다시 확인", () => {
+      const result = extractCandidatePaths("Glob", { path: base, pattern: "../x" });
+      expect(result).toContain(path.resolve(base, "../x"));
+    });
+
+    it("Grep: glob='**/../x' — 메타문자로 시작해도 벗어난 후보를 만든다", () => {
+      const result = extractCandidatePaths("Grep", { pattern: "foo", path: base, glob: "**/../x" });
+      expect(result).toContain(path.resolve(base, ".."));
+    });
+
+    it("Grep: glob='*/../x' — 단일 메타문자로 시작해도 벗어난 후보를 만든다", () => {
+      const result = extractCandidatePaths("Grep", { pattern: "foo", path: base, glob: "*/../x" });
+      expect(result).toContain(path.resolve(base, ".."));
+    });
+
+    it("Grep: glob='[a]/../x' — 문자 클래스로 시작해도 벗어난 후보를 만든다", () => {
+      const result = extractCandidatePaths("Grep", { pattern: "foo", path: base, glob: "[a]/../x" });
+      expect(result).toContain(path.resolve(base, ".."));
+    });
+
+    it("Grep: glob='{a,b}/../x' — 브레이스로 시작해도 벗어난 후보를 만든다", () => {
+      const result = extractCandidatePaths("Grep", { pattern: "foo", path: base, glob: "{a,b}/../x" });
+      expect(result).toContain(path.resolve(base, ".."));
+    });
+
+    it("Grep: 선행 '..'(메타문자 없음) — 기존에도 리터럴 접두로 잡혔지만 회귀로 다시 확인", () => {
+      const result = extractCandidatePaths("Grep", { pattern: "foo", path: base, glob: "../x" });
+      expect(result).toContain(path.resolve(base, "../x"));
+    });
+
+    it("긍정 사례 — 평범한 재귀 글롭('**/*.ts')은 상위 탈출 후보를 추가하지 않고 그대로 통과한다", () => {
+      const candidates = extractCandidatePaths("Glob", { path: base, pattern: "**/*.ts" });
+      expect(candidates).toEqual([base]);
+      const result = decidePathPermission("Glob", candidates, { isOwnerDm: true, allowedDirs: [base] });
+      expect(result).toEqual({ behavior: "allow" });
+    });
+
+    it("긍정 사례 — decidePathPermission 까지 연결하면 메타문자 시작 패턴의 상위 탈출은 deny 된다", () => {
+      for (const pattern of ["**/../x", "*/../x", "[a]/../x", "{a,b}/../x"]) {
+        const candidates = extractCandidatePaths("Glob", { path: base, pattern });
+        const result = decidePathPermission("Glob", candidates, { isOwnerDm: true, allowedDirs: [base] });
+        expect(result.behavior).toBe("deny");
+      }
+    });
+
+    it("'..' 를 포함하지 않는 일반 문자열(예: '..hidden')은 오탐하지 않는다", () => {
+      // 세그먼트 경계 밖의 '..'(리터럴 디렉토리 이름의 일부)는 상위 탈출로 취급하지 않는다.
+      const result = extractCandidatePaths("Glob", { path: base, pattern: "*/foo..bar/x" });
+      expect(result).not.toContain(path.resolve(base, ".."));
+    });
+  });
+
   describe("후보가 비면 cwd 를 후보로 넣는다(보안리뷰 #3)", () => {
     it("Bash: blockedPath 없고 cwd 있으면 cwd 를 후보로", () => {
       expect(extractCandidatePaths("Bash", { command: "ls" }, undefined, "C:\\proj\\a")).toEqual(["C:\\proj\\a"]);

@@ -467,11 +467,19 @@ describe("AgentCore — 원격 워커 연결 상태를 페르소나에 반영한
     expect(t.calls[0].systemPrompt).not.toMatch(/fs_read/);
   });
 
-  it("워커가 연결돼 있어도 손님 DM 안내는 영향받지 않는다(손님은 원래도 PC 도구 언급이 없다)", async () => {
+  // 최종 리뷰 FIX4 — 이 테스트는 예전엔 "손님은 원래도 PC 도구 언급이 없다"(워커 연결과 무관하게
+  // 항상 fs_read 를 언급하지 않는다)를 확인했다. 그건 persona.ts 의 손님 분기가 workerConnected 를
+  // 아예 보지 않던 시절의 동작을 그대로 굳힌 것이었다 — 그런데 Task 7 로 손님도 공유 기계가
+  // 연결되면 실제로 fs_*/sh_exec 를 받으므로(scopeDirs 로 자기 폴더에 갇힌 채), 그 상태에서
+  // "PC 도구 언급이 없다"는 안내가 오히려 실제 도구 보유와 어긋났다(안내와 실제 도구가 어긋나는
+  // 결함 유형 — FIX4 가 고쳤다). 지금은 반대로 "워커가 연결되면 언급한다"를 확인한다(Task 7 반전).
+  it("워커가 연결되면 손님 DM 안내도 파일·셸 도구를 언급한다 — 폴더 관리 도구는 언급하지 않는다(FIX4, Task 7 반전)", async () => {
     const t = await setup({ hub: { isConnected: () => true } });
     pub(t.bus, dmHint("guest", "allowed"), "안녕", 1);
     await t.core.drain();
-    expect(t.calls[0].systemPrompt).not.toMatch(/fs_read/);
+    expect(t.calls[0].systemPrompt).toMatch(/fs_read/);
+    expect(t.calls[0].systemPrompt).not.toMatch(/manage_access/);
+    expect(t.calls[0].systemPrompt).not.toMatch(/allow_dir/);
   });
 });
 

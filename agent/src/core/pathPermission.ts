@@ -45,6 +45,24 @@ function literalPrefixOfGlobPattern(pattern: string): string {
   return literal.replace(/[\\/]+$/, "");
 }
 
+// 최종 리뷰 FIX1(치명) — pattern/glob 문자열 어디에든 상위 디렉토리 참조("..") 세그먼트가 있는지
+// 검사한다. literalPrefixOfGlobPattern 은 "첫 메타문자 이전"만 리터럴로 본다 — 패턴이 메타문자로
+// 시작하면(예: "**/../../222/*.txt") 리터럴 접두가 통째로 빈 문자열이 되어, 그 뒤에 실제로 있는
+// ".." 는 후보 추출 대상에서 완전히 빠졌다(리뷰 재현: 손님이 이 형태로 다른 회원의 폴더를
+// 읽었다 — fs_grep 이 파일 내용까지 그대로 돌려줬다). 글롭을 실제로 풀어(tinyglobby 로) 상위
+// 탈출 여부를 계산하는 대신, ".." 세그먼트가 있다는 사실 자체를 "허용 폴더를 벗어나려는 시도"로
+// 간주해 무조건 벗어난 후보를 만든다 — 이 시스템에서 glob 패턴이 상위로 나가야 할 정당한 이유는
+// 없다(허용 폴더를 늘리려면 소유자가 allow_dir 로 등록하면 된다).
+//
+// 세그먼트 경계(구분자 또는 문자열 시작/끝)로 정확히 구분해, "..hidden" 같은 리터럴 이름은
+// 오탐하지 않는다 — paths.ts 의 isPathWithin 이 rel.startsWith("..") 대신 정확한 세그먼트 경계로
+// 판정하는 것과 같은 이유다.
+const UPWARD_SEGMENT = /(?:^|[\\/])\.\.(?:[\\/]|$)/;
+
+function hasUpwardTraversalSegment(pattern: string): boolean {
+  return UPWARD_SEGMENT.test(pattern);
+}
+
 // canUseTool 의 (toolName, input, {blockedPath}, cwd) 에서 검사할 후보 경로들을 뽑는다.
 // Read/Write/Edit → file_path. Glob → path(있으면) + pattern 의 리터럴 경로 접두(보안리뷰 #1 —
 // tinyglobby 는 pattern 에 절대경로·'..'를 그대로 써서 허용폴더 밖을 열거할 수 있어 반드시 검사해야 한다).
@@ -76,6 +94,14 @@ export function extractCandidatePaths(
       if (literal.length > 0) {
         candidates.push(path.isAbsolute(literal) ? literal : path.resolve(basePath ?? cwd ?? ".", literal));
       }
+      // 최종 리뷰 FIX1(치명): 위 리터럴 접두 계산과 별개로, 메타문자 위치와 무관하게 pattern
+      // 전체에 ".." 세그먼트가 있으면 반드시 벗어난 것으로 취급할 후보를 추가한다 — 메타문자가
+      // 접두 맨 앞에 오면(literal="") 이 후보가 유일한 방어선이다. basePath(또는 cwd)의 한 단계
+      // 위를 후보로 쓴다 — basePath 자신은 이미 허용 폴더 안이라고 검증될 값이므로, 그 부모는
+      // (같은 부모를 공유하는 다른 허용 폴더가 없는 한) 항상 벗어난 값이다.
+      if (hasUpwardTraversalSegment(pattern)) {
+        candidates.push(path.resolve(basePath ?? cwd ?? ".", ".."));
+      }
     }
   } else if (toolName === "Grep") {
     const basePath = typeof input.path === "string" && input.path.length > 0 ? input.path : undefined;
@@ -86,6 +112,11 @@ export function extractCandidatePaths(
       const literal = literalPrefixOfGlobPattern(globArg);
       if (literal.length > 0) {
         candidates.push(path.isAbsolute(literal) ? literal : path.resolve(basePath ?? cwd ?? ".", literal));
+      }
+      // 최종 리뷰 FIX1: Glob 분기와 동일한 이유로, glob 전체에 ".." 세그먼트가 있으면(메타문자가
+      // 접두 맨 앞에 와도) 무조건 벗어난 후보를 추가한다. pattern(정규식)은 여전히 건드리지 않는다.
+      if (hasUpwardTraversalSegment(globArg)) {
+        candidates.push(path.resolve(basePath ?? cwd ?? ".", ".."));
       }
     }
   } else if (toolName === "Bash") {

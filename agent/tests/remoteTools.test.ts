@@ -396,4 +396,38 @@ describe("remoteToolHandler — 공유 기계에서 사용자별 격리", () => 
     delete (ctx as any).remote;
     expect(await remoteToolHandler(ctx, "fs_read", { path: "C:\\ws\\111\\a" })).toContain("워커가 연결돼 있지 않아");
   });
+
+  // 최종 리뷰 FIX1(치명) — 손님이 glob 메타문자로 시작하는 pattern/glob 으로 상위 탈출을 시도하면
+  // (예: "**/../../222/*.txt") literalPrefixOfGlobPattern 이 리터럴 접두를 빈 문자열로 계산해
+  // 후보가 하나도 안 나왔다 — path 만 검사되고(자기 폴더라 legal) args 는 그대로 워커로 넘어가,
+  // 워커가 실제로 그 glob 을 풀어 다른 회원의 폴더(222)를 노출했다(리뷰 재현: fs_grep 이 파일
+  // 내용까지 돌려줬다). 봇 쪽 1차 필터가 허브를 부르기 전에 반드시 거부해야 한다.
+  describe("손님의 glob 메타문자-시작 상위 탈출은 허브를 부르기 전에 거부된다(최종 리뷰 FIX1, 리뷰 재현)", () => {
+    it("fs_grep — glob:'**/../../222/*.txt' (path 는 자기 폴더) → 허브를 부르지 않고 거부한다", async () => {
+      const { ctx, calls } = ctxFor({ isOwner: false, isPrivate: false, userId: "111", dirs: ["C:\\ws"], workerKind: "shared" });
+      const out = await remoteToolHandler(ctx, "fs_grep", { pattern: ".", path: "C:\\ws\\111", glob: "**/../../222/*.txt" });
+      expect(out).toContain("허용된 폴더 밖");
+      expect(calls).toHaveLength(0);
+    });
+
+    it("fs_grep — glob:'**/../../222/*' (path 생략) → 허브를 부르지 않고 거부한다", async () => {
+      const { ctx, calls } = ctxFor({ isOwner: false, isPrivate: false, userId: "111", dirs: ["C:\\ws"], workerKind: "shared" });
+      const out = await remoteToolHandler(ctx, "fs_grep", { pattern: ".", glob: "**/../../222/*" });
+      expect(out).toContain("허용된 폴더 밖");
+      expect(calls).toHaveLength(0);
+    });
+
+    it("fs_glob — pattern:'**/../../222/*.txt' (path 는 자기 폴더) → 허브를 부르지 않고 거부한다", async () => {
+      const { ctx, calls } = ctxFor({ isOwner: false, isPrivate: false, userId: "111", dirs: ["C:\\ws"], workerKind: "shared" });
+      const out = await remoteToolHandler(ctx, "fs_glob", { path: "C:\\ws\\111", pattern: "**/../../222/*.txt" });
+      expect(out).toContain("허용된 폴더 밖");
+      expect(calls).toHaveLength(0);
+    });
+
+    it("대조군 — 평범한 재귀 glob('**/*.ts')은 자기 폴더 안에서 정상적으로 허브를 부른다(회귀 없음)", async () => {
+      const { ctx, calls } = ctxFor({ isOwner: false, isPrivate: false, userId: "111", dirs: ["C:\\ws"], workerKind: "shared" });
+      await remoteToolHandler(ctx, "fs_glob", { path: "C:\\ws\\111", pattern: "**/*.ts" });
+      expect(calls).toHaveLength(1);
+    });
+  });
 });

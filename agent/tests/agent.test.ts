@@ -136,6 +136,34 @@ describe("resolveTurnWorker — noRemoteTools 는 워커 연결 여부와 무관
   });
 });
 
+// 최종 리뷰 FIX2(치명) — 정기 게시(digest.ts) 턴은 공개 채널 계층(isOwner:false, isPrivate:false,
+// userId:"digest")으로 돈다. Task 7 이전에는 그 계층 자체에 원격 도구가 없어 안전했지만, 이제는
+// 그 계층도 워커가 연결되면 fs_*/sh_exec 를 받는다 — 아래 첫 테스트가 "고치기 전이었다면
+// 이랬을 것"(리뷰가 재현한 정확한 확인: shared-worker 로 resolve)을 보여주고, 두 번째 테스트가
+// digest.ts 가 실제로 세우는 noRemoteTools:true 를 이 컨텍스트에 적용하면 워커 자체가 resolve
+// 되지 않는다는 것(고친 뒤의 상태)을 증명한다.
+describe("resolveTurnWorker — 정기 게시(digest) 컨텍스트도 noRemoteTools 없이는 공유 워커로 resolve 된다(최종 리뷰 FIX2)", () => {
+  const digestContext = { isOwner: false, isPrivate: false, userId: "digest" };
+  const registry = { personalWorkerOf: async () => null, sharedWorkerId: async () => "semicolon-shared" };
+  const connectedHub = { isConnected: () => true };
+
+  it("(고치기 전 상태 재현) noRemoteTools 없이 digest 컨텍스트를 넘기면 연결된 공유 워커로 resolve 된다 — 리뷰가 지적한 바로 그 결과", async () => {
+    const worker = await resolveTurnWorker({ context: digestContext }, registry, connectedHub);
+    expect(worker).toEqual({ workerId: "semicolon-shared", kind: "shared" });
+  });
+
+  it("digest.ts 가 세우는 noRemoteTools:true 를 적용하면, 공유 워커가 연결돼 있어도 워커가 resolve 되지 않고 allowedToolsFor 에도 원격 도구가 하나도 없다", async () => {
+    const worker = await resolveTurnWorker({ context: digestContext, noRemoteTools: true }, registry, connectedHub);
+    expect(worker).toBeNull();
+    const workerConnected = worker !== null;
+    const tools = allowedToolsFor("allowed", digestContext.isPrivate, digestContext.isOwner, "local", workerConnected);
+    expect(tools.some((n) => n.startsWith("mcp__asahi__fs_") || n === "mcp__asahi__sh_exec")).toBe(false);
+    expect(tools).not.toContain("mcp__asahi__allow_dir");
+    // 공개 채널 계층이 원래 받던 것(공용 recall)은 그대로 남는다.
+    expect(tools).toContain("mcp__asahi__recall");
+  });
+});
+
 // FIX2(치명, 최종 리뷰) — ctx.remote 를 구성하는 로직을 순수 함수로 뽑아 hub.rootsOf 배선을
 // 직접 검증한다. 예전엔 allowDirHandler(tools.ts)가 봇 프로세스의 fs.statSync/fs.realpathSync 로
 // 경로를 검증했다 — 봇과 워커가 서로 다른 머신일 수 있어(클라우드는 물론 local 배포도 마찬가지)
@@ -162,6 +190,23 @@ describe("buildRemoteCtx — ctx.remote 구성(Task 7: worker={workerId,kind} �
     const result = await remote!.call("fs_read", { path: "/w/proj/a.txt" });
     expect(result).toEqual({ ok: true, content: "본문" });
     expect(seen).toEqual([{ id: "owner-laptop", tool: "fs_read", args: { path: "/w/proj/a.txt" } }]);
+  });
+
+  // FIX3(중요, 최종 리뷰) — workerKind 는 이 함수가 옮기는 필드 중 remoteToolHandler 의
+  // scopeDirs(remoteTools.ts) 가 손님을 자기 폴더로 가두는지 말지를 통째로 결정하는 값이다.
+  // 위 테스트는 kind:"personal" 하나만 확인해서, buildRemoteCtx 가 worker.kind 를 무시하고
+  // "personal" 을 하드코딩해도(리뷰의 M12 뮤테이션) 통과해 버렸다 — kind:"shared" 를 넣어도
+  // 그대로 "personal" 이 나오는 셈이라 아무도 못 잡았다. kind:"shared" 케이스를 별도로 확인해야
+  // 이 필드가 실제로 그대로 옮겨지는지(하드코딩되지 않는지) 검증된다.
+  it("worker.kind 가 'shared' 면 workerKind 도 'shared' 로 그대로 실린다(FIX3 — 하드코딩 회귀 가드)", async () => {
+    const hub = {
+      call: async () => ({ ok: true, content: "" }),
+      rootsOf: (id: string) => (id === "semicolon-shared" ? ["C:\\ws"] : []),
+    };
+    const remote = buildRemoteCtx({ workerId: "semicolon-shared", kind: "shared" }, hub);
+    expect(remote?.workerKind).toBe("shared");
+    expect(remote?.workerId).toBe("semicolon-shared");
+    expect(remote?.roots).toEqual(["C:\\ws"]);
   });
 
   it("worker 가 null 이면 hub 가 있어도 undefined 다(ctx.remote 를 채우지 않는다)", () => {

@@ -101,8 +101,15 @@ export class DigestRunner {
   private async execute(topic: DigestTopic, channelRef: string, opts: { announceFailure?: boolean } = {}): Promise<boolean> {
     const announceFailure = opts.announceFailure ?? true;
     const spec = DIGEST_TOPICS[topic];
-    // 게시는 사용자 대화가 아니다. 공개 채널 계층(isOwner:false, isPrivate:false)으로 돌려
-    // PC 도구가 구조적으로 열리지 않게 한다 — 플래그로 빼는 게 아니라 그 계층에 애초에 없다.
+    // 게시는 사용자 대화가 아니다. 예전엔 공개 채널 계층(isOwner:false, isPrivate:false)으로
+    // 돌리는 것만으로 PC 도구가 구조적으로 열리지 않았다 — 그땐 그 계층 자체에 원격 도구가 없었기
+    // 때문이다. 최종 리뷰 FIX2: Task 7 로 그 전제가 깨졌다 — 공개 채널 계층도 공유 워커가
+    // 연결되면 fs_*/sh_exec 를 받는다(tools.ts 의 allowedToolsFor 마지막 분기, resolveTurnWorker 는
+    // 위치만으로 이 턴을 공유 워커에 연결한다). 그래서 이제는 계층만으로 안전하지 않고,
+    // noRemoteTools:true 를 명시로 세워야 한다 — 사람이 지켜보지 않는 타이머로 돌면서 신뢰할 수
+    // 없는 웹 검색 결과를 그대로 읽어들이는 이 턴에 공유 기계의 셸 접근까지 열려 있으면 안 된다
+    // (유휴 요약 턴에 적용한 것과 같은 이유 — agent.ts 의 noRemoteTools 계약·core.ts 의
+    // summarizeAndClose 참고). noWebTools 는 세우지 않는다 — 이 턴의 목적 자체가 웹 검색이다.
     const context = { role: "allowed" as const, isPrivate: false, isOwner: false, userId: "digest", conversationId: 0 };
     let text = "";
     let ok = false;
@@ -112,6 +119,7 @@ export class DigestRunner {
         systemPrompt: buildSystemPrompt({ role: "allowed", isPrivate: false, isOwner: false, emotions: this.emotions }),
         cwd: this.agentCwd,
         context,
+        noRemoteTools: true,
       });
       text = result.text.trim();
       ok = result.ok && text.length > 0;

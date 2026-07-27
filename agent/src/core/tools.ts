@@ -253,11 +253,15 @@ export function allowedToolsFor(
   // 손님-DM/손님-서버) 모두 workerConnected 만 보고 remote 를 splice 한다. 계층을 가르는 건
   // 그 뒤에 붙는 다른 도구들(기억·DB·접근관리·dir 관리)이다.
   const remote = workerConnected ? REMOTE_TOOL_NAMES.map((n) => t(n)) : [];
-  // dir 관리 도구는 remote 와 달리 isOwner 도 함께 봐야 한다 — 공유 기계의 허용 폴더 "목록
-  // 자체를 바꾸는" 권한은 관리자(소유자)만 갖는다. 손님은 워커가 연결돼 있어도 이 셋을 받지
-  // 못한다(canManagePc 가 실행 시점에도 같은 기준으로 다시 막는다 — 목록과 핸들러가 어긋나지
-  // 않는다).
-  const dirTools = workerConnected && isOwner ? [t("allow_dir"), t("revoke_dir"), t("list_dirs")] : [];
+  // 최종 리뷰 FIX5(사소) — dirTools 는 아래 owner 두 분기(owner-DM·owner-서버)에만 스플라이스된다
+  // (:262-273). 손님이 받는 분기(세 번째·네 번째 return)는 dirTools 자체를 참조하지 않으므로,
+  // 이 상수의 조건에 && isOwner 를 넣어도 결과는 절대 달라지지 않았다 — 죽은 조건이었는데, 그
+  // 조건이 마치 손님을 막는 관문인 것처럼 comment 가 오해를 유발했다(리뷰 지적: "그 조건이 안
+  // 하는 일을 한다고 주장하는 comment 를 남기지 마라"). 손님이 이 셋을 못 받는 진짜 이유는
+  // "그 분기가 애초에 안 쓴다"는 구조 자체다 — 실행 시점에는 canManagePc(아래 dir 핸들러들이
+  // 다시 확인)가 같은 기준(isOwner)으로 한 번 더 막는다. 공유 기계의 허용 폴더 "목록 자체를
+  // 바꾸는" 권한은 관리자(소유자)만 갖는다는 사실 자체는 그대로다.
+  const dirTools = workerConnected ? [t("allow_dir"), t("revoke_dir"), t("list_dirs")] : [];
   const webTools = webToolsEnabled ? WEB_TOOLS : [];
   if (isOwner && isPrivate) {
     return [
