@@ -359,24 +359,32 @@ describe("remoteToolHandler — 공유 기계에서 사용자별 격리", () => 
     return { ctx, calls };
   }
 
+  // Task 8: 손님(!isOwner) + 공유 워커(shared) 조합에서는 remoteToolHandler 가 실제 요청 전에
+  // fs_mkdir 준비 호출을 하나 더 끼워 넣는다(아래 "손님의 개인 폴더 자동 생성" 참고) — 그 요청이
+  // 결국 거부되더라도(자기 폴더 밖을 가리켜서 등) 준비 호출 자체는 이미 나간 뒤다. 그래서 이 아래
+  // 테스트들은 calls 전체 개수 대신 fs_mkdir 을 제외한 "실제 도구 호출" 개수만 센다 — 세는 대상이
+  // 바뀌는 것이지, 각 테스트가 원래 검증하려던 것(허용 여부)은 그대로다.
+  const realCalls = (calls: Array<{ tool: string; args: Record<string, unknown> }>) =>
+    calls.filter((c) => c.tool !== "fs_mkdir");
+
   it("손님이 남의 폴더를 읽으려 하면 거부한다 — 이 설계의 핵심 불변식", async () => {
     const { ctx, calls } = ctxFor({ isOwner: false, isPrivate: false, userId: "111", dirs: ["C:\\ws"], workerKind: "shared" });
     const out = await remoteToolHandler(ctx, "fs_read", { path: "C:\\ws\\222\\secret.txt" });
     expect(out).toContain("허용된 폴더 밖");
-    expect(calls).toHaveLength(0);
+    expect(realCalls(calls)).toHaveLength(0);
   });
 
   it("손님이 자기 폴더 안을 읽는 것은 통과한다", async () => {
     const { ctx, calls } = ctxFor({ isOwner: false, isPrivate: false, userId: "111", dirs: ["C:\\ws"], workerKind: "shared" });
     await remoteToolHandler(ctx, "fs_read", { path: "C:\\ws\\111\\my.txt" });
-    expect(calls).toHaveLength(1);
+    expect(realCalls(calls)).toHaveLength(1);
   });
 
   it("손님이 상위 참조로 빠져나가려 하면 거부한다", async () => {
     const { ctx, calls } = ctxFor({ isOwner: false, isPrivate: false, userId: "111", dirs: ["C:\\ws"], workerKind: "shared" });
     const out = await remoteToolHandler(ctx, "fs_read", { path: "C:\\ws\\111\\..\\222\\secret.txt" });
     expect(out).toContain("허용된 폴더 밖");
-    expect(calls).toHaveLength(0);
+    expect(realCalls(calls)).toHaveLength(0);
   });
 
   it("소유자는 공유 기계에서 남의 폴더도 읽는다(관리자)", async () => {
@@ -388,7 +396,33 @@ describe("remoteToolHandler — 공유 기계에서 사용자별 격리", () => 
   it("path 를 생략한 fs_grep 은 손님의 하위 폴더가 주입된다", async () => {
     const { ctx, calls } = ctxFor({ isOwner: false, isPrivate: false, userId: "111", dirs: ["C:\\ws"], workerKind: "shared" });
     await remoteToolHandler(ctx, "fs_grep", { pattern: "TODO" });
-    expect(calls[0].args.path).toBe("C:\\ws\\111");
+    // calls[0] 은 이제 Task 8 의 fs_mkdir 준비 호출이다 — 이 테스트가 실제로 보려는 건 fs_grep
+    // 호출에 주입된 path 이므로 tool 로 정확히 찾는다(위치로 세면 fs_mkdir 의 path 가 우연히
+    // 같은 값이라 실수로도 통과해버린다).
+    const grepCall = calls.find((c) => c.tool === "fs_grep");
+    expect(grepCall?.args.path).toBe("C:\\ws\\111");
+  });
+
+  // Task 8: 손님의 개인 폴더 자동 생성 — 공유 기계에서 손님(!isOwner)의 첫 원격 도구 호출 전에
+  // fs_mkdir 을 한 번 끼워 넣는다. "1인당 1폴더"가 규칙이라 그 폴더가 없다고 거부할 이유가 없고,
+  // 모델에게 만들게 시키면(fs_write·sh_exec 등) 실패 처리가 제각각이 되므로 봇이 직접 보장한다.
+  it("손님의 첫 호출 전에 개인 폴더를 만든다", async () => {
+    const { ctx, calls } = ctxFor({ isOwner: false, isPrivate: false, userId: "111", dirs: ["C:\\ws"], workerKind: "shared" });
+    await remoteToolHandler(ctx, "fs_read", { path: "C:\\ws\\111\\a.txt" });
+    expect(calls[0]).toEqual({ tool: "fs_mkdir", args: { path: "C:\\ws\\111" } });
+    expect(calls[1].tool).toBe("fs_read");
+  });
+
+  it("소유자에게는 폴더를 만들지 않는다", async () => {
+    const { ctx, calls } = ctxFor({ isOwner: true, isPrivate: false, userId: "owner", dirs: ["C:\\ws"], workerKind: "shared" });
+    await remoteToolHandler(ctx, "fs_read", { path: "C:\\ws\\a.txt" });
+    expect(calls.every((c) => c.tool !== "fs_mkdir")).toBe(true);
+  });
+
+  it("개인 워커에서는 폴더를 만들지 않는다", async () => {
+    const { ctx, calls } = ctxFor({ isOwner: true, isPrivate: true, userId: "owner", dirs: ["C:\\dev"], workerKind: "personal" });
+    await remoteToolHandler(ctx, "fs_read", { path: "C:\\dev\\a.txt" });
+    expect(calls.every((c) => c.tool !== "fs_mkdir")).toBe(true);
   });
 
   it("워커가 없으면 안내하고 호출하지 않는다", async () => {
@@ -407,27 +441,28 @@ describe("remoteToolHandler — 공유 기계에서 사용자별 격리", () => 
       const { ctx, calls } = ctxFor({ isOwner: false, isPrivate: false, userId: "111", dirs: ["C:\\ws"], workerKind: "shared" });
       const out = await remoteToolHandler(ctx, "fs_grep", { pattern: ".", path: "C:\\ws\\111", glob: "**/../../222/*.txt" });
       expect(out).toContain("허용된 폴더 밖");
-      expect(calls).toHaveLength(0);
+      // Task 8: fs_mkdir 준비 호출은 이 거부보다 먼저 나가므로 제외하고 센다(위 realCalls 참고).
+      expect(realCalls(calls)).toHaveLength(0);
     });
 
     it("fs_grep — glob:'**/../../222/*' (path 생략) → 허브를 부르지 않고 거부한다", async () => {
       const { ctx, calls } = ctxFor({ isOwner: false, isPrivate: false, userId: "111", dirs: ["C:\\ws"], workerKind: "shared" });
       const out = await remoteToolHandler(ctx, "fs_grep", { pattern: ".", glob: "**/../../222/*" });
       expect(out).toContain("허용된 폴더 밖");
-      expect(calls).toHaveLength(0);
+      expect(realCalls(calls)).toHaveLength(0);
     });
 
     it("fs_glob — pattern:'**/../../222/*.txt' (path 는 자기 폴더) → 허브를 부르지 않고 거부한다", async () => {
       const { ctx, calls } = ctxFor({ isOwner: false, isPrivate: false, userId: "111", dirs: ["C:\\ws"], workerKind: "shared" });
       const out = await remoteToolHandler(ctx, "fs_glob", { path: "C:\\ws\\111", pattern: "**/../../222/*.txt" });
       expect(out).toContain("허용된 폴더 밖");
-      expect(calls).toHaveLength(0);
+      expect(realCalls(calls)).toHaveLength(0);
     });
 
     it("대조군 — 평범한 재귀 glob('**/*.ts')은 자기 폴더 안에서 정상적으로 허브를 부른다(회귀 없음)", async () => {
       const { ctx, calls } = ctxFor({ isOwner: false, isPrivate: false, userId: "111", dirs: ["C:\\ws"], workerKind: "shared" });
       await remoteToolHandler(ctx, "fs_glob", { path: "C:\\ws\\111", pattern: "**/*.ts" });
-      expect(calls).toHaveLength(1);
+      expect(realCalls(calls)).toHaveLength(1);
     });
   });
 });
