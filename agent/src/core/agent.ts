@@ -5,7 +5,9 @@ import type { UsersRepo } from "../store/usersRepo.js";
 import type { MemoriesRepo } from "../store/memoriesRepo.js";
 import type { AllowedDirsRepo } from "../store/allowedDirsRepo.js";
 import type { IntrospectRepo } from "../store/introspectRepo.js";
+import type { WorkerKind } from "../store/workersRepo.js";
 import { buildTools, allowedToolsFor, TOOL_SERVER, type ToolCtx, type RuntimeInfo } from "./tools.js";
+import { resolveWorkerSelector } from "./workerSelect.js";
 import type { ImageInput } from "./images.js";
 
 // 자기인지(§Task5): SDK_VERSION 은 package.json 의 @anthropic-ai/claude-agent-sdk 버전과 동기화한다.
@@ -22,8 +24,8 @@ export type ProgressUpdate =
   | { kind: "answering" };
 // images(§Task3 이미지 입력): 있으면 query() 의 prompt 를 문자열 대신 async-iterable(SDKUserMessage 1개)로
 // 바꿔 멀티모달 턴을 만든다(buildMultimodalMessage). 없으면 기존 문자열 prompt 경로 그대로(회귀 없음).
-// noRemoteTools(FIX4, 최종 리뷰): true 면 이 턴은 워커 연결 여부·소유자 DM 여부와 무관하게 원격
-// 도구(fs_*/sh_exec, 그리고 FIX2 로 같은 축에 묶인 allow_dir 등)를 강제로 닫는다(resolveWorkerConnected
+// noRemoteTools(FIX4, 최종 리뷰): true 면 이 턴은 워커 연결 여부와 무관하게 원격
+// 도구(fs_*/sh_exec, 그리고 FIX2 로 같은 축에 묶인 allow_dir 등)를 강제로 닫는다(resolveTurnWorker
 // 참고). core.ts 의 유휴 대화 요약 턴(summarizeAndClose)이 이 값을 쓴다 — 그 턴은 사람이 지켜보지
 // 않는 타이머로 돌고, 이전에 모델이 읽은 파일 등을 통해 프롬프트 인젝션이 심어졌을 수도 있는 세션을
 // 그대로 이어받는다(resume). 그런 턴에 PC 접근을 열어 두면 그 인젝션이 아무도 모르는 사이에 실제
@@ -112,7 +114,7 @@ export function progressFromMessage(message: ProgressSourceMessage, pendingToolN
 // 자기인지(§Task5): runtime(RuntimeInfo) 을 별도 인자로 받아 ctx.runtime 에 그대로 싣는다. repos 는
 // 그대로 넘기기만 하면 introspect 도 함께 옮겨진다(ToolRepos 에 introspect 가 포함돼 있으므로).
 // ctx.remote 는 이 함수가 다루지 않는다 — makeRunAgentTurn 이 buildRemoteCtx 로 별도로 채운다
-// (워커 연결 판정(resolveWorkerConnected)이 끝난 뒤에야 알 수 있는 값이라 여기서 계산할 수 없다).
+// (어느 워커를 쓸지 정하는 resolveTurnWorker 판정이 끝난 뒤에야 알 수 있는 값이라 여기서 계산할 수 없다).
 export function buildToolCtx(repos: ToolRepos, context: TurnContext, runtime: RuntimeInfo): ToolCtx {
   return {
     repos, role: context.role, isPrivate: context.isPrivate,
@@ -121,31 +123,37 @@ export function buildToolCtx(repos: ToolRepos, context: TurnContext, runtime: Ru
   };
 }
 
-// FIX7(중요): 이 턴에 원격 워커(ctx.remote + fs_*/sh_exec 6종)를 열지 정하는 술어만 따로 뽑은
-// 순수 함수 — makeRunAgentTurn 안에 인라인으로 두면 이 판단 하나를 검증하려고 SDK query() 전체를
-// 목업해야 해서 테스트가 없었다(리뷰 지적: 가장 보안에 민감한 줄인데도 회귀를 잡을 방법이 없었다).
-// 정확히 "소유자 DM(소유자 && 비공개)이면서 그 소유자의 워커가 허브에 연결돼 있다"의 AND 다 —
-// "연결은 됐지만 공개 채널"(isPrivate=false)과 "연결은 됐지만 손님"(isOwner=false) 두 경우가 이
-// 판정이 지켜야 할 핵심 회귀다: 허브 쪽 배선(hub.isConnected)은 이 턴이 공개 채널인지도, 소유자인지도
-// 모르고 오직 "그 userId 의 워커가 연결돼 있는가"만 안다 — 그래서 나머지 두 조건은 반드시 여기서
-// 함께 확인해야 한다(remoteToolHandler 가 실행 시점에 독립적으로 다시 확인하는 것과 같은 기준).
-export function shouldConnectWorker(
-  context: { isOwner: boolean; isPrivate: boolean; userId: string },
-  hub?: { isConnected(userId: string): boolean },
-): boolean {
-  return context.isOwner && context.isPrivate && hub?.isConnected(context.userId) === true;
-}
-
-// FIX4(중요, 최종 리뷰): req.noRemoteTools 를 shouldConnectWorker 판정과 합성하는 순수 함수 —
-// noRemoteTools 가 true 면(유휴 요약 턴) 워커가 실제로 연결돼 있고 소유자 DM 이어도 무조건
-// false 를 돌려준다. makeRunAgentTurn 안에 인라인으로 두지 않고 뽑은 이유는 shouldConnectWorker
-// 를 뽑은 이유와 같다 — SDK query() 전체를 목업하지 않고 이 판정 하나만 검증하기 위해서다.
-export function resolveWorkerConnected(
+// Task 7(워커 라우팅): 이 턴이 실제로 쓸 워커를 정하는 함수 — 예전의 shouldConnectWorker(신원
+// 판정)와 resolveWorkerConnected(noRemoteTools 합성)를 이 함수 하나로 합쳤다. 예전 shouldConnectWorker
+// 는 "소유자 DM(소유자 && 비공개)이면서 hub.isConnected(그 userId)"의 AND 였다 — 그 판정이
+// 성립했던 건 그 시절엔 워커 1대 = 소유자 1명이라 워커의 id 자체가 곧 소유자의 userId 였기
+// 때문이다. 이제 워커는 레지스트리(workers 테이블)에 등록된 별도의 id 를 갖고(예: 동아리
+// 공용 PC 의 "semicolon-shared" — registerWorker.ts 참고), 손님도 그 공유 워커에 붙는다 —
+// "누가 묻는가"(userId)와 "어느 기계인가"(workerId)가 서로 다른 축이 됐으므로, hub.isConnected 를
+// 부르기 전에 레지스트리로 실제 workerId 를 먼저 찾아야 한다(예전 코드는 이 조회 없이
+// hub.isConnected(userId) 를 직접 불렀는데, 실제 등록된 워커 id 와 userId 가 다른 한 이 호출은
+// 항상 어긋났다 — registry 도입 전에는 드러나지 않았던 잠재적 버그다).
+//
+// 규칙은 resolveWorkerSelector(workerSelect.ts) 한 줄이 전부다 — "어디서 말하느냐가 어느
+// 기계냐를 정한다": 소유자 DM 은 그 소유자의 개인 워커, 그 외(소유자의 서버 채널·손님의 DM·
+// 손님의 서버 채널 전부)는 공유 워커. 이 함수는 그 선택자를 실제 id 로 바꾸고 연결 여부까지
+// 확인하는 부분만 맡는다 — allowedToolsFor·remoteToolHandler 양쪽이 "워커가 있는가"를 판단할
+// 때 쓰는 것과 동일한 하나의 결정이다(도구 목록과 실행 핸들러가 서로 다른 판정을 쓰면 "보이는데
+// 실행은 거부"가 생긴다 — remoteTools.ts 상단 주석 참고).
+//
+// noRemoteTools 가 true 면(유휴 요약 턴) 레지스트리·허브 조회 자체를 건너뛰고 무조건 null 이다 —
+// 예전 resolveWorkerConnected 가 하던 noRemoteTools 합성을 그대로 유지한다(사람이 지켜보지 않는
+// 타이머로 도는 턴에는 워커가 실제로 연결돼 있어도 강제로 닫아야 한다는 FIX4 의 취지 그대로).
+export async function resolveTurnWorker(
   req: { context: { isOwner: boolean; isPrivate: boolean; userId: string }; noRemoteTools?: boolean },
-  hub?: { isConnected(userId: string): boolean },
-): boolean {
-  if (req.noRemoteTools) return false;
-  return shouldConnectWorker(req.context, hub);
+  registry?: { personalWorkerOf(userId: string): Promise<string | null>; sharedWorkerId(): Promise<string | null> },
+  hub?: { isConnected(workerId: string): boolean },
+): Promise<{ workerId: string; kind: WorkerKind } | null> {
+  if (req.noRemoteTools === true || !registry || !hub) return null;
+  const sel = resolveWorkerSelector(req.context);
+  const id = sel.kind === "personal" ? await registry.personalWorkerOf(sel.userId) : await registry.sharedWorkerId();
+  if (id === null || !hub.isConnected(id)) return null;
+  return { workerId: id, kind: sel.kind };
 }
 
 // FIX3(중요, 최종 리뷰 3차): req.noWebTools 를 뽑아내는 순수 함수 — resolveWorkerConnected 를
@@ -156,20 +164,25 @@ export function resolveWebToolsEnabled(req: { noWebTools?: boolean }): boolean {
   return !req.noWebTools;
 }
 
-// FIX2(치명, 최종 리뷰): ctx.remote(호출 통로 + 워커의 실제 작업 폴더)를 구성하는 순수 함수.
-// makeRunAgentTurn 안에 인라인으로 두면 hub.rootsOf 배선을 직접 검증하려고 SDK query() 전체를
-// 목업해야 해서(다른 추출 함수들과 같은 이유) 테스트가 무거워진다. workerConnected 가 false 거나
-// hub 가 없으면 undefined(= ctx.remote 를 아예 채우지 않음)를 돌려준다. roots 는 tools.ts 의
+// Task 7: ctx.remote(호출 통로 + workerId + workerKind + 워커의 실제 작업 폴더)를 구성하는
+// 순수 함수. resolveTurnWorker 가 이미 "어느 워커, 어느 종류(personal/shared)"까지 정했으므로
+// 이 함수는 그 결과를 hub.call/rootsOf 에 실제로 연결하기만 한다 — worker 가 null 이거나 hub 가
+// 없으면 undefined(= ctx.remote 를 아예 채우지 않음)를 돌려준다. roots 는 tools.ts 의
 // allowDirHandler 가 "이 경로가 워커의 실제 작업 폴더 안인가"를 검증하는 데 쓴다(봇 프로세스
-// 자신의 파일시스템은 더 이상 보지 않는다 — 봇과 워커는 서로 다른 머신일 수 있다) —
-// WorkerHub.rootsOf(userId) 는 이 함수가 생기기 전까지 프로덕션 호출자가 없었다(테스트 전용).
+// 자신의 파일시스템은 더 이상 보지 않는다 — 봇과 워커는 서로 다른 머신일 수 있다). workerKind 는
+// remoteToolHandler(remoteTools.ts)가 scopeDirs 로 손님을 자기 폴더 안에 가두는 데 쓴다 —
+// personal 워커(소유자의 개인 기계)는 좁히지 않고, shared 워커에서만 좁힌다.
 export function buildRemoteCtx(
-  workerConnected: boolean,
-  hub: { call(userId: string, tool: string, args: Record<string, unknown>): Promise<{ ok: boolean; content: string }>; rootsOf(userId: string): string[] } | undefined,
-  userId: string,
+  worker: { workerId: string; kind: WorkerKind } | null,
+  hub?: { rootsOf(id: string): string[]; call(id: string, tool: string, args: Record<string, unknown>): Promise<{ ok: boolean; content: string }> },
 ): ToolCtx["remote"] {
-  if (!workerConnected || !hub) return undefined;
-  return { call: (tool, args) => hub.call(userId, tool, args), roots: hub.rootsOf(userId) };
+  if (!worker || !hub) return undefined;
+  return {
+    workerId: worker.workerId,
+    workerKind: worker.kind,
+    roots: hub.rootsOf(worker.workerId),
+    call: (tool, args) => hub.call(worker.workerId, tool, args),
+  };
 }
 
 // 도구 리포를 클로저로 받아 실제 SDK 턴 러너를 만든다. 매 턴 컨텍스트로
@@ -178,20 +191,26 @@ export function buildRemoteCtx(
 // 단계에서 이미 뺀다.
 // model(자기인지 §Task5, 기본 DEFAULT_MODEL): query() 에 그대로 전달되고, ctx.runtime.model 로도 실려
 // runtime_info 도구가 "설정값"으로 보고한다. init 메시지의 실제 model 과 다르면 아래에서 warn 로그를 남긴다.
-// hub(원격 워커 1단계, 선택 — Task 7): 봇(index.ts)만 넘긴다. 소유자 DM 이고 그 소유자의 워커가
-// 허브에 연결돼 있으면 ctx.remote 를 채우고 원격 도구(fs_*/sh_exec)를 연다. 워커 프로세스(worker.ts)는
-// 이 함수 자체를 쓰지 않는다 — 워커는 startWorkerClient 로 도구 호출을 직접 받는다.
-// rootsOf(FIX2, 최종 리뷰): hub 가 그 사용자의 워커가 hello 로 알려온 실제 작업 폴더를 돌려준다 —
+// registry(Task 7, 선택): workers 테이블 조회 — resolveTurnWorker 가 "이 턴이 어느 워커를 쓰는가"를
+// 실제 id 로 풀 때 쓴다(index.ts 는 repos.workers 를 그대로 넘긴다). hub 와 항상 짝으로 쓰인다 —
+// 어느 한쪽이라도 없으면 resolveTurnWorker 가 워커 없음(null)으로 취급한다.
+// hub(원격 워커, 선택 — Task 7): 봇(index.ts)만 넘긴다. resolveTurnWorker 가 registry 로 찾은
+// workerId 가 실제로 이 허브에 연결돼 있으면 ctx.remote 를 채우고 원격 도구(fs_*/sh_exec)를 연다 —
+// 소유자 DM 뿐 아니라 소유자의 서버 채널·손님의 DM·서버 채널도 각자의 워커(개인 또는 공유)로
+// 연결될 수 있다(§workerSelect.ts). 워커 프로세스(worker.ts)는 이 함수 자체를 쓰지 않는다 —
+// 워커는 startWorkerClient 로 도구 호출을 직접 받는다.
+// rootsOf(FIX2, 최종 리뷰): hub 가 그 워커가 hello 로 알려온 실제 작업 폴더를 돌려준다 —
 // buildRemoteCtx 가 이 값을 ctx.remote.roots 에 실어, tools.ts 의 allowDirHandler 가 등록 요청을
 // 그 값으로 재검증할 수 있게 한다.
 export function makeRunAgentTurn(
   repos: ToolRepos,
   deployTarget: "local" | "cloud" = "local",
   model: string = DEFAULT_MODEL,
+  registry?: { personalWorkerOf(userId: string): Promise<string | null>; sharedWorkerId(): Promise<string | null> },
   hub?: {
-    isConnected(userId: string): boolean;
-    call(userId: string, tool: string, args: Record<string, unknown>): Promise<{ ok: boolean; content: string }>;
-    rootsOf(userId: string): string[];
+    isConnected(workerId: string): boolean;
+    call(workerId: string, tool: string, args: Record<string, unknown>): Promise<{ ok: boolean; content: string }>;
+    rootsOf(workerId: string): string[];
   },
 ): TurnRunner {
   return async (req) => {
@@ -199,24 +218,24 @@ export function makeRunAgentTurn(
     const ctx: ToolCtx = buildToolCtx(repos, req.context, runtime);
     const server = buildTools(ctx);
 
-    // 원격 통로는 "소유자 DM"(진짜 사설 1:1) 일 때만 연다 — remoteToolHandler(remoteTools.ts)가
-    // 실행 시점에 다시 확인하는 것과 동일한 기준이다. hub.isConnected(userId) 만으로 판단하면
-    // (허브 쪽 배선은 이 턴이 공개 채널인지 모른다) 소유자가 공개 서버 채널에 쓴 턴에도 ctx.remote 가
-    // 채워져, 그 채널의 모델이 sh_exec 등 PC 도구를 호출할 길이 생긴다. allowedTools 산정에도 같은
-    // workerConnected 값을 넘겨야 "도구는 보이는데 실행하면 거부"라는 불일치가 생기지 않는다.
-    // FIX7: 이 판정 자체는 shouldConnectWorker 로 뽑아 따로 테스트한다(agent.test.ts) — 이 함수
-    // (makeRunAgentTurn)는 SDK query() 호출까지 가므로 판정 하나만 검증하기엔 무겁다.
-    // FIX4(최종 리뷰): req.noRemoteTools 가 있으면(유휴 요약 턴) shouldConnectWorker 결과와
-    // 무관하게 강제로 false 다 — resolveWorkerConnected 가 그 합성을 담당한다.
-    const workerConnected = resolveWorkerConnected(req, hub);
+    // Task 7: "어느 기계를, 그것이 있기는 한가"를 여기 한 곳에서만 정한다 — resolveTurnWorker 가
+    // resolveWorkerSelector(위치 기반 선택)로 개인/공유를 가르고, registry 로 실제 workerId 를
+    // 찾고, hub 로 연결 여부까지 확인한다. remoteToolHandler(remoteTools.ts)는 더 이상 이 판정을
+    // 독립적으로 다시 하지 않는다 — ctx.remote 가 채워져 있다는 사실 자체가 이 판정의 결과다.
+    // allowedTools 산정에도 같은 workerConnected 값을 넘겨야 "도구는 보이는데 실행하면 거부"라는
+    // 불일치가 생기지 않는다(아래에서 확인).
+    // FIX4(최종 리뷰): req.noRemoteTools 가 있으면(유휴 요약 턴) resolveTurnWorker 가 레지스트리·
+    // 허브 조회 자체를 건너뛰고 무조건 null 을 돌려준다(그 합성을 그대로 유지).
+    const worker = await resolveTurnWorker(req, registry, hub);
+    const workerConnected = worker !== null;
     // FIX3(최종 리뷰 3차): req.noWebTools 가 있으면(유휴 요약 턴) 웹 검색도 함께 강제로 닫는다 —
     // resolveWebToolsEnabled 가 그 판정을 담당한다. allowedToolsFor 와 builtinTools 양쪽에
     // 반드시 같은 값을 넘겨야 "허용 목록엔 있는데 실행 화이트리스트엔 없음(또는 그 반대)" 불일치가
     // 생기지 않는다.
     const webToolsEnabled = resolveWebToolsEnabled(req);
-    // FIX2(최종 리뷰): ctx.remote 구성(호출 통로 + 워커 roots) 자체도 buildRemoteCtx 로 뽑아
-    // 테스트한다.
-    ctx.remote = buildRemoteCtx(workerConnected, hub, req.context.userId);
+    // ctx.remote 구성(호출 통로 + workerId/workerKind + 워커 roots) 자체도 buildRemoteCtx 로
+    // 뽑아 테스트한다(agent.test.ts).
+    ctx.remote = buildRemoteCtx(worker, hub);
     const allowedTools = allowedToolsFor(req.context.role, req.context.isPrivate, req.context.isOwner, deployTarget, workerConnected, webToolsEnabled);
     // 원격 도구는 전부 mcp__asahi__* 이므로 bare 사전승인으로 두고, 내장 파일/Bash 도구는 아예 열지 않는다
     // (builtinTools=[] 이 SDK 내장 도구를 전부 닫는다). 경로 검사는 이제 워커(remote/roots.ts)가 최종

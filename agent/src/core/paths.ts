@@ -50,9 +50,20 @@ export function normalizeDir(p: string): string {
   return pathFlavorOf(p).resolve(p);
 }
 
+// Task 6 리뷰 이월: 이 함수가 실제로 지키는 것은 "동아리 회원 한 명이 다른 회원의 폴더 밖으로
+// 나가지 못한다"는 격리다(workerSelect.ts 의 scopeDirs 가 ctx.userId 를 그대로 segment 로
+// 넘긴다). 지금까지 이게 안전했던 건 이 함수 자신이 보장해서가 아니라 "userId 는 항상 디스코드
+// 스노플레이크(숫자)"라는 호출측의 습관 덕분이었다 — 그건 이 함수가 지키는 성질이 아니라 호출측이
+// 우연히 지키고 있는 성질이다. segment 자체를 평범한 식별자(영숫자·밑줄·하이픈)로만 제한해,
+// 경로 구분자·'..'·드라이브 문자 접두가 섞인 값으로는 애초에 경로 문자열을 만들 수 없게 한다.
+const SEGMENT_PATTERN = /^[A-Za-z0-9_-]+$/;
+
 // 워커의 루트 경로 아래에 한 단계를 잇는다. 문자열을 "/" 로 잇지 않는 이유는 위와 같다 —
 // `C:\ws/111` 처럼 구분자가 섞이면 두 겹의 경로 검사가 서로 다른 판정을 하게 된다.
 export function joinUnderRoot(root: string, segment: string): string {
+  if (!SEGMENT_PATTERN.test(segment)) {
+    throw new Error(`허용되지 않는 경로 조각이에요: ${segment}`);
+  }
   const flavor = pathFlavorOf(root);
   return `${root.replace(/[\\/]+$/, "")}${flavor.sep}${segment}`;
 }

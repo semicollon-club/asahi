@@ -24,7 +24,9 @@ const flush = async () => {
 
 async function setup(over: {
   config?: Partial<Config>; mode?: "immediate" | "manual" | "throw" | "resume-fails";
-  imageFetch?: typeof fetch; hub?: { isConnected(userId: string): boolean }; digest?: DigestRunner;
+  imageFetch?: typeof fetch; hub?: { isConnected(workerId: string): boolean };
+  registry?: { personalWorkerOf(userId: string): Promise<string | null>; sharedWorkerId(): Promise<string | null> };
+  digest?: DigestRunner;
 } = {}) {
   const db = await openTestDb();
   const repos = {
@@ -61,9 +63,17 @@ async function setup(over: {
     return new Promise((res) => resolvers.push(() => res(nextResult)));
   };
   const bus = new EventBus();
+  // Task 7: AgentCore 는 이제 registry 도 받는다(resolveTurnWorker 가 hub.isConnected 를 부르기
+  // 전에 workerId 를 먼저 찾는 데 쓴다). 기본값은 personalWorkerOf 를 항등(userId 를 그대로
+  // workerId 로 씀)으로 흉내낸다 — 이 파일의 hub 가짜들이 원래 userId 로 isConnected 를 판정하던
+  // 습관과 그대로 맞물려, over.hub 를 바꾸는 기존 테스트를 건드리지 않고도 워커 해석이 통과한다.
+  const registry = over.registry ?? {
+    personalWorkerOf: async (userId: string) => userId,
+    sharedWorkerId: async () => "shared-worker",
+  };
   const core = new AgentCore({
     bus, config, runTurn, now: () => clock, repos, agentCwd: "/data/agent",
-    fetchImpl: over.imageFetch, hub: over.hub, digest: over.digest,
+    fetchImpl: over.imageFetch, hub: over.hub, registry, digest: over.digest,
   });
   core.start();
   const published: AgentEvent[] = [];

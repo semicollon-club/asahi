@@ -1,6 +1,6 @@
 import type { EventBus, UserMessageEvent, ConversationHint } from "../events/bus.js";
 import type { Config } from "../config.js";
-import { shouldConnectWorker, type TurnRunner, type TurnContext, type TurnResult, type ProgressUpdate } from "./agent.js";
+import { resolveTurnWorker, type TurnRunner, type TurnContext, type TurnResult, type ProgressUpdate } from "./agent.js";
 import { buildSystemPrompt, deriveRapportStage } from "./persona.js";
 import { parseSessionCommand, parseDigestCommand, parseHelpCommand, renderCommandHelp } from "./commands.js";
 import { DIGEST_TOPICS } from "./digest.js";
@@ -75,9 +75,16 @@ export class AgentCore {
   private emotions: string[];
   // FIX3(중요, 최종 리뷰): 능력 안내(persona.ts)가 실제 도구 상태를 반영하려면, systemPrompt 를
   // 만드는 시점(runTurn 호출 전)에 이미 "이번 턴에 워커가 연결돼 있는가"를 알아야 한다 — 그
-  // 판정은 agent.ts 의 shouldConnectWorker 가 쓰는 것과 동일한 hub.isConnected(userId) 다.
-  // 선택值(옵셔널)인 이유: 워커 배선이 없는 환경(테스트 등)에서는 늘 워커 미연결로 간주된다.
-  private hub?: { isConnected(userId: string): boolean };
+  // 판정은 agent.ts 의 resolveTurnWorker 가 쓰는 것과 동일하다. Task 7: hub.isConnected 는
+  // workerId 를 받는다(userId 가 아니다) — 워커가 registry 에 별도 id 로 등록되므로, 아래 registry
+  // 로 실제 workerId 를 먼저 찾아야 한다(둘은 항상 짝으로 쓰인다).
+  // 선택값(옵셔널)인 이유: 워커 배선이 없는 환경(테스트 등)에서는 늘 워커 미연결로 간주된다.
+  private hub?: { isConnected(workerId: string): boolean };
+  // Task 7: workers 테이블 조회 — resolveTurnWorker 가 "이 턴이 어느 워커를 쓰는가"를 실제
+  // id 로 풀 때 쓴다(index.ts 는 repos.workers 를 그대로 넘긴다). hub 와 마찬가지로 배선이 없는
+  // 환경(테스트 등)에서는 늘 워커 미연결로 간주된다(resolveTurnWorker 는 registry·hub 둘 중
+  // 하나라도 없으면 null 을 돌려준다).
+  private registry?: { personalWorkerOf(userId: string): Promise<string | null>; sharedWorkerId(): Promise<string | null> };
   // 정기 게시(조사) 실행기. 옵셔널인 이유는 hub 와 같다 — 배선이 없는 환경(테스트 등)에서는
   // 예약어를 받아도 실행할 대상이 없으므로 ingest 가 안내만 하고 넘어간다.
   // FIX1(치명, 최종 리뷰 3차): 예전엔 여기(AgentCore)에 예약어 전용 채널별 동시 실행 가드
@@ -91,7 +98,9 @@ export class AgentCore {
 
   constructor(deps: {
     bus: EventBus; config: Config; runTurn: TurnRunner; repos: CoreRepos; agentCwd: string; now?: () => number;
-    fetchImpl?: typeof fetch; hub?: { isConnected(userId: string): boolean }; emotions?: string[]; digest?: DigestRunner;
+    fetchImpl?: typeof fetch; hub?: { isConnected(workerId: string): boolean };
+    registry?: { personalWorkerOf(userId: string): Promise<string | null>; sharedWorkerId(): Promise<string | null> };
+    emotions?: string[]; digest?: DigestRunner;
   }) {
     this.bus = deps.bus;
     this.config = deps.config;
@@ -102,6 +111,7 @@ export class AgentCore {
     this.now = deps.now ?? Date.now;
     this.fetchImpl = deps.fetchImpl ?? fetch;
     this.hub = deps.hub;
+    this.registry = deps.registry;
     this.emotions = deps.emotions ?? [];
     this.digest = deps.digest;
   }
@@ -346,12 +356,16 @@ export class AgentCore {
 
       const context: TurnContext = { role, isPrivate: conv.isPrivate, isOwner, userId, conversationId: conv.id };
       const rapportStage = deriveRapportStage(await this.repos.messages.countUserMessages(userId));
-      // FIX3(최종 리뷰): 능력 안내는 이제 deployTarget 이 아니라 "지금 이 턴에 워커가 실제로
-      // 연결돼 있는가"로 갈린다 — agent.ts 의 shouldConnectWorker 와 완전히 같은 판정을 여기서도
-      // 계산해 페르소나에 싣는다. 도구셋 자체는 agent.ts(makeRunAgentTurn)가 같은 함수로 별도로
-      // 다시 계산한다 — 두 계산이 어긋나면(예: 이 사이 워커가 끊기면) 프롬프트와 실제 도구가
-      // 그 한 턴만 어긋날 수 있지만, "안내 자체가 없거나 늘 거짓"이었던 이전 버그보다는 낫다.
-      const workerConnected = shouldConnectWorker({ isOwner, isPrivate: conv.isPrivate, userId }, this.hub);
+      // Task 7: 능력 안내는 "지금 이 턴에 워커가 실제로 연결돼 있는가"로 갈린다 — agent.ts 의
+      // resolveTurnWorker 와 완전히 같은 판정(위치 기반 선택 → registry 로 workerId 조회 → hub
+      // 연결 확인)을 여기서도 계산해 페르소나에 싣는다. 예전(shouldConnectWorker)엔 hub.isConnected
+      // 를 userId 로 직접 불렀는데, 워커가 registry 에 별도 id 로 등록되는 지금은 그게 항상
+      // 어긋난다 — registry 조회를 거치지 않으면 워커가 실제로 연결돼 있어도 이 안내가 늘 "연결
+      // 안 됨"으로 나온다. 도구셋 자체는 agent.ts(makeRunAgentTurn)가 같은 함수로 별도로 다시
+      // 계산한다 — 두 계산이 어긋나면(예: 이 사이 워커가 끊기면) 프롬프트와 실제 도구가 그 한
+      // 턴만 어긋날 수 있지만, "안내 자체가 없거나 늘 거짓"이었던 이전 버그보다는 낫다.
+      const worker = await resolveTurnWorker({ context: { isOwner, isPrivate: conv.isPrivate, userId } }, this.registry, this.hub);
+      const workerConnected = worker !== null;
       const systemPrompt = buildSystemPrompt({ role, isPrivate: conv.isPrivate, isOwner, deployTarget: this.config.deployTarget, rapportStage, workerConnected, emotions: this.emotions });
       const onProgress = (u: ProgressUpdate) => {
         this.bus.publish({ type: "progress", channel: "discord", channelRef: conv.discordChannelId, text: formatProgress(u), ts: this.now() });

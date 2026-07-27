@@ -209,15 +209,20 @@ describe("allow_dir/revoke_dir/list_dir 도구(§원격개발 A2, FIX2: 워커 r
     expect(await listDirsHandler(guest)).toContain("소유자");
   });
 
-  it("서버(비공개 아님)에서는 소유자여도 세 도구 모두 거부한다", async () => {
+  // Task 7: 이 테스트는 예전엔 "서버(비공개 아님)에서는 소유자여도 세 도구 모두 거부한다"였다 —
+  // 그땐 워커가 곧 소유자의 개인 기계였으니 DM 밖에서는 관리할 대상 자체가 없다는 전제였다.
+  // 이제 소유자는 서버 채널에서도 공유 기계(동아리 공용 PC)에 연결되고, 그 기계의 관리자
+  // 역시 소유자다(canManagePc 가 isOwner 만 본다) — 그래서 이제는 반대로 "허용한다"를 확인한다.
+  it("서버(비공개 아님)에서도 소유자면 세 도구 모두 허용한다(공유 기계의 관리자 — Task 7 반전)", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "asahi-ownerserver-"));
     const ownerServer = await ctx({
       isOwner: true, isPrivate: false,
-      remote: { roots: [os.tmpdir()], call: async () => ({ ok: true, content: "" }), workerId: "owner-laptop" },
+      remote: { roots: [os.tmpdir()], call: async () => ({ ok: true, content: "" }), workerId: "shared-worker", workerKind: "shared" },
     });
-    expect(await allowDirHandler(ownerServer, { path: dir })).toContain("소유자");
-    expect(await ownerServer.repos.allowedDirs.list(ownerServer.userId)).toEqual([]);
-    expect(await listDirsHandler(ownerServer)).toContain("소유자");
+    const out = await allowDirHandler(ownerServer, { path: dir });
+    expect(out).toContain(path.resolve(dir));
+    expect(await ownerServer.repos.allowedDirs.list("shared-worker")).toEqual([path.resolve(dir)]);
+    expect(await listDirsHandler(ownerServer)).toContain(path.resolve(dir));
   });
 
   // FIX6(사소하지만 함정, 최종 리뷰) — canManagePc 는 예전에 ctx.isPrivate && (ctx.isOwner ||
@@ -522,9 +527,14 @@ describe("allowedToolsFor — 원격 도구 노출", () => {
     expect(allowedToolsFor("owner", true, true, "local")).not.toContain(RT);
   });
 
-  it("손님 DM·서버 채널에는 워커가 연결돼 있어도 노출하지 않는다(1단계는 소유자 전용)", () => {
-    expect(allowedToolsFor("allowed", true, false, "local", true)).not.toContain(RT);
-    expect(allowedToolsFor("allowed", false, false, "local", true)).not.toContain(RT);
+  // Task 7: 예전엔 "1단계는 소유자 전용"이라 손님에게 원격 도구를 절대 주지 않았다. 이제는
+  // 위치가 어느 기계냐를 정한다(workerSelect.ts) — 손님도 DM·서버 어디서든 공유 기계에 연결되면
+  // 원격 도구를 받는다. 격리는 여기(도구 목록)가 아니라 remoteToolHandler 의 scopeDirs 가
+  // 맡는다(자기 하위 폴더 밖은 읽지 못한다 — remoteTools.test.ts 의 "공유 기계에서 사용자별
+  // 격리" 참고).
+  it("손님 DM·서버 채널도 워커가 연결되면 원격 도구를 받는다(공유 기계로 연결 — Task 7 반전)", () => {
+    expect(allowedToolsFor("allowed", true, false, "local", true)).toContain(RT);
+    expect(allowedToolsFor("allowed", false, false, "local", true)).toContain(RT);
   });
 
   it("기억·접근관리 도구는 워커 연결 여부와 무관하다", () => {
@@ -581,5 +591,43 @@ describe("allowedToolsFor — 웹 검색", () => {
     expect(tools).toContain("mcp__asahi__remember");
     expect(tools).toContain("mcp__asahi__fs_read");
     expect(tools).toContain("mcp__asahi__manage_access");
+  });
+});
+
+// Task 7(워커 라우팅): 원격 도구는 더 이상 owner-DM 전용이 아니다 — "어디서 말하느냐가 어느
+// 기계냐를 정한다"(workerSelect.ts). 공개 서버·손님 DM 은 공유 기계(동아리 공용 PC)로 연결되고,
+// 폴더 관리(allow_dir 등)만 관리자(소유자) 전용으로 남는다.
+describe("allowedToolsFor — 공유 워커로 계층이 넓어진다", () => {
+  const remoteNames = ["fs_read", "fs_write", "fs_edit", "fs_glob", "fs_grep", "sh_exec"];
+  const hasRemote = (tools: string[]) => remoteNames.every((n) => tools.some((t) => t.endsWith(n)));
+
+  it("공개 서버 + 워커 연결이면 원격 도구가 열린다(예전엔 무조건 닫혔다)", () => {
+    expect(hasRemote(allowedToolsFor("allowed", false, false, "local", true))).toBe(true);
+  });
+
+  it("공개 서버 + 워커 미연결이면 열리지 않는다", () => {
+    expect(hasRemote(allowedToolsFor("allowed", false, false, "local", false))).toBe(false);
+  });
+
+  it("손님 DM + 워커 연결이면 열린다(공유 워커로 간다)", () => {
+    expect(hasRemote(allowedToolsFor("allowed", true, false, "local", true))).toBe(true);
+  });
+
+  it("손님에게는 폴더 관리 도구를 주지 않는다 — 워커가 연결돼 있어도", () => {
+    const tools = allowedToolsFor("allowed", false, false, "local", true);
+    expect(tools.some((t) => t.endsWith("allow_dir"))).toBe(false);
+    expect(tools.some((t) => t.endsWith("revoke_dir"))).toBe(false);
+  });
+
+  it("소유자는 서버에서도 폴더 관리 도구를 갖는다", () => {
+    const tools = allowedToolsFor("owner", false, true, "local", true);
+    expect(tools.some((t) => t.endsWith("allow_dir"))).toBe(true);
+  });
+
+  it("손님에게는 DB·접근관리 도구를 여전히 주지 않는다", () => {
+    const tools = allowedToolsFor("allowed", true, false, "local", true);
+    for (const n of ["db_query", "db_schema", "manage_access", "runtime_info"]) {
+      expect(tools.some((t) => t.endsWith(n))).toBe(false);
+    }
   });
 });

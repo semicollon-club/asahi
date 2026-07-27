@@ -8,7 +8,7 @@ import { UsersRepo } from "../src/store/usersRepo.js";
 import { AllowedDirsRepo } from "../src/store/allowedDirsRepo.js";
 import { IntrospectRepo } from "../src/store/introspectRepo.js";
 import {
-  buildToolCtx, buildMultimodalMessage, shouldConnectWorker, buildRemoteCtx, resolveWorkerConnected,
+  buildToolCtx, buildMultimodalMessage, buildRemoteCtx, resolveTurnWorker,
   resolveWebToolsEnabled,
   type TurnContext, type ToolRepos,
 } from "../src/core/agent.js";
@@ -43,33 +43,96 @@ describe("buildToolCtx — makeRunAgentTurn 의 ToolCtx 구성", () => {
   });
 });
 
-// FIX7: makeRunAgentTurn 이 ctx.remote(+ 원격 도구 6종)를 열지 정하는 가장 보안에 민감한 판단인데도
-// 테스트가 없었다 — 그 판단만 순수 함수로 뽑아(agent.ts 의 shouldConnectWorker) 직접 검증한다.
-// makeRunAgentTurn 자체는 SDK query() 를 통째로 목업해야 호출까지 갈 수 있어 이 판정 하나만
-// 떼어 보기 번거로웠다(다른 테스트들도 실제 query() 호출까지는 가지 않는다는 점에서 이 파일의
-// 관례와도 맞다). 리뷰가 지목한 핵심 회귀 두 가지: "연결은 됐지만 공개 채널", "연결은 됐지만 손님".
-describe("shouldConnectWorker — 원격 워커 연결 판정(FIX7)", () => {
+// Task 7: makeRunAgentTurn 이 ctx.remote(+ 원격 도구 6종)를 열지 정하는 가장 보안에 민감한
+// 판단인데도(FIX7) 예전엔 테스트가 없었다 — 그 판단만 순수 함수로 뽑아(agent.ts 의
+// resolveTurnWorker) 직접 검증한다. resolveTurnWorker 는 예전의 shouldConnectWorker(신원 판정)와
+// resolveWorkerConnected(noRemoteTools 합성)를 하나로 합친 함수다 — 아래 describe 블록이 각각을
+// 대체한다. makeRunAgentTurn 자체는 SDK query() 를 통째로 목업해야 호출까지 갈 수 있어 이 판정
+// 하나만 떼어 보기 번거로웠다(다른 테스트들도 실제 query() 호출까지는 가지 않는다는 점에서 이
+// 파일의 관례와도 맞다).
+//
+// 예전 shouldConnectWorker 는 "연결은 됐지만 공개 채널"·"연결은 됐지만 손님" 두 경우 모두
+// false(워커 없음)를 돌려줬다 — 그땐 원격 워커 자체가 owner-DM 전용이었다. Task 7 이후로는
+// 그 두 경우도 워커가 "없는" 게 아니라 다른 워커(공유 워커)로 resolve 된다 — 위치가 어느
+// 기계냐를 정한다(workerSelect.ts 의 resolveWorkerSelector). 그래서 아래 테스트들은 "false"
+// 대신 "어느 워커로 resolve 됐는가(kind)"를 확인한다 — registry 에 personal/shared 를 서로
+// 다른 id 로 응답하게 해서, 실제로 옳은 쪽이 쓰였는지까지 검증한다(이게 예전 회귀가 지키려던
+// 성질의 갱신판이다 — "소유자의 개인 워커가 공개 채널·손님에게 새지 않는다").
+describe("resolveTurnWorker — 이 턴이 실제로 쓸 워커를 정한다(Task 7, 예전 shouldConnectWorker 를 대체)", () => {
+  function registryStub(o: { personal?: string | null; shared?: string | null } = {}) {
+    return {
+      personalWorkerOf: async (_userId: string) => (o.personal === undefined ? "personal-worker" : o.personal),
+      sharedWorkerId: async () => (o.shared === undefined ? "shared-worker" : o.shared),
+    };
+  }
+  const connectedHub = { isConnected: (_id: string) => true };
+  const disconnectedHub = { isConnected: (_id: string) => false };
+
+  it("소유자·DM(비공개)·워커 연결 셋 다 맞으면 그 소유자의 개인 워커로 resolve 한다", async () => {
+    const worker = await resolveTurnWorker({ context: { isOwner: true, isPrivate: true, userId: "owner" } }, registryStub(), connectedHub);
+    expect(worker).toEqual({ workerId: "personal-worker", kind: "personal" });
+  });
+
+  it("워커는 연결돼 있지만 공개 채널(isPrivate=false)이면 소유자라도 개인 워커가 아니라 공유 워커로 resolve 한다(예전엔 여기서 아예 없음이었지만, 이제는 공유 기계로 간다 — Task 7 반전)", async () => {
+    const worker = await resolveTurnWorker({ context: { isOwner: true, isPrivate: false, userId: "owner" } }, registryStub(), connectedHub);
+    expect(worker).toEqual({ workerId: "shared-worker", kind: "shared" });
+  });
+
+  it("워커는 연결돼 있지만 손님(isOwner=false)이면 DM 이어도 개인 워커가 아니라 공유 워커로 resolve 한다(같은 반전)", async () => {
+    const worker = await resolveTurnWorker({ context: { isOwner: false, isPrivate: true, userId: "guest" } }, registryStub(), connectedHub);
+    expect(worker).toEqual({ workerId: "shared-worker", kind: "shared" });
+  });
+
+  it("소유자 DM 이어도 그 워커가 허브에 연결돼 있지 않으면 null", async () => {
+    const worker = await resolveTurnWorker({ context: { isOwner: true, isPrivate: true, userId: "owner" } }, registryStub(), disconnectedHub);
+    expect(worker).toBeNull();
+  });
+
+  it("registry 가 그 선택자에 해당하는 워커를 못 찾으면(등록되지 않음) null", async () => {
+    const worker = await resolveTurnWorker(
+      { context: { isOwner: true, isPrivate: true, userId: "owner" } },
+      registryStub({ personal: null }),
+      connectedHub,
+    );
+    expect(worker).toBeNull();
+  });
+
+  it("registry 자체를 안 넘기면 null(hub 만으로는 workerId 를 알 수 없다)", async () => {
+    expect(await resolveTurnWorker({ context: { isOwner: true, isPrivate: true, userId: "owner" } }, undefined, connectedHub)).toBeNull();
+  });
+
+  it("hub 자체를 안 넘기면(봇이 아닌 워커 경로 등) null", async () => {
+    expect(await resolveTurnWorker({ context: { isOwner: true, isPrivate: true, userId: "owner" } }, registryStub(), undefined)).toBeNull();
+  });
+});
+
+// FIX4(중요, 최종 리뷰): req.noRemoteTools 를 resolveTurnWorker 안에서 합성한다 — 유휴 요약
+// 턴(core.ts 의 summarizeAndClose)이 이 값을 쓴다. 예전엔 resolveWorkerConnected 라는 별도
+// 함수가 이 합성을 맡았지만, Task 7 로 shouldConnectWorker 와 함께 resolveTurnWorker 하나로
+// 합쳐졌다.
+describe("resolveTurnWorker — noRemoteTools 는 워커 연결 여부와 무관하게 강제로 닫는다(FIX4, 예전 resolveWorkerConnected 를 대체)", () => {
+  const registry = { personalWorkerOf: async () => "personal-worker", sharedWorkerId: async () => "shared-worker" };
   const connectedHub = { isConnected: () => true };
-  const disconnectedHub = { isConnected: () => false };
+  const context = { isOwner: true, isPrivate: true, userId: "owner" };
 
-  it("소유자·DM(비공개)·워커 연결 셋 다 맞으면 true", () => {
-    expect(shouldConnectWorker({ isOwner: true, isPrivate: true, userId: "owner" }, connectedHub)).toBe(true);
+  it("noRemoteTools 가 없으면 평소처럼 워커를 resolve 한다(회귀 없음)", async () => {
+    expect(await resolveTurnWorker({ context }, registry, connectedHub)).toEqual({ workerId: "personal-worker", kind: "personal" });
+    expect(await resolveTurnWorker({ context: { ...context, isPrivate: false } }, registry, connectedHub)).toEqual({ workerId: "shared-worker", kind: "shared" });
   });
 
-  it("워커는 연결돼 있지만 공개 채널(isPrivate=false)이면 소유자여도 false(회귀 — 리뷰 지적)", () => {
-    expect(shouldConnectWorker({ isOwner: true, isPrivate: false, userId: "owner" }, connectedHub)).toBe(false);
+  it("noRemoteTools=true 면 워커가 연결돼 있고 소유자 DM 이어도 null 이다(유휴 요약 턴) — registry·hub 조회 자체를 건너뛴다", async () => {
+    expect(await resolveTurnWorker({ context, noRemoteTools: true }, registry, connectedHub)).toBeNull();
   });
 
-  it("워커는 연결돼 있지만 손님(isOwner=false)이면 DM 이어도 false(회귀 — 리뷰 지적)", () => {
-    expect(shouldConnectWorker({ isOwner: false, isPrivate: true, userId: "guest" }, connectedHub)).toBe(false);
-  });
-
-  it("소유자 DM 이어도 그 사용자의 워커가 연결돼 있지 않으면 false", () => {
-    expect(shouldConnectWorker({ isOwner: true, isPrivate: true, userId: "owner" }, disconnectedHub)).toBe(false);
-  });
-
-  it("hub 자체를 안 넘기면(봇이 아닌 워커 경로 등) false", () => {
-    expect(shouldConnectWorker({ isOwner: true, isPrivate: true, userId: "owner" }, undefined)).toBe(false);
+  it("FIX4 — noRemoteTools 인 요청은 워커가 연결돼 있어도 allowedToolsFor 에 원격 도구 이름을 하나도 넘기지 않는다(유휴 요약 턴이 실제로 받는 도구 목록)", async () => {
+    const worker = await resolveTurnWorker({ context, noRemoteTools: true }, registry, connectedHub);
+    const workerConnected = worker !== null;
+    const tools = allowedToolsFor("owner", context.isPrivate, context.isOwner, "local", workerConnected);
+    expect(tools.some((n) => n.startsWith("mcp__asahi__fs_") || n === "mcp__asahi__sh_exec")).toBe(false);
+    // dir 관리 도구(FIX2 로 workerConnected 하나로 묶임)도 마찬가지로 닫힌다.
+    expect(tools).not.toContain("mcp__asahi__allow_dir");
+    // 기억·접근관리처럼 워커와 무관한 도구는 그대로 남는다(요약 자체는 대화 처리이므로).
+    expect(tools).toContain("mcp__asahi__remember");
   });
 });
 
@@ -78,60 +141,36 @@ describe("shouldConnectWorker — 원격 워커 연결 판정(FIX7)", () => {
 // 경로를 검증했다 — 봇과 워커가 서로 다른 머신일 수 있어(클라우드는 물론 local 배포도 마찬가지)
 // 이 검증은 실제로 아무 의미가 없었다. 이제 allowDirHandler 는 ctx.remote.roots(워커가 hello
 // 프레임으로 알려온 실제 작업 폴더)로 검증하므로, makeRunAgentTurn 이 그 값을 실제로 채워야 한다 —
-// WorkerHub.rootsOf(userId) 는 이 함수가 생기기 전까지 프로덕션 호출자가 없었다(테스트 전용).
-describe("buildRemoteCtx — ctx.remote 구성(FIX2: hub.rootsOf 를 실제로 배선)", () => {
-  it("workerConnected 가 true 고 hub 가 있으면 roots 는 hub.rootsOf 결과로, call 은 hub.call 로 이어진다", async () => {
-    const seen: Array<{ userId: string; tool: string; args: Record<string, unknown> }> = [];
+// WorkerHub.rootsOf(workerId) 는 이 함수가 생기기 전까지 프로덕션 호출자가 없었다(테스트 전용).
+// Task 7: 시그니처가 workerConnected(boolean)+userId 대신 worker({workerId,kind}|null) 하나를
+// 받게 바뀌었다 — resolveTurnWorker 가 이미 어느 워커·어느 종류인지 정했으므로 이 함수는 그
+// 결과를 hub 에 연결하기만 한다.
+describe("buildRemoteCtx — ctx.remote 구성(Task 7: worker={workerId,kind} 기준으로 바뀜)", () => {
+  it("worker 가 있고 hub 가 있으면 roots 는 hub.rootsOf(workerId) 결과로, call 은 hub.call(workerId,...) 로 이어지고, workerId·workerKind 도 그대로 실린다", async () => {
+    const seen: Array<{ id: string; tool: string; args: Record<string, unknown> }> = [];
     const hub = {
-      call: async (userId: string, tool: string, args: Record<string, unknown>) => {
-        seen.push({ userId, tool, args });
+      call: async (id: string, tool: string, args: Record<string, unknown>) => {
+        seen.push({ id, tool, args });
         return { ok: true, content: "본문" };
       },
-      rootsOf: (userId: string) => (userId === "owner" ? ["/w/proj"] : []),
+      rootsOf: (id: string) => (id === "owner-laptop" ? ["/w/proj"] : []),
     };
-    const remote = buildRemoteCtx(true, hub, "owner");
+    const remote = buildRemoteCtx({ workerId: "owner-laptop", kind: "personal" }, hub);
     expect(remote?.roots).toEqual(["/w/proj"]);
+    expect(remote?.workerId).toBe("owner-laptop");
+    expect(remote?.workerKind).toBe("personal");
     const result = await remote!.call("fs_read", { path: "/w/proj/a.txt" });
     expect(result).toEqual({ ok: true, content: "본문" });
-    expect(seen).toEqual([{ userId: "owner", tool: "fs_read", args: { path: "/w/proj/a.txt" } }]);
+    expect(seen).toEqual([{ id: "owner-laptop", tool: "fs_read", args: { path: "/w/proj/a.txt" } }]);
   });
 
-  it("workerConnected 가 false 면 hub 가 있어도 undefined 다(ctx.remote 를 채우지 않는다)", () => {
+  it("worker 가 null 이면 hub 가 있어도 undefined 다(ctx.remote 를 채우지 않는다)", () => {
     const hub = { call: async () => ({ ok: true, content: "" }), rootsOf: () => ["/w"] };
-    expect(buildRemoteCtx(false, hub, "owner")).toBeUndefined();
+    expect(buildRemoteCtx(null, hub)).toBeUndefined();
   });
 
-  it("hub 자체가 없으면 workerConnected 값과 무관하게 undefined 다", () => {
-    expect(buildRemoteCtx(true, undefined, "owner")).toBeUndefined();
-  });
-});
-
-// FIX4(중요, 최종 리뷰) — 유휴 대화 요약 턴(core.ts 의 summarizeAndClose)은 사람이 지켜보지
-// 않는 타이머로 돌고, 이전에 모델이 읽은 파일 등을 통해 프롬프트 인젝션이 심어졌을 수도 있는
-// 세션을 그대로 이어받는다(resume). 그런 턴에도 fs_*/sh_exec 가 열려 있으면 그 인젝션이 아무도
-// 모르는 사이에 실제 PC 작업으로 이어질 수 있다 — noRemoteTools 플래그로 워커 연결 여부와
-// 무관하게 강제로 닫는다.
-describe("resolveWorkerConnected — noRemoteTools 는 워커 연결 여부와 무관하게 강제로 닫는다(FIX4)", () => {
-  const connectedHub = { isConnected: () => true };
-  const context = { isOwner: true, isPrivate: true, userId: "owner" };
-
-  it("noRemoteTools 가 없으면 shouldConnectWorker 와 동일하게 동작한다(회귀 없음)", () => {
-    expect(resolveWorkerConnected({ context }, connectedHub)).toBe(true);
-    expect(resolveWorkerConnected({ context: { ...context, isPrivate: false } }, connectedHub)).toBe(false);
-  });
-
-  it("noRemoteTools=true 면 워커가 연결돼 있고 소유자 DM 이어도 false 다(유휴 요약 턴)", () => {
-    expect(resolveWorkerConnected({ context, noRemoteTools: true }, connectedHub)).toBe(false);
-  });
-
-  it("FIX4 — noRemoteTools 인 요청은 워커가 연결돼 있어도 allowedToolsFor 에 원격 도구 이름을 하나도 넘기지 않는다(유휴 요약 턴이 실제로 받는 도구 목록)", () => {
-    const workerConnected = resolveWorkerConnected({ context, noRemoteTools: true }, connectedHub);
-    const tools = allowedToolsFor("owner", context.isPrivate, context.isOwner, "local", workerConnected);
-    expect(tools.some((n) => n.startsWith("mcp__asahi__fs_") || n === "mcp__asahi__sh_exec")).toBe(false);
-    // dir 관리 도구(FIX2 로 workerConnected 하나로 묶임)도 마찬가지로 닫힌다.
-    expect(tools).not.toContain("mcp__asahi__allow_dir");
-    // 기억·접근관리처럼 워커와 무관한 도구는 그대로 남는다(요약 자체는 대화 처리이므로).
-    expect(tools).toContain("mcp__asahi__remember");
+  it("hub 자체가 없으면 worker 가 있어도 undefined 다", () => {
+    expect(buildRemoteCtx({ workerId: "owner-laptop", kind: "personal" }, undefined)).toBeUndefined();
   });
 });
 

@@ -118,7 +118,7 @@ async function main() {
   // 에이전트 cwd 는 소스가 아닌 데이터 영역에 둔다 — 에이전트가 소스 트리를 훑지 않도록(1단계 점검 지적).
   const agentCwd = path.resolve(config.dataDir, "..", "agent-cwd");
   fs.mkdirSync(agentCwd, { recursive: true });
-  const runTurn = makeRunAgentTurn({ memories: repos.memories, users: repos.users, allowedDirs: repos.allowedDirs, introspect: repos.introspect }, config.deployTarget, config.model, hub);
+  const runTurn = makeRunAgentTurn({ memories: repos.memories, users: repos.users, allowedDirs: repos.allowedDirs, introspect: repos.introspect }, config.deployTarget, config.model, repos.workers, hub);
 
   const characterImages = new CharacterImagesRepo(db);
   // 감정 목록은 기동 시 한 번 읽는다. 이미지를 추가하고 동기화 스크립트를 돌려도
@@ -137,8 +137,10 @@ async function main() {
   });
 
   // FIX3(최종 리뷰): core.ts 도 hub 를 받아 능력 안내(persona.ts)에 "이번 턴에 워커가 실제로
-  // 연결돼 있는가"를 반영한다(agent.ts 의 shouldConnectWorker 와 같은 판정, 같은 hub 인스턴스).
-  const core = new AgentCore({ bus, config, runTurn, repos, agentCwd, hub, emotions, digest });
+  // 연결돼 있는가"를 반영한다(agent.ts 의 resolveTurnWorker 와 같은 판정, 같은 hub 인스턴스).
+  // registry(Task 7): resolveTurnWorker 가 hub.isConnected 를 부르기 전에 실제 workerId 를
+  // 찾는 데 쓴다 — repos.workers 를 makeRunAgentTurn 과 동일하게 그대로 넘긴다.
+  const core = new AgentCore({ bus, config, runTurn, repos, agentCwd, hub, registry: repos.workers, emotions, digest });
   core.start();
 
   const discord = new DiscordAdapter({ bus, config, users, conversations, characterImages });

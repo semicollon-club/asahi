@@ -11,8 +11,8 @@ export type PersonaContext = {
   // 친근도 단계(가벼운 관계 진화). 생략 시 0(서먹). core/worker 가 계산해 주입.
   rapportStage?: 0 | 1 | 2;
   // FIX3(중요, 최종 리뷰): 이번 턴에 원격 워커(fs_*/sh_exec)가 실제로 열려 있는지 — core.ts 가
-  // agent.ts 의 shouldConnectWorker(요약 턴은 resolveWorkerConnected)와 같은 판정을 계산해
-  // 싣는다. 생략 시 false(워커 미연결로 간주 — 안전한 기본값). 이 필드가 도입되기 전에는
+  // agent.ts 의 resolveTurnWorker(Task 7 이전엔 shouldConnectWorker/resolveWorkerConnected)와
+  // 같은 판정을 계산해 싣는다. 생략 시 false(워커 미연결로 간주 — 안전한 기본값). 이 필드가 도입되기 전에는
   // deployTarget 만 보고 능력 안내를 갈랐다 — 그 결과 프로덕션(cloud + 워커 연결)에서는 "클라우드라
   // PC 작업을 못 한다"고 안내하면서 실제로는 fs_*/sh_exec 가 열려 있었고, local + 워커 미연결에서는
   // 이미 존재하지 않는 SDK 내장 도구(Read/Write/Bash)를 가지고 있다고 안내했다(리뷰 지적).
@@ -118,7 +118,12 @@ function buildMemoryBlock(ctx: PersonaContext): string {
 // ── 블록 ④ 능력(§7.1) ───────────────────────────────────────────────────────
 // FIX3(중요, 최종 리뷰): owner-DM 분기는 이제 deployTarget 이 아니라 workerConnected 로 갈린다 —
 // "어디서 실행 중인가"가 아니라 "지금 PC 작업이 실제로 되는가"가 진짜 갈림축이다(클라우드에서도
-// 워커만 붙으면 된다. agent.ts 의 shouldConnectWorker/resolveWorkerConnected 와 같은 원칙).
+// 워커만 붙으면 된다. agent.ts 의 resolveTurnWorker 와 같은 원칙).
+// [Task 7 갱신 필요] 이 블록은 아직 owner-DM 두 갈래(연결/미연결)와 "그 외"만 안다 — Task 7 로
+// 소유자가 서버 채널에서도 공유 기계에 연결되어 fs_*/sh_exec/allow_dir 을 받게 됐지만(tools.ts 의
+// allowedToolsFor), 이 함수의 "공개 채널" 분기(아래)는 여전히 "PC 작업을 하지 않습니다"라고
+// 안내한다 — 실제 도구 유무와 이 안내가 그 경우에 한해 어긋난다. 안내 문구를 owner-서버 전용으로
+// 새로 쓰는 결정은 이 태스크의 범위 밖이라 손대지 않았다(§워커 라우팅 태스크 보고서 참고).
 // 도구 이름도 실제로 존재하는 이름(fs_read/fs_write/fs_edit/fs_glob/fs_grep, sh_exec)을 그대로
 // 쓴다 — SDK 내장 Read/Write/Bash 는 이제 존재하지 않으므로 이름조차 언급하지 않는다. 셸
 // 주의사항(허용 폴더 밖 접근을 기술적으로 완전히 막지 못한다는 안내)은 sh_exec 가 실제로 열려
