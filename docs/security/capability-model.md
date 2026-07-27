@@ -165,8 +165,12 @@ Asahi 비서는 대화·모델 호출·기억·세션을 전담하는 **봇** �
 함수 안에서 더 이상 아무것도 분기하지 않는다(여전히 `runtime_info` 가 보고하는 배포 정보로는
 의미가 있어 시그니처에는 남아 있다). `allowDirHandler`는 봇 자신의 파일시스템 대신
 `ctx.remote.roots`(그 워커가 `hello` 프레임으로 알려온 실제 작업 폴더 — `WorkerHub.rootsOf`,
-`agent/src/core/agent.ts` 의 `buildRemoteCtx` 가 배선한다)로 재검증한다. 손님 DM·서버 분기는
-이 배열들을 아예 스프레드하지 않으므로 원격 도구·dir 관리 도구는 소유자 DM 에만 나타난다.
+`agent/src/core/agent.ts` 의 `buildRemoteCtx` 가 배선한다)로 재검증한다. 다만 이 통일은
+`dirTools`(`allow_dir`/`revoke_dir`/`list_dirs`) 에 한정된다 — 손님 분기(DM·서버)는 `dirTools`
+자체를 스프레드하지 않으므로 폴더 관리 도구는 지금도 두 소유자 분기(owner-DM·owner-서버)
+에만 나타난다. `remote`(`fs_*`/`sh_exec`)는 그와 별개로 `workerConnected` 하나만 보고 네
+분기 모두에 스플라이스된다(위 능력 계층표) — 원격 도구 자체가 소유자 DM 에만 나타난다는
+서술은 Task 7 이후 더 이상 맞지 않는다.
 
 ## character_fact 전역 스코프와 DM→공개 데이터 흐름
 
@@ -338,7 +342,7 @@ Asahi 비서는 대화·모델 호출·기억·세션을 전담하는 **봇** �
 | `agent/src/core/remoteTools.ts` | `remoteToolHandler` 는 `ctx.remote`(=`resolveTurnWorker` 판정 결과)가 없으면 항상 거부한다 — 예전처럼 `isOwnerDm` 을 독립적으로 다시 확인하지 않는다(Task 7, 이 판정은 이제 `agent.ts` 하나뿐이다). `fs_read`/`fs_write`/`fs_edit`/`fs_glob`/`fs_grep` 의 경로 후보는 그 워커의 `allowed_dirs` 를 `scopeDirs` 로 좁힌 범위 안에 있어야 하며, 빈 경로 문자열·빈 허용 목록·리포 조회 실패는 모두 거부(fail-closed)로 처리한다. `fs_glob`/`fs_grep` 은 `path` 생략 시 검사에 쓴 기본값을 `args` 에 실제로 주입해 워커로 보낸다(최종 리뷰 FIX1). `sh_exec` 는 이 경로 필터의 대상이 아니다(의도된 설계 — 위 "손님·공유 기계" 절 참고). |
 | `agent/src/remote/roots.ts` | `checkPath` 는 워커의 최종 경로 관문이다 — `WORKER_ROOTS` 항목이 모호한 절대경로(윈도우에서 드라이브 문자·UNC 없음)면 무조건 거부하고, `resolveRealOrNearestAncestor` 로 realpath 정규화한 뒤 그 워커의 `WORKER_ROOTS` 밖이면 거부한다. **이 검사는 워커의 루트 기준이지 손님 개인의 스코프 기준이 아니다** — 손님 폴더 안 심볼릭 링크가 이 두 기준의 차이를 파고드는 받아들인 위험이다(`docs/security/risk-register.md`). |
 | `agent/src/remote/hub.ts` | `WorkerHub.handleConnection` 은 `hello` 의 토큰을 상수 시간(`timingSafeEqual`)으로 비교하고, 빈 토큰은 길이 검사로 먼저 거부하며, 등록되지 않은 `workerId` 와 토큰 불일치를 같은 거부 사유(`DENIED_REASON`)로 응답해 인증 오라클을 막는다(대조값 자체도 프로세스별 랜덤이라 "없는 워커" 경로를 맞출 수 없다). `unauth`/`authenticating` 상태에서는 어떤 프레임도 처리하지 않는다(`hello` 재전송 포함 — 레지스트리 조회가 비동기가 되며 생긴 창을 `authenticating` 상태로 막는다). `rootsOf(workerId)` 는 `agent.ts` 의 `buildRemoteCtx` 가 실제로 호출한다(§능력 계층표 참고). |
-| `agent/src/core/pathPermission.ts` | `extractCandidatePaths`(`remoteTools.ts` 가 재사용)는 Glob 의 `pattern` 과 Grep 의 `glob`(최종 리뷰 FIX1 — 검색 대상 파일 필터도 경로를 담을 수 있다) 리터럴 접두를 후보에서 빠뜨리지 않는다. `resolveRealOrNearestAncestor`(`roots.ts` 가 재사용)는 존재하지 않는 경로도 가장 가까운 실재 조상까지 realpath 한다. `decidePathPermission`/`isPathGatedTool` 은 옛 `canUseTool` 전용이었고 지금은 프로덕션 코드에서 호출되지 않는다(2단계 재사용 여지로 남겨둠 — 새 경로 검사 로직의 근거로 오인하지 말 것). |
+| `agent/src/core/pathPermission.ts` | `extractCandidatePaths`(`remoteTools.ts` 가 재사용)는 Glob 의 `pattern` 과 Grep 의 `glob`(최종 리뷰 FIX1 — 검색 대상 파일 필터도 경로를 담을 수 있다) 리터럴 접두를 후보에서 빠뜨리지 않는다. 그 리터럴을 base 에 결합할 때는 `paths.ts` 의 `pathFlavorOf` 로 대상 문자열의 플레이버(윈도우/POSIX)를 판정한다 — host 프로세스의 `process.platform` 을 따르는 `node:path` 기본 export 를 쓰면, 리눅스에 배포된 봇이 윈도우 워커의 경로(`C:\ws\...`)를 다룰 때 정상 호출을 "허용된 폴더 밖"으로 오거부한다(최종 pre-merge 리뷰 FIX2, 리뷰 재현). `resolveRealOrNearestAncestor`(`roots.ts` 가 재사용)는 존재하지 않는 경로도 가장 가까운 실재 조상까지 realpath 한다. `isPathGatedTool` 은 `extractCandidatePaths` 의 cwd 폴백 조건으로 지금도 쓰인다. `decidePathPermission`(옛 `canUseTool` 전용 최종 allow/deny 판정 함수)은 프로덕션 호출자가 없어 삭제했다(최종 pre-merge 리뷰 FIX6) — 남겨 두면 이 브랜치가 뒤집은 정책("PC 작업은 소유자 DM 에서만")을 그대로 반환하는 죽은 함수가 새 경로 검사 로직의 근거로 오인될 위험이 있었다. |
 | `agent/src/core/sqlGuard.ts` | `assertReadOnlySql` 은 다중 문장과 `SELECT`/`WITH` 이외 시작 키워드를 거부한다(1차 방어). |
 | `agent/src/store/introspectRepo.ts` | `readOnlyQuery` 의 `SET TRANSACTION READ ONLY` 는 에러를 삼키지 않는다(2차·핵심 방어선). |
 

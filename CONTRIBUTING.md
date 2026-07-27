@@ -1,5 +1,5 @@
 ---
-lastReviewed: 2026-07-13
+lastReviewed: 2026-07-28
 ---
 
 # 기여 가이드 (CONTRIBUTING)
@@ -58,13 +58,16 @@ npm run dev
 `.env`(루트, `DATABASE_URL` 등 필수 환경변수)가 있어야 실제로 디스코드에 연결해 동작한다.
 `npm run dev`는 `tsx src/index.ts`를 바로 실행하므로 빌드 없이 TypeScript를 그대로 돈다.
 
-## 워커 (로컬 PC 작업 위임)
+## 워커 (PC 작업 실행)
 
-로컬 워커(`agent/src/worker.ts`)는 소유자 PC에서 파일/Bash 같은 PC 작업을 대신 실행해주는
-별도 프로세스다(하이브리드 구조는 [docs/architecture/overview.md](docs/architecture/overview.md)
-참고). `npm run worker`로 로컬 워커를 실행할 수 있고, 자세한 건
-[deploy/worker-셋업.md](deploy/worker-셋업.md) 참고 — `.env`에
-`WORKER_USER_ID`(소유자 자신의 디스코드 ID)를 채워둬야 한다.
+워커(`agent/src/worker.ts`)는 소유자 PC 또는 동아리 공용 미니PC에서 파일/Bash 같은 PC 작업을
+대신 실행해주는 별도 프로세스다(하이브리드 구조는 [docs/architecture/overview.md](docs/architecture/overview.md)
+참고, `docs/decisions/0007-multi-worker-routing.md`). 먼저 워커를 레지스트리에 등록해 토큰을
+발급받는다(`cd agent && npm run register-worker -- --id <이름> --kind personal --user <소유자
+디스코드 ID>` — 공용 워커는 `--kind shared`로, `--user`는 생략). 그 뒤 `.env`에 `WORKER_ID`
+(등록한 `--id`와 같은 값)·`WORKER_TOKEN`(등록 시 콘솔에 한 번만 출력된 토큰)·`HUB_URL`·
+`WORKER_ROOTS`를 채우고 `npm run worker`로 실행한다. 자세한 건
+[deploy/worker-셋업.md](deploy/worker-셋업.md) 참고.
 
 ## 빌드 / 프로덕션 실행
 

@@ -75,7 +75,7 @@ lastReviewed: 2026-07-28
 
 ## 테스트
 
-`agent/` 기준 vitest 40개 파일, **686개 통과 + 1개 skip**(687개). skip 1건은 Postgres READ ONLY
+`agent/` 기준 vitest 40개 파일, **691개 통과 + 1개 skip**(692개). skip 1건은 Postgres READ ONLY
 트랜잭션의 실제 쓰기 거부 동작으로, 테스트용 인메모리 Postgres 구현(pg-mem)의 한계상 유닛 테스트로
 재현할 수 없어 실 Supabase 스모크로만 검증 가능하다.
 
