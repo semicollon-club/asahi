@@ -95,7 +95,7 @@ export class WorkerHub {
         // tokensMatch 가 true 를 돌려줄 수 있으므로 이 검사를 먼저, 별도로 둔다).
         // FIX5: 아래 denied 사유는 토큰 오류·신원 오류 어느 쪽이든 완전히 같다(인증 오라클 방지).
         const tokenOk = this.opts.token.length > 0 && tokensMatch(frame.token, this.opts.token);
-        const identityOk = frame.userId === this.opts.ownerId;
+        const identityOk = frame.workerId === this.opts.ownerId;
         if (!tokenOk || !identityOk) {
           socket.send(encodeFrame({ type: "denied", reason: DENIED_REASON }));
           socket.close();
@@ -106,7 +106,7 @@ export class WorkerHub {
         this.clearHelloTimer(socket);
 
         // 1단계는 소유자 워커 하나만 지원한다. 사용자별 토큰이 생기는 2단계에서 이 조건이 바뀐다.
-        userId = frame.userId;
+        userId = frame.workerId;
         this.dropExisting(userId);
         this.conns.set(userId, { socket, roots: frame.roots, pending: new Map() });
         socket.send(encodeFrame({ type: "ready" }));

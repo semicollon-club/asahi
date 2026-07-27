@@ -1,7 +1,10 @@
 // 봇(허브)과 워커가 WebSocket 으로 주고받는 프레임 정의. 양쪽이 공유하는 유일한 계약이며
 // 순수 함수만 둔다(소켓·fs 없음) — 그래야 실제 연결 없이 테스트할 수 있다.
 
-export type WorkerHello = { type: "hello"; token: string; userId: string; roots: string[] };
+// workerId: "나는 누구의 워커다"가 아니라 "나는 어느 워커다". 허브가 이 값으로 workers 행을
+// 찾아 토큰 해시를 대조한다. 옛 형식(userId)은 파서가 거부하므로 구버전 워커는 조용히 붙지 못하고
+// 명확히 실패한다 — 이게 의도된 동작이다.
+export type WorkerHello = { type: "hello"; token: string; workerId: string; roots: string[] };
 export type HubReady = { type: "ready" };
 export type HubDenied = { type: "denied"; reason: string };
 export type HubCall = { type: "call"; id: string; tool: string; args: Record<string, unknown> };
@@ -31,8 +34,8 @@ export function parseFrame(raw: string): Frame | null {
   if (!isObj(v)) return null;
   switch (v.type) {
     case "hello":
-      return isStr(v.token) && isStr(v.userId) && isStrArray(v.roots)
-        ? { type: "hello", token: v.token, userId: v.userId, roots: v.roots }
+      return isStr(v.token) && isStr(v.workerId) && isStrArray(v.roots)
+        ? { type: "hello", token: v.token, workerId: v.workerId, roots: v.roots }
         : null;
     case "ready":
       return { type: "ready" };

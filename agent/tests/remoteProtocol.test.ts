@@ -4,7 +4,7 @@ import { encodeFrame, parseFrame, type Frame } from "../src/remote/protocol.js";
 describe("프레임 직렬화", () => {
   it("7종 프레임을 인코딩·파싱해도 값이 보존된다", () => {
     const frames: Frame[] = [
-      { type: "hello", token: "t", userId: "u", roots: ["/a", "/b"] },
+      { type: "hello", token: "t", workerId: "w", roots: ["/a", "/b"] },
       { type: "ready" },
       { type: "denied", reason: "토큰 불일치" },
       { type: "call", id: "1", tool: "fs_read", args: { path: "/a/x.txt" } },
@@ -27,13 +27,37 @@ describe("프레임 검증 — 잘못된 입력은 null", () => {
   });
 
   it("필수 필드가 없거나 타입이 다르면 null", () => {
-    expect(parseFrame(JSON.stringify({ type: "hello", token: "t", userId: "u" }))).toBeNull();
-    expect(parseFrame(JSON.stringify({ type: "hello", token: 1, userId: "u", roots: [] }))).toBeNull();
+    expect(parseFrame(JSON.stringify({ type: "hello", token: "t", workerId: "w" }))).toBeNull();
+    expect(parseFrame(JSON.stringify({ type: "hello", token: 1, workerId: "w", roots: [] }))).toBeNull();
     expect(parseFrame(JSON.stringify({ type: "call", id: "1", tool: "fs_read" }))).toBeNull();
     expect(parseFrame(JSON.stringify({ type: "result", id: "1", ok: "yes", content: "" }))).toBeNull();
   });
 
   it("roots 배열에 문자열이 아닌 값이 섞이면 null", () => {
-    expect(parseFrame(JSON.stringify({ type: "hello", token: "t", userId: "u", roots: ["/a", 3] }))).toBeNull();
+    expect(parseFrame(JSON.stringify({ type: "hello", token: "t", workerId: "w", roots: ["/a", 3] }))).toBeNull();
+  });
+});
+
+describe("hello — 신원이 userId 에서 workerId 로 바뀐다", () => {
+  it("workerId 가 있는 hello 를 파싱한다", () => {
+    const raw = JSON.stringify({ type: "hello", token: "t", workerId: "semicolon-shared", roots: ["C:\\ws"] });
+    expect(parseFrame(raw)).toEqual({ type: "hello", token: "t", workerId: "semicolon-shared", roots: ["C:\\ws"] });
+  });
+
+  it("옛 형식(userId)은 거부한다 — 구버전 워커가 조용히 붙으면 안 된다", () => {
+    const raw = JSON.stringify({ type: "hello", token: "t", userId: "123", roots: ["/ws"] });
+    expect(parseFrame(raw)).toBeNull();
+  });
+
+  it("workerId 가 문자열이 아니면 거부한다", () => {
+    for (const bad of [123, null, {}, []]) {
+      const raw = JSON.stringify({ type: "hello", token: "t", workerId: bad, roots: ["/ws"] });
+      expect(parseFrame(raw)).toBeNull();
+    }
+  });
+
+  it("encode → parse 왕복이 보존된다", () => {
+    const f = { type: "hello" as const, token: "t", workerId: "w1", roots: ["/a", "/b"] };
+    expect(parseFrame(encodeFrame(f))).toEqual(f);
   });
 });

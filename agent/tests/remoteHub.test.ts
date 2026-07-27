@@ -28,7 +28,7 @@ describe("WorkerHub — 인증", () => {
   it("올바른 토큰과 소유자 ID 면 ready 를 보내고 연결로 등록한다", () => {
     const s = fakeSocket();
     hub.handleConnection(s.sock);
-    s.recv({ type: "hello", token: "good", userId: "owner", roots: ["/w"] });
+    s.recv({ type: "hello", token: "good", workerId: "owner", roots: ["/w"] });
     expect(s.sent[0]).toEqual({ type: "ready" });
     expect(hub.isConnected("owner")).toBe(true);
     expect(hub.rootsOf("owner")).toEqual(["/w"]);
@@ -37,7 +37,7 @@ describe("WorkerHub — 인증", () => {
   it("토큰이 틀리면 denied 후 연결을 끊고 등록하지 않는다", () => {
     const s = fakeSocket();
     hub.handleConnection(s.sock);
-    s.recv({ type: "hello", token: "bad", userId: "owner", roots: ["/w"] });
+    s.recv({ type: "hello", token: "bad", workerId: "owner", roots: ["/w"] });
     expect(s.sent[0]?.type).toBe("denied");
     expect(s.closed).toBe(true);
     expect(hub.isConnected("owner")).toBe(false);
@@ -46,7 +46,7 @@ describe("WorkerHub — 인증", () => {
   it("소유자가 아닌 userId 는 거부한다(1단계는 소유자 워커 하나)", () => {
     const s = fakeSocket();
     hub.handleConnection(s.sock);
-    s.recv({ type: "hello", token: "good", userId: "guest", roots: ["/w"] });
+    s.recv({ type: "hello", token: "good", workerId: "guest", roots: ["/w"] });
     expect(s.sent[0]?.type).toBe("denied");
     expect(hub.isConnected("guest")).toBe(false);
   });
@@ -56,12 +56,12 @@ describe("WorkerHub — 인증", () => {
   it("토큰이 틀린 경우와, 토큰은 맞지만 신원이 다른 경우가 완전히 같은 거부 사유를 돌려준다(FIX5 — 인증 오라클 방지)", () => {
     const wrongToken = fakeSocket();
     hub.handleConnection(wrongToken.sock);
-    wrongToken.recv({ type: "hello", token: "bad", userId: "owner", roots: ["/w"] });
+    wrongToken.recv({ type: "hello", token: "bad", workerId: "owner", roots: ["/w"] });
     const wrongTokenFrame = wrongToken.sent[0];
 
     const wrongIdentity = fakeSocket();
     hub.handleConnection(wrongIdentity.sock);
-    wrongIdentity.recv({ type: "hello", token: "good", userId: "guest", roots: ["/w"] });
+    wrongIdentity.recv({ type: "hello", token: "good", workerId: "guest", roots: ["/w"] });
     const wrongIdentityFrame = wrongIdentity.sent[0];
 
     expect(wrongTokenFrame?.type).toBe("denied");
@@ -76,7 +76,7 @@ describe("WorkerHub — 인증", () => {
     // hub 의 token("good", 4자)과 길이가 다른 훨씬 긴 문자열 — timingSafeEqual 은 길이가 다른
     // 버퍼를 그냥 넘기면 예외를 던지므로, 그 경우를 hub 내부에서 미리 처리하지 않으면 여기서
     // 예외가 튀어 소켓 처리 전체가 죽는다.
-    expect(() => s.recv({ type: "hello", token: "x".repeat(50), userId: "owner", roots: ["/w"] })).not.toThrow();
+    expect(() => s.recv({ type: "hello", token: "x".repeat(50), workerId: "owner", roots: ["/w"] })).not.toThrow();
     expect(s.sent[0]?.type).toBe("denied");
     expect(hub.isConnected("owner")).toBe(false);
   });
@@ -85,7 +85,7 @@ describe("WorkerHub — 인증", () => {
     const emptyTokenHub = new WorkerHub({ token: "", ownerId: "owner" });
     const s = fakeSocket();
     emptyTokenHub.handleConnection(s.sock);
-    s.recv({ type: "hello", token: "", userId: "owner", roots: ["/w"] });
+    s.recv({ type: "hello", token: "", workerId: "owner", roots: ["/w"] });
     expect(s.sent[0]?.type).toBe("denied");
     expect(s.closed).toBe(true);
     expect(emptyTokenHub.isConnected("owner")).toBe(false);
@@ -108,11 +108,11 @@ describe("WorkerHub — 인증", () => {
   it("이미 인증된 연결에 두 번째 hello 가 와도 무시한다(재등록·roots 변경·ready 재전송 없음, 다른 userId 로도 탈취되지 않음)", () => {
     const s = fakeSocket();
     hub.handleConnection(s.sock);
-    s.recv({ type: "hello", token: "good", userId: "owner", roots: ["/w"] });
+    s.recv({ type: "hello", token: "good", workerId: "owner", roots: ["/w"] });
     expect(s.sent).toHaveLength(1); // ready 하나만 보낸 상태
 
     // 같은 연결로 두 번째 hello — 심지어 다른 userId 로 탈취를 시도해도 무시되어야 한다.
-    s.recv({ type: "hello", token: "good", userId: "intruder", roots: ["/evil"] });
+    s.recv({ type: "hello", token: "good", workerId: "intruder", roots: ["/evil"] });
 
     expect(s.sent).toHaveLength(1); // ready 를 다시 보내지 않는다
     expect(hub.isConnected("owner")).toBe(true); // 기존 등록 유지
@@ -133,7 +133,7 @@ describe("WorkerHub — 도구 호출", () => {
     hub = new WorkerHub({ token: "good", ownerId: "owner", callTimeoutMs: 300 });
     s = fakeSocket();
     hub.handleConnection(s.sock);
-    s.recv({ type: "hello", token: "good", userId: "owner", roots: ["/w"] });
+    s.recv({ type: "hello", token: "good", workerId: "owner", roots: ["/w"] });
   });
 
   it("call 프레임을 보내고 같은 id 의 result 로 응답한다", async () => {
@@ -215,13 +215,13 @@ describe("WorkerHub — 재연결(동일 userId 두 연결)", () => {
   it("같은 userId 로 두 번째 연결이 오면 첫 번째를 밀어내고, 첫 연결의 대기 중 호출은 ok:false 로 정리되며, 이후 호출은 새 소켓으로만 간다", async () => {
     const s1 = fakeSocket();
     hub.handleConnection(s1.sock);
-    s1.recv({ type: "hello", token: "good", userId: "owner", roots: ["/w"] });
+    s1.recv({ type: "hello", token: "good", workerId: "owner", roots: ["/w"] });
 
     const p1 = hub.call("owner", "fs_read", { path: "/w/a.txt" });
 
     const s2 = fakeSocket();
     hub.handleConnection(s2.sock);
-    s2.recv({ type: "hello", token: "good", userId: "owner", roots: ["/w2"] });
+    s2.recv({ type: "hello", token: "good", workerId: "owner", roots: ["/w2"] });
 
     // 첫 번째 소켓은 닫히고, 그 연결에 대기 중이던 호출은 orphan 되지 않고 실패로 정리된다.
     expect(s1.closed).toBe(true);
@@ -263,7 +263,7 @@ describe("WorkerHub — 인증 전 소켓의 수명(FIX3)", () => {
     const hub = new WorkerHub({ token: "good", ownerId: "owner", helloTimeoutMs: 30 });
     const s = fakeSocket();
     hub.handleConnection(s.sock);
-    s.recv({ type: "hello", token: "good", userId: "owner", roots: ["/w"] });
+    s.recv({ type: "hello", token: "good", workerId: "owner", roots: ["/w"] });
     expect(hub.isConnected("owner")).toBe(true);
 
     await new Promise((resolve) => setTimeout(resolve, 80));
@@ -287,7 +287,7 @@ describe("WorkerHub — 인증 전 소켓의 수명(FIX3)", () => {
     const hub = new WorkerHub({ token: "good", ownerId: "owner", callTimeoutMs: 300 });
     const authed = fakeSocket();
     hub.handleConnection(authed.sock);
-    authed.recv({ type: "hello", token: "good", userId: "owner", roots: ["/w"] });
+    authed.recv({ type: "hello", token: "good", workerId: "owner", roots: ["/w"] });
     const silent = fakeSocket();
     hub.handleConnection(silent.sock);
 

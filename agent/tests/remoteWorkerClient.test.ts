@@ -28,7 +28,7 @@ describe("워커 클라이언트", () => {
     const s = fakeSocket();
     const c = startWorkerClient({ connect: () => s.sock, token: "t", userId: "owner", roots: ["/w"], executors });
     s.open();
-    expect(s.sent[0]).toEqual({ type: "hello", token: "t", userId: "owner", roots: ["/w"] });
+    expect(s.sent[0]).toEqual({ type: "hello", token: "t", workerId: "owner", roots: ["/w"] });
     c.stop();
   });
 
