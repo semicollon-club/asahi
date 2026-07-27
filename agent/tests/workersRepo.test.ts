@@ -45,10 +45,29 @@ describe("WorkersRepo", () => {
     expect(row?.tokenHash).toBe("new");
   });
 
+  it("라벨 없이 재등록(회전)하면 기존 라벨이 보존된다", async () => {
+    await repo.upsert({ id: "w1", kind: "shared", userId: null, tokenHash: "old", label: "동아리 미니PC", ts: 100 });
+    await repo.upsert({ id: "w1", kind: "shared", userId: null, tokenHash: "new", ts: 200 });
+    expect((await repo.getById("w1"))?.label).toBe("동아리 미니PC");
+  });
+
+  it("라벨을 명시해서 재등록하면 교체된다", async () => {
+    await repo.upsert({ id: "w1", kind: "shared", userId: null, tokenHash: "old", label: "동아리 미니PC", ts: 100 });
+    await repo.upsert({ id: "w1", kind: "shared", userId: null, tokenHash: "new", label: "새 이름", ts: 200 });
+    expect((await repo.getById("w1"))?.label).toBe("새 이름");
+  });
+
   it("personal 워커를 담당 사용자로 찾는다", async () => {
     await repo.upsert({ id: "owner-laptop", kind: "personal", userId: "owner", tokenHash: "h", ts: 100 });
     expect(await repo.personalWorkerOf("owner")).toBe("owner-laptop");
     expect(await repo.personalWorkerOf("guest")).toBeNull();
+  });
+
+  it("personal 워커가 한 사용자에게 여럿이면(예: 노트북+데스크탑) 가장 먼저 등록된 것을 돌려준다(결정적)", async () => {
+    // created_ts 가 완전히 같은 동석(tie) 상황 — 정렬 없이 LIMIT 1 이면 DB 가 순서를 정한다.
+    await repo.upsert({ id: "z-laptop", kind: "personal", userId: "owner", tokenHash: "h", ts: 100 });
+    await repo.upsert({ id: "a-desktop", kind: "personal", userId: "owner", tokenHash: "h", ts: 100 });
+    expect(await repo.personalWorkerOf("owner")).toBe("a-desktop");
   });
 
   it("shared 워커를 찾는다 — 없으면 null", async () => {

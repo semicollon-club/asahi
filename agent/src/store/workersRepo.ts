@@ -53,6 +53,9 @@ export class WorkersRepo {
 
   // 같은 id 로 다시 부르면 토큰 해시가 교체된다(회전·폐기 경로). created_ts 는 유지한다 —
   // "언제 처음 등록했는가"는 회전으로 사라져선 안 되는 정보다.
+  // label 도 같은 이유로 회전에서 살아남아야 하는 신원 메타데이터다 — --label 없이 재등록하면
+  // (o.label === undefined, 즉 아래에서 null 로 넘어감) 기존 값을 그대로 두고, 명시적으로 준
+  // 라벨만 교체한다. COALESCE(EXCLUDED.label, workers.label) 이 그 "생략 시 보존" 을 구현한다.
   async upsert(o: { id: string; kind: WorkerKind; userId: string | null; tokenHash: string; label?: string; ts: number }): Promise<void> {
     await this.db.query(
       `INSERT INTO workers (id, kind, user_id, token_hash, label, created_ts)
@@ -61,7 +64,7 @@ export class WorkersRepo {
          kind = EXCLUDED.kind,
          user_id = EXCLUDED.user_id,
          token_hash = EXCLUDED.token_hash,
-         label = EXCLUDED.label`,
+         label = COALESCE(EXCLUDED.label, workers.label)`,
       [o.id, o.kind, o.userId, o.tokenHash, o.label ?? null, o.ts],
     );
   }
@@ -70,9 +73,12 @@ export class WorkersRepo {
     await this.db.query("UPDATE workers SET last_seen_ts = $1 WHERE id = $2", [ts, id]);
   }
 
+  // 한 사용자가 개인 워커를 두 대 이상 등록할 수 있다(예: 소유자의 노트북+데스크탑) —
+  // user_id 에는 UNIQUE 제약이 없다. sharedWorkerId 와 같은 이유로, created_ts 가 같을 때도
+  // 결과가 DB 순서에 휘둘리지 않도록 id 를 타이브레이커로 둔다.
   async personalWorkerOf(userId: string): Promise<string | null> {
     const r = await this.db.query(
-      "SELECT id FROM workers WHERE kind = 'personal' AND user_id = $1 ORDER BY created_ts LIMIT 1",
+      "SELECT id FROM workers WHERE kind = 'personal' AND user_id = $1 ORDER BY created_ts, id LIMIT 1",
       [userId],
     );
     return (r.rows as { id: string }[])[0]?.id ?? null;
