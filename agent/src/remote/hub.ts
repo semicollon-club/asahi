@@ -1,5 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
 import { encodeFrame, parseFrame, type Frame } from "./protocol.js";
+import { hashWorkerToken } from "../store/workersRepo.js";
 
 // 실제 ws 소켓을 감싸는 최소 인터페이스. 이 추상화 덕에 소켓 없이 허브 로직을 테스트한다
 // (ws → HubSocket 어댑터는 index.ts 배선에서 만든다).
@@ -33,9 +34,9 @@ const DEFAULT_HELLO_TIMEOUT_MS = 10_000;
 // 전송 계층이 이미 다 버퍼링한 "뒤"에야 아래 검사가 실행돼 방어가 너무 늦다.
 export const MAX_FRAME_CHARS = 1_000_000;
 
-// FIX5(중요): 토큰이 틀린 경우와 "토큰은 맞지만 신원(userId)이 다른" 경우를 구분하지 않는다.
-// 구분되는 사유를 돌려주면, 인증되지 않은 클라이언트가 그 응답만으로 "이 토큰이 유효한가"를
-// 신원과 무관하게 확인할 수 있는 오라클이 된다.
+// FIX5(중요): "그런 workerId 없음"과 "토큰이 틀림"을 구분하지 않는다. 구분되는 사유를 돌려주면,
+// 인증되지 않은 클라이언트가 그 응답만으로 "이 workerId 가 실제로 등록돼 있는가"를 확인할 수
+// 있는 오라클이 된다.
 const DENIED_REASON = "인증에 실패했어요.";
 
 // FIX5: 토큰을 상수 시간으로 비교한다. 문자열 '!==' 비교는 앞에서부터 다른 문자가 나오는 순간
@@ -43,6 +44,7 @@ const DENIED_REASON = "인증에 실패했어요.";
 // 타이밍 공격). Buffer 길이가 다르면 timingSafeEqual 자체가 예외를 던지므로, 그 경우엔 자기
 // 자신과 비교하는 더미 연산으로 같은 코드 경로의 비용만 흉내내고 false 를 돌려준다 — 길이 정보
 // 자체가 새는 것까지 막지는 못하지만, 적어도 "내용 비교" 단계에서 조기 반환은 없앤다.
+// Task3: 이제 인자로 평문 토큰이 아니라 해시(양쪽 다 hashWorkerToken 을 거친 값)를 받는다.
 function tokensMatch(given: string, expected: string): boolean {
   const givenBuf = Buffer.from(given, "utf8");
   const expectedBuf = Buffer.from(expected, "utf8");
@@ -53,23 +55,45 @@ function tokensMatch(given: string, expected: string): boolean {
   return timingSafeEqual(givenBuf, expectedBuf);
 }
 
+// 허브가 인증에 필요한 최소 인터페이스. WorkersRepo 전체를 받지 않는 이유는 테스트에서
+// 가짜를 만들기 쉽게 하기 위해서다 — 허브는 조회와 접속 기록만 필요하다.
+export type WorkerRegistry = {
+  getById(id: string): Promise<{ tokenHash: string } | null>;
+  touchLastSeen(id: string, ts: number): Promise<void>;
+};
+
+// 인증 상태. authenticating 은 hello 를 받아 레지스트리를 조회하는 중이라는 뜻이고, 그 사이
+// 도착한 프레임은 무조건 연결 종료로 다룬다 — 조회가 비동기가 되면서 생긴 창이라, 여기서
+// 얼버무리면 "인증 전 프레임은 즉시 끊는다"는 기존 규칙에 구멍이 난다.
+type AuthState = "unauth" | "authenticating" | "authed";
+
 export class WorkerHub {
   private conns = new Map<string, Conn>();
   // FIX3: 아직 hello 로 인증되지 않은 소켓 → 그 hello-타임아웃 타이머. conns 는 인증된 연결만
   // 담으므로, 인증 전 소켓은 여기서 따로 추적해야 closeAll() 이 이들도 닫을 수 있다.
   private unauthSockets = new Map<HubSocket, ReturnType<typeof setTimeout>>();
   private seq = 0;
+  private registry: WorkerRegistry;
+  private now: () => number;
   private callTimeoutMs: number;
   private helloTimeoutMs: number;
 
-  constructor(private opts: { token: string; ownerId: string; callTimeoutMs?: number; helloTimeoutMs?: number }) {
+  constructor(opts: { registry: WorkerRegistry; now?: () => number; callTimeoutMs?: number; helloTimeoutMs?: number }) {
+    this.registry = opts.registry;
+    this.now = opts.now ?? Date.now;
     this.callTimeoutMs = opts.callTimeoutMs ?? DEFAULT_CALL_TIMEOUT_MS;
     this.helloTimeoutMs = opts.helloTimeoutMs ?? DEFAULT_HELLO_TIMEOUT_MS;
   }
 
   // 새 소켓 하나를 받는다. hello 로 인증되기 전에는 어떤 프레임도 처리하지 않는다.
   handleConnection(socket: HubSocket): void {
-    let userId: string | null = null;
+    let state: AuthState = "unauth";
+    let workerId: string | null = null;
+    // authenticate() 는 socket 을 인자로만 받을 뿐 이 클로저의 state 를 모른다. 조회가 진행되는
+    // 동안(authenticating) 크기 초과·형식 오류 등 다른 이유로 이 소켓이 이미 닫혔는데도 조회가
+    // 뒤늦게 성공(ok:true)으로 돌아오면, 그 결과를 그대로 커밋해 이미 죽은 소켓을 conns 에
+    // 남겨두면 안 된다 — 아래 onClose 에서 이 플래그를 세우고, .then() 에서 확인해 되돌린다.
+    let socketClosed = false;
 
     // FIX3: hello 를 제때 안 보내면 닫는다. 인증에 성공하면(아래) 이 타이머를 바로 지운다 —
     // 안 지우면 정상적으로 인증된 지 한참 지난 연결도 이 시간이 지나는 순간 끊겨버린다.
@@ -86,35 +110,42 @@ export class WorkerHub {
       const frame = parseFrame(raw);
       if (!frame) { socket.close(); return; }
 
-      if (userId === null) {
-        // 인증 전에는 hello 만 받는다. 그 외에는 즉시 끊는다.
+      // 조회 중에는 어떤 프레임도 받지 않는다(hello 재전송 포함).
+      if (state === "authenticating") { socket.close(); return; }
+
+      if (state === "unauth") {
         if (frame.type !== "hello") { socket.close(); return; }
-
-        // FIX2 방어: config 검증(loadConfig)을 어떻게든 우회해 빈 토큰으로 허브가 뜨더라도, 빈
-        // 토큰이 "누구든 인증"으로 이어지면 안 된다 — 길이 0 은 무조건 거부한다(빈 문자열끼리는
-        // tokensMatch 가 true 를 돌려줄 수 있으므로 이 검사를 먼저, 별도로 둔다).
-        // FIX5: 아래 denied 사유는 토큰 오류·신원 오류 어느 쪽이든 완전히 같다(인증 오라클 방지).
-        const tokenOk = this.opts.token.length > 0 && tokensMatch(frame.token, this.opts.token);
-        const identityOk = frame.workerId === this.opts.ownerId;
-        if (!tokenOk || !identityOk) {
-          socket.send(encodeFrame({ type: "denied", reason: DENIED_REASON }));
-          socket.close();
-          return;
-        }
-
-        // 인증 성공 — 더 이상 hello-타임아웃 대상이 아니다.
-        this.clearHelloTimer(socket);
-
-        // 1단계는 소유자 워커 하나만 지원한다. 사용자별 토큰이 생기는 2단계에서 이 조건이 바뀐다.
-        userId = frame.workerId;
-        this.dropExisting(userId);
-        this.conns.set(userId, { socket, roots: frame.roots, pending: new Map() });
-        socket.send(encodeFrame({ type: "ready" }));
+        state = "authenticating";
+        // 조회는 비동기다. 이 프로미스는 절대 reject 되지 않게 감싼다 — 여기서 던지면
+        // onMessage 콜백 밖으로 새어 프로세스 전체가 죽는다.
+        void this.authenticate(socket, frame.workerId, frame.token, frame.roots)
+          .then((ok) => {
+            if (!ok) { state = "unauth"; return; }  // 이미 close() 된 상태
+            if (socketClosed) {
+              // 조회하는 동안 이 소켓이 이미 다른 경로로 닫혔다(예: authenticating 중 도착한
+              // 프레임). 뒤늦게 성공해도 authenticate() 가 conns 에 넣어둔 등록을 되돌린다 —
+              // 그 사이 같은 workerId 로 새 연결이 이미 들어와 있을 수 있으니, 지금 그 자리를
+              // 차지한 게 정말 이 소켓인지 확인하고서만 지운다(남의 연결을 지우지 않는다).
+              const conn = this.conns.get(frame.workerId);
+              if (conn && conn.socket === socket) this.conns.delete(frame.workerId);
+              return;
+            }
+            state = "authed";
+            workerId = frame.workerId;
+          })
+          .catch((e) => {
+            console.error("[hub] 인증 처리 오류:", e);
+            state = "unauth";
+            socket.close();
+          });
         return;
       }
 
-      const conn = this.conns.get(userId);
-      if (!conn) return;
+      // state === "authed"
+      if (frame.type === "hello") { socket.close(); return; }
+      if (workerId === null) return;
+      const conn = this.conns.get(workerId);
+      if (!conn || conn.socket !== socket) return;
       if (frame.type === "result") {
         const p = conn.pending.get(frame.id);
         if (!p) return; // 모르는 id — 타임아웃 뒤 늦게 온 응답일 수 있다. 무시한다.
@@ -127,32 +158,34 @@ export class WorkerHub {
     });
 
     socket.onClose(() => {
+      socketClosed = true;
+
       // FIX3: 인증 전에 끊겼다면 hello-타임아웃 추적을 정리한다(인증 후라면 위에서 이미 지워
       // 여기선 no-op).
       this.clearHelloTimer(socket);
 
-      if (userId === null) return;
-      const conn = this.conns.get(userId);
+      if (workerId === null) return;
+      const conn = this.conns.get(workerId);
       if (!conn || conn.socket !== socket) return;
-      this.conns.delete(userId);
+      this.conns.delete(workerId);
       this.failAllPending(conn, "워커 연결이 끊겼어요.");
     });
   }
 
-  isConnected(userId: string): boolean {
-    return this.conns.has(userId);
+  isConnected(workerId: string): boolean {
+    return this.conns.has(workerId);
   }
 
-  rootsOf(userId: string): string[] {
-    return this.conns.get(userId)?.roots ?? [];
+  rootsOf(workerId: string): string[] {
+    return this.conns.get(workerId)?.roots ?? [];
   }
 
   // 도구 호출 하나를 워커로 보내고 결과를 기다린다. 어떤 경우에도 reject 하지 않는다 —
   // 실패는 ok:false 로 모델에게 돌려주어 턴 전체가 죽지 않게 한다.
   // args 는 호출측이 준 그대로 프레임에 실어 보낼 뿐 절대 merge·spread·Object.assign 하지 않는다 —
   // __proto__ 같은 키가 들어 있어도 그대로 통과시켜야 프로토타입 오염 경로가 생기지 않는다.
-  call(userId: string, tool: string, args: Record<string, unknown>): Promise<{ ok: boolean; content: string }> {
-    const conn = this.conns.get(userId);
+  call(workerId: string, tool: string, args: Record<string, unknown>): Promise<{ ok: boolean; content: string }> {
+    const conn = this.conns.get(workerId);
     if (!conn) return Promise.resolve({ ok: false, content: "워커가 연결돼 있지 않아요." });
     const id = String(++this.seq);
     return new Promise((resolve) => {
@@ -185,18 +218,18 @@ export class WorkerHub {
       socket.close();
     }
     this.unauthSockets.clear();
-    for (const [userId, conn] of this.conns) {
+    for (const [workerId, conn] of this.conns) {
       this.failAllPending(conn, "봇이 종료돼 작업을 마치지 못했어요.");
       conn.socket.close();
-      this.conns.delete(userId);
+      this.conns.delete(workerId);
     }
   }
 
-  // 같은 사용자의 이전 연결이 남아 있으면 정리한다(워커 재시작 시 유령 연결 방지).
-  private dropExisting(userId: string): void {
-    const prev = this.conns.get(userId);
+  // 같은 workerId 의 이전 연결이 남아 있으면 정리한다(워커 재시작 시 유령 연결 방지).
+  private dropExisting(workerId: string): void {
+    const prev = this.conns.get(workerId);
     if (!prev) return;
-    this.conns.delete(userId);
+    this.conns.delete(workerId);
     this.failAllPending(prev, "워커가 다시 연결돼 이전 작업이 취소됐어요.");
     prev.socket.close();
   }
@@ -207,6 +240,32 @@ export class WorkerHub {
       p.resolve({ ok: false, content: message });
     }
     conn.pending.clear();
+  }
+
+  // 성공하면 conns 에 등록하고 true, 실패하면 denied 를 보내고 닫은 뒤 false.
+  private async authenticate(socket: HubSocket, workerId: string, token: string, roots: string[]): Promise<boolean> {
+    const row = await this.registry.getById(workerId);
+    // FIX5 유지: "그런 워커 없음"과 "토큰 틀림"을 구분하지 않는다. 구분하면 인증되지 않은
+    // 클라이언트가 유효한 workerId 를 캐낼 수 있는 오라클이 된다. 행이 없어도 해시 비교를
+    // 흉내내 응답 시간 차이도 줄인다 — row !== null && tokensMatch(...) 처럼 단락 평가로 쓰면
+    // row 가 없을 때 tokensMatch 호출 자체가 스킵되어 이 흉내가 무너지므로, 비교는 항상 먼저
+    // 실행하고 최종 판정에서만 row 유무를 반영한다.
+    const expected = row?.tokenHash ?? hashWorkerToken("");
+    const hashesMatch = tokensMatch(hashWorkerToken(token), expected);
+    const ok = row !== null && hashesMatch;
+    if (!ok) {
+      socket.send(encodeFrame({ type: "denied", reason: DENIED_REASON }));
+      socket.close();
+      return false;
+    }
+
+    this.clearHelloTimer(socket);
+    this.dropExisting(workerId);
+    this.conns.set(workerId, { socket, roots, pending: new Map() });
+    socket.send(encodeFrame({ type: "ready" }));
+    // 접속 기록은 실패해도 인증을 되돌리지 않는다 — 부가 정보다.
+    await this.registry.touchLastSeen(workerId, this.now()).catch(() => {});
+    return true;
   }
 
   // FIX3: hello-타임아웃 타이머와 추적 Map 항목을 함께 정리한다. 인증 성공 직후·소켓 종료(onClose)·
