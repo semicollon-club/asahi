@@ -19,7 +19,6 @@ import { WorkersRepo } from "./store/workersRepo.js";
 import { SettingsRepo } from "./store/settingsRepo.js";
 import { IntrospectRepo } from "./store/introspectRepo.js";
 import { CharacterImagesRepo } from "./store/characterImagesRepo.js";
-import { backfillLegacyAllowedDirs } from "./store/allowedDirsMigration.js";
 import { AgentCore } from "./core/core.js";
 import { makeRunAgentTurn } from "./core/agent.js";
 import { DigestRunner, DIGEST_TOPICS, type DigestTopic } from "./core/digest.js";
@@ -59,10 +58,6 @@ async function main() {
   };
   // 소유자를 users(owner)로 보장 — 게이트 통과 기본값.
   await users.upsert(config.ownerId, { role: "owner" });
-
-  // 리뷰 #6(LOW): allowed_dirs 테이블 도입 전 owner.allowedDirs 단일 settings 키에 저장돼 있던
-  // 소유자 허용 폴더를 이전한다(멱등이라 부팅마다 호출해도 안전).
-  await backfillLegacyAllowedDirs(new SettingsRepo(db), allowedDirs, config.ownerId);
 
   // 워커 허브: 워커가 아웃바운드로 붙는 유일한 표면. Task 4: 봇 전체가 공유하던 단일 토큰 대신,
   // workers 테이블(레지스트리)에서 워커별 해시 토큰을 조회해 인증한다(hub.ts 의 WorkerRegistry) —
