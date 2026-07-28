@@ -147,3 +147,47 @@ describe("formatProgress — 성패와 사유가 보인다", () => {
     expect(formatProgress({ kind: "answering" })).toBe("답변 작성 중");
   });
 });
+
+// 리뷰 후속(Task 3): shortenPath 가 실측 실패 케이스 두 가지를 놓쳤다 — (1) LLM 이 도구 인자를
+// 슬래시로 정규화해 base(백슬래시)와 구분자가 섞이는 경우, (2) 드라이브 문자 대소문자만 다른 경우.
+// 둘 다 예전엔 "조용히" 축약 없이 전체 경로를 그대로 노출했다(폴더 밖 경로와 구분이 안 됨).
+describe("formatProgress — shortenPath 가 혼합 구분자·대소문자에도 축약한다(리뷰 후속)", () => {
+  const BASE = ["C:\\asahi-workspace\\1517428698368704650"];
+
+  it("슬래시로 정규화된 텍스트 + 역슬래시 base → 축약된다", () => {
+    const s = formatProgress({ kind: "tool", name: "fs_read", input: "C:/asahi-workspace/1517428698368704650/src/a.ts" }, BASE);
+    expect(s).toBe("fs_read src/a.ts");
+  });
+
+  it("대소문자만 다른 텍스트(드라이브 문자) → 축약된다", () => {
+    const s = formatProgress({ kind: "tool", name: "fs_read", input: "c:\\asahi-workspace\\1517428698368704650\\src\\a.ts" }, BASE);
+    expect(s).toBe("fs_read src\\a.ts");
+  });
+
+  it("축약 결과가 원본의 표기를 유지한다(정규화된 사본이 아니라 원본 텍스트에서 잘라낸다)", () => {
+    const s = formatProgress({ kind: "tool", name: "fs_read", input: "C:/asahi-workspace/1517428698368704650/src/sub/a.ts" }, BASE);
+    // 원본이 슬래시로 왔으니 잘라낸 나머지도 슬래시인 채로 남아야 한다(역슬래시로 재작성되면 안 됨).
+    expect(s).toBe("fs_read src/sub/a.ts");
+  });
+
+  it("기준 폴더 밖 경로는 그대로다(회귀)", () => {
+    const s = formatProgress({ kind: "tool", name: "fs_read", input: "C:\\other\\a.ts" }, BASE);
+    expect(s).toBe("fs_read C:\\other\\a.ts");
+  });
+
+  it("형제 폴더 오탐이 없다 — base 뒤에 다른 이름이 이어지면 축약하지 않는다", () => {
+    const s = formatProgress(
+      { kind: "tool", name: "fs_read", input: "C:\\asahi-workspace\\1517428698368704650-backup\\a.ts" },
+      BASE,
+    );
+    expect(s).toBe("fs_read C:\\asahi-workspace\\1517428698368704650-backup\\a.ts");
+  });
+});
+
+describe("formatProgress — 기준 폴더가 여러 개일 때(리뷰 후속: Minor)", () => {
+  it("두 번째 baseDirs 항목으로도 매칭된다", () => {
+    const bases = ["C:\\asahi-workspace\\1111111111111111111", "C:\\asahi-workspace\\2222222222222222222"];
+    const s = formatProgress({ kind: "tool", name: "fs_read", input: "C:\\asahi-workspace\\2222222222222222222\\src\\a.ts" }, bases);
+    expect(s).toBe("fs_read src\\a.ts");
+  });
+});

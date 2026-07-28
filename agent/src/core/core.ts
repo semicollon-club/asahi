@@ -1,3 +1,4 @@
+import path from "node:path";
 import type { EventBus, UserMessageEvent, ConversationHint } from "../events/bus.js";
 import type { Config } from "../config.js";
 import { resolveTurnWorker, type TurnRunner, type TurnContext, type TurnResult, type ProgressUpdate } from "./agent.js";
@@ -17,6 +18,7 @@ import type { AllowedDirsRepo } from "../store/allowedDirsRepo.js";
 import type { ActionsRepo } from "../store/actionsRepo.js";
 import type { WorkerKind } from "../store/workersRepo.js";
 import { scopeDirs } from "./workerSelect.js";
+import { pathFlavorOf } from "./paths.js";
 import { buildContextBlock, isSessionNotFound } from "./turnPrep.js";
 import { buildImageMarker, downloadImages, type ImageRef, type ImageInput } from "./images.js";
 
@@ -26,16 +28,45 @@ const SUMMARY_PROMPT = `이 대화 세션이 곧 종료됩니다. 나중에 다�
 - 결정된 것, 사용자에 대해 새로 알게 된 것, 진행 중인 일 중심으로 10줄 이내
 - 요약 텍스트만 출력 (인사말·설명 없이)`;
 
+// text/rawPrefix 를 "표시용 비교"에만 쓸 폴딩된 사본으로 바꾼다 — 윈도우 플레이버일 때만 구분자를
+// 통일하고(백슬래시→슬래시) 대소문자를 접는다(윈도우 파일시스템은 대소문자를 구분하지 않는다;
+// POSIX 는 구분자가 "/" 뿐이고 대소문자도 구분하므로 그대로 둔다). 두 치환 모두 문자 수를 보존한다고
+// 가정한다 — paths.ts 의 isPathWithin(33-34번째 줄 부근)도 경계 판정에 같은 toLowerCase 가정을 이미
+// 쓰고 있다. 그래서 폴딩된 문자열에서 찾은 접두 길이(rawPrefix.length, 폴딩 전 원래 길이)를 그대로
+// 원본 text 자르기에 써도 안전하다 — shortenPath 가 진짜로 필요로 하는 성질이 바로 이것이다.
+function foldForCompare(s: string, isWindows: boolean): string {
+  const unified = isWindows ? s.replace(/\\/g, "/") : s;
+  return isWindows ? unified.toLowerCase() : unified;
+}
+
 // 표시용 경로 축약: 그 사용자의 작업 폴더로 시작하면 그 앞부분을 떼어 낸다. 긴 절대경로가
 // 상태 메시지의 12줄 예산을 잡아먹는 것을 막고, 부원에게 "내 폴더 안"이라는 게 자연스럽게
 // 드러난다. 밖의 경로는 그대로 둔다 — 줄이면 어디인지 알 수 없어진다.
+//
+// 리뷰 후속(Task 3 사후검토, 실측 실패 케이스 2가지): (1) LLM 이 도구 인자를 슬래시로 정규화해
+// 넘기면 base(백슬래시)와 구분자가 섞여 예전의 리터럴 startsWith 두 벌(백슬래시 접미 / "끝만"
+// 슬래시로 바꾼 접미 — 내부 백슬래시는 그대로라 base 자체가 이미 POSIX 표기일 때만 맞았다)로는
+// 못 잡았다. (2) 드라이브 문자 대소문자만 달라도(c:\ vs C:\) 못 잡았다. 두 경우 다 "조용히" 축약
+// 없이 전체 경로가 그대로 노출됐다 — 폴더 밖 경로와 구분이 안 된다.
+//
+// base 가 윈도우식(드라이브 문자·UNC)인지는 paths.ts 의 pathFlavorOf 로 판정한다 — isPathWithin 이
+// "무엇이 윈도우 경로인가"에 쓰는 것과 동일한 규칙이라, 두 곳의 판정이 나중에 갈리지 않는다(같은
+// 규칙을 두 벌로 만들면 갈린다는 게 이 저장소가 이미 여러 번 겪은 결함 유형이다 — pathPermission.ts
+// 의 resolveAgainstBase 도 같은 이유로 pathFlavorOf 를 재사용한다).
+//
+// isPathWithin/normalizeDir 자체는 재사용하지 않았다 — 그 함수들은 flavor.resolve() 로 상대경로를
+// cwd 기준으로 만들고 '..'를 접은 뒤(+대소문자 폴딩) "같은 경로냐"만 참/거짓으로 답하도록 만들어져,
+// 돌려주는 값이 있다면 정규화된 사본이지 "원본에서 그대로 잘라낸 나머지"가 아니다. 이 함수는
+// 사용자에게 보여줄 문자열이 원래 표기(사용자가 실제로 준 구분자·대소문자)를 유지해야 하므로,
+// 폴딩(foldForCompare)은 "어디서 자를지" 판단(boolean)에만 쓰고 자르기 자체는 항상 원본 text 에서 한다.
 function shortenPath(text: string, baseDirs?: string[]): string {
   if (!baseDirs) return text;
   for (const base of baseDirs) {
-    const prefix = base.endsWith("\\") || base.endsWith("/") ? base : `${base}\\`;
-    if (text.startsWith(prefix)) return text.slice(prefix.length);
-    const posix = `${base.replace(/\\+$/, "")}/`;
-    if (text.startsWith(posix)) return text.slice(posix.length);
+    const isWindows = pathFlavorOf(base) === path.win32;
+    const rawPrefix = base.endsWith("\\") || base.endsWith("/") ? base : `${base}${isWindows ? "\\" : "/"}`;
+    if (foldForCompare(text, isWindows).startsWith(foldForCompare(rawPrefix, isWindows))) {
+      return text.slice(rawPrefix.length);
+    }
   }
   return text;
 }
