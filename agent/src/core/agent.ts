@@ -30,7 +30,10 @@ export type ProgressUpdate =
 // 도구를 연달아 부를 때 어긋난다.
 export type PendingTool = { name: string; input?: string; startedAt: number };
 
-// 결과 요약 상한. 표시 한 줄과 actions.result_summary 양쪽에 쓴다.
+// 결과 요약의 기록 상한 — actions.result_summary 에 남길 해상도다. 표시 줄의 상한은 이 값이
+// 아니라 core.ts 의 PROGRESS_SUMMARY_MAX(80)가 따로 갖는다. 같은 이벤트에서 나온 두 소비자가
+// 서로 다른 예산을 갖는 지점이라, 표시를 늘리려고 이 값을 건드리면 표시는 그대로이고 DB
+// 해상도만 바뀐다(최종 리뷰 Important 2 로 갈라진 뒤 이 주석이 낡아 바로잡았다).
 export const RESULT_SUMMARY_MAX = 200;
 
 // images(§Task3 이미지 입력): 있으면 query() 의 prompt 를 문자열 대신 async-iterable(SDKUserMessage 1개)로
