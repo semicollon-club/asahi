@@ -41,9 +41,19 @@ npm install
 ## 테스트 (DB 불필요)
 
 ```powershell
-npm test          # vitest, 1회 실행
+npm test            # vitest, 1회 실행
 npm run test:watch  # 감시 모드
+npm run typecheck   # tsc, src + tests 전부 타입 검사
 ```
+
+`npm run typecheck`를 따로 두는 이유가 있다. `npm run build`가 쓰는 `tsconfig.json`은
+`include`가 `src`뿐이라 **테스트 파일은 타입 검사를 받지 않는다** — `dist/`에 테스트를 함께
+내보내지 않으려면 그래야 한다. 그런데 vitest는 esbuild로 타입을 지우고 실행하므로 타입 오류를
+잡지 않는다. 그 결과 "가짜 객체가 실제 타입과 어긋나는" 종류의 문제가 양쪽 어디에도 안 걸린다
+— 실제로 `CoreRepos`에 필드를 추가했을 때 테스트의 가짜 repos가 그 필드를 빠뜨린 것을 `tsc`도
+`vitest`도 잡아 주지 않았고, 코드의 `try/catch`가 삼켜 조용히 기능이 빠진 채 통과했다.
+`tsconfig.check.json`은 `noEmit`으로 `src`와 `tests`를 함께 검사한다. **테스트를 고친 뒤에는
+`npm test`와 함께 이것도 돌린다.**
 
 테스트는 [pg-mem](https://github.com/oguimbal/pg-mem)으로 Postgres를 인메모리에 흉내
 내므로, `DATABASE_URL` 같은 실제 DB 연결 없이도 전부 돌아간다. 처음 셋업한 뒤 가장 먼저
