@@ -156,3 +156,16 @@ describe("FIX1 — Object.prototype 상속 키는 예약어로 오인식되지 �
     }
   });
 });
+
+describe("renderCommandHelp — 손님이 무엇을 할 수 있는지 알린다", () => {
+  it("자기 폴더 조회·파일 작업을 안내한다", () => {
+    const help = renderCommandHelp();
+    expect(help).toMatch(/폴더/);
+    expect(help).toMatch(/파일/);
+  });
+
+  it("소유자 전용 도구 이름은 노출하지 않는다", () => {
+    const help = renderCommandHelp();
+    expect(help).not.toMatch(/manage_access|db_query|allow_dir/);
+  });
+});

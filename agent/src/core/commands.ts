@@ -66,7 +66,19 @@ export const COMMAND_HELP: ReadonlyArray<{ commands: readonly string[]; descript
   { commands: [...HELP_COMMANDS], description: "이 목록을 보여준다" },
 ];
 
+// 손님용 능력 안내. /help 는 손님도 보므로(예약어가 없는 부원도 이 목록으로 먼저 안내받는다),
+// 예약어처럼 정확히 쳐야 하는 게 아니라 자연어로 시키면 되는 것들을 짧게 덧붙인다. 도구가
+// 있어도 "그렇게 물어봐도 된다"는 걸 모르면 안 쓰인다 — 이 목록이 그 구멍을 메운다.
+// 소유자 전용 도구(manage_access·db_query·allow_dir 등)는 여기 넣지 않는다 — 손님에게는
+// 못 쓰는 기능을 알려줘봤자 혼란만 준다.
+const GUEST_TIPS = [
+  "이런 것도 말로 시키면 돼:",
+  "- 내 폴더에 뭐 있는지 보여줘 — 작업 폴더 구조를 그대로 훑어서 알려줘",
+  "- 파일 만들어줘 / 읽어줘 / 고쳐줘 — 네 작업 폴더 안에서",
+  "- 명령 실행해줘 — 예: 테스트 돌려줘, 빌드해줘",
+].join("\n");
+
 export function renderCommandHelp(): string {
   const lines = COMMAND_HELP.map((g) => `- ${g.commands.join(" · ")} — ${g.description}`);
-  return `쓸 수 있는 명령어야.\n\n${lines.join("\n")}\n\n그 외에는 그냥 말 걸면 돼.`;
+  return `쓸 수 있는 명령어야.\n\n${lines.join("\n")}\n\n${GUEST_TIPS}\n\n그 외에는 그냥 말 걸면 돼.`;
 }
