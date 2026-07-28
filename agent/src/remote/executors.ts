@@ -169,13 +169,26 @@ export function makeExecutors(roots: string[]): Executors {
     async fs_tree(args) {
       const g = gate(args.path);
       if (!g.ok) return g.res;
-      const maxDepth = Math.min(num(args.depth) ?? TREE_DEFAULT_DEPTH, TREE_MAX_DEPTH);
+      // depth 는 0 미만으로 내려가지 않는다 — tools.ts 의 zod 스키마가 하한을 두더라도, 모델이
+      // 스키마를 우회해 음수를 보낼 가능성까지 여기서 막는다(스키마만 믿지 않는다). 클램프가
+      // 없으면 최상위(depth0)에서 바로 depth 초과로 판정돼 entries 를 하나도 못 채우고,
+      // renderTree 의 "entries 가 비었는지" 검사가 truncated 검사보다 먼저 걸려 내용이 있는
+      // 폴더를 "비어 있어요"로 속인다.
+      const maxDepth = Math.max(0, Math.min(num(args.depth) ?? TREE_DEFAULT_DEPTH, TREE_MAX_DEPTH));
       const entries: TreeEntry[] = [];
-      let truncated = false;
-      let truncatedReason: TreeTruncReason | undefined;
+      // 두 상한은 성격이 다르므로 플래그를 분리한다.
+      // - entries 는 전역이다: 상한에 닿으면 순회 전체를 멈추는 게 맞다(더 읽어봐야 어차피 다
+      //   보여줄 수 없다).
+      // - depth 는 가지별(local)이다: 어떤 가지가 너무 깊다고 다른 형제 가지의 얕은 내용까지
+      //   못 볼 이유가 없다. 예전엔 이 둘을 하나의 truncated 플래그로 같이 써서, depth 로 멈춘
+      //   가지가 walk 맨 위의 `if (truncated) return` 을 통해 그 뒤 모든 형제의 순회까지
+      //   막아버리는 회귀가 있었다 — A/A1/leaf.txt 가 depth 를 넘겨 플래그가 서면, 알파벳상
+      //   뒤에 오는 형제 B 는 이름만 보이고 depth 상한 안(정상 범위)의 B/B1.txt 까지 사라졌다.
+      let entriesTruncated = false;
+      let depthTruncated = false;
 
       const walk = async (dir: string, rel: string, depth: number): Promise<void> => {
-        if (truncated) return;
+        if (entriesTruncated) return; // 전역 상한만 이후 호출 전체를 막는다. depth 상한은 여기서 걸지 않는다.
         let items;
         try {
           items = await fs.readdir(dir, { withFileTypes: true });
@@ -194,20 +207,18 @@ export function makeExecutors(roots: string[]): Executors {
           .sort((a, b) => a.name.localeCompare(b.name));
 
         if (depth > maxDepth) {
-          // depth 상한 때문에 여기서 멈출 때, 더 보여줄 게 실제로 있을 때만(필터 후에도 남는 게
-          // 있을 때만) "잘렸다"고 말한다 — 마지막 depth 의 폴더가 비어 있으면 자른 게 아니므로
-          // 거짓 안내가 된다(OUTPUT_MAX 와 같은 원칙: 조용히 자르면 모델이 전체를 봤다고 착각한다).
-          if (visible.length > 0) {
-            truncated = true;
-            truncatedReason = "depth";
-          }
+          // depth 상한 때문에 이 가지에서 멈출 때, 더 보여줄 게 실제로 있을 때만(필터 후에도
+          // 남는 게 있을 때만) "잘렸다"고 말한다 — 마지막 depth 의 폴더가 비어 있으면 자른 게
+          // 아니므로 거짓 안내가 된다(OUTPUT_MAX 와 같은 원칙: 조용히 자르면 모델이 전체를 봤다고
+          // 착각한다). 이 가지만 return 할 뿐, 전역 플래그를 세우지 않으므로 형제 가지의 walk
+          // 호출은 영향받지 않는다.
+          if (visible.length > 0) depthTruncated = true;
           return;
         }
 
         for (const it of visible) {
           if (entries.length >= TREE_MAX_ENTRIES) {
-            truncated = true;
-            truncatedReason = "entries";
+            entriesTruncated = true;
             return;
           }
           const childRel = rel === "" ? it.name : `${rel}/${it.name}`;
@@ -221,6 +232,11 @@ export function makeExecutors(roots: string[]): Executors {
       } catch (err) {
         return { ok: false, content: `읽지 못했어요: ${String(err)}` };
       }
+      // 안내 문구는 실제로 일어난 것만 말한다 — 둘 다 걸렸으면 둘 다 드러낸다. 하나만 골라
+      // 보여주면 나머지 하나는 조용히 잘린 것과 같아진다.
+      const truncatedReason: TreeTruncReason | undefined =
+        entriesTruncated && depthTruncated ? "both" : entriesTruncated ? "entries" : depthTruncated ? "depth" : undefined;
+      const truncated = truncatedReason !== undefined;
       return { ok: true, content: truncate(renderTree(entries, { root: g.path, truncated, truncatedReason })) };
     },
 

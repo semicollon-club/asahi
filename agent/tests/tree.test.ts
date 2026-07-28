@@ -35,4 +35,13 @@ describe("renderTree", () => {
     const out = renderTree([e("a.ts", false, 0)], { root: "C:\\ws\\u1", truncated: true, truncatedReason: "entries" });
     expect(out).toContain("항목이 많아");
   });
+
+  // 회귀 수정: depth 상한과 항목 수 상한이 한 호출에서 동시에 걸릴 수 있다(executors.ts 의
+  // walk 가 가지별 depth 플래그와 전역 entries 플래그를 따로 추적한다). 하나만 골라 보여주면
+  // 나머지 하나는 조용히 잘린 것과 같아지므로, 안내 문구는 두 사실을 모두 드러내야 한다.
+  it("잘린 이유가 둘 다(both)면 depth·항목 수 둘 다 언급한다", () => {
+    const out = renderTree([e("a.ts", false, 0)], { root: "C:\\ws\\u1", truncated: true, truncatedReason: "both" });
+    expect(out).toContain("depth");
+    expect(out).toContain("항목");
+  });
 });

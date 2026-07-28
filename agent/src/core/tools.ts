@@ -408,7 +408,9 @@ export function buildTools(ctx: ToolCtx) {
       tool(
         "fs_tree",
         "작업 폴더의 파일·폴더 구조를 보여줍니다. 사용자가 '내 폴더에 뭐 있어?' 처럼 물으면 기억으로 답하지 말고 이 도구를 부르세요.",
-        { path: z.string().optional().describe("조회할 폴더의 절대경로. 생략하면 허용된 첫 폴더"), depth: z.number().optional().describe("내려갈 깊이(기본 3, 최대 5)") },
+        // depth 는 min(0) 으로 음수를 1차 방어한다 — 실제 하한 강제는 executors.ts 의 fs_tree 가
+        // 스키마와 무관하게(모델이 이걸 우회해도) 한 번 더 한다(스키마만 믿지 않는다).
+        { path: z.string().optional().describe("조회할 폴더의 절대경로. 생략하면 허용된 첫 폴더"), depth: z.number().min(0).optional().describe("내려갈 깊이(기본 3, 최대 5)") },
         async (args) => textResult(await remoteToolHandler(ctx, "fs_tree", args)),
       ),
       tool(
