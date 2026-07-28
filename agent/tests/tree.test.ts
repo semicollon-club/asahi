@@ -23,4 +23,16 @@ describe("renderTree", () => {
   it("항목 상한이 정의돼 있다", () => {
     expect(TREE_MAX_ENTRIES).toBe(500);
   });
+
+  // 리뷰 지적(Important 1의 "가능하면") — 잘린 이유가 depth 상한인지 항목 수 상한인지 구분되면
+  // 부원이 depth 를 올릴지 하위 폴더를 지정할지 판단할 수 있다.
+  it("잘린 이유가 depth 면 depth 를 늘리라고 안내한다", () => {
+    const out = renderTree([e("a", true, 0)], { root: "C:\\ws\\u1", truncated: true, truncatedReason: "depth" });
+    expect(out).toContain("depth");
+  });
+
+  it("잘린 이유가 entries 면 항목이 많다고 안내한다", () => {
+    const out = renderTree([e("a.ts", false, 0)], { root: "C:\\ws\\u1", truncated: true, truncatedReason: "entries" });
+    expect(out).toContain("항목이 많아");
+  });
 });

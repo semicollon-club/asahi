@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { makeExecutors, OUTPUT_MAX } from "../src/remote/executors.js";
+import { TREE_MAX_ENTRIES } from "../src/remote/tree.js";
 
 describe("워커 실행기", () => {
   let root: string;
@@ -261,5 +262,67 @@ describe("fs_tree 실행기", () => {
     const ex = makeExecutors([root]);
     const r = await ex.fs_tree!({ path: other });
     expect(r.ok).toBe(false);
+  });
+
+  // 리뷰 지적(Important 1): depth 상한 때문에 순회를 멈출 때 truncated 플래그를 세우지 않아,
+  // 잘린 트리가 안내 없이 그냥 끝나고 부원은 그게 전부인 줄 알았다. 아래 세 테스트가 그 구멍과
+  // "빈 폴더를 거짓으로 잘렸다고 하지 않는다"는 방지 조건을 함께 고정한다.
+  it("depth 상한을 넘는 트리는 상한까지만 보여주고, depth 때문에 잘렸다고 안내한다", async () => {
+    // 주의: 임시폴더 접두사에 "depth" 를 쓰지 않는다 — 아래 toMatch(/depth/) 를 썼다가 루트
+    // 경로 자체(head 에 그대로 노출됨)에 우연히 걸려 버그가 있어도 통과하는 거짓양성을 겪었다.
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "asahi-tree-cutoff-"));
+    // a(0)/b(1)/c(2) — depth:1 로 부르면 b 까지만 보이고, c 는 안 보이는 대신 잘렸다는 안내가 나가야 한다.
+    const deep = path.join(root, "a", "b", "c");
+    fs.mkdirSync(deep, { recursive: true });
+    fs.writeFileSync(path.join(deep, "leaf.txt"), "x");
+
+    const ex = makeExecutors([root]);
+    const r = await ex.fs_tree!({ path: root, depth: 1 });
+    expect(r.ok).toBe(true);
+    expect(r.content).toContain("a/");
+    expect(r.content).toContain("b/");
+    expect(r.content).not.toContain("c/");
+    expect(r.content).not.toContain("leaf.txt");
+    // 왜 잘렸는지(깊이 때문)가 구분돼야 depth 를 올릴지 하위 폴더를 지정할지 판단할 수 있다.
+    // 안내 문구 고유 표현("못 내려갔")으로 확인한다 — 그냥 "depth" 만 찾으면 위 주의사항과 같은
+    // 거짓양성에 다시 노출된다.
+    expect(r.content).toContain("못 내려갔");
+  });
+
+  it("마지막 depth 의 폴더가 비어 있으면 잘렸다고 하지 않는다(거짓 안내 방지)", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "asahi-tree-cutoff-empty-"));
+    const emptyLeaf = path.join(root, "a", "b");
+    fs.mkdirSync(emptyLeaf, { recursive: true }); // b 는 비어 있다 — 더 보여줄 게 없다.
+
+    const ex = makeExecutors([root]);
+    const r = await ex.fs_tree!({ path: root, depth: 1 });
+    expect(r.ok).toBe(true);
+    expect(r.content).toContain("a/");
+    expect(r.content).toContain("b/");
+    expect(r.content).not.toContain("잘랐");
+    expect(r.content).not.toContain("잘렸");
+  });
+
+  it("항목 수 상한을 넘는 트리는 잘렸다고 안내한다", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "asahi-tree-entries-"));
+    for (let i = 0; i < TREE_MAX_ENTRIES + 5; i++) {
+      fs.writeFileSync(path.join(root, `f${i}.txt`), "");
+    }
+
+    const ex = makeExecutors([root]);
+    const r = await ex.fs_tree!({ path: root });
+    expect(r.ok).toBe(true);
+    expect(r.content).toContain("항목이 많아");
+  });
+
+  // 리뷰 지적(Minor 1): roots.ts 의 경로 판정은 대상이 없어도(가장 가까운 상위로 올라가) 통과한다
+  // — 오타 난 경로·지워진 폴더가 readdir 실패 → 조용히 건너뜀 → renderTree([]) 를 거쳐 "비어
+  // 있어요"로 나왔다. 형제 도구 fs_read 처럼 최상위 실패는 오류로 드러내야 한다.
+  it("최상위 경로가 없으면 오류로 드러낸다(비어 있다고 속이지 않는다)", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "asahi-tree-missing-"));
+    const ex = makeExecutors([root]);
+    const r = await ex.fs_tree!({ path: path.join(root, "no-such-dir") });
+    expect(r.ok).toBe(false);
+    expect(r.content).toContain("읽지 못했어요");
   });
 });

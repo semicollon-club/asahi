@@ -3,7 +3,15 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { glob } from "tinyglobby";
 import { checkPath } from "./roots.js";
-import { renderTree, TREE_MAX_ENTRIES, TREE_DEFAULT_DEPTH, TREE_MAX_DEPTH, TREE_EXCLUDED, type TreeEntry } from "./tree.js";
+import {
+  renderTree,
+  TREE_MAX_ENTRIES,
+  TREE_DEFAULT_DEPTH,
+  TREE_MAX_DEPTH,
+  TREE_EXCLUDED,
+  type TreeEntry,
+  type TreeTruncReason,
+} from "./tree.js";
 
 export type ExecResult = { ok: boolean; content: string };
 export type Executors = Record<string, (args: Record<string, unknown>) => Promise<ExecResult>>;
@@ -164,27 +172,56 @@ export function makeExecutors(roots: string[]): Executors {
       const maxDepth = Math.min(num(args.depth) ?? TREE_DEFAULT_DEPTH, TREE_MAX_DEPTH);
       const entries: TreeEntry[] = [];
       let truncated = false;
+      let truncatedReason: TreeTruncReason | undefined;
 
       const walk = async (dir: string, rel: string, depth: number): Promise<void> => {
-        if (depth > maxDepth || truncated) return;
+        if (truncated) return;
         let items;
         try {
           items = await fs.readdir(dir, { withFileTypes: true });
-        } catch {
-          return; // 권한 없는 하위 폴더는 조용히 건너뛴다(전체를 실패시키지 않는다)
+        } catch (err) {
+          // depth 0 은 요청받은 경로(g.path) 자기 자신이다. roots.ts 의 경로 판정은 대상이 없어도
+          // (가장 가까운 상위로 올라가) 통과할 수 있어, 오타 난 경로·지워진 폴더가 바로 여기로
+          // 온다 — 그걸 조용히 건너뛰면 renderTree([]) 가 "비어 있어요"로 속인다. 형제 도구
+          // fs_read 처럼 오류로 드러내야 하므로 최상위 호출자에게 그대로 던진다. 하위 폴더의
+          // 실패(권한 등)는 흔하고 하나 때문에 전체를 실패시키면 안 되므로 조용히 건너뛴다 —
+          // depth===0 인지 여부가 이 둘을 가른다.
+          if (depth === 0) throw err;
+          return;
         }
-        for (const it of items.sort((a, b) => a.name.localeCompare(b.name))) {
-          if (it.isSymbolicLink()) continue;
-          if (TREE_EXCLUDED.has(it.name)) continue;
-          if (entries.length >= TREE_MAX_ENTRIES) { truncated = true; return; }
+        const visible = items
+          .filter((it) => !it.isSymbolicLink() && !TREE_EXCLUDED.has(it.name))
+          .sort((a, b) => a.name.localeCompare(b.name));
+
+        if (depth > maxDepth) {
+          // depth 상한 때문에 여기서 멈출 때, 더 보여줄 게 실제로 있을 때만(필터 후에도 남는 게
+          // 있을 때만) "잘렸다"고 말한다 — 마지막 depth 의 폴더가 비어 있으면 자른 게 아니므로
+          // 거짓 안내가 된다(OUTPUT_MAX 와 같은 원칙: 조용히 자르면 모델이 전체를 봤다고 착각한다).
+          if (visible.length > 0) {
+            truncated = true;
+            truncatedReason = "depth";
+          }
+          return;
+        }
+
+        for (const it of visible) {
+          if (entries.length >= TREE_MAX_ENTRIES) {
+            truncated = true;
+            truncatedReason = "entries";
+            return;
+          }
           const childRel = rel === "" ? it.name : `${rel}/${it.name}`;
           entries.push({ relPath: childRel, isDir: it.isDirectory(), depth });
           if (it.isDirectory()) await walk(path.join(dir, it.name), childRel, depth + 1);
         }
       };
 
-      await walk(g.path, "", 0);
-      return { ok: true, content: truncate(renderTree(entries, { root: g.path, truncated })) };
+      try {
+        await walk(g.path, "", 0);
+      } catch (err) {
+        return { ok: false, content: `읽지 못했어요: ${String(err)}` };
+      }
+      return { ok: true, content: truncate(renderTree(entries, { root: g.path, truncated, truncatedReason })) };
     },
 
     async sh_exec(args) {
