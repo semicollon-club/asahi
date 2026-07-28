@@ -18,7 +18,7 @@ async function make(over: Partial<{
   const settings = new SettingsRepo(db);
   const bus = new EventBus();
   const sent: AgentEvent[] = [];
-  bus.subscribe("assistant_message", (e) => sent.push(e));
+  bus.subscribe("assistant_message", (e) => { sent.push(e); });
   const prompts: string[] = [];
   // FIX2(최종 리뷰 3차) 날짜 롤오버 테스트용: now 를 고정값이 아니라 가변 클록으로 둔다 —
   // 기존 호출부(over.now 만 쓰는 테스트)는 setClock 을 부르지 않으므로 동작이 완전히 그대로다.
@@ -54,7 +54,7 @@ async function makeManual(over: Partial<{ channels: Record<string, string>; now:
   const settings = new SettingsRepo(db);
   const bus = new EventBus();
   const sent: AgentEvent[] = [];
-  bus.subscribe("assistant_message", (e) => sent.push(e));
+  bus.subscribe("assistant_message", (e) => { sent.push(e); });
   const runTurnCalls: string[] = [];
   const pending: Array<{ resolve: (r: { text: string; ok: boolean }) => void; reject: (e: unknown) => void }> = [];
   let clock = over.now ?? AFTER_SEVEN;

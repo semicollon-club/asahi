@@ -9,8 +9,28 @@ import { makeExecutors } from "../src/remote/executors.js";
 // 기본값은 "소유자 DM"을 나타낸다 — remoteToolHandler 가 최상단에서 신원을 독립적으로 재확인하므로
 // (FIX1), 신원 자체를 검증 대상으로 삼지 않는 테스트는 소유자 DM 으로 고정해 통과시킨다.
 // over 로 repos 등 추가 필드를 덧붙일 수 있다(경로 인자가 있는 케이스에서 필요).
-const ctxWith = (call: ToolCtx["remote"], over: Record<string, unknown> = {}): ToolCtx =>
-  ({ remote: call, isOwner: true, isPrivate: true, ...over } as unknown as ToolCtx);
+//
+// remote 는 부분만 받아 나머지를 기본값으로 채운다. 테스트들이 관심 있는 건 call 하나뿐인데,
+// ToolCtx["remote"] 는 roots·workerId·workerKind 까지 요구한다 — 매 호출마다 그 셋을 적으면
+// 잡음만 늘고, 반대로 캐스팅으로 뭉개면 실제 타입과 어긋난 가짜가 조용히 통과한다.
+// workerKind 기본값은 "personal" 이다: scopeDirs 가 좁히지 않아 위 주석의 "소유자 DM" 기본과
+// 맞는다. 공유 워커·손님 스코프를 검증하는 테스트는 over 나 remote 로 명시해 덮어쓴다.
+const ctxWith = (
+  remote: Partial<NonNullable<ToolCtx["remote"]>> | undefined,
+  over: Record<string, unknown> = {},
+): ToolCtx =>
+  ({
+    remote: remote && {
+      roots: ["/w"],
+      workerId: "test-worker",
+      workerKind: "personal",
+      call: async () => ({ ok: true, content: "" }),
+      ...remote,
+    },
+    isOwner: true,
+    isPrivate: true,
+    ...over,
+  } as unknown as ToolCtx);
 
 describe("원격 도구", () => {
   it("도구 이름 6개를 고정으로 노출한다", () => {
@@ -49,8 +69,13 @@ describe("원격 도구", () => {
 });
 
 describe("봇 쪽 1차 경로 필터", () => {
-  const withDirs = (dirs: string[], call: ToolCtx["remote"]): ToolCtx =>
-    ({ remote: call, isOwner: true, isPrivate: true, userId: "owner", repos: { allowedDirs: { list: async () => dirs } } } as unknown as ToolCtx);
+  // ctxWith 와 같은 이유로 remote 는 부분만 받아 나머지를 채운다(파일 상단 주석 참고).
+  const withDirs = (dirs: string[], remote: Partial<NonNullable<ToolCtx["remote"]>>): ToolCtx =>
+    ({
+      remote: { roots: ["/w"], workerId: "test-worker", workerKind: "personal", ...remote },
+      isOwner: true, isPrivate: true, userId: "owner",
+      repos: { allowedDirs: { list: async () => dirs } },
+    } as unknown as ToolCtx);
 
   it("allowed_dirs 밖 경로는 허브를 부르지 않고 거부한다", async () => {
     let called = false;
@@ -83,8 +108,13 @@ describe("봇 쪽 1차 경로 필터", () => {
 // 로컬 SDK Glob/Grep 게이트(pathPermission.ts 의 extractCandidatePaths)가 이미 풀어 둔 문제라
 // 그 로직을 재사용해 검증한다.
 describe("FIX6 — fs_glob·fs_grep 는 path 가 없어도, pattern 이 벗어나도 1차 필터를 건너뛰지 않는다", () => {
-  const withDirs = (dirs: string[], call: ToolCtx["remote"]): ToolCtx =>
-    ({ remote: call, isOwner: true, isPrivate: true, userId: "owner", repos: { allowedDirs: { list: async () => dirs } } } as unknown as ToolCtx);
+  // ctxWith 와 같은 이유로 remote 는 부분만 받아 나머지를 채운다(파일 상단 주석 참고).
+  const withDirs = (dirs: string[], remote: Partial<NonNullable<ToolCtx["remote"]>>): ToolCtx =>
+    ({
+      remote: { roots: ["/w"], workerId: "test-worker", workerKind: "personal", ...remote },
+      isOwner: true, isPrivate: true, userId: "owner",
+      repos: { allowedDirs: { list: async () => dirs } },
+    } as unknown as ToolCtx);
 
   it("fs_glob 는 path 생략 + allowedDirs 가 비어 있으면 허브를 부르지 않고 거부한다(전체 루트 열거 방지)", async () => {
     let called = false;
@@ -299,8 +329,13 @@ describe("FIX1(치명, 최종 리뷰) — fs_glob·fs_grep 가 path 생략/glob 
 });
 
 describe("FIX1(치명, 최종 리뷰) — path 생략 시 허브로 나가는 args 에 검사한 기본값을 실제로 주입한다", () => {
-  const withDirs = (dirs: string[], call: ToolCtx["remote"]): ToolCtx =>
-    ({ remote: call, isOwner: true, isPrivate: true, userId: "owner", repos: { allowedDirs: { list: async () => dirs } } } as unknown as ToolCtx);
+  // ctxWith 와 같은 이유로 remote 는 부분만 받아 나머지를 채운다(파일 상단 주석 참고).
+  const withDirs = (dirs: string[], remote: Partial<NonNullable<ToolCtx["remote"]>>): ToolCtx =>
+    ({
+      remote: { roots: ["/w"], workerId: "test-worker", workerKind: "personal", ...remote },
+      isOwner: true, isPrivate: true, userId: "owner",
+      repos: { allowedDirs: { list: async () => dirs } },
+    } as unknown as ToolCtx);
 
   it("fs_grep 에 path 를 생략하면 허브로 나가는 args.path 에 allowed_dirs[0] 이 채워진다(워커가 roots[0] 을 기본값으로 쓰지 못하게)", async () => {
     const seen: Array<Record<string, unknown>> = [];

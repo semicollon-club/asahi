@@ -45,6 +45,9 @@ async function setup(over: {
     discordToken: "t", ownerId: "owner", databaseUrl: "postgres://test", dataDir: ":memory:", memoryDir: "x",
     sessionIdleMinutes: 30, maxTurnsPerHour: 30, maxTurnsPerHourPerUser: 20, maxTurnsPerHourGlobal: 40, ownerReserve: 10,
     deployTarget: "local",
+    // 타입 검사를 켜면서 드러난 누락 — Config 의 필수 필드인데 가짜에 없었다. 코어는 model 을
+    // runTurn 요청에, httpPort 를 워커 허브 리스너에 쓴다.
+    model: "claude-opus-4-8", httpPort: 3000,
     // 기본은 미설정(빈 객체) — 조사 결과가 명령을 친 곳으로 폴백하는 경로다.
     // 지정 채널로 보내는 경로는 over.config 로 덮어써 따로 검증한다.
     digestChannels: {},
@@ -82,9 +85,11 @@ async function setup(over: {
   });
   core.start();
   const published: AgentEvent[] = [];
-  bus.subscribe("assistant_message", (e) => published.push(e));
-  bus.subscribe("system_notice", (e) => published.push(e));
-  bus.subscribe("progress", (e) => published.push(e));
+  // 블록 본문으로 둔다 — 화살표 한 줄로 쓰면 push 의 반환값(number)이 구독 콜백의 반환 타입
+  // (void | Promise<void>)과 어긋난다.
+  bus.subscribe("assistant_message", (e) => { published.push(e); });
+  bus.subscribe("system_notice", (e) => { published.push(e); });
+  bus.subscribe("progress", (e) => { published.push(e); });
   return {
     db, bus, core, calls, published, repos, resolvers,
     setClock: (t: number) => { clock = t; },
@@ -754,7 +759,8 @@ describe("AgentCore — 이미지 입력", () => {
     await t.core.drain();
     // runTurn 에 이미지 전달
     expect(t.calls[0].images).toHaveLength(1);
-    expect(t.calls[0].images[0].base64).toBe(Buffer.from("img").toString("base64"));
+    // 바로 위에서 길이 1을 단정했으므로 non-null 로 좁힌다(images 는 선택 필드다).
+    expect(t.calls[0].images![0]!.base64).toBe(Buffer.from("img").toString("base64"));
     // 저장은 마커
     const conv = await t.repos.conversations.getByChannelId("dm-owner");
     const recent = await t.repos.messages.recent(conv!.id, 5);

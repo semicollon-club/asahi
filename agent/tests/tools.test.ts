@@ -16,13 +16,30 @@ import {
 } from "../src/core/tools.js";
 import { CHARACTER_FACT_LIMIT } from "../src/core/turnPrep.js";
 
-async function ctx(over: Partial<ToolCtx> = {}): Promise<ToolCtx> {
+// remote 는 부분만 받아 나머지를 기본값으로 채운다. 이 파일의 테스트가 지정하는 건 roots·call·
+// workerId 정도인데 ToolCtx["remote"] 는 workerKind 까지 요구한다 — 매번 다 적으면 잡음이고,
+// 캐스팅으로 뭉개면 실제 타입과 어긋난 가짜가 조용히 통과한다(그게 CoreRepos 누락을 가렸던
+// 방식이다). workerKind 기본값 "personal" 은 scopeDirs 가 좁히지 않는 쪽이라 이 파일의 기본
+// 맥락(소유자)과 맞는다 — 공유 워커·손님 스코프를 보는 테스트는 remote 로 명시해 덮어쓴다.
+type CtxOver = Partial<Omit<ToolCtx, "remote">> & { remote?: Partial<NonNullable<ToolCtx["remote"]>> };
+
+async function ctx(over: CtxOver = {}): Promise<ToolCtx> {
   const db = await openTestDb();
+  const { remote, ...rest } = over;
   return {
     repos: { memories: new MemoriesRepo(db), users: new UsersRepo(db), allowedDirs: new AllowedDirsRepo(db), introspect: new IntrospectRepo(db) },
     role: "allowed", isPrivate: true, isOwner: false, userId: "guest", conversationId: 1,
     runtime: { model: "claude-opus-4-8", sdkVersion: "0.3.207", deployTarget: "local", maxTurns: 30 },
-    ...over,
+    ...rest,
+    ...(remote
+      ? {
+          remote: {
+            roots: [], workerId: "test-worker", workerKind: "personal" as const,
+            call: async () => ({ ok: true, content: "" }),
+            ...remote,
+          },
+        }
+      : {}),
   };
 }
 
