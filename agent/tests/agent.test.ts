@@ -318,3 +318,60 @@ describe("progressFromMessage — tool_result 에 성패·입력·소요시간�
     expect((u as { durationMs?: number }).durationMs).toBeUndefined();
   });
 });
+
+// 리뷰 후속(Task 1 코드리뷰 Important) — 위 describe 의 모든 케이스는 content 를 string 으로만
+// 넣어 짝지어 왔다. 그런데 tools.ts 의 textResult(`{ content: [{ type: "text", text }] }`)를
+// 거치는 이 저장소의 모든 도구는 실제로 배열을 돌려준다 — Anthropic 메시지 스펙(SDK 의
+// ToolResultBlockParam)상 content 는 string | 블록배열 둘 다 정상이다. string 만 가정한 예전
+// 구현은 이 배열 경로를 그냥 지나쳐 summary 가 실사용에서 늘 undefined 였다(현재 테스트들이
+// string 만 써서 이 구멍을 못 잡았다). 아래는 배열 경로를 리뷰가 요구한 다섯 케이스 그대로
+// 직접 검증한다.
+describe("progressFromMessage — tool_result.content 가 배열이어도 summary 를 뽑는다(MCP 표준, textResult 가 실제로 만드는 모양)", () => {
+  const toolUse = (id: string, name: string, input: unknown) => ({
+    type: "assistant",
+    message: { content: [{ type: "tool_use", id, name, input }] },
+  });
+  const toolResult = (id: string, extra: Record<string, unknown> = {}) => ({
+    type: "user",
+    message: { content: [{ type: "tool_result", tool_use_id: id, ...extra }] },
+  });
+
+  it("content 가 [{ type: 'text', text: '본문' }] 배열이면 summary 는 '본문'", () => {
+    const pending = new Map<string, PendingTool>();
+    progressFromMessage(toolUse("t1", "recall", { query: "병원" }), pending, () => 0);
+    const [u] = progressFromMessage(
+      toolResult("t1", { content: [{ type: "text", text: "본문" }] }), pending, () => 10);
+    expect((u as { summary?: string }).summary).toBe("본문");
+  });
+
+  it("텍스트 블록이 여러 개면 이어붙인다", () => {
+    const pending = new Map<string, PendingTool>();
+    progressFromMessage(toolUse("t1", "recall", { query: "병원" }), pending, () => 0);
+    const [u] = progressFromMessage(
+      toolResult("t1", { content: [{ type: "text", text: "가" }, { type: "text", text: "나" }] }), pending, () => 10);
+    expect((u as { summary?: string }).summary).toBe("가나");
+  });
+
+  it("텍스트 블록이 하나도 없는 배열(예: 이미지만)이면 summary 는 undefined", () => {
+    const pending = new Map<string, PendingTool>();
+    progressFromMessage(toolUse("t1", "recall", { query: "병원" }), pending, () => 0);
+    const [u] = progressFromMessage(
+      toolResult("t1", { content: [{ type: "image", source: { type: "base64", media_type: "image/png", data: "" } }] }), pending, () => 10);
+    expect((u as { summary?: string }).summary).toBeUndefined();
+  });
+
+  it("content 가 문자열이면 예전처럼 그 문자열 그대로 summary 가 된다(회귀 없음)", () => {
+    const pending = new Map<string, PendingTool>();
+    progressFromMessage(toolUse("t1", "recall", { query: "병원" }), pending, () => 0);
+    const [u] = progressFromMessage(toolResult("t1", { content: "본문" }), pending, () => 10);
+    expect((u as { summary?: string }).summary).toBe("본문");
+  });
+
+  it("200자 상한이 배열 경로에서도 적용된다", () => {
+    const pending = new Map<string, PendingTool>();
+    progressFromMessage(toolUse("t1", "sh_exec", { command: "ls" }), pending, () => 0);
+    const [u] = progressFromMessage(
+      toolResult("t1", { content: [{ type: "text", text: "가".repeat(500) }] }), pending, () => 10);
+    expect((u as { summary?: string }).summary!.length).toBeLessThanOrEqual(200);
+  });
+});

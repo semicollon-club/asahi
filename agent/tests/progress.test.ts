@@ -69,7 +69,10 @@ describe("progressFromMessage — SDK 메시지에서 진행 업데이트 추출
     expect(pending.has("t1")).toBe(false); // 소비 후 제거
   });
 
-  it("pending 에 없는 tool_result 는 name 없이", () => {
+  // 리뷰 후속(Minor) — 이 테스트는 name/input/durationMs 가 비는 것뿐 아니라 ok 기본값(true)과
+  // summary 추출까지 함께 단정한다. 제목이 "name 없이"만 말하던 예전 상태는 실제 검증 범위보다
+  // 좁았다 — 제목을 단정 내용 전체에 맞춘다.
+  it("pending 에 없는 tool_result 는 name·input·durationMs 는 비지만 ok:true·summary 는 채워진다", () => {
     const pending = new Map<string, PendingTool>();
     const msg = { type: "user", message: { content: [{ type: "tool_result", tool_use_id: "unknown", content: "결과" }] } };
     expect(progressFromMessage(msg, pending)).toEqual<ProgressUpdate[]>([
