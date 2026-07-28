@@ -9,6 +9,7 @@ import { SummariesRepo } from "../src/store/summariesRepo.js";
 import { MemoriesRepo } from "../src/store/memoriesRepo.js";
 import { TurnsRepo } from "../src/store/turnsRepo.js";
 import { AllowedDirsRepo } from "../src/store/allowedDirsRepo.js";
+import { ActionsRepo } from "../src/store/actionsRepo.js";
 import { AgentCore } from "../src/core/core.js";
 import type { Config } from "../src/config.js";
 import type { TurnRequest, TurnResult } from "../src/core/agent.js";
@@ -37,6 +38,7 @@ async function setup(over: {
     // 테스트는 타입 검사를 받지 않는다 — 여기서 빠뜨리면 tsc 도 vitest 도 잡아 주지 않고,
     // 코어의 try/catch 가 삼켜 "경로 안내 없음"으로 조용히 degrade 한다.
     allowedDirs: new AllowedDirsRepo(db),
+    actions: new ActionsRepo(db),
   };
   await repos.users.upsert("owner", { role: "owner" });
   await repos.users.upsert("guest", { role: "allowed" });
@@ -938,5 +940,41 @@ describe("AgentCore — DM 의 조사 예약어는 DM 에 답한다", () => {
     // 혼자 확인해 보려던 것이 매번 동아리 채널에 게시되면 안 된다.
     expect(digestCalls[0].channelRef).toBe("dm-owner");
     expect(t.published.filter((e) => e.type === "system_notice")).toHaveLength(0);
+  });
+});
+
+describe("AgentCore — 도구 호출을 actions 에 기록한다", () => {
+  it("도구 호출 1건이 1행이 되고 대화·사용자가 함께 남는다", async () => {
+    const t = await setup({ hub: { isConnected: () => true } });
+    pub(t.bus, dmHint("owner", "owner"), "파일 읽어줘", 1);
+    await t.core.drain();
+    // setup 의 runTurn 가짜는 onProgress 로 answering 만 보낸다 — 도구 이벤트를 직접 흘려보낸다.
+    t.calls[0].onProgress?.({ kind: "tool", name: "fs_read", input: "a.txt" });
+    t.calls[0].onProgress?.({ kind: "tool_result", name: "fs_read", input: "a.txt", ok: true, summary: "본문", durationMs: 12 });
+    await t.core.drain();
+
+    const rows = await t.repos.actions.recent(10);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ tool: "fs_read", status: "ok", durationMs: 12, userId: "owner" });
+  });
+
+  it("answering·tool 이벤트는 기록하지 않는다(도구 호출 1건 = 1행)", async () => {
+    const t = await setup({ hub: { isConnected: () => true } });
+    pub(t.bus, dmHint("owner", "owner"), "안녕", 1);
+    await t.core.drain();
+    t.calls[0].onProgress?.({ kind: "tool", name: "fs_read", input: "a.txt" });
+    t.calls[0].onProgress?.({ kind: "answering" });
+    await t.core.drain();
+    expect(await t.repos.actions.recent(10)).toHaveLength(0);
+  });
+
+  it("기록이 실패해도 턴을 죽이지 않는다", async () => {
+    const t = await setup({ hub: { isConnected: () => true } });
+    t.repos.actions.record = async () => { throw new Error("DB 오류(테스트용)"); };
+    pub(t.bus, dmHint("owner", "owner"), "파일 읽어줘", 1);
+    await t.core.drain();
+    t.calls[0].onProgress?.({ kind: "tool_result", name: "fs_read", ok: false, durationMs: 1 });
+    await t.core.drain();
+    expect(t.published.some((e) => e.type === "assistant_message")).toBe(true);
   });
 });

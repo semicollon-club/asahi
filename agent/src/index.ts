@@ -15,6 +15,7 @@ import { SummariesRepo } from "./store/summariesRepo.js";
 import { MemoriesRepo } from "./store/memoriesRepo.js";
 import { TurnsRepo } from "./store/turnsRepo.js";
 import { AllowedDirsRepo } from "./store/allowedDirsRepo.js";
+import { ActionsRepo } from "./store/actionsRepo.js";
 import { WorkersRepo } from "./store/workersRepo.js";
 import { SettingsRepo } from "./store/settingsRepo.js";
 import { IntrospectRepo } from "./store/introspectRepo.js";
@@ -55,6 +56,7 @@ async function main() {
     allowedDirs,
     introspect: new IntrospectRepo(db),
     workers: new WorkersRepo(db),
+    actions: new ActionsRepo(db),
   };
   // 소유자를 users(owner)로 보장 — 게이트 통과 기본값.
   await users.upsert(config.ownerId, { role: "owner" });

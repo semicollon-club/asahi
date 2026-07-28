@@ -14,6 +14,7 @@ import type { SummariesRepo } from "../store/summariesRepo.js";
 import type { MemoriesRepo } from "../store/memoriesRepo.js";
 import type { TurnsRepo } from "../store/turnsRepo.js";
 import type { AllowedDirsRepo } from "../store/allowedDirsRepo.js";
+import type { ActionsRepo } from "../store/actionsRepo.js";
 import type { WorkerKind } from "../store/workersRepo.js";
 import { scopeDirs } from "./workerSelect.js";
 import { buildContextBlock, isSessionNotFound } from "./turnPrep.js";
@@ -49,6 +50,8 @@ export type CoreRepos = {
   // 실제 경로 게이팅은 remoteToolHandler 가 ToolCtx 의 같은 리포로 따로 수행한다 — 코어는
   // 안내문을 만들 때만 읽는다.
   allowedDirs: AllowedDirsRepo;
+  // 도구 호출 기록. 표시(bus)와 같은 이벤트에서 나온다 — 두 벌을 만들면 반드시 어긋난다.
+  actions: ActionsRepo;
 };
 
 // 대화(conversation)별 세션 + 대화 키별 직렬락으로 동작하는 코어.
@@ -377,6 +380,16 @@ export class AgentCore {
       const systemPrompt = buildSystemPrompt({ role, isPrivate: conv.isPrivate, isOwner, deployTarget: this.config.deployTarget, rapportStage, workerConnected, emotions: this.emotions, workspaceDirs });
       const onProgress = (u: ProgressUpdate) => {
         this.bus.publish({ type: "progress", channel: "discord", channelRef: conv.discordChannelId, text: formatProgress(u), ts: this.now() });
+        // 기록은 도구 호출이 끝난 시점에만 남긴다(tool 이벤트는 짝이 맞춰져 이 한 행에 흡수된다).
+        // 부가 기능이므로 실패해도 턴을 죽이지 않는다 — hub.ts 의 touchLastSeen 과 같은 패턴.
+        if (u.kind !== "tool_result") return;
+        void this.repos.actions
+          .record({
+            ts: this.now(), conversationId: conv.id, userId,
+            tool: u.name ?? "(unknown)", input: u.input,
+            resultSummary: u.summary, status: u.ok ? "ok" : "error", durationMs: u.durationMs,
+          })
+          .catch((err) => console.error("[core] 도구 기록 실패:", err));
       };
 
       // 이 턴에만 쓰는 이미지 다운로드(§6: DB엔 마커만 저장했으므로, 과거 이미지 재주입은 없다 —
