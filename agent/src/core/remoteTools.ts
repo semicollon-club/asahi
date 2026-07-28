@@ -58,13 +58,30 @@ const LOCAL_TOOL_NAME: Partial<Record<string, string>> = { fs_glob: "Glob", fs_g
 // 서브셸·PATH 탐색 등으로 얼마든지 우회된다). Task 7 로 손님도 공유 기계에서 sh_exec 를 받게
 // 되면서 이 한계는 그대로 손님에게도 적용된다 — 공유 기계의 셸 접근은 애초에 폴더 격리로
 // 완전히 봉쇄할 수 있는 종류의 권한이 아니다(문서화된, 받아들여진 위험).
+//
+// 반환은 문자열이 아니라 { content, ok } 다. 예전엔 문자열 하나였는데, 그 순간 워커(executors.ts)와
+// 이 함수의 1차 필터가 이미 계산해 둔 성패가 구조적으로 소실됐다 — 호출측(tools.ts 의 textResult)은
+// 실을 값 자체가 없으니 MCP 의 isError 를 세울 수 없었고, MCP 는 isError 가 없으면 성공으로 보므로
+// tool_result 블록에 is_error:true 가 실릴 경로가 아예 없었다. 그 결과 부원이 겪는 실패 전부가
+// `✓ fs_write — 허용된 폴더 밖 경로예요` 처럼 성공으로 표시되고 actions.status 도 'ok' 로 기록됐다
+// (이전의 `... 완료` 보다 더 단정적으로 틀린 문장이 된 셈이다). 새 개념을 만들지 않고, 이미 존재하던
+// 불리언을 여기서 잇기만 한다.
+//
+// 분류 규칙은 하나다: 아래 조기 반환은 전부 실패(ok:false)다 — 워커 미연결, 빈 경로, 허용 폴더
+// 목록 확인 불가, 허용 폴더 조회 오류, allow_dir 안내, 허용 폴더 밖 경로, 원격 호출 예외. 전부
+// "요청한 작업이 수행되지 않았다"는 뜻이고, 사용자에게 보여야 할 사유가 있으며, M2 의 첫 질의
+// ("어떤 도구가 자주 실패하는가")가 세어야 할 사건이다. 성공은 워커가 ok:true 를 준 경우뿐이다.
 export async function remoteToolHandler(
   ctx: ToolCtx,
   tool: string,
   args: Record<string, unknown>,
-): Promise<string> {
+): Promise<{ content: string; ok: boolean }> {
+  // 거부는 전부 이 헬퍼를 거친다 — 새 조기 반환을 추가하면서 ok 를 빠뜨리는 일이 없게, "거부"라는
+  // 낱말 자체가 ok:false 를 뜻하게 만든다.
+  const deny = (content: string) => ({ content, ok: false });
+
   const remote = ctx.remote;
-  if (!remote) return "지금은 워커가 연결돼 있지 않아 PC 작업을 할 수 없어요.";
+  if (!remote) return deny("지금은 워커가 연결돼 있지 않아 PC 작업을 할 수 없어요.");
 
   const singlePathArg = pathArgOf(args);
   const localTool = LOCAL_TOOL_NAME[tool];
@@ -77,13 +94,13 @@ export async function remoteToolHandler(
     // 빈 문자열/공백 문자열은 "경로 인자 없음"이 아니라 "잘못된 경로 인자"다 — 여기서 걸러내지
     // 않으면 아래 필터 전체가 조용히 스킵되고 호출이 그대로 워커로 넘어간다.
     if (singlePathArg !== undefined && singlePathArg.trim().length === 0) {
-      return "경로가 비어 있어요. 올바른 절대경로를 지정해 주세요.";
+      return deny("경로가 비어 있어요. 올바른 절대경로를 지정해 주세요.");
     }
 
     // repos.allowedDirs 가 없는 호출측은 현재 운영 코드(buildToolCtx)에서는 나타나지 않아야
     // 하지만, "판정할 수 없다"를 "통과시킨다"로 처리하면(fail open) 이 1차 필터가 있으나 마나
     // 해진다. 판정 불가 상태의 안전한 기본값은 거부다(fail closed).
-    if (!ctx.repos?.allowedDirs) return "허용 폴더 목록을 확인할 수 없어 요청을 거부했어요.";
+    if (!ctx.repos?.allowedDirs) return deny("허용 폴더 목록을 확인할 수 없어 요청을 거부했어요.");
 
     // Task 7: allowed_dirs 는 워커(remote.workerId) 기준으로 저장된다 — 같은 사람이라도 기계가
     // 다르면(소유자의 노트북 vs 동아리 공용 PC) 목록이 섞이면 안 된다. scopeDirs 가 그 목록을
@@ -99,9 +116,9 @@ export async function remoteToolHandler(
       // allowedDirs.list 는 실제 DB 호출이라 reject 할 수 있다(아래 허브 콜과 달리 "절대
       // reject 하지 않는다"는 보장이 없다) — 여기서 잡아 문자열로 바꾼다. scopeDirs 가 잘못된
       // 경로 조각을 거부해 던지는 예외도 여기서 같은 방식으로 잡힌다.
-      return `허용 폴더 확인 중 오류가 발생했어요: ${e instanceof Error ? e.message : String(e)}`;
+      return deny(`허용 폴더 확인 중 오류가 발생했어요: ${e instanceof Error ? e.message : String(e)}`);
     }
-    if (allowed.length === 0) return "먼저 allow_dir 로 작업할 폴더를 허용해 주세요.";
+    if (allowed.length === 0) return deny("먼저 allow_dir 로 작업할 폴더를 허용해 주세요.");
 
     // Task 8: 손님의 개인 폴더는 첫 접근 때 만든다("1인당 1폴더"가 규칙이라 없다고 거부할 이유가
     // 없다). 모델에게 시키지 않고 봇이 직접 끼워 넣는다 — 모델이 fs_write 나 sh_exec 로 제각각
@@ -130,7 +147,7 @@ export async function remoteToolHandler(
       ? extractCandidatePaths(localTool, args, undefined, allowed[0])
       : singlePathArg !== undefined ? [singlePathArg] : [];
     for (const c of candidates) {
-      if (!isPathWithinAny(c, allowed)) return `허용된 폴더 밖 경로예요: ${c}`;
+      if (!isPathWithinAny(c, allowed)) return deny(`허용된 폴더 밖 경로예요: ${c}`);
     }
 
     // 최종 리뷰 FIX1(치명): 위에서 "검사"만 하고 끝내면 안 된다 — fs_glob/fs_grep 은 path 가
@@ -152,7 +169,12 @@ export async function remoteToolHandler(
   } catch (e) {
     // WorkerHub.call 은 reject 하지 않도록 설계돼 있지만, 그 보장이 깨지는 경우까지 대비한다 —
     // "절대 던지지 않는다"는 이 함수 자신의 계약이므로 방어를 이중으로 둔다.
-    return `원격 작업 처리 중 오류가 발생했어요: ${e instanceof Error ? e.message : String(e)}`;
+    return deny(`원격 작업 처리 중 오류가 발생했어요: ${e instanceof Error ? e.message : String(e)}`);
   }
-  return r.content.length > 0 ? r.content : (r.ok ? "(완료)" : "(실패했지만 내용이 없어요)");
+  // 여기가 유일하게 ok:true 가 나올 수 있는 지점이다 — 그마저도 워커가 준 값을 그대로 옮길 뿐,
+  // 이 함수가 성패를 새로 판단하지는 않는다(내용이 비었다고 실패로 바꾸지도, 그 반대도 하지 않는다).
+  return {
+    content: r.content.length > 0 ? r.content : (r.ok ? "(완료)" : "(실패했지만 내용이 없어요)"),
+    ok: r.ok,
+  };
 }

@@ -32,33 +32,53 @@ const ctxWith = (
     ...over,
   } as unknown as ToolCtx);
 
+// 최종 리뷰 Critical 1 — 반환이 문자열에서 { content, ok } 로 넓어졌다. 예전엔 워커와 이 함수의
+// 1차 필터가 이미 계산해 둔 성패가 이 반환 지점에서 통째로 소실돼, MCP 의 isError 를 세울 값 자체가
+// 없었다(→ 실패 전부가 ✓·status='ok' 로 표시·기록됨). 그래서 아래 테스트들은 문구만이 아니라 ok 를
+// 함께 단정한다 — 문구가 맞아도 ok 가 어긋나면 그 버그가 그대로 되살아나기 때문이다.
+// content 만 편하게 꺼내 쓰기 위한 헬퍼(문구만 보면 되는 단정에서 쓴다).
+const contentOf = async (p: Promise<{ content: string; ok: boolean }>): Promise<string> => (await p).content;
+
 describe("원격 도구", () => {
   it("도구 이름 7개를 고정으로 노출한다", () => {
     // Task 4: fs_tree 추가 — 폴더 구조 전용 조회 도구.
     expect([...REMOTE_TOOL_NAMES].sort()).toEqual(["fs_edit", "fs_glob", "fs_grep", "fs_read", "fs_tree", "fs_write", "sh_exec"]);
   });
 
-  it("허브 호출 결과를 그대로 문자열로 돌려준다", async () => {
+  it("허브 호출 결과를 그대로 돌려준다 — 내용도, 성패(ok)도", async () => {
     // path 인자가 있으므로 1차 필터가 동작한다 — repos.allowedDirs 를 채워 통과시킨다(이 테스트의
     // 관심사는 신원 재확인이 아니라 허브 결과의 그대로 전달이다).
     const ctx = ctxWith(
       { call: async () => ({ ok: true, content: "본문" }) },
       { userId: "owner", repos: { allowedDirs: { list: async () => ["/w"] } } },
     );
-    expect(await remoteToolHandler(ctx, "fs_read", { path: "/w/a" })).toBe("본문");
+    expect(await remoteToolHandler(ctx, "fs_read", { path: "/w/a" })).toEqual({ content: "본문", ok: true });
   });
 
-  it("실패해도 예외를 던지지 않고 내용을 돌려준다(턴이 죽지 않게)", async () => {
+  it("워커가 계산한 실패는 예외가 아니라 ok:false 로 돌아온다(턴이 죽지 않게, 그러나 성공으로 둔갑하지도 않게)", async () => {
     const ctx = ctxWith(
       { call: async () => ({ ok: false, content: "폴더 밖 경로예요" }) },
       { userId: "owner", repos: { allowedDirs: { list: async () => ["/x"] } } },
     );
-    await expect(remoteToolHandler(ctx, "fs_read", { path: "/x" })).resolves.toContain("폴더 밖");
+    // 허용 폴더(/x) 안이라 봇 쪽 필터는 통과하고, 실패를 판정한 건 워커다 — 그 ok:false 가
+    // 그대로 살아 나와야 tools.ts 가 isError 를 세울 수 있다.
+    expect(await remoteToolHandler(ctx, "fs_read", { path: "/x" })).toEqual({ content: "폴더 밖 경로예요", ok: false });
   });
 
-  it("워커 연결이 없으면 안내 문구를 돌려준다", async () => {
+  it("워커 연결이 없으면 안내 문구를 ok:false 로 돌려준다", async () => {
     const ctx = ctxWith(undefined);
-    await expect(remoteToolHandler(ctx, "fs_read", {})).resolves.toContain("워커");
+    const r = await remoteToolHandler(ctx, "fs_read", {});
+    expect(r.content).toContain("워커");
+    expect(r.ok).toBe(false);
+  });
+
+  // 워커가 빈 내용을 주는 경우의 대체 문구도 성패를 바꾸지 않는다 — "내용이 없다"와 "실패했다"는
+  // 서로 다른 사실이고, 이 함수는 성패를 새로 판단하지 않는다.
+  it("내용이 비어도 워커의 성패를 그대로 유지한다", async () => {
+    const okCtx = ctxWith({ call: async () => ({ ok: true, content: "" }) }, { userId: "owner" });
+    expect(await remoteToolHandler(okCtx, "sh_exec", { command: "true" })).toEqual({ content: "(완료)", ok: true });
+    const failCtx = ctxWith({ call: async () => ({ ok: false, content: "" }) }, { userId: "owner" });
+    expect(await remoteToolHandler(failCtx, "sh_exec", { command: "false" })).toEqual({ content: "(실패했지만 내용이 없어요)", ok: false });
   });
 
   it("호출한 도구 이름과 인자를 그대로 허브에 전달한다", async () => {
@@ -83,22 +103,25 @@ describe("봇 쪽 1차 경로 필터", () => {
     const ctx = withDirs(["/w/proj"], { call: async () => { called = true; return { ok: true, content: "" }; } });
     const out = await remoteToolHandler(ctx, "fs_read", { path: "/etc/passwd" });
     expect(called).toBe(false);
-    expect(out).toContain("허용");
+    expect(out.content).toContain("허용");
+    expect(out.ok).toBe(false);
   });
 
   it("allowed_dirs 안 경로는 통과시킨다", async () => {
     const ctx = withDirs(["/w/proj"], { call: async () => ({ ok: true, content: "본문" }) });
-    await expect(remoteToolHandler(ctx, "fs_read", { path: "/w/proj/a.txt" })).resolves.toBe("본문");
+    await expect(remoteToolHandler(ctx, "fs_read", { path: "/w/proj/a.txt" })).resolves.toEqual({ content: "본문", ok: true });
   });
 
-  it("allowed_dirs 가 비어 있으면 등록을 안내한다", async () => {
+  it("allowed_dirs 가 비어 있으면 등록을 안내한다(안내지만 요청은 수행되지 않았으므로 실패다)", async () => {
     const ctx = withDirs([], { call: async () => ({ ok: true, content: "" }) });
-    await expect(remoteToolHandler(ctx, "fs_read", { path: "/w/a" })).resolves.toContain("allow_dir");
+    const out = await remoteToolHandler(ctx, "fs_read", { path: "/w/a" });
+    expect(out.content).toContain("allow_dir");
+    expect(out.ok).toBe(false);
   });
 
   it("sh_exec 는 경로 인자가 없어 1차 필터 대상이 아니다(셸은 경로 인자로 봉쇄할 수 없다는 설계 그대로 — FIX6 은 문서만 바로잡고 이 동작은 바꾸지 않는다)", async () => {
     const ctx = withDirs(["/w/proj"], { call: async () => ({ ok: true, content: "출력" }) });
-    await expect(remoteToolHandler(ctx, "sh_exec", { command: "ls" })).resolves.toBe("출력");
+    await expect(remoteToolHandler(ctx, "sh_exec", { command: "ls" })).resolves.toEqual({ content: "출력", ok: true });
   });
 });
 
@@ -122,7 +145,8 @@ describe("FIX6 — fs_glob·fs_grep 는 path 가 없어도, pattern 이 벗어�
     const ctx = withDirs([], { call: async () => { called = true; return { ok: true, content: "" }; } });
     const out = await remoteToolHandler(ctx, "fs_glob", { pattern: "**/*" });
     expect(called).toBe(false);
-    expect(out).toContain("allow_dir");
+    expect(out.content).toContain("allow_dir");
+    expect(out.ok).toBe(false);
   });
 
   it("fs_grep 는 path 생략 + allowedDirs 가 비어 있으면 허브를 부르지 않고 거부한다(전체 루트 열거 방지)", async () => {
@@ -130,17 +154,18 @@ describe("FIX6 — fs_glob·fs_grep 는 path 가 없어도, pattern 이 벗어�
     const ctx = withDirs([], { call: async () => { called = true; return { ok: true, content: "" }; } });
     const out = await remoteToolHandler(ctx, "fs_grep", { pattern: "secret" });
     expect(called).toBe(false);
-    expect(out).toContain("allow_dir");
+    expect(out.content).toContain("allow_dir");
+    expect(out.ok).toBe(false);
   });
 
   it("fs_glob 는 path 를 생략해도 allowedDirs 가 있으면 그 첫 폴더를 기본값으로 검사해 통과시킨다(기존 동작 유지)", async () => {
     const ctx = withDirs(["/w/proj"], { call: async () => ({ ok: true, content: "목록" }) });
-    await expect(remoteToolHandler(ctx, "fs_glob", { pattern: "**/*" })).resolves.toBe("목록");
+    await expect(remoteToolHandler(ctx, "fs_glob", { pattern: "**/*" })).resolves.toEqual({ content: "목록", ok: true });
   });
 
   it("fs_grep 는 path 를 생략해도 allowedDirs 가 있으면 그 첫 폴더를 기본값으로 검사해 통과시킨다(기존 동작 유지)", async () => {
     const ctx = withDirs(["/w/proj"], { call: async () => ({ ok: true, content: "결과" }) });
-    await expect(remoteToolHandler(ctx, "fs_grep", { pattern: "TODO" })).resolves.toBe("결과");
+    await expect(remoteToolHandler(ctx, "fs_grep", { pattern: "TODO" })).resolves.toEqual({ content: "결과", ok: true });
   });
 
   it("fs_glob 는 path 는 허용 폴더 안이어도 pattern 이 '../../**/*' 로 그 밖을 가리키면 허브를 부르지 않고 거부한다", async () => {
@@ -148,12 +173,13 @@ describe("FIX6 — fs_glob·fs_grep 는 path 가 없어도, pattern 이 벗어�
     const ctx = withDirs(["/w/proj"], { call: async () => { called = true; return { ok: true, content: "" }; } });
     const out = await remoteToolHandler(ctx, "fs_glob", { path: "/w/proj", pattern: "../../**/*" });
     expect(called).toBe(false);
-    expect(out).toContain("허용된 폴더 밖");
+    expect(out.content).toContain("허용된 폴더 밖");
+    expect(out.ok).toBe(false);
   });
 
   it("fs_glob 는 path·pattern 이 전부 허용 폴더 안이면 정상적으로 허브를 부른다(회귀 없음)", async () => {
     const ctx = withDirs(["/w/proj"], { call: async () => ({ ok: true, content: "목록2" }) });
-    await expect(remoteToolHandler(ctx, "fs_glob", { path: "/w/proj", pattern: "**/*.ts" })).resolves.toBe("목록2");
+    await expect(remoteToolHandler(ctx, "fs_glob", { path: "/w/proj", pattern: "**/*.ts" })).resolves.toEqual({ content: "목록2", ok: true });
   });
 });
 
@@ -191,7 +217,8 @@ describe("신원 재확인은 이제 ctx.remote 존재 여부 하나다(옛 FIX1
   it("ctx.remote 가 없으면 신원과 무관하게 거부한다(agent.ts 의 판정이 이미 '워커 없음'으로 정한 것)", async () => {
     const ctx = ({ isOwner: true, isPrivate: true, userId: "owner" } as unknown as ToolCtx); // remote 자체가 없음
     const out = await remoteToolHandler(ctx, "sh_exec", { command: "ls" });
-    expect(out).toContain("워커가 연결돼 있지 않아");
+    expect(out.content).toContain("워커가 연결돼 있지 않아");
+    expect(out.ok).toBe(false);
   });
 });
 
@@ -199,18 +226,19 @@ describe("신원 재확인은 이제 ctx.remote 존재 여부 하나다(옛 FIX1
 // WorkerHub.call 은 reject 하지 않도록 설계돼 있지만 그 보장이 깨지는 경우까지 대비하고,
 // allowedDirs.list 는 실제 DB 호출이라 애초에 그런 보장이 없다. 둘 다 reject 하면 예외가 아니라
 // 문자열이 되어야 한다 — remoteToolHandler 는 절대 던지지 않는다는 게 이 함수의 계약이다.
-describe("FIX2 — 원격 호출·DB 조회 실패는 예외가 아니라 문자열로 돌아온다", () => {
-  it("허브 call() 이 reject 해도 예외를 던지지 않고 이유를 담은 문자열을 돌려준다", async () => {
+describe("FIX2 — 원격 호출·DB 조회 실패는 예외가 아니라 ok:false 결과로 돌아온다", () => {
+  it("허브 call() 이 reject 해도 예외를 던지지 않고 이유를 담은 실패 결과를 돌려준다", async () => {
     const ctx = ({
       remote: { call: async () => { throw new Error("hub 폭발"); } },
       isOwner: true, isPrivate: true, userId: "owner",
     } as unknown as ToolCtx);
     const out = await remoteToolHandler(ctx, "sh_exec", { command: "ls" });
-    expect(out).toContain("오류");
-    expect(out).toContain("hub 폭발");
+    expect(out.content).toContain("오류");
+    expect(out.content).toContain("hub 폭발");
+    expect(out.ok).toBe(false);
   });
 
-  it("allowedDirs.list() 가 reject 해도(DB 다운 등) 예외를 던지지 않고 이유를 담은 문자열을 돌려준다", async () => {
+  it("allowedDirs.list() 가 reject 해도(DB 다운 등) 예외를 던지지 않고 이유를 담은 실패 결과를 돌려준다", async () => {
     let hubCalled = false;
     const ctx = ({
       remote: { call: async () => { hubCalled = true; return { ok: true, content: "본문" }; } },
@@ -218,8 +246,9 @@ describe("FIX2 — 원격 호출·DB 조회 실패는 예외가 아니라 문자
       repos: { allowedDirs: { list: async () => { throw new Error("db down"); } } },
     } as unknown as ToolCtx);
     const out = await remoteToolHandler(ctx, "fs_read", { path: "/w/a" });
-    expect(out).toContain("오류");
-    expect(out).toContain("db down");
+    expect(out.content).toContain("오류");
+    expect(out.content).toContain("db down");
+    expect(out.ok).toBe(false);
     expect(hubCalled).toBe(false); // 1차 필터에서 이미 실패했으니 허브까지 갈 이유가 없다
   });
 });
@@ -238,7 +267,8 @@ describe("FIX3 — 빈/공백 path 는 1차 필터를 건너뛰지 않고 거부
       } as unknown as ToolCtx);
       const out = await remoteToolHandler(ctx, "fs_read", { path: blank });
       expect(called).toBe(false);
-      expect(out).toContain("비어");
+      expect(out.content).toContain("비어");
+      expect(out.ok).toBe(false);
     }
   });
 });
@@ -256,7 +286,8 @@ describe("FIX4 — repos 부재는 통과가 아니라 거부다(fail closed)", 
     } as unknown as ToolCtx);
     const out = await remoteToolHandler(ctx, "fs_read", { path: "/w/a" });
     expect(called).toBe(false);
-    expect(out).toContain("확인할 수 없어");
+    expect(out.content).toContain("확인할 수 없어");
+    expect(out.ok).toBe(false);
   });
 });
 
@@ -306,17 +337,17 @@ describe("FIX1(치명, 최종 리뷰) — fs_glob·fs_grep 가 path 생략/glob 
 
   it("(a) path 생략 시 워커의 기본값(roots[0]=전체 루트)이 아니라 봇이 승인한 폴더(allowed_dirs[0])를 검색한다", async () => {
     const ctx = ctxWithRealWorker([allowedSub]);
-    const out = await remoteToolHandler(ctx, "fs_grep", { pattern: "PROBE6_SECRET" });
+    const out = await contentOf(remoteToolHandler(ctx, "fs_grep", { pattern: "PROBE6_SECRET" }));
     expect(out).not.toContain("PROBE6_SECRET");
   });
 
   it("(b) path 가 허용 폴더 안이어도 glob 인자로 형제 폴더(secret)를 가리키면 거부한다", async () => {
     const ctx = ctxWithRealWorker([allowedSub]);
-    const out = await remoteToolHandler(ctx, "fs_grep", {
+    const out = await contentOf(remoteToolHandler(ctx, "fs_grep", {
       pattern: "PROBE_SECRET_VALUE",
       path: allowedSub,
       glob: "../secret/**/*",
-    });
+    }));
     expect(out).not.toContain("PROBE_SECRET_VALUE");
     expect(out).not.toContain("creds.txt");
   });
@@ -324,7 +355,7 @@ describe("FIX1(치명, 최종 리뷰) — fs_glob·fs_grep 가 path 생략/glob 
   it("fs_glob 도 (a)와 동일하다 — path 생략 시 워커 루트 전체가 아니라 허용 폴더만 나열한다", async () => {
     fs.writeFileSync(path.join(secretDir, "leaked-marker.txt"), "x");
     const ctx = ctxWithRealWorker([allowedSub]);
-    const out = await remoteToolHandler(ctx, "fs_glob", { pattern: "**/*" });
+    const out = await contentOf(remoteToolHandler(ctx, "fs_glob", { pattern: "**/*" }));
     expect(out).not.toContain("leaked-marker.txt");
   });
 });
@@ -406,7 +437,8 @@ describe("remoteToolHandler — 공유 기계에서 사용자별 격리", () => 
   it("손님이 남의 폴더를 읽으려 하면 거부한다 — 이 설계의 핵심 불변식", async () => {
     const { ctx, calls } = ctxFor({ isOwner: false, isPrivate: false, userId: "111", dirs: ["C:\\ws"], workerKind: "shared" });
     const out = await remoteToolHandler(ctx, "fs_read", { path: "C:\\ws\\222\\secret.txt" });
-    expect(out).toContain("허용된 폴더 밖");
+    expect(out.content).toContain("허용된 폴더 밖");
+    expect(out.ok).toBe(false);
     expect(realCalls(calls)).toHaveLength(0);
   });
 
@@ -419,7 +451,8 @@ describe("remoteToolHandler — 공유 기계에서 사용자별 격리", () => 
   it("손님이 상위 참조로 빠져나가려 하면 거부한다", async () => {
     const { ctx, calls } = ctxFor({ isOwner: false, isPrivate: false, userId: "111", dirs: ["C:\\ws"], workerKind: "shared" });
     const out = await remoteToolHandler(ctx, "fs_read", { path: "C:\\ws\\111\\..\\222\\secret.txt" });
-    expect(out).toContain("허용된 폴더 밖");
+    expect(out.content).toContain("허용된 폴더 밖");
+    expect(out.ok).toBe(false);
     expect(realCalls(calls)).toHaveLength(0);
   });
 
@@ -464,7 +497,7 @@ describe("remoteToolHandler — 공유 기계에서 사용자별 격리", () => 
   it("워커가 없으면 안내하고 호출하지 않는다", async () => {
     const { ctx } = ctxFor({ isOwner: false, isPrivate: false, userId: "111", dirs: ["C:\\ws"], workerKind: "shared" });
     delete (ctx as any).remote;
-    expect(await remoteToolHandler(ctx, "fs_read", { path: "C:\\ws\\111\\a" })).toContain("워커가 연결돼 있지 않아");
+    expect((await remoteToolHandler(ctx, "fs_read", { path: "C:\\ws\\111\\a" })).content).toContain("워커가 연결돼 있지 않아");
   });
 
   // 최종 리뷰 FIX1(치명) — 손님이 glob 메타문자로 시작하는 pattern/glob 으로 상위 탈출을 시도하면
@@ -476,7 +509,8 @@ describe("remoteToolHandler — 공유 기계에서 사용자별 격리", () => 
     it("fs_grep — glob:'**/../../222/*.txt' (path 는 자기 폴더) → 허브를 부르지 않고 거부한다", async () => {
       const { ctx, calls } = ctxFor({ isOwner: false, isPrivate: false, userId: "111", dirs: ["C:\\ws"], workerKind: "shared" });
       const out = await remoteToolHandler(ctx, "fs_grep", { pattern: ".", path: "C:\\ws\\111", glob: "**/../../222/*.txt" });
-      expect(out).toContain("허용된 폴더 밖");
+      expect(out.content).toContain("허용된 폴더 밖");
+      expect(out.ok).toBe(false);
       // Task 8: fs_mkdir 준비 호출은 이 거부보다 먼저 나가므로 제외하고 센다(위 realCalls 참고).
       expect(realCalls(calls)).toHaveLength(0);
     });
@@ -484,14 +518,16 @@ describe("remoteToolHandler — 공유 기계에서 사용자별 격리", () => 
     it("fs_grep — glob:'**/../../222/*' (path 생략) → 허브를 부르지 않고 거부한다", async () => {
       const { ctx, calls } = ctxFor({ isOwner: false, isPrivate: false, userId: "111", dirs: ["C:\\ws"], workerKind: "shared" });
       const out = await remoteToolHandler(ctx, "fs_grep", { pattern: ".", glob: "**/../../222/*" });
-      expect(out).toContain("허용된 폴더 밖");
+      expect(out.content).toContain("허용된 폴더 밖");
+      expect(out.ok).toBe(false);
       expect(realCalls(calls)).toHaveLength(0);
     });
 
     it("fs_glob — pattern:'**/../../222/*.txt' (path 는 자기 폴더) → 허브를 부르지 않고 거부한다", async () => {
       const { ctx, calls } = ctxFor({ isOwner: false, isPrivate: false, userId: "111", dirs: ["C:\\ws"], workerKind: "shared" });
       const out = await remoteToolHandler(ctx, "fs_glob", { path: "C:\\ws\\111", pattern: "**/../../222/*.txt" });
-      expect(out).toContain("허용된 폴더 밖");
+      expect(out.content).toContain("허용된 폴더 밖");
+      expect(out.ok).toBe(false);
       expect(realCalls(calls)).toHaveLength(0);
     });
 
@@ -516,20 +552,21 @@ describe("remoteToolHandler — 공유 기계에서 사용자별 격리", () => 
       const { ctx, calls } = ctxFor({ isOwner: false, isPrivate: false, userId: "111", dirs: ["C:\\ws"], workerKind: "shared" });
       const out = await remoteToolHandler(ctx, "fs_glob", { path: "C:\\ws\\111", pattern: "src/**/*.ts" });
       expect(realCalls(calls)).toHaveLength(1);
-      expect(out).not.toContain("허용된 폴더 밖");
+      expect(out.content).not.toContain("허용된 폴더 밖");
     });
 
     it("fs_grep — path=자기 폴더 + glob='src/*.ts' → 허브를 부른다(Grep 쪽도 동일한 계산을 탄다)", async () => {
       const { ctx, calls } = ctxFor({ isOwner: false, isPrivate: false, userId: "111", dirs: ["C:\\ws"], workerKind: "shared" });
       const out = await remoteToolHandler(ctx, "fs_grep", { pattern: "TODO", path: "C:\\ws\\111", glob: "src/*.ts" });
       expect(realCalls(calls)).toHaveLength(1);
-      expect(out).not.toContain("허용된 폴더 밖");
+      expect(out.content).not.toContain("허용된 폴더 밖");
     });
 
     it("대조군 — 같은 상대 패턴 모양이라도 상위 탈출(예: '../222/*.ts')은 여전히 거부된다", async () => {
       const { ctx, calls } = ctxFor({ isOwner: false, isPrivate: false, userId: "111", dirs: ["C:\\ws"], workerKind: "shared" });
       const out = await remoteToolHandler(ctx, "fs_glob", { path: "C:\\ws\\111", pattern: "../222/*.ts" });
-      expect(out).toContain("허용된 폴더 밖");
+      expect(out.content).toContain("허용된 폴더 밖");
+      expect(out.ok).toBe(false);
       expect(realCalls(calls)).toHaveLength(0);
     });
   });
@@ -548,7 +585,8 @@ describe("fs_tree 는 fs_glob 과 동일하게 1차 필터를 탄다", () => {
     const ctx = withDirs([], { call: async () => { called = true; return { ok: true, content: "" }; } });
     const out = await remoteToolHandler(ctx, "fs_tree", {});
     expect(called).toBe(false);
-    expect(out).toContain("allow_dir");
+    expect(out.content).toContain("allow_dir");
+    expect(out.ok).toBe(false);
   });
 
   it("path 를 생략하면 검사에 쓴 allowed[0] 을 args 에 실제로 주입한다", async () => {
@@ -561,6 +599,7 @@ describe("fs_tree 는 fs_glob 과 동일하게 1차 필터를 탄다", () => {
   it("허용 폴더 밖 path 는 거부한다", async () => {
     const ctx = withDirs(["/w/proj"], { call: async () => ({ ok: true, content: "" }) });
     const out = await remoteToolHandler(ctx, "fs_tree", { path: "/etc" });
-    expect(out).toContain("허용된 폴더 밖");
+    expect(out.content).toContain("허용된 폴더 밖");
+    expect(out.ok).toBe(false);
   });
 });
