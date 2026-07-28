@@ -8,6 +8,7 @@ import { MessagesRepo } from "../src/store/messagesRepo.js";
 import { SummariesRepo } from "../src/store/summariesRepo.js";
 import { MemoriesRepo } from "../src/store/memoriesRepo.js";
 import { TurnsRepo } from "../src/store/turnsRepo.js";
+import { AllowedDirsRepo } from "../src/store/allowedDirsRepo.js";
 import { AgentCore } from "../src/core/core.js";
 import type { Config } from "../src/config.js";
 import type { TurnRequest, TurnResult } from "../src/core/agent.js";
@@ -32,6 +33,10 @@ async function setup(over: {
   const repos = {
     users: new UsersRepo(db), conversations: new ConversationsRepo(db), participants: new ParticipantsRepo(db),
     messages: new MessagesRepo(db), summaries: new SummariesRepo(db), memories: new MemoriesRepo(db), turns: new TurnsRepo(db),
+    // 손님 작업 폴더 안내(resolveGuestWorkspaceDirs)가 읽는다. tsconfig 의 include 가 src 뿐이라
+    // 테스트는 타입 검사를 받지 않는다 — 여기서 빠뜨리면 tsc 도 vitest 도 잡아 주지 않고,
+    // 코어의 try/catch 가 삼켜 "경로 안내 없음"으로 조용히 degrade 한다.
+    allowedDirs: new AllowedDirsRepo(db),
   };
   await repos.users.upsert("owner", { role: "owner" });
   await repos.users.upsert("guest", { role: "allowed" });
@@ -480,6 +485,57 @@ describe("AgentCore — 원격 워커 연결 상태를 페르소나에 반영한
     expect(t.calls[0].systemPrompt).toMatch(/fs_read/);
     expect(t.calls[0].systemPrompt).not.toMatch(/manage_access/);
     expect(t.calls[0].systemPrompt).not.toMatch(/allow_dir/);
+  });
+});
+
+// 실사용에서 드러난 문제 — 능력 안내가 "네 몫의 폴더"라고만 하고 경로를 주지 않아, 손님이
+// "내 워크스페이스에 폴더 만들어줘"라고 하면 봇이 절대경로를 되물었다. 손님에겐 list_dirs
+// (관리자 전용)도 없어 자기 디스코드 숫자 id 를 직접 알아내는 것 말고는 방법이 없었다.
+// core 가 remoteToolHandler 와 같은 scopeDirs 계산으로 경로를 구해 페르소나에 싣는다 —
+// 안내와 집행이 다른 계산에서 나오면 어긋난다.
+describe("AgentCore — 손님 작업 폴더 경로를 페르소나에 싣는다", () => {
+  const sharedHub = { isConnected: (id: string) => id === "shared-worker" };
+
+  it("공유 워커가 연결돼 있고 allowed_dirs 가 있으면 손님 프롬프트에 그 손님 몫의 경로가 담긴다", async () => {
+    const t = await setup({ hub: sharedHub });
+    await t.repos.allowedDirs.add("shared-worker", "C:\\ws");
+    pub(t.bus, dmHint("guest", "allowed"), "내 폴더에 파일 하나 만들어줘", 1);
+    await t.core.drain();
+    // scopeDirs 가 붙인 하위 폴더까지 그대로 — 루트만 알려주면 손님이 루트에 쓰려다 거부당한다.
+    expect(t.calls[0].systemPrompt).toContain("C:\\ws\\guest");
+  });
+
+  it("손님마다 자기 폴더만 담긴다(다른 손님 폴더가 새지 않는다)", async () => {
+    const t = await setup({ hub: sharedHub });
+    await t.repos.allowedDirs.add("shared-worker", "C:\\ws");
+    pub(t.bus, dmHint("guest", "allowed"), "안녕", 1);
+    await t.core.drain();
+    expect(t.calls[0].systemPrompt).toContain("C:\\ws\\guest");
+    expect(t.calls[0].systemPrompt).not.toContain("C:\\ws\\guest2");
+  });
+
+  it("소유자에게는 싣지 않는다 — scopeDirs 가 좁히지 않아 한 폴더로 특정되지 않고 list_dirs 로 직접 조회한다", async () => {
+    const t = await setup({ hub: { isConnected: () => true } });
+    await t.repos.allowedDirs.add("shared-worker", "C:\\ws");
+    pub(t.bus, threadHint("owner", "ch-1", "owner", "m-1"), "안녕", 1);
+    await t.core.drain();
+    expect(t.calls[0].systemPrompt).not.toContain("C:\\ws\\owner");
+  });
+
+  it("allowed_dirs 가 비어 있으면 도구 안내는 유지하되 경로 줄은 넣지 않는다(경로를 지어낼 여지를 주지 않는다)", async () => {
+    const t = await setup({ hub: sharedHub });
+    pub(t.bus, dmHint("guest", "allowed"), "안녕", 1);
+    await t.core.drain();
+    expect(t.calls[0].systemPrompt).toMatch(/fs_read/);
+    expect(t.calls[0].systemPrompt).not.toMatch(/작업 폴더는/);
+  });
+
+  it("워커가 연결돼 있지 않으면 경로를 안내하지 않는다(도구가 없는데 위치만 알리지 않는다)", async () => {
+    const t = await setup(); // hub 미배선
+    await t.repos.allowedDirs.add("shared-worker", "C:\\ws");
+    pub(t.bus, dmHint("guest", "allowed"), "안녕", 1);
+    await t.core.drain();
+    expect(t.calls[0].systemPrompt).not.toContain("C:\\ws\\guest");
   });
 });
 

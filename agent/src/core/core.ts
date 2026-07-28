@@ -13,6 +13,9 @@ import type { MessagesRepo } from "../store/messagesRepo.js";
 import type { SummariesRepo } from "../store/summariesRepo.js";
 import type { MemoriesRepo } from "../store/memoriesRepo.js";
 import type { TurnsRepo } from "../store/turnsRepo.js";
+import type { AllowedDirsRepo } from "../store/allowedDirsRepo.js";
+import type { WorkerKind } from "../store/workersRepo.js";
+import { scopeDirs } from "./workerSelect.js";
 import { buildContextBlock, isSessionNotFound } from "./turnPrep.js";
 import { buildImageMarker, downloadImages, type ImageRef, type ImageInput } from "./images.js";
 
@@ -42,6 +45,10 @@ export type CoreRepos = {
   summaries: SummariesRepo;
   memories: MemoriesRepo;
   turns: TurnsRepo;
+  // 손님에게 "네 작업 폴더가 어디인가"를 알려주기 위해 필요하다(resolveGuestWorkspaceDirs).
+  // 실제 경로 게이팅은 remoteToolHandler 가 ToolCtx 의 같은 리포로 따로 수행한다 — 코어는
+  // 안내문을 만들 때만 읽는다.
+  allowedDirs: AllowedDirsRepo;
 };
 
 // 대화(conversation)별 세션 + 대화 키별 직렬락으로 동작하는 코어.
@@ -366,7 +373,8 @@ export class AgentCore {
       // 턴만 어긋날 수 있지만, "안내 자체가 없거나 늘 거짓"이었던 이전 버그보다는 낫다.
       const worker = await resolveTurnWorker({ context: { isOwner, isPrivate: conv.isPrivate, userId } }, this.registry, this.hub);
       const workerConnected = worker !== null;
-      const systemPrompt = buildSystemPrompt({ role, isPrivate: conv.isPrivate, isOwner, deployTarget: this.config.deployTarget, rapportStage, workerConnected, emotions: this.emotions });
+      const workspaceDirs = await this.resolveGuestWorkspaceDirs(worker, isOwner, userId);
+      const systemPrompt = buildSystemPrompt({ role, isPrivate: conv.isPrivate, isOwner, deployTarget: this.config.deployTarget, rapportStage, workerConnected, emotions: this.emotions, workspaceDirs });
       const onProgress = (u: ProgressUpdate) => {
         this.bus.publish({ type: "progress", channel: "discord", channelRef: conv.discordChannelId, text: formatProgress(u), ts: this.now() });
       };
@@ -443,6 +451,32 @@ export class AgentCore {
         continue;
       }
       this.enqueue(this.turnChains, conv.discordChannelId, () => this.runConversationTurn(conv.id, userId, role, m.content, m.id));
+    }
+  }
+
+  // 손님에게 자기 작업 폴더 경로를 알려주기 위한 값(persona.ts 의 workspaceDirs). 게이팅에는
+  // 쓰이지 않는다 — 실제 판정은 remoteToolHandler 가 매 호출마다 따로 한다. 다만 같은 함수
+  // (scopeDirs)와 같은 입력(그 워커의 allowed_dirs)에서 뽑아, 안내와 집행이 갈리지 않게 한다.
+  //
+  // 소유자는 대상이 아니다: scopeDirs 가 소유자를 좁히지 않아 allowed_dirs 가 곧 "그 사람의
+  // 폴더" 하나로 특정되지 않고, 애초에 list_dirs 로 직접 조회할 수 있다. 개인 워커도 대상이
+  // 아니다 — 거기엔 손님이 붙지 않는다(resolveWorkerSelector).
+  private async resolveGuestWorkspaceDirs(
+    worker: { workerId: string; kind: WorkerKind } | null,
+    isOwner: boolean,
+    userId: string,
+  ): Promise<string[] | undefined> {
+    if (worker === null || worker.kind !== "shared" || isOwner) return undefined;
+    try {
+      const dirs = await this.repos.allowedDirs.list(worker.workerId);
+      return scopeDirs(dirs, { workerKind: worker.kind, isOwner, userId });
+    } catch (err) {
+      // 안내용 부가 정보일 뿐이라 실패해도 턴을 죽이지 않는다(경로 없이 진행 — 예전 동작과 같다).
+      // scopeDirs 는 joinUnderRoot 를 통해 이상한 userId 를 거부하며 던질 수 있는데, 그 경우
+      // remoteToolHandler 도 같은 예외를 fail closed 로 처리하므로 여기서 생략해도 실제 접근이
+      // 더 열리지는 않는다 — 안내만 예전처럼 "경로 없음"으로 돌아간다.
+      console.error("[core] 손님 작업 폴더 계산 실패 — 경로 안내 없이 진행:", err);
+      return undefined;
     }
   }
 
