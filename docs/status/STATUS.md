@@ -85,11 +85,19 @@ lastReviewed: 2026-07-28
 체크리스트는 `deploy/smoke-test.md`에서 추적한다.
 
 - Postgres READ ONLY 트랜잭션의 실제 쓰기 거부.
-- **봇 ↔ 워커 실 WebSocket 왕복** — 실제 네트워크로 이어진 두 프로세스 사이에서 인증(`hello`/
-  `ready`/`denied`)·재연결·호출 타임아웃·경로 게이팅 두 겹(봇 `allowed_dirs` + 워커 `WORKER_ROOTS`)이
-  그대로 동작하는지. 유닛 테스트(`agent/tests/remoteProtocol.test.ts`,
+- **봇 ↔ 워커 실 WebSocket 왕복** — 2026-07-28 미니PC(공유 워커) 점검으로 **일부 실증됐다.**
+  확인된 것: 인증(`hello`→`ready`, `workers.last_seen_ts` 갱신으로 교차 확인)·자동 재연결·
+  `fs_write`/`fs_read`/`fs_edit`/`sh_exec` 왕복·봇 쪽 1차 경로 필터(허용 폴더 밖, `..` 상위
+  탈출, 글롭 상위 탈출 전부 도구 원문으로 거부)·손님 폴더 자동 생성과 사용자별 격리. 이 과정에서
+  리눅스 봇이 윈도우 워커의 경로를 전부 거부하던 문제가 해소된 것도 처음 실증됐다.
+  아직 실환경에서 안 눌러본 것: `denied`(틀린 토큰) 경로, 호출 타임아웃, **워커 쪽 최종 게이트**
+  (`WORKER_ROOTS` 기준 `checkPath`) — 지금까지의 시도는 봇 쪽 1차 필터에서 먼저 걸려 워커까지
+  도달한 적이 없다. 유닛 테스트(`agent/tests/remoteProtocol.test.ts`,
   `remoteHub.test.ts`, `remoteWorkerClient.test.ts`, `remoteRoots.test.ts`, `remoteExecutors.test.ts`,
   `remoteTools.test.ts`)는 소켓 없이 프로토콜·핸들러 로직만 검증한다.
+- **허브 keepalive 의 실환경 효과** — 유휴 WS 가 중간 프록시에 끊기던 문제를 허브의 주기적
+  `ping` 으로 고쳤다(`hub.ts`). 유닛 테스트는 타이머 동작만 검증하므로, 실제로 유휴 30분 이상
+  연결이 유지되는지는 `deploy/smoke-test.md` 의 keepalive 항목으로 확인한다.
 - 디스코드 이미지 첨부 → 모델 인식(실제 첨부 파일로 확인).
 - **표정 이미지 실 배포 검증** — Supabase Storage 실제 업로드, `character_images` 카탈로그 갱신,
   디스코드 embed 렌더링이 실 환경에서 그대로 동작하는지. 유닛 테스트(`characterImagesRepo.test.ts`,
