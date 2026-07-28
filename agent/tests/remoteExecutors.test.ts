@@ -16,10 +16,11 @@ describe("워커 실행기", () => {
   });
   afterEach(() => fs.rmSync(root, { recursive: true, force: true }));
 
-  it("도구 7개를 정확히 노출한다", () => {
+  it("도구 8개를 정확히 노출한다", () => {
     // Task 8: fs_mkdir 추가. 모델이 부르는 도구 목록(REMOTE_TOOL_NAMES)에는 안 들어가지만, 워커
     // 실행기 자체는 다른 fs_* 와 나란히 이 객체에 존재한다.
-    expect(Object.keys(ex).sort()).toEqual(["fs_edit", "fs_glob", "fs_grep", "fs_mkdir", "fs_read", "fs_write", "sh_exec"]);
+    // Task 4: fs_tree 추가 — 폴더 구조 전용 조회 도구(모델이 부르는 목록에도 들어간다).
+    expect(Object.keys(ex).sort()).toEqual(["fs_edit", "fs_glob", "fs_grep", "fs_mkdir", "fs_read", "fs_tree", "fs_write", "sh_exec"]);
   });
 
   it("fs_read 는 줄번호를 붙여 읽는다", async () => {
@@ -39,7 +40,8 @@ describe("워커 실행기", () => {
   it("루트 밖은 모든 fs 도구가 거부한다", async () => {
     const outside = path.join(os.tmpdir(), "outside.txt");
     const args = { path: outside, content: "x", oldString: "a", newString: "b", pattern: "*" };
-    for (const tool of ["fs_read", "fs_write", "fs_edit", "fs_glob", "fs_grep"]) {
+    // Task 4: fs_tree 도 같은 gate(path 인자 검사)를 거치므로 나란히 검증한다.
+    for (const tool of ["fs_read", "fs_write", "fs_edit", "fs_glob", "fs_grep", "fs_tree"]) {
       const run = ex[tool];
       const r = await run(args);
       expect(r.ok, `${tool} 이 루트 밖을 허용했다`).toBe(false);
@@ -221,5 +223,43 @@ describe("워커 실행기", () => {
       expect(r.content).not.toContain(OUTSIDE_MARKER);
       expect(r.content).not.toContain(OUTSIDE_FILE_PREFIX);
     });
+  });
+});
+
+describe("fs_tree 실행기", () => {
+  it("루트 아래 구조를 돌려준다", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "asahi-tree-"));
+    fs.mkdirSync(path.join(root, "src"));
+    fs.writeFileSync(path.join(root, "src", "a.ts"), "x");
+    fs.mkdirSync(path.join(root, "node_modules"));
+    fs.writeFileSync(path.join(root, "node_modules", "junk.js"), "x");
+
+    const ex = makeExecutors([root]);
+    const r = await ex.fs_tree!({ path: root });
+    expect(r.ok).toBe(true);
+    expect(r.content).toContain("a.ts");
+    expect(r.content).not.toContain("junk.js"); // node_modules 제외
+  });
+
+  it("심볼릭 링크를 따라가지 않는다(워크스페이스 밖 열거 방지)", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "asahi-tree-root-"));
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "asahi-tree-outside-"));
+    fs.writeFileSync(path.join(outside, "secret.txt"), "x");
+    try {
+      fs.symlinkSync(outside, path.join(root, "escape"), "junction");
+    } catch {
+      return; // 링크를 만들 권한이 없는 환경에서는 건너뛴다
+    }
+    const ex = makeExecutors([root]);
+    const r = await ex.fs_tree!({ path: root });
+    expect(r.content).not.toContain("secret.txt");
+  });
+
+  it("roots 밖 경로는 거부한다", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "asahi-tree-gate-"));
+    const other = fs.mkdtempSync(path.join(os.tmpdir(), "asahi-tree-other-"));
+    const ex = makeExecutors([root]);
+    const r = await ex.fs_tree!({ path: other });
+    expect(r.ok).toBe(false);
   });
 });

@@ -406,6 +406,12 @@ export function buildTools(ctx: ToolCtx) {
         async (args) => textResult(await remoteToolHandler(ctx, "fs_grep", args)),
       ),
       tool(
+        "fs_tree",
+        "작업 폴더의 파일·폴더 구조를 보여줍니다. 사용자가 '내 폴더에 뭐 있어?' 처럼 물으면 기억으로 답하지 말고 이 도구를 부르세요.",
+        { path: z.string().optional().describe("조회할 폴더의 절대경로. 생략하면 허용된 첫 폴더"), depth: z.number().optional().describe("내려갈 깊이(기본 3, 최대 5)") },
+        async (args) => textResult(await remoteToolHandler(ctx, "fs_tree", args)),
+      ),
+      tool(
         "sh_exec",
         "워커 PC 에서 셸 명령을 실행합니다. 강력한 도구이니 신중히 쓰세요.",
         { command: z.string().describe("실행할 셸 명령"), timeoutMs: z.number().optional().describe("타임아웃(밀리초)") },

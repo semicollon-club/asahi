@@ -3,6 +3,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { glob } from "tinyglobby";
 import { checkPath } from "./roots.js";
+import { renderTree, TREE_MAX_ENTRIES, TREE_DEFAULT_DEPTH, TREE_MAX_DEPTH, TREE_EXCLUDED, type TreeEntry } from "./tree.js";
 
 export type ExecResult = { ok: boolean; content: string };
 export type Executors = Record<string, (args: Record<string, unknown>) => Promise<ExecResult>>;
@@ -153,6 +154,37 @@ export function makeExecutors(roots: string[]): Executors {
         if (out.join("\n").length > OUTPUT_MAX) break;
       }
       return { ok: true, content: truncate(out.length > 0 ? out.join("\n") : "(일치하는 내용 없음)") };
+    },
+
+    // 재귀 순회라 fs_read 에 없던 위험이 하나 있다 — 심볼릭 링크 하나로 워크스페이스 밖을
+    // 열거할 수 있다. withFileTypes 로 링크를 아예 건너뛴다(따라가지 않는다).
+    async fs_tree(args) {
+      const g = gate(args.path);
+      if (!g.ok) return g.res;
+      const maxDepth = Math.min(num(args.depth) ?? TREE_DEFAULT_DEPTH, TREE_MAX_DEPTH);
+      const entries: TreeEntry[] = [];
+      let truncated = false;
+
+      const walk = async (dir: string, rel: string, depth: number): Promise<void> => {
+        if (depth > maxDepth || truncated) return;
+        let items;
+        try {
+          items = await fs.readdir(dir, { withFileTypes: true });
+        } catch {
+          return; // 권한 없는 하위 폴더는 조용히 건너뛴다(전체를 실패시키지 않는다)
+        }
+        for (const it of items.sort((a, b) => a.name.localeCompare(b.name))) {
+          if (it.isSymbolicLink()) continue;
+          if (TREE_EXCLUDED.has(it.name)) continue;
+          if (entries.length >= TREE_MAX_ENTRIES) { truncated = true; return; }
+          const childRel = rel === "" ? it.name : `${rel}/${it.name}`;
+          entries.push({ relPath: childRel, isDir: it.isDirectory(), depth });
+          if (it.isDirectory()) await walk(path.join(dir, it.name), childRel, depth + 1);
+        }
+      };
+
+      await walk(g.path, "", 0);
+      return { ok: true, content: truncate(renderTree(entries, { root: g.path, truncated })) };
     },
 
     async sh_exec(args) {

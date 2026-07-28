@@ -5,7 +5,7 @@ import type { ToolCtx } from "./tools.js";
 
 // 워커에서 실행되는 원격 도구 이름. SDK 내장 Read/Write/Edit/Glob/Grep/Bash 를 대체한다.
 // 이름을 달리 지은 이유: 내장 도구와 이름이 겹치면 어느 쪽이 도는지 알 수 없다.
-export const REMOTE_TOOL_NAMES = ["fs_read", "fs_write", "fs_edit", "fs_glob", "fs_grep", "sh_exec"] as const;
+export const REMOTE_TOOL_NAMES = ["fs_read", "fs_write", "fs_edit", "fs_glob", "fs_grep", "fs_tree", "sh_exec"] as const;
 
 // 인자에서 1차 필터를 걸 경로를 뽑는다(fs_read/fs_write/fs_edit 용 — fs_glob/fs_grep 은 아래
 // LOCAL_TOOL_NAME 경로로 별도 처리한다). sh_exec 는 경로 인자가 없으므로 대상이 아니다 — 뿐만
@@ -33,7 +33,10 @@ function pathArgOf(args: Record<string, unknown>): string | undefined {
 // cwd 인자로 넘긴다 — "후보가 하나도 안 나오면 그 기본값을 검사한다"는 이미 검증된 규칙을 그대로
 // 태운다. 다만 "검사"만으로는 부족하다 — 아래 remoteToolHandler 본문의 최종 리뷰 FIX1 주석 참고
 // (검사에 쓴 기본값을 실제로 args 에 주입해야, 워커가 자신의 roots[0] 을 대신 쓰는 일이 없다).
-const LOCAL_TOOL_NAME: Partial<Record<string, string>> = { fs_glob: "Glob", fs_grep: "Grep" };
+// fs_tree 도 path 를 생략할 수 있으므로 같은 취급을 받아야 한다. Glob 으로 매핑하는 이유는
+// extractCandidatePaths 가 "path 생략 시 기본값을 검사한다"는 규칙을 그대로 태우기 위해서다 —
+// fs_tree 에는 pattern 인자가 없으므로 그 부분은 자연히 후보를 만들지 않는다.
+const LOCAL_TOOL_NAME: Partial<Record<string, string>> = { fs_glob: "Glob", fs_grep: "Grep", fs_tree: "Glob" };
 
 // 원격 호출은 실패해도 예외를 던지지 않는다 — 도구 하나의 실패가 턴 전체를 죽이면
 // 모델이 다른 방법을 시도하거나 사용자에게 알릴 기회 자체가 사라진다.

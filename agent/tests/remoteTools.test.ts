@@ -33,8 +33,9 @@ const ctxWith = (
   } as unknown as ToolCtx);
 
 describe("원격 도구", () => {
-  it("도구 이름 6개를 고정으로 노출한다", () => {
-    expect([...REMOTE_TOOL_NAMES].sort()).toEqual(["fs_edit", "fs_glob", "fs_grep", "fs_read", "fs_write", "sh_exec"]);
+  it("도구 이름 7개를 고정으로 노출한다", () => {
+    // Task 4: fs_tree 추가 — 폴더 구조 전용 조회 도구.
+    expect([...REMOTE_TOOL_NAMES].sort()).toEqual(["fs_edit", "fs_glob", "fs_grep", "fs_read", "fs_tree", "fs_write", "sh_exec"]);
   });
 
   it("허브 호출 결과를 그대로 문자열로 돌려준다", async () => {
@@ -531,5 +532,35 @@ describe("remoteToolHandler — 공유 기계에서 사용자별 격리", () => 
       expect(out).toContain("허용된 폴더 밖");
       expect(realCalls(calls)).toHaveLength(0);
     });
+  });
+});
+
+describe("fs_tree 는 fs_glob 과 동일하게 1차 필터를 탄다", () => {
+  const withDirs = (dirs: string[], remote: Partial<NonNullable<ToolCtx["remote"]>>): ToolCtx =>
+    ({
+      remote: { roots: ["/w"], workerId: "test-worker", workerKind: "personal", ...remote },
+      isOwner: true, isPrivate: true, userId: "owner",
+      repos: { allowedDirs: { list: async () => dirs } },
+    } as unknown as ToolCtx);
+
+  it("path 를 생략하고 allowedDirs 가 비어 있으면 허브를 부르지 않는다", async () => {
+    let called = false;
+    const ctx = withDirs([], { call: async () => { called = true; return { ok: true, content: "" }; } });
+    const out = await remoteToolHandler(ctx, "fs_tree", {});
+    expect(called).toBe(false);
+    expect(out).toContain("allow_dir");
+  });
+
+  it("path 를 생략하면 검사에 쓴 allowed[0] 을 args 에 실제로 주입한다", async () => {
+    const seen: Array<Record<string, unknown>> = [];
+    const ctx = withDirs(["/w/proj"], { call: async (_t, args) => { seen.push(args); return { ok: true, content: "" }; } });
+    await remoteToolHandler(ctx, "fs_tree", {});
+    expect(seen[0]!.path).toBe("/w/proj");
+  });
+
+  it("허용 폴더 밖 path 는 거부한다", async () => {
+    const ctx = withDirs(["/w/proj"], { call: async () => ({ ok: true, content: "" }) });
+    const out = await remoteToolHandler(ctx, "fs_tree", { path: "/etc" });
+    expect(out).toContain("허용된 폴더 밖");
   });
 });
