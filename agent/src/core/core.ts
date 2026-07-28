@@ -26,13 +26,41 @@ const SUMMARY_PROMPT = `이 대화 세션이 곧 종료됩니다. 나중에 다�
 - 결정된 것, 사용자에 대해 새로 알게 된 것, 진행 중인 일 중심으로 10줄 이내
 - 요약 텍스트만 출력 (인사말·설명 없이)`;
 
+// 표시용 경로 축약: 그 사용자의 작업 폴더로 시작하면 그 앞부분을 떼어 낸다. 긴 절대경로가
+// 상태 메시지의 12줄 예산을 잡아먹는 것을 막고, 부원에게 "내 폴더 안"이라는 게 자연스럽게
+// 드러난다. 밖의 경로는 그대로 둔다 — 줄이면 어디인지 알 수 없어진다.
+function shortenPath(text: string, baseDirs?: string[]): string {
+  if (!baseDirs) return text;
+  for (const base of baseDirs) {
+    const prefix = base.endsWith("\\") || base.endsWith("/") ? base : `${base}\\`;
+    if (text.startsWith(prefix)) return text.slice(prefix.length);
+    const posix = `${base.replace(/\\+$/, "")}/`;
+    if (text.startsWith(posix)) return text.slice(posix.length);
+  }
+  return text;
+}
+
+function seconds(ms: number): string {
+  return `${(ms / 1000).toFixed(1)}초`;
+}
+
 // ProgressUpdate → 사용자용 짧은 텍스트(순수 함수, 디스코드 태스크가 그대로 재사용한다).
-export function formatProgress(u: ProgressUpdate): string {
+// baseDirs(옵셔널): 그 손님의 작업 폴더 목록 — 넘기면 경로를 그 폴더 기준으로 축약한다.
+export function formatProgress(u: ProgressUpdate, baseDirs?: string[]): string {
   switch (u.kind) {
     case "tool":
-      return u.input !== undefined ? `${u.name}("${u.input}")` : `${u.name}()`;
-    case "tool_result":
-      return u.name ? `${u.name} 완료` : "도구 실행 완료";
+      return u.input !== undefined ? `${u.name} ${shortenPath(u.input, baseDirs)}` : `${u.name}()`;
+    case "tool_result": {
+      // 실패를 "완료"로 찍던 것이 이 함수의 가장 큰 결함이었다 — 부원이 왜 안 됐는지 알 수
+      // 있는 경로가 이 한 줄뿐이다.
+      const mark = u.ok ? "✓" : "✗";
+      const name = u.name ?? "도구";
+      const tail = u.ok
+        ? [u.summary === undefined ? undefined : shortenPath(u.summary.split("\n")[0]!, baseDirs), u.durationMs === undefined ? undefined : `(${seconds(u.durationMs)})`]
+        : [u.summary === undefined ? undefined : shortenPath(u.summary.split("\n")[0]!, baseDirs)];
+      const rest = tail.filter((x) => x !== undefined).join(" ");
+      return rest.length > 0 ? `${mark} ${name} — ${rest}` : `${mark} ${name}`;
+    }
     case "answering":
       return "답변 작성 중";
   }
@@ -379,7 +407,7 @@ export class AgentCore {
       const workspaceDirs = await this.resolveGuestWorkspaceDirs(worker, isOwner, userId);
       const systemPrompt = buildSystemPrompt({ role, isPrivate: conv.isPrivate, isOwner, deployTarget: this.config.deployTarget, rapportStage, workerConnected, emotions: this.emotions, workspaceDirs });
       const onProgress = (u: ProgressUpdate) => {
-        this.bus.publish({ type: "progress", channel: "discord", channelRef: conv.discordChannelId, text: formatProgress(u), ts: this.now() });
+        this.bus.publish({ type: "progress", channel: "discord", channelRef: conv.discordChannelId, text: formatProgress(u, workspaceDirs), ts: this.now() });
         // 기록은 도구 호출이 끝난 시점에만 남긴다(tool 이벤트는 짝이 맞춰져 이 한 행에 흡수된다).
         // 부가 기능이므로 실패해도 턴을 죽이지 않는다 — hub.ts 의 touchLastSeen 과 같은 패턴.
         if (u.kind !== "tool_result") return;

@@ -94,8 +94,11 @@ describe("progressFromMessage — SDK 메시지에서 진행 업데이트 추출
 });
 
 describe("formatProgress — 진행 업데이트를 사용자용 텍스트로", () => {
-  it("tool + input → name(\"input\")", () => {
-    expect(formatProgress({ kind: "tool", name: "recall", input: "병원" })).toBe('recall("병원")');
+  // Task 3: baseDirs 로 경로를 줄이는 shortenPath 가 "tool" 분기에도 적용되면서 표시 형식이
+  // `name("input")` 에서 `name input` (공백 구분, 따옴표·괄호 없음)으로 의도적으로 바뀌었다 —
+  // baseDirs 를 안 주면 shortenPath 는 원문을 그대로 돌려주므로 input 자체는 그대로다.
+  it("tool + input → name input", () => {
+    expect(formatProgress({ kind: "tool", name: "recall", input: "병원" })).toBe("recall 병원");
   });
   it("tool without input → name()", () => {
     expect(formatProgress({ kind: "tool", name: "Read" })).toBe("Read()");
@@ -108,6 +111,39 @@ describe("formatProgress — 진행 업데이트를 사용자용 텍스트로", 
     expect(formatProgress({ kind: "tool_result", ok: true }).length).toBeGreaterThan(0);
   });
   it("answering → 답변 작성 중", () => {
+    expect(formatProgress({ kind: "answering" })).toBe("답변 작성 중");
+  });
+});
+
+describe("formatProgress — 성패와 사유가 보인다", () => {
+  const BASE = ["C:\\asahi-workspace\\1517428698368704650"];
+
+  it("성공은 체크 표시와 소요시간을 붙인다", () => {
+    const s = formatProgress({ kind: "tool_result", name: "fs_read", ok: true, summary: "본문", durationMs: 320 });
+    expect(s).toContain("✓");
+    expect(s).toContain("fs_read");
+    expect(s).toContain("0.3");
+  });
+
+  it("실패는 X 표시와 사유를 그대로 보여준다", () => {
+    const s = formatProgress({ kind: "tool_result", name: "fs_write", ok: false, summary: "허용된 폴더 밖 경로예요", durationMs: 5 });
+    expect(s).toContain("✗");
+    expect(s).toContain("허용된 폴더 밖 경로예요");
+    expect(s).not.toContain("완료");
+  });
+
+  it("경로는 그 사용자의 폴더 기준으로 줄인다", () => {
+    const s = formatProgress({ kind: "tool", name: "fs_read", input: "C:\\asahi-workspace\\1517428698368704650\\src\\a.ts" }, BASE);
+    expect(s).toContain("src\\a.ts");
+    expect(s).not.toContain("1517428698368704650");
+  });
+
+  it("기준 폴더 밖 경로는 줄이지 않는다", () => {
+    const s = formatProgress({ kind: "tool", name: "fs_read", input: "C:\\other\\a.ts" }, BASE);
+    expect(s).toContain("C:\\other\\a.ts");
+  });
+
+  it("answering 은 그대로다(회귀 없음)", () => {
     expect(formatProgress({ kind: "answering" })).toBe("답변 작성 중");
   });
 });
