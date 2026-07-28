@@ -20,8 +20,19 @@ export type TurnContext = { role: Role; isPrivate: boolean; isOwner: boolean; us
 // 턴 처리 중 진행 상황(판별 유니온). 표시용 텍스트로 바꾸는 건 core.ts 의 formatProgress 가 맡는다.
 export type ProgressUpdate =
   | { kind: "tool"; name: string; input?: string }
-  | { kind: "tool_result"; name?: string }
+  // 표시와 기록이 같은 값에서 나오도록 확장했다(2026-07-28 관측 기반 스펙 §3).
+  // ok/summary 는 SDK 의 tool_result 블록에서, input/durationMs 는 짝지은 tool 이벤트에서 온다.
+  | { kind: "tool_result"; name?: string; input?: string; ok: boolean; summary?: string; durationMs?: number }
   | { kind: "answering" };
+
+// tool_use_id → 그 호출의 이름·입력·시작 시각. 예전엔 이름(string)만 담았는데, 기록 한 행을
+// 채우려면 input 과 소요시간이 필요하다. 짝짓기는 반드시 id 로 한다 — 이름으로 짝지으면 같은
+// 도구를 연달아 부를 때 어긋난다.
+export type PendingTool = { name: string; input?: string; startedAt: number };
+
+// 결과 요약 상한. 표시 한 줄과 actions.result_summary 양쪽에 쓴다.
+export const RESULT_SUMMARY_MAX = 200;
+
 // images(§Task3 이미지 입력): 있으면 query() 의 prompt 를 문자열 대신 async-iterable(SDKUserMessage 1개)로
 // 바꿔 멀티모달 턴을 만든다(buildMultimodalMessage). 없으면 기존 문자열 prompt 경로 그대로(회귀 없음).
 // noRemoteTools(FIX4, 최종 리뷰): true 면 이 턴은 워커 연결 여부와 무관하게 원격
@@ -80,25 +91,45 @@ export function buildMultimodalMessage(text: string, images: ImageInput[]): SDKU
 }
 
 // query() 스트림 메시지 하나에서 진행 업데이트들을 뽑는 순수 함수. assistant 의 tool_use → 'tool',
-// 그 뒤 user 의 tool_result → 'tool_result'(이름은 pendingToolNames 로 되찾음), text 블록 → 'answering'.
-// pendingToolNames 는 호출자가 턴 하나 동안 유지하는 tool_use_id → 짧은 도구명 맵(이 함수가 채우고 소비한다).
+// 그 뒤 user 의 tool_result → 'tool_result'(이름·입력은 pending 으로 되찾고 성패·요약은 이 블록
+// 자체에서, 소요시간은 짝지은 tool 의 시작 시각과의 차로 계산), text 블록 → 'answering'.
+// pending 은 호출자가 턴 하나 동안 유지하는 tool_use_id → PendingTool 맵(이 함수가 채우고 소비한다).
+// now(기본 Date.now)는 테스트가 시계를 주입해 durationMs 를 결정적으로 검증할 수 있게 한다.
 type ProgressSourceMessage = { type: string; message?: unknown };
-export function progressFromMessage(message: ProgressSourceMessage, pendingToolNames: Map<string, string>): ProgressUpdate[] {
+export function progressFromMessage(
+  message: ProgressSourceMessage,
+  pending: Map<string, PendingTool>,
+  now: () => number = Date.now,
+): ProgressUpdate[] {
   const inner = message.message;
   const content = inner && typeof inner === "object" ? (inner as { content?: unknown }).content : undefined;
   if (!Array.isArray(content)) return [];
   const updates: ProgressUpdate[] = [];
   for (const raw of content) {
     if (!raw || typeof raw !== "object") continue;
-    const block = raw as { type?: unknown; name?: unknown; id?: unknown; input?: unknown; tool_use_id?: unknown };
+    const block = raw as {
+      type?: unknown; name?: unknown; id?: unknown; input?: unknown;
+      tool_use_id?: unknown; is_error?: unknown; content?: unknown;
+    };
     if (block.type === "tool_use" && typeof block.name === "string") {
       const name = shortToolName(block.name);
-      if (typeof block.id === "string") pendingToolNames.set(block.id, name);
-      updates.push({ kind: "tool", name, input: summarizeToolInput(block.input) });
+      const input = summarizeToolInput(block.input);
+      if (typeof block.id === "string") pending.set(block.id, { name, input, startedAt: now() });
+      updates.push({ kind: "tool", name, input });
     } else if (block.type === "tool_result" && typeof block.tool_use_id === "string") {
-      const name = pendingToolNames.get(block.tool_use_id);
-      pendingToolNames.delete(block.tool_use_id);
-      updates.push({ kind: "tool_result", name });
+      const p = pending.get(block.tool_use_id);
+      pending.delete(block.tool_use_id);
+      // is_error 가 실려 오지 않는 SDK 버전에서도 안전하게 동작한다 — 없으면 성공으로 본다.
+      const ok = block.is_error !== true;
+      const body = typeof block.content === "string" ? block.content : undefined;
+      updates.push({
+        kind: "tool_result",
+        name: p?.name,
+        input: p?.input,
+        ok,
+        summary: body === undefined ? undefined : body.slice(0, RESULT_SUMMARY_MAX),
+        durationMs: p === undefined ? undefined : now() - p.startedAt,
+      });
     } else if (block.type === "text") {
       updates.push({ kind: "answering" });
     }
@@ -249,8 +280,9 @@ export function makeRunAgentTurn(
     let sessionId: string | undefined;
     let text = "";
     let ok = false;
-    // 턴 하나 동안 tool_use_id → 짧은 도구명(진행 이벤트용). onProgress 가 없으면 추출도 하지 않는다.
-    const pendingToolNames = new Map<string, string>();
+    // 턴 하나 동안 tool_use_id → PendingTool(이름·입력·시작 시각, 진행 이벤트용). onProgress 가
+    // 없으면 추출도 하지 않는다.
+    const pendingToolNames = new Map<string, PendingTool>();
     // 이미지가 있으면 async-iterable(멀티모달 1메시지)로, 없으면 기존 문자열 prompt 그대로(회귀 금지).
     const promptInput = req.images && req.images.length > 0
       ? (async function* () { yield buildMultimodalMessage(req.prompt, req.images!); })()

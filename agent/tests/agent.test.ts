@@ -9,8 +9,8 @@ import { AllowedDirsRepo } from "../src/store/allowedDirsRepo.js";
 import { IntrospectRepo } from "../src/store/introspectRepo.js";
 import {
   buildToolCtx, buildMultimodalMessage, buildRemoteCtx, resolveTurnWorker,
-  resolveWebToolsEnabled,
-  type TurnContext, type ToolRepos,
+  resolveWebToolsEnabled, progressFromMessage,
+  type TurnContext, type ToolRepos, type PendingTool,
 } from "../src/core/agent.js";
 import { allowDirHandler, allowedToolsFor, type RuntimeInfo } from "../src/core/tools.js";
 
@@ -259,5 +259,62 @@ describe("buildMultimodalMessage", () => {
     const m = buildMultimodalMessage("   ", [img]) as any;
     expect(m.message.content).toHaveLength(1);
     expect(m.message.content[0].type).toBe("image");
+  });
+});
+
+describe("progressFromMessage — tool_result 에 성패·입력·소요시간을 싣는다", () => {
+  const toolUse = (id: string, name: string, input: unknown) => ({
+    type: "assistant",
+    message: { content: [{ type: "tool_use", id, name, input }] },
+  });
+  const toolResult = (id: string, extra: Record<string, unknown> = {}) => ({
+    type: "user",
+    message: { content: [{ type: "tool_result", tool_use_id: id, ...extra }] },
+  });
+
+  it("is_error 가 없으면 ok:true, 있으면 ok:false", () => {
+    const pending = new Map<string, PendingTool>();
+    progressFromMessage(toolUse("t1", "fs_read", { path: "/w/a" }), pending, () => 1000);
+    const okUpdates = progressFromMessage(toolResult("t1", { content: "본문" }), pending, () => 1300);
+    expect(okUpdates[0]).toMatchObject({ kind: "tool_result", ok: true });
+
+    progressFromMessage(toolUse("t2", "fs_write", {}), pending, () => 2000);
+    const failUpdates = progressFromMessage(
+      toolResult("t2", { is_error: true, content: "허용된 폴더 밖 경로예요" }), pending, () => 2100);
+    expect(failUpdates[0]).toMatchObject({ kind: "tool_result", ok: false });
+  });
+
+  it("짝지어진 tool 의 입력과 소요시간을 함께 싣는다", () => {
+    const pending = new Map<string, PendingTool>();
+    progressFromMessage(toolUse("t1", "fs_read", { path: "/w/a.txt" }), pending, () => 1000);
+    const [u] = progressFromMessage(toolResult("t1", { content: "본문" }), pending, () => 1450);
+    expect(u).toMatchObject({ kind: "tool_result", name: "fs_read", durationMs: 450 });
+    expect((u as { input?: string }).input).toContain("a.txt");
+  });
+
+  it("같은 도구를 연달아 불러도 id 로 각각 짝지어진다", () => {
+    const pending = new Map<string, PendingTool>();
+    progressFromMessage(toolUse("a", "fs_read", { path: "/w/first.txt" }), pending, () => 100);
+    progressFromMessage(toolUse("b", "fs_read", { path: "/w/second.txt" }), pending, () => 200);
+    const [second] = progressFromMessage(toolResult("b", { content: "x" }), pending, () => 260);
+    const [first] = progressFromMessage(toolResult("a", { content: "y" }), pending, () => 900);
+    expect((second as { input?: string }).input).toContain("second.txt");
+    expect((second as { durationMs?: number }).durationMs).toBe(60);
+    expect((first as { input?: string }).input).toContain("first.txt");
+    expect((first as { durationMs?: number }).durationMs).toBe(800);
+  });
+
+  it("결과 요약은 200자에서 자른다", () => {
+    const pending = new Map<string, PendingTool>();
+    progressFromMessage(toolUse("t1", "sh_exec", { command: "ls" }), pending, () => 0);
+    const [u] = progressFromMessage(toolResult("t1", { content: "가".repeat(500) }), pending, () => 10);
+    expect((u as { summary?: string }).summary!.length).toBeLessThanOrEqual(200);
+  });
+
+  it("짝이 없는 tool_result 도 버리지 않는다(ok 는 살린다)", () => {
+    const pending = new Map<string, PendingTool>();
+    const [u] = progressFromMessage(toolResult("unknown", { content: "x" }), pending, () => 5);
+    expect(u).toMatchObject({ kind: "tool_result", ok: true });
+    expect((u as { durationMs?: number }).durationMs).toBeUndefined();
   });
 });
