@@ -250,6 +250,53 @@ describe("buildSystemPrompt — 손님 분기도 sh_exec 봉쇄를 과장하지 
   });
 });
 
+// 실사용에서 드러난 문제 — 능력 안내가 "네 몫의 폴더"라고만 하고 경로를 주지 않아, 손님이
+// "내 워크스페이스에 폴더 만들어줘"라고 하면 봇이 절대경로를 되물었다. 손님에게는 list_dirs
+// (관리자 전용)도 없어서, 자기 디스코드 숫자 id 를 개발자 모드로 직접 복사해 오지 않는 한
+// fs_* 를 쓸 방법이 없었다. core.ts 가 remoteToolHandler 와 같은 scopeDirs 계산으로 구한
+// 경로를 실어 준다 — 안내와 집행이 다른 계산에서 나오면 어긋난다.
+describe("buildSystemPrompt — 손님에게 자기 작업 폴더 경로를 알려준다", () => {
+  const DIR = "C:\\asahi-workspace\\1517428698368704650";
+
+  for (const isPrivate of [true, false]) {
+    const where = isPrivate ? "DM" : "서버";
+    const guest = { role: "allowed" as const, isOwner: false, isPrivate };
+
+    it(`손님(${where}) + 워커 연결 + 폴더가 있으면 그 경로를 능력 안내에 넣는다`, () => {
+      const cap = capabilitySection(buildSystemPrompt({ ...guest, workerConnected: true, workspaceDirs: [DIR] }));
+      expect(cap).toContain(DIR);
+    });
+
+    it(`손님(${where}) + 폴더가 비었거나 생략되면 경로 줄 자체를 넣지 않는다(빈 안내로 지어낼 여지를 주지 않는다)`, () => {
+      for (const workspaceDirs of [undefined, []]) {
+        const cap = capabilitySection(buildSystemPrompt({ ...guest, workerConnected: true, workspaceDirs }));
+        expect(cap).not.toMatch(/작업 폴더는/);
+      }
+    });
+
+    it(`손님(${where}) + 워커 미연결이면 폴더가 주어져도 경로를 안내하지 않는다(도구가 없는데 위치만 알리지 않는다)`, () => {
+      const cap = capabilitySection(buildSystemPrompt({ ...guest, workspaceDirs: [DIR] }));
+      expect(cap).not.toContain(DIR);
+    });
+
+    it(`손님(${where}) 폴더가 여러 개면 모두 알려준다`, () => {
+      const second = "D:\\ws\\1517428698368704650";
+      const cap = capabilitySection(buildSystemPrompt({ ...guest, workerConnected: true, workspaceDirs: [DIR, second] }));
+      expect(cap).toContain(DIR);
+      expect(cap).toContain(second);
+    });
+  }
+
+  it("소유자에게는 workspaceDirs 를 안내하지 않는다(scopeDirs 가 좁히지 않아 한 폴더로 특정되지 않고, list_dirs 로 직접 조회한다)", () => {
+    for (const isPrivate of [true, false]) {
+      const cap = capabilitySection(
+        buildSystemPrompt({ role: "owner", isOwner: true, isPrivate, workerConnected: true, workspaceDirs: [DIR] }),
+      );
+      expect(cap).not.toContain(DIR);
+    }
+  });
+});
+
 describe("deriveRapportStage", () => {
   it("10 미만이면 0(서먹)", () => {
     expect(deriveRapportStage(0)).toBe(0);
