@@ -12,9 +12,28 @@ export type HubSocket = {
 };
 
 type Pending = { resolve: (r: { ok: boolean; content: string }) => void; timer: ReturnType<typeof setTimeout> };
-type Conn = { socket: HubSocket; roots: string[]; pending: Map<string, Pending> };
+type Conn = { socket: HubSocket; roots: string[]; pending: Map<string, Pending>; pingTimer: ReturnType<typeof setInterval> };
 
 const DEFAULT_CALL_TIMEOUT_MS = 120_000;
+
+// 유휴 연결을 살려 두기 위한 keepalive 주기.
+//
+// Ping/Pong 프레임(protocol.ts)과 양쪽의 응답 경로는 원래부터 있었지만 어느 쪽도 먼저 보내지
+// 않았다 — 정의만 있고 아무도 시작하지 않는 keepalive 였다. 그래서 도구 호출이 없는 동안 WS 가
+// 완전히 유휴 상태가 되고 Railway 엣지 프록시가 그 연결을 끊는다(실측 2026-07-28: 미니PC 워커가
+// 약 15분 간격으로 "연결이 끊겨 재시도합니다 → 연결됨 → 준비됨" 을 반복).
+//
+// 사용자에게 보이는 증상은 재연결 로그가 아니라 간헐적 거부다: 재연결 창(workerClient 의 고정
+// 3초) 동안 isConnected 가 false 라 resolveTurnWorker 가 null 을 돌려주고, 모델은 "지금은 워커가
+// 연결돼 있지 않아 PC 작업을 할 수 없어요" 로 답한다 — 아무 이유 없이 가끔 안 되는 것처럼 보인다.
+//
+// 워커가 아니라 허브가 보낸다: 프록시의 유휴 타이머는 어느 방향의 프레임으로도 갱신되고,
+// 워커의 pong 응답 경로(workerClient.ts)는 이미 있어 워커 쪽 변경이 필요 없다 — 미니PC 를
+// 재배포하지 않아도 이 수정이 그대로 듣는다.
+//
+// pong 이 안 와도 연결을 끊지는 않는다. 그건 새로운 끊김 사유를 만드는 일이고, 반쪽 연결은
+// call() 의 callTimeoutMs 가 이미 실패로 처리한다 — 여기서는 원인(유휴)만 없앤다.
+const DEFAULT_PING_INTERVAL_MS = 30_000;
 
 // FIX3(중요): 연결은 됐지만 hello 를 보내지 않는(또는 못 보내는) 소켓을 이 시간 안에 닫는다. 실제
 // 워커는 연결 직후 곧바로 hello 를 보내므로(workerClient.ts 의 onOpen) 넉넉한 값이다. 이 타임아웃이
@@ -94,12 +113,31 @@ export class WorkerHub {
   private now: () => number;
   private callTimeoutMs: number;
   private helloTimeoutMs: number;
+  private pingIntervalMs: number;
 
-  constructor(opts: { registry: WorkerRegistry; now?: () => number; callTimeoutMs?: number; helloTimeoutMs?: number }) {
+  constructor(opts: {
+    registry: WorkerRegistry; now?: () => number;
+    callTimeoutMs?: number; helloTimeoutMs?: number; pingIntervalMs?: number;
+  }) {
     this.registry = opts.registry;
     this.now = opts.now ?? Date.now;
     this.callTimeoutMs = opts.callTimeoutMs ?? DEFAULT_CALL_TIMEOUT_MS;
     this.helloTimeoutMs = opts.helloTimeoutMs ?? DEFAULT_HELLO_TIMEOUT_MS;
+    this.pingIntervalMs = opts.pingIntervalMs ?? DEFAULT_PING_INTERVAL_MS;
+  }
+
+  // 인증된 연결에만 건다(인증 전 소켓은 hello 타임아웃이 따로 관리한다). send 가 동기적으로
+  // 던질 수 있어(이미 닫힌 소켓 등) 감싼다 — 타이머 콜백에서 새어 나가면 잡을 곳이 없어
+  // 봇 프로세스가 죽는다. 끊긴 연결의 타이머는 onClose·dropExisting·closeAll 이 정리하므로,
+  // 이 catch 가 막는 것은 그 사이의 짧은 창뿐이다.
+  private startPing(socket: HubSocket): ReturnType<typeof setInterval> {
+    return setInterval(() => {
+      try {
+        socket.send(encodeFrame({ type: "ping" }));
+      } catch (e) {
+        console.error("[hub] ping 전송 실패:", e);
+      }
+    }, this.pingIntervalMs);
   }
 
   // 새 소켓 하나를 받는다. hello 로 인증되기 전에는 어떤 프레임도 처리하지 않는다.
@@ -166,7 +204,7 @@ export class WorkerHub {
 
             this.clearHelloTimer(socket);
             this.dropExisting(id);
-            this.conns.set(id, { socket, roots, pending: new Map() });
+            this.conns.set(id, { socket, roots, pending: new Map(), pingTimer: this.startPing(socket) });
             state = "authed";
             workerId = id;
             socket.send(encodeFrame({ type: "ready" }));
@@ -209,6 +247,7 @@ export class WorkerHub {
       const conn = this.conns.get(workerId);
       if (!conn || conn.socket !== socket) return;
       this.conns.delete(workerId);
+      clearInterval(conn.pingTimer);
       this.failAllPending(conn, "워커 연결이 끊겼어요.");
     });
   }
@@ -260,6 +299,8 @@ export class WorkerHub {
     }
     this.unauthSockets.clear();
     for (const [workerId, conn] of this.conns) {
+      // 타이머를 먼저 끊는다 — 남겨 두면 이벤트 루프가 계속 살아 있어 종료가 막힌다.
+      clearInterval(conn.pingTimer);
       this.failAllPending(conn, "봇이 종료돼 작업을 마치지 못했어요.");
       conn.socket.close();
       this.conns.delete(workerId);
@@ -271,6 +312,9 @@ export class WorkerHub {
     const prev = this.conns.get(workerId);
     if (!prev) return;
     this.conns.delete(workerId);
+    // onClose 에만 맡기면 안 된다 — 실제 ws 의 close() 는 요청일 뿐이라 'close' 이벤트가 최대
+    // 30초까지 늦게 오고(이 파일 위쪽 I1b 주석), 그 사이 밀려난 소켓으로 ping 이 계속 나간다.
+    clearInterval(prev.pingTimer);
     this.failAllPending(prev, "워커가 다시 연결돼 이전 작업이 취소됐어요.");
     prev.socket.close();
   }
