@@ -1,3 +1,4 @@
+import path from "node:path";
 import type { EventBus, UserMessageEvent, ConversationHint } from "../events/bus.js";
 import type { Config } from "../config.js";
 import { resolveTurnWorker, type TurnRunner, type TurnContext, type TurnResult, type ProgressUpdate } from "./agent.js";
@@ -14,8 +15,10 @@ import type { SummariesRepo } from "../store/summariesRepo.js";
 import type { MemoriesRepo } from "../store/memoriesRepo.js";
 import type { TurnsRepo } from "../store/turnsRepo.js";
 import type { AllowedDirsRepo } from "../store/allowedDirsRepo.js";
+import type { ActionsRepo } from "../store/actionsRepo.js";
 import type { WorkerKind } from "../store/workersRepo.js";
 import { scopeDirs } from "./workerSelect.js";
+import { pathFlavorOf } from "./paths.js";
 import { buildContextBlock, isSessionNotFound } from "./turnPrep.js";
 import { buildImageMarker, downloadImages, type ImageRef, type ImageInput } from "./images.js";
 
@@ -25,13 +28,95 @@ const SUMMARY_PROMPT = `이 대화 세션이 곧 종료됩니다. 나중에 다�
 - 결정된 것, 사용자에 대해 새로 알게 된 것, 진행 중인 일 중심으로 10줄 이내
 - 요약 텍스트만 출력 (인사말·설명 없이)`;
 
+// text/rawPrefix 를 "표시용 비교"에만 쓸 폴딩된 사본으로 바꾼다 — 윈도우 플레이버일 때만 구분자를
+// 통일하고(백슬래시→슬래시) 대소문자를 접는다(윈도우 파일시스템은 대소문자를 구분하지 않는다;
+// POSIX 는 구분자가 "/" 뿐이고 대소문자도 구분하므로 그대로 둔다). 두 치환 모두 문자 수를 보존한다고
+// 가정한다 — paths.ts 의 isPathWithin(33-34번째 줄 부근)도 경계 판정에 같은 toLowerCase 가정을 이미
+// 쓰고 있다. 그래서 폴딩된 문자열에서 찾은 접두 길이(rawPrefix.length, 폴딩 전 원래 길이)를 그대로
+// 원본 text 자르기에 써도 안전하다 — shortenPath 가 진짜로 필요로 하는 성질이 바로 이것이다.
+function foldForCompare(s: string, isWindows: boolean): string {
+  const unified = isWindows ? s.replace(/\\/g, "/") : s;
+  return isWindows ? unified.toLowerCase() : unified;
+}
+
+// 표시용 경로 축약: 그 사용자의 작업 폴더로 시작하면 그 앞부분을 떼어 낸다. 긴 절대경로가
+// 상태 메시지의 12줄 예산을 잡아먹는 것을 막고, 부원에게 "내 폴더 안"이라는 게 자연스럽게
+// 드러난다. 밖의 경로는 그대로 둔다 — 줄이면 어디인지 알 수 없어진다.
+//
+// 리뷰 후속(Task 3 사후검토, 실측 실패 케이스 2가지): (1) LLM 이 도구 인자를 슬래시로 정규화해
+// 넘기면 base(백슬래시)와 구분자가 섞여 예전의 리터럴 startsWith 두 벌(백슬래시 접미 / "끝만"
+// 슬래시로 바꾼 접미 — 내부 백슬래시는 그대로라 base 자체가 이미 POSIX 표기일 때만 맞았다)로는
+// 못 잡았다. (2) 드라이브 문자 대소문자만 달라도(c:\ vs C:\) 못 잡았다. 두 경우 다 "조용히" 축약
+// 없이 전체 경로가 그대로 노출됐다 — 폴더 밖 경로와 구분이 안 된다.
+//
+// base 가 윈도우식(드라이브 문자·UNC)인지는 paths.ts 의 pathFlavorOf 로 판정한다 — isPathWithin 이
+// "무엇이 윈도우 경로인가"에 쓰는 것과 동일한 규칙이라, 두 곳의 판정이 나중에 갈리지 않는다(같은
+// 규칙을 두 벌로 만들면 갈린다는 게 이 저장소가 이미 여러 번 겪은 결함 유형이다 — pathPermission.ts
+// 의 resolveAgainstBase 도 같은 이유로 pathFlavorOf 를 재사용한다).
+//
+// isPathWithin/normalizeDir 자체는 재사용하지 않았다 — 그 함수들은 flavor.resolve() 로 상대경로를
+// cwd 기준으로 만들고 '..'를 접은 뒤(+대소문자 폴딩) "같은 경로냐"만 참/거짓으로 답하도록 만들어져,
+// 돌려주는 값이 있다면 정규화된 사본이지 "원본에서 그대로 잘라낸 나머지"가 아니다. 이 함수는
+// 사용자에게 보여줄 문자열이 원래 표기(사용자가 실제로 준 구분자·대소문자)를 유지해야 하므로,
+// 폴딩(foldForCompare)은 "어디서 자를지" 판단(boolean)에만 쓰고 자르기 자체는 항상 원본 text 에서 한다.
+function shortenPath(text: string, baseDirs?: string[]): string {
+  if (!baseDirs) return text;
+  for (const base of baseDirs) {
+    const isWindows = pathFlavorOf(base) === path.win32;
+    const rawPrefix = base.endsWith("\\") || base.endsWith("/") ? base : `${base}${isWindows ? "\\" : "/"}`;
+    if (foldForCompare(text, isWindows).startsWith(foldForCompare(rawPrefix, isWindows))) {
+      return text.slice(rawPrefix.length);
+    }
+  }
+  return text;
+}
+
+function seconds(ms: number): string {
+  return `${(ms / 1000).toFixed(1)}초`;
+}
+
+// 표시 줄 하나에 실을 결과 요약의 상한(최종 리뷰 Important 2). 이벤트의 summary 상한
+// (agent.ts 의 RESULT_SUMMARY_MAX=200)과는 다른 값이고, 달라야 한다 — 200 은 actions.result_summary
+// 에 남길 기록 해상도이고, 이 80 은 한 줄짜리 UI 가 감당할 수 있는 길이다. 같은 값에서 나온 두
+// 소비자(표시·기록)가 서로 다른 예산을 갖는 지점이 정확히 여기다.
+//
+// 왜 자르는가: 디스코드 메시지는 2000자가 한도인데, 상태 메시지의 유일한 길이 보호는
+// discord.ts 의 12줄 상한(PROGRESS_DISPLAY_MAX_LINES)이었다. 그 값은 짧은 줄(`fs_read 완료`,
+// 52자)을 전제로 잡힌 것인데, 이 브랜치가 summary 를 표시 줄에 실으면서 한 줄 최악이 220자가
+// 됐다 — 12줄이면 2694자로 한도를 넘는다. 넘으면 send/edit 이 reject 되고 그 catch 는 로그만
+// 남기므로, 상태 메시지가 그 턴 내내 옛 내용으로 얼어붙는다(도구를 많이 쓴 턴 = 진행 표시가
+// 가장 필요한 턴에서 하필 그렇게 된다). 80 이면 머리글·줄머리·이름·소요시간까지 더해도 12줄이
+// 1400자 안쪽이라 한도까지 여유가 넉넉하다.
+export const PROGRESS_SUMMARY_MAX = 80;
+
+// 결과 요약을 표시 한 줄로 만든다: 첫 줄만 뽑고 → 경로를 사용자 폴더 기준으로 줄이고 → 상한에서
+// 자른다. 자른 자리에 말줄임표를 남긴다 — 한 줄짜리 UI 라 생략해도 되지만, 잘렸는지 아닌지를
+// 부원이 구분할 수 있어야 "사유가 원래 이게 전부"라고 오해하지 않는다.
+// 코드포인트 단위로 자른다(slice 는 UTF-16 코드유닛 기준이라 이모지가 경계에 걸리면 서로게이트
+// 쌍이 쪼개진다 — tools.ts 의 truncateChars 와 같은 이유).
+function summaryLine(summary: string, baseDirs?: string[]): string {
+  const line = shortenPath(summary.split("\n")[0]!, baseDirs);
+  const chars = [...line];
+  return chars.length > PROGRESS_SUMMARY_MAX ? `${chars.slice(0, PROGRESS_SUMMARY_MAX).join("")}…` : line;
+}
+
 // ProgressUpdate → 사용자용 짧은 텍스트(순수 함수, 디스코드 태스크가 그대로 재사용한다).
-export function formatProgress(u: ProgressUpdate): string {
+// baseDirs(옵셔널): 그 손님의 작업 폴더 목록 — 넘기면 경로를 그 폴더 기준으로 축약한다.
+export function formatProgress(u: ProgressUpdate, baseDirs?: string[]): string {
   switch (u.kind) {
     case "tool":
-      return u.input !== undefined ? `${u.name}("${u.input}")` : `${u.name}()`;
-    case "tool_result":
-      return u.name ? `${u.name} 완료` : "도구 실행 완료";
+      return u.input !== undefined ? `${u.name} ${shortenPath(u.input, baseDirs)}` : `${u.name}()`;
+    case "tool_result": {
+      // 실패를 "완료"로 찍던 것이 이 함수의 가장 큰 결함이었다 — 부원이 왜 안 됐는지 알 수
+      // 있는 경로가 이 한 줄뿐이다.
+      const mark = u.ok ? "✓" : "✗";
+      const name = u.name ?? "도구";
+      const tail = u.ok
+        ? [u.summary === undefined ? undefined : summaryLine(u.summary, baseDirs), u.durationMs === undefined ? undefined : `(${seconds(u.durationMs)})`]
+        : [u.summary === undefined ? undefined : summaryLine(u.summary, baseDirs)];
+      const rest = tail.filter((x) => x !== undefined).join(" ");
+      return rest.length > 0 ? `${mark} ${name} — ${rest}` : `${mark} ${name}`;
+    }
     case "answering":
       return "답변 작성 중";
   }
@@ -49,6 +134,8 @@ export type CoreRepos = {
   // 실제 경로 게이팅은 remoteToolHandler 가 ToolCtx 의 같은 리포로 따로 수행한다 — 코어는
   // 안내문을 만들 때만 읽는다.
   allowedDirs: AllowedDirsRepo;
+  // 도구 호출 기록. 표시(bus)와 같은 이벤트에서 나온다 — 두 벌을 만들면 반드시 어긋난다.
+  actions: ActionsRepo;
 };
 
 // 대화(conversation)별 세션 + 대화 키별 직렬락으로 동작하는 코어.
@@ -153,7 +240,10 @@ export class AgentCore {
     // 어댑터의 isChannelCommand 를 통과한 것만 오므로 /help 와 조사 예약어 둘뿐이다.
     if (hint.commandOnly) {
       if (parseHelpCommand(text)) {
-        this.bus.publish({ type: "assistant_message", channel: "discord", channelRef: hint.discordChannelId, text: renderCommandHelp(), ts: this.now() });
+        // 능력 안내는 워커 연결 여부로 갈린다(최종 리뷰 Important 3) — 아래 helpText 참고.
+        // commandOnly 는 일반 채널 경로라 항상 공개(isPrivate:false)다.
+        const text2 = await this.helpText(hint.userId, false);
+        this.bus.publish({ type: "assistant_message", channel: "discord", channelRef: hint.discordChannelId, text: text2, ts: this.now() });
         return;
       }
       const topic = parseDigestCommand(text);
@@ -174,7 +264,8 @@ export class AgentCore {
 
     // 도움말: 예약어 목록만 보여준다. 모델을 부르지 않는다.
     if (parseHelpCommand(text)) {
-      this.bus.publish({ type: "assistant_message", channel: "discord", channelRef: conv.discordChannelId, text: renderCommandHelp(), ts: this.now() });
+      const helpText = await this.helpText(hint.userId, conv.isPrivate);
+      this.bus.publish({ type: "assistant_message", channel: "discord", channelRef: conv.discordChannelId, text: helpText, ts: this.now() });
       return;
     }
 
@@ -376,7 +467,17 @@ export class AgentCore {
       const workspaceDirs = await this.resolveGuestWorkspaceDirs(worker, isOwner, userId);
       const systemPrompt = buildSystemPrompt({ role, isPrivate: conv.isPrivate, isOwner, deployTarget: this.config.deployTarget, rapportStage, workerConnected, emotions: this.emotions, workspaceDirs });
       const onProgress = (u: ProgressUpdate) => {
-        this.bus.publish({ type: "progress", channel: "discord", channelRef: conv.discordChannelId, text: formatProgress(u), ts: this.now() });
+        this.bus.publish({ type: "progress", channel: "discord", channelRef: conv.discordChannelId, text: formatProgress(u, workspaceDirs), ts: this.now() });
+        // 기록은 도구 호출이 끝난 시점에만 남긴다(tool 이벤트는 짝이 맞춰져 이 한 행에 흡수된다).
+        // 부가 기능이므로 실패해도 턴을 죽이지 않는다 — hub.ts 의 touchLastSeen 과 같은 패턴.
+        if (u.kind !== "tool_result") return;
+        void this.repos.actions
+          .record({
+            ts: this.now(), conversationId: conv.id, userId,
+            tool: u.name ?? "(unknown)", input: u.input,
+            resultSummary: u.summary, status: u.ok ? "ok" : "error", durationMs: u.durationMs,
+          })
+          .catch((err) => console.error("[core] 도구 기록 실패:", err));
       };
 
       // 이 턴에만 쓰는 이미지 다운로드(§6: DB엔 마커만 저장했으므로, 과거 이미지 재주입은 없다 —
@@ -452,6 +553,29 @@ export class AgentCore {
       }
       this.enqueue(this.turnChains, conv.discordChannelId, () => this.runConversationTurn(conv.id, userId, role, m.content, m.id));
     }
+  }
+
+  // /help 안내문. 최종 리뷰 Important 3 — 능력 안내(파일·명령 작업을 시킬 수 있다는 안내)는
+  // 워커가 실제로 연결돼 있을 때만 나가야 한다. 판정은 여기서 새로 만들지 않고 runConversationTurn·
+  // agent.ts 가 쓰는 것과 완전히 같은 resolveTurnWorker 를 그대로 부른다 — 안내와 집행이 서로 다른
+  // 계산에서 나오면 갈린다는 것이 이 저장소가 반복해서 겪은 결함 유형이다(persona.ts 의 FIX4 주석).
+  //
+  // 조회가 실패해도(레지스트리 DB 오류 등) /help 자체는 반드시 나가야 한다 — 도움말이 통째로
+  // 사라지는 것보다 능력 안내 한 문단이 보수적으로 빠지는 편이 낫다. 그래서 실패는 "워커 없음"으로
+  // 떨어뜨린다(fail closed: 없는 능력을 있다고 말하지 않는 쪽).
+  private async helpText(userId: string, isPrivate: boolean): Promise<string> {
+    let workerConnected = false;
+    try {
+      const worker = await resolveTurnWorker(
+        { context: { isOwner: userId === this.ownerId, isPrivate, userId } },
+        this.registry,
+        this.hub,
+      );
+      workerConnected = worker !== null;
+    } catch (err) {
+      console.error("[core] /help 워커 판정 실패 — 능력 안내 없이 진행:", err);
+    }
+    return renderCommandHelp(workerConnected);
   }
 
   // 손님에게 자기 작업 폴더 경로를 알려주기 위한 값(persona.ts 의 workspaceDirs). 게이팅에는

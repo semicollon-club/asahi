@@ -297,6 +297,29 @@ describe("buildSystemPrompt — 손님에게 자기 작업 폴더 경로를 알�
   });
 });
 
+// 리뷰 지적(Important 2) — Task 4 가 fs_tree 실행기·도구 선언을 추가했지만, 능력 안내(사용자에게
+// 노출되는 서술형 도구 나열)에는 넣지 않았다. 이 저장소는 "안내와 실제 도구가 어긋남"을 결함
+// 유형으로 명시적으로 다룬다(위 FIX3·FIX4 참고) — fs_tree 누락도 같은 유형이므로, 워커가 연결된
+// 세 분기(소유자 DM·소유자 서버·손님) 모두에서 fs_tree 언급을 회귀 테스트로 고정한다.
+describe("buildSystemPrompt — 능력 안내에 fs_tree 를 포함한다(fs_tree 도구 안내 누락 고침)", () => {
+  it("owner-DM + 워커 연결 시 fs_tree 를 언급한다", () => {
+    const p = buildSystemPrompt({ role: "owner", isPrivate: true, isOwner: true, workerConnected: true });
+    expect(capabilitySection(p)).toMatch(/fs_tree/);
+  });
+
+  it("owner-서버 + 워커 연결 시 fs_tree 를 언급한다", () => {
+    const p = buildSystemPrompt({ role: "owner", isPrivate: false, isOwner: true, workerConnected: true });
+    expect(capabilitySection(p)).toMatch(/fs_tree/);
+  });
+
+  it("손님(DM·서버) + 워커 연결 시 fs_tree 를 언급한다", () => {
+    for (const isPrivate of [true, false]) {
+      const p = buildSystemPrompt({ role: "allowed", isPrivate, isOwner: false, workerConnected: true });
+      expect(capabilitySection(p)).toMatch(/fs_tree/);
+    }
+  });
+});
+
 describe("deriveRapportStage", () => {
   it("10 미만이면 0(서먹)", () => {
     expect(deriveRapportStage(0)).toBe(0);

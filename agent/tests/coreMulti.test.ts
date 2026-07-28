@@ -9,6 +9,7 @@ import { SummariesRepo } from "../src/store/summariesRepo.js";
 import { MemoriesRepo } from "../src/store/memoriesRepo.js";
 import { TurnsRepo } from "../src/store/turnsRepo.js";
 import { AllowedDirsRepo } from "../src/store/allowedDirsRepo.js";
+import { ActionsRepo } from "../src/store/actionsRepo.js";
 import { AgentCore } from "../src/core/core.js";
 import type { Config } from "../src/config.js";
 import type { TurnRequest, TurnResult } from "../src/core/agent.js";
@@ -37,6 +38,7 @@ async function setup(over: {
     // 테스트는 타입 검사를 받지 않는다 — 여기서 빠뜨리면 tsc 도 vitest 도 잡아 주지 않고,
     // 코어의 try/catch 가 삼켜 "경로 안내 없음"으로 조용히 degrade 한다.
     allowedDirs: new AllowedDirsRepo(db),
+    actions: new ActionsRepo(db),
   };
   await repos.users.upsert("owner", { role: "owner" });
   await repos.users.upsert("guest", { role: "allowed" });
@@ -746,6 +748,51 @@ describe("AgentCore — /help", () => {
     expect(text).toContain("/새세션");
     expect(text).toContain("/대회");
   });
+
+  // 최종 리뷰 Important 3 — commands.test.ts 는 renderCommandHelp 라는 순수 함수만 본다. 그 함수가
+  // 아무리 정확해도 호출부가 실제 워커 상태를 넘기지 않으면 사용자에게는 아무것도 달라지지 않으므로
+  // (이 브랜치의 Critical 1 이 정확히 그런 종류의 결함이었다), 배선 자체를 코어에서 확인한다.
+  const helpTextOf = (t: { published: AgentEvent[] }): string =>
+    (t.published.find((e) => e.type === "assistant_message") as { text: string }).text;
+
+  it("워커가 연결돼 있으면 파일·명령 안내가 붙는다", async () => {
+    const t = await setup({ hub: { isConnected: () => true } });
+    pub(t.bus, dmHint("owner", "owner"), "/help", 1);
+    await t.core.drain();
+    expect(helpTextOf(t)).toContain("파일 만들어줘");
+  });
+
+  it("워커가 끊겨 있으면 그 안내를 빼고 지금은 안 된다고 알린다(미니PC 가 꺼져 있는 동안)", async () => {
+    const t = await setup({ hub: { isConnected: () => false } });
+    pub(t.bus, dmHint("owner", "owner"), "/help", 1);
+    await t.core.drain();
+    const text = helpTextOf(t);
+    expect(text).not.toContain("파일 만들어줘");
+    expect(text).toContain("지금은");
+    expect(text).toContain("/새세션"); // 예약어 목록 자체는 그대로
+  });
+
+  it("워커 배선이 아예 없는 환경(hub 없음)도 미연결로 취급한다", async () => {
+    const t = await setup(); // hub 를 넘기지 않음
+    pub(t.bus, dmHint("owner", "owner"), "/help", 1);
+    await t.core.drain();
+    expect(helpTextOf(t)).not.toContain("파일 만들어줘");
+  });
+
+  it("레지스트리 조회가 터져도 /help 자체는 나간다(능력 안내만 보수적으로 빠진다)", async () => {
+    const t = await setup({
+      hub: { isConnected: () => true },
+      registry: {
+        personalWorkerOf: async () => { throw new Error("db down(테스트용)"); },
+        sharedWorkerId: async () => { throw new Error("db down(테스트용)"); },
+      },
+    });
+    pub(t.bus, dmHint("owner", "owner"), "/help", 1);
+    await t.core.drain();
+    const text = helpTextOf(t);
+    expect(text).toContain("/새세션");
+    expect(text).not.toContain("파일 만들어줘");
+  });
 });
 
 describe("AgentCore — 이미지 입력", () => {
@@ -820,6 +867,22 @@ describe("AgentCore — 일반 채널의 예약어(commandOnly)", () => {
     expect(t.published.find((e) => e.type === "assistant_message")?.text).toContain("/대회");
     expect(await t.repos.conversations.getByChannelId("chan-일반")).toBeNull();
     expect(t.calls).toHaveLength(0);
+  });
+
+  // 최종 리뷰 Important 3 — 이 경로(commandOnly)는 위의 대화 안 /help 와 다른 호출부다. 한쪽만
+  // 고치면 일반 채널에서 친 /help 는 예전 그대로 어긋난 안내를 낸다.
+  it("/help 의 능력 안내는 이 경로에서도 워커 연결 여부로 갈린다", async () => {
+    const on = await setup({ hub: { isConnected: () => true } });
+    pub(on.bus, channelCommandHint("guest", "chan-일반", "allowed"), "/help", 1);
+    await on.core.drain();
+    expect(on.published.find((e) => e.type === "assistant_message")?.text).toContain("파일 만들어줘");
+
+    const off = await setup({ hub: { isConnected: () => false } });
+    pub(off.bus, channelCommandHint("guest", "chan-일반", "allowed"), "/help", 1);
+    await off.core.drain();
+    const text = off.published.find((e) => e.type === "assistant_message")?.text;
+    expect(text).not.toContain("파일 만들어줘");
+    expect(text).toContain("지금은");
   });
 
   it("손님 한도는 이 경로에도 그대로 적용된다", async () => {
@@ -938,5 +1001,41 @@ describe("AgentCore — DM 의 조사 예약어는 DM 에 답한다", () => {
     // 혼자 확인해 보려던 것이 매번 동아리 채널에 게시되면 안 된다.
     expect(digestCalls[0].channelRef).toBe("dm-owner");
     expect(t.published.filter((e) => e.type === "system_notice")).toHaveLength(0);
+  });
+});
+
+describe("AgentCore — 도구 호출을 actions 에 기록한다", () => {
+  it("도구 호출 1건이 1행이 되고 대화·사용자가 함께 남는다", async () => {
+    const t = await setup({ hub: { isConnected: () => true } });
+    pub(t.bus, dmHint("owner", "owner"), "파일 읽어줘", 1);
+    await t.core.drain();
+    // setup 의 runTurn 가짜는 onProgress 로 answering 만 보낸다 — 도구 이벤트를 직접 흘려보낸다.
+    t.calls[0].onProgress?.({ kind: "tool", name: "fs_read", input: "a.txt" });
+    t.calls[0].onProgress?.({ kind: "tool_result", name: "fs_read", input: "a.txt", ok: true, summary: "본문", durationMs: 12 });
+    await t.core.drain();
+
+    const rows = await t.repos.actions.recent(10);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ tool: "fs_read", status: "ok", durationMs: 12, userId: "owner" });
+  });
+
+  it("answering·tool 이벤트는 기록하지 않는다(도구 호출 1건 = 1행)", async () => {
+    const t = await setup({ hub: { isConnected: () => true } });
+    pub(t.bus, dmHint("owner", "owner"), "안녕", 1);
+    await t.core.drain();
+    t.calls[0].onProgress?.({ kind: "tool", name: "fs_read", input: "a.txt" });
+    t.calls[0].onProgress?.({ kind: "answering" });
+    await t.core.drain();
+    expect(await t.repos.actions.recent(10)).toHaveLength(0);
+  });
+
+  it("기록이 실패해도 턴을 죽이지 않는다", async () => {
+    const t = await setup({ hub: { isConnected: () => true } });
+    t.repos.actions.record = async () => { throw new Error("DB 오류(테스트용)"); };
+    pub(t.bus, dmHint("owner", "owner"), "파일 읽어줘", 1);
+    await t.core.drain();
+    t.calls[0].onProgress?.({ kind: "tool_result", name: "fs_read", ok: false, durationMs: 1 });
+    await t.core.drain();
+    expect(t.published.some((e) => e.type === "assistant_message")).toBe(true);
   });
 });

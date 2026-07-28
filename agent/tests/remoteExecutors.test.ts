@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { makeExecutors, OUTPUT_MAX } from "../src/remote/executors.js";
+import { TREE_MAX_ENTRIES } from "../src/remote/tree.js";
 
 describe("워커 실행기", () => {
   let root: string;
@@ -16,10 +17,11 @@ describe("워커 실행기", () => {
   });
   afterEach(() => fs.rmSync(root, { recursive: true, force: true }));
 
-  it("도구 7개를 정확히 노출한다", () => {
+  it("도구 8개를 정확히 노출한다", () => {
     // Task 8: fs_mkdir 추가. 모델이 부르는 도구 목록(REMOTE_TOOL_NAMES)에는 안 들어가지만, 워커
     // 실행기 자체는 다른 fs_* 와 나란히 이 객체에 존재한다.
-    expect(Object.keys(ex).sort()).toEqual(["fs_edit", "fs_glob", "fs_grep", "fs_mkdir", "fs_read", "fs_write", "sh_exec"]);
+    // Task 4: fs_tree 추가 — 폴더 구조 전용 조회 도구(모델이 부르는 목록에도 들어간다).
+    expect(Object.keys(ex).sort()).toEqual(["fs_edit", "fs_glob", "fs_grep", "fs_mkdir", "fs_read", "fs_tree", "fs_write", "sh_exec"]);
   });
 
   it("fs_read 는 줄번호를 붙여 읽는다", async () => {
@@ -39,7 +41,8 @@ describe("워커 실행기", () => {
   it("루트 밖은 모든 fs 도구가 거부한다", async () => {
     const outside = path.join(os.tmpdir(), "outside.txt");
     const args = { path: outside, content: "x", oldString: "a", newString: "b", pattern: "*" };
-    for (const tool of ["fs_read", "fs_write", "fs_edit", "fs_glob", "fs_grep"]) {
+    // Task 4: fs_tree 도 같은 gate(path 인자 검사)를 거치므로 나란히 검증한다.
+    for (const tool of ["fs_read", "fs_write", "fs_edit", "fs_glob", "fs_grep", "fs_tree"]) {
       const run = ex[tool];
       const r = await run(args);
       expect(r.ok, `${tool} 이 루트 밖을 허용했다`).toBe(false);
@@ -221,5 +224,174 @@ describe("워커 실행기", () => {
       expect(r.content).not.toContain(OUTSIDE_MARKER);
       expect(r.content).not.toContain(OUTSIDE_FILE_PREFIX);
     });
+  });
+});
+
+describe("fs_tree 실행기", () => {
+  it("루트 아래 구조를 돌려준다", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "asahi-tree-"));
+    fs.mkdirSync(path.join(root, "src"));
+    fs.writeFileSync(path.join(root, "src", "a.ts"), "x");
+    fs.mkdirSync(path.join(root, "node_modules"));
+    fs.writeFileSync(path.join(root, "node_modules", "junk.js"), "x");
+
+    const ex = makeExecutors([root]);
+    const r = await ex.fs_tree!({ path: root });
+    expect(r.ok).toBe(true);
+    expect(r.content).toContain("a.ts");
+    expect(r.content).not.toContain("junk.js"); // node_modules 제외
+  });
+
+  it("심볼릭 링크를 따라가지 않는다(워크스페이스 밖 열거 방지)", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "asahi-tree-root-"));
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "asahi-tree-outside-"));
+    fs.writeFileSync(path.join(outside, "secret.txt"), "x");
+    try {
+      fs.symlinkSync(outside, path.join(root, "escape"), "junction");
+    } catch {
+      return; // 링크를 만들 권한이 없는 환경에서는 건너뛴다
+    }
+    const ex = makeExecutors([root]);
+    const r = await ex.fs_tree!({ path: root });
+    expect(r.content).not.toContain("secret.txt");
+  });
+
+  it("roots 밖 경로는 거부한다", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "asahi-tree-gate-"));
+    const other = fs.mkdtempSync(path.join(os.tmpdir(), "asahi-tree-other-"));
+    const ex = makeExecutors([root]);
+    const r = await ex.fs_tree!({ path: other });
+    expect(r.ok).toBe(false);
+  });
+
+  // 리뷰 지적(Important 1): depth 상한 때문에 순회를 멈출 때 truncated 플래그를 세우지 않아,
+  // 잘린 트리가 안내 없이 그냥 끝나고 부원은 그게 전부인 줄 알았다. 아래 세 테스트가 그 구멍과
+  // "빈 폴더를 거짓으로 잘렸다고 하지 않는다"는 방지 조건을 함께 고정한다.
+  it("depth 상한을 넘는 트리는 상한까지만 보여주고, depth 때문에 잘렸다고 안내한다", async () => {
+    // 주의: 임시폴더 접두사에 "depth" 를 쓰지 않는다 — 아래 toMatch(/depth/) 를 썼다가 루트
+    // 경로 자체(head 에 그대로 노출됨)에 우연히 걸려 버그가 있어도 통과하는 거짓양성을 겪었다.
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "asahi-tree-cutoff-"));
+    // a(0)/b(1)/c(2) — depth:1 로 부르면 b 까지만 보이고, c 는 안 보이는 대신 잘렸다는 안내가 나가야 한다.
+    const deep = path.join(root, "a", "b", "c");
+    fs.mkdirSync(deep, { recursive: true });
+    fs.writeFileSync(path.join(deep, "leaf.txt"), "x");
+
+    const ex = makeExecutors([root]);
+    const r = await ex.fs_tree!({ path: root, depth: 1 });
+    expect(r.ok).toBe(true);
+    expect(r.content).toContain("a/");
+    expect(r.content).toContain("b/");
+    expect(r.content).not.toContain("c/");
+    expect(r.content).not.toContain("leaf.txt");
+    // 왜 잘렸는지(깊이 때문)가 구분돼야 depth 를 올릴지 하위 폴더를 지정할지 판단할 수 있다.
+    // 안내 문구 고유 표현("못 내려갔")으로 확인한다 — 그냥 "depth" 만 찾으면 위 주의사항과 같은
+    // 거짓양성에 다시 노출된다.
+    expect(r.content).toContain("못 내려갔");
+  });
+
+  it("마지막 depth 의 폴더가 비어 있으면 잘렸다고 하지 않는다(거짓 안내 방지)", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "asahi-tree-cutoff-empty-"));
+    const emptyLeaf = path.join(root, "a", "b");
+    fs.mkdirSync(emptyLeaf, { recursive: true }); // b 는 비어 있다 — 더 보여줄 게 없다.
+
+    const ex = makeExecutors([root]);
+    const r = await ex.fs_tree!({ path: root, depth: 1 });
+    expect(r.ok).toBe(true);
+    expect(r.content).toContain("a/");
+    expect(r.content).toContain("b/");
+    expect(r.content).not.toContain("잘랐");
+    expect(r.content).not.toContain("잘렸");
+  });
+
+  it("항목 수 상한을 넘는 트리는 잘렸다고 안내한다", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "asahi-tree-entries-"));
+    for (let i = 0; i < TREE_MAX_ENTRIES + 5; i++) {
+      fs.writeFileSync(path.join(root, `f${i}.txt`), "");
+    }
+
+    const ex = makeExecutors([root]);
+    const r = await ex.fs_tree!({ path: root });
+    expect(r.ok).toBe(true);
+    expect(r.content).toContain("항목이 많아");
+  });
+
+  // 리뷰 지적(Minor 1): roots.ts 의 경로 판정은 대상이 없어도(가장 가까운 상위로 올라가) 통과한다
+  // — 오타 난 경로·지워진 폴더가 readdir 실패 → 조용히 건너뜀 → renderTree([]) 를 거쳐 "비어
+  // 있어요"로 나왔다. 형제 도구 fs_read 처럼 최상위 실패는 오류로 드러내야 한다.
+  it("최상위 경로가 없으면 오류로 드러낸다(비어 있다고 속이지 않는다)", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "asahi-tree-missing-"));
+    const ex = makeExecutors([root]);
+    const r = await ex.fs_tree!({ path: path.join(root, "no-such-dir") });
+    expect(r.ok).toBe(false);
+    expect(r.content).toContain("읽지 못했어요");
+  });
+
+  // 회귀 재현(1차 수정이 만든 버그): depth 상한과 항목 수 상한을 하나의 truncated 플래그로 같이
+  // 썼다. depth 상한은 가지별(local) 조건인데 전역 플래그로 세우는 바람에, walk 맨 위의
+  // `if (truncated) return` 이 그 뒤에 오는 모든 형제의 하위 순회까지 막아버렸다 — 알파벳상 뒤에
+  // 오는 형제는 이름만 보이고, depth 상한 안쪽(정상 범위)의 내용까지 통째로 사라졌다. 기존
+  // 단선(a/b/c) 구조 테스트는 형제가 없어 이 문제를 못 잡는다 — 형제가 있는 구조로 직접 재현한다.
+  it("한 가지가 depth 를 넘겨도 다른 형제의 정상 범위 내용은 전부 나온다(깊이 상한은 가지별로만 멈춘다)", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "asahi-tree-siblings-"));
+    // A 가지: A/A1/leaf.txt — depth:1 로 부르면 leaf.txt(depth2)는 상한을 넘는다.
+    fs.mkdirSync(path.join(root, "A", "A1"), { recursive: true });
+    fs.writeFileSync(path.join(root, "A", "A1", "leaf.txt"), "x");
+    // B 가지: B/B1.txt — depth1 로 정상 범위 안이다. 알파벳상 A 다음이라, A 의 depth 잘림이
+    // truncated 를 전역으로 세우면 B 의 하위 순회가 시작조차 못 하는 게 바로 이 회귀였다.
+    fs.mkdirSync(path.join(root, "B"), { recursive: true });
+    fs.writeFileSync(path.join(root, "B", "B1.txt"), "x");
+
+    const ex = makeExecutors([root]);
+    const r = await ex.fs_tree!({ path: root, depth: 1 });
+    expect(r.ok).toBe(true);
+    expect(r.content).toContain("A/");
+    expect(r.content).toContain("B/");
+    // 회귀의 핵심 증상: B1.txt 는 depth 1 안(정상 범위)인데도 예전 코드는 A 의 depth 잘림 때문에
+    // B 의 하위 순회를 아예 건너뛰어 이걸 지웠다.
+    expect(r.content).toContain("B1.txt");
+    expect(r.content).not.toContain("leaf.txt"); // A/A1/leaf.txt 는 depth2 로, 정상적으로 잘려야 한다
+  });
+
+  // depth 상한과 항목 수 상한이 같은 호출에서 동시에 걸리는 경우 — 안내 문구는 실제로 일어난
+  // 것만 말해야 한다. 하나만 골라 보여주면 나머지 하나는 조용히 잘린 것과 같아진다.
+  it("depth 상한과 항목 수 상한이 둘 다 걸리면 안내 문구가 둘 다 드러낸다(거짓 안내 방지)", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "asahi-tree-both-"));
+    // "0_deep" 가지 — 이름이 숫자로 시작해 아래 f### 파일들보다 항상 먼저 정렬·처리된다.
+    // 0_deep/0_deep2/leaf.txt 는 depth:1 호출에서 depth2 로 상한을 넘는다.
+    fs.mkdirSync(path.join(root, "0_deep", "0_deep2"), { recursive: true });
+    fs.writeFileSync(path.join(root, "0_deep", "0_deep2", "leaf.txt"), "x");
+    // 0_deep·0_deep2 두 항목이 먼저 entries 를 채우므로, 남는 자리는 TREE_MAX_ENTRIES-2 뿐이다.
+    // zero-pad 로 이름을 맞춰 정렬 순서 = 생성 순서로 고정한다 — f000.txt 부터 채워지고
+    // f498.txt·f499.txt 는 항목 수 상한에 밀려 못 들어간다(결정론적으로 검증하기 위함).
+    for (let i = 0; i < TREE_MAX_ENTRIES; i++) {
+      fs.writeFileSync(path.join(root, `f${String(i).padStart(3, "0")}.txt`), "");
+    }
+
+    const ex = makeExecutors([root]);
+    const r = await ex.fs_tree!({ path: root, depth: 1 });
+    expect(r.ok).toBe(true);
+    // depth 사실: leaf.txt(depth2)는 정상적으로 안 보인다.
+    expect(r.content).not.toContain("leaf.txt");
+    // entries 사실: 먼저 채워진 f000.txt 는 보이고, 상한에 밀린 f499.txt 는 안 보인다.
+    expect(r.content).toContain("f000.txt");
+    expect(r.content).not.toContain("f499.txt");
+    // 안내 문구는 두 사실을 모두 드러내야 한다.
+    expect(r.content).toContain("depth");
+    expect(r.content).toContain("항목");
+  });
+
+  // 리뷰 지적(Minor) — depth 가 음수면 tools.ts 의 zod 스키마가 하한을 안 둬 그대로 실행기까지
+  // 온다. 예전 코드는 최상위(depth0)에서 바로 depth 초과로 판정해 entries 를 하나도 못 채우고,
+  // renderTree 가 "entries 가 비었는지"를 truncated 검사보다 먼저 봐서 내용이 있는 폴더를 "비어
+  // 있어요"로 속였다. 스키마만 믿지 않고 실행기에서도 0 미만으로 못 내려가게 막아야 한다.
+  it("depth 가 음수여도 최상위 내용을 정상적으로 보여준다(비어 있다고 속이지 않는다)", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "asahi-tree-negdepth-"));
+    fs.writeFileSync(path.join(root, "a.txt"), "x");
+
+    const ex = makeExecutors([root]);
+    const r = await ex.fs_tree!({ path: root, depth: -1 });
+    expect(r.ok).toBe(true);
+    expect(r.content).toContain("a.txt");
+    expect(r.content).not.toContain("비어");
   });
 });

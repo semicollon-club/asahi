@@ -308,109 +308,142 @@ export function allowedToolsFor(
 }
 
 // ── 인프로세스 MCP 서버(SDK) — handler 는 위 순수 함수를 감싼다 ──────────────
-const textResult = (text: string) => ({ content: [{ type: "text" as const, text }] });
+// isError 는 실패일 때만 싣는다. MCP 는 이 필드가 없으면 성공으로 보므로, 인자를 생략하는
+// 기존 핸들러(비원격)는 예전과 완전히 같은 결과를 낸다 — 이 태스크가 고치는 건 원격 도구의
+// 성패 전달 하나뿐이다. 실패일 때 이 필드가 서야만 SDK 가 tool_result 블록에 is_error:true 를
+// 실어 주고, 그래야 progressFromMessage 의 ok 가 false 가 되어 표시(✗)와 기록(status='error')
+// 양쪽에 도달한다(agent.ts 의 `block.is_error !== true` 참고).
+const textResult = (text: string, isError = false) => ({
+  content: [{ type: "text" as const, text }],
+  ...(isError ? { isError: true } : {}),
+});
+
+// 원격 도구 7개의 공통 배선. remoteToolHandler 가 돌려주는 { content, ok } 의 ok 를 그대로
+// isError 로 뒤집어 싣는다 — 이 한 줄이 "워커가 계산한 성패"와 "모델·표시·기록이 보는 성패"를
+// 잇는 이음매다(예전엔 여기서 문자열만 받아 ok 가 버려졌다).
+const remoteResult = async (ctx: ToolCtx, tool: string, args: Record<string, unknown>) => {
+  const r = await remoteToolHandler(ctx, tool, args);
+  return textResult(r.content, !r.ok);
+};
+
+// 도구 선언 목록을 buildTools 에서 분리해 내보낸다. 이 배열 자체가 "핸들러의 반환을 MCP 결과로
+// 바꾸는" 이음매(seam)인데, createSdkMcpServer 안에 인라인으로 묻혀 있으면 그 변환을 테스트가
+// 직접 실행할 방법이 없다 — 지금까지 성패 전달이 이 지점에서 끊긴 채로 여러 번의 리뷰를 통과한
+// 이유가 정확히 그것이다(모든 테스트가 ProgressUpdate 를 손으로 지어내 이 변환을 건너뛰었다).
+// 이제 tests 가 이 함수로 실제 선언을 받아 handler 를 그대로 호출할 수 있다.
+export function buildToolDefinitions(ctx: ToolCtx) {
+  return [
+    tool(
+      "remember",
+      "사용자에 대해 오래 기억할 사실·선호·결정·진행 중인 일을 저장합니다. 사소한 것은 저장하지 마세요.",
+      { title: z.string().describe("짧은 제목"), content: z.string().describe("기억할 내용") },
+      async (args) => textResult(await rememberHandler(ctx, args)),
+    ),
+    tool(
+      "recall",
+      "저장된 기억에서 관련 내용을 찾습니다.",
+      { query: z.string().describe("찾을 키워드") },
+      async (args) => textResult(await recallHandler(ctx, args)),
+    ),
+    tool(
+      "character_fact",
+      "대화 중 즉흥으로 지어낸 너 자신의 신상 설정을 확정해 고정합니다. 처음 말한 그 턴에만 저장하세요. 이미 저장된 설정과 충돌하는 내용은 저장하지 마세요.",
+      { title: z.string().max(CHARACTER_FACT_TITLE_MAX_LEN).describe("짧은 제목(예: 학년, 동아리부장)"), content: z.string().max(CHARACTER_FACT_MAX_LEN).describe("확정할 설정 내용") },
+      async (args) => textResult(await characterFactHandler(ctx, args)),
+    ),
+    tool(
+      "manage_access",
+      "(소유자 전용) 사용자의 접근 권한을 설정합니다. 디스코드 숫자 ID 로만. owner 는 부여할 수 없습니다.",
+      { userId: z.string().describe("디스코드 숫자 ID"), role: z.enum(["allowed", "blocked"]).describe("부여할 역할(allowed 또는 blocked)") },
+      async (args) => textResult(await manageAccessHandler(ctx, args)),
+    ),
+    tool(
+      "allow_dir",
+      "(소유자 전용) 원격 개발 작업을 허용할 폴더를 등록합니다. 실제 존재하는 디렉토리여야 합니다.",
+      { path: z.string().describe("허용할 폴더의 절대경로") },
+      async (args) => textResult(await allowDirHandler(ctx, args)),
+    ),
+    tool(
+      "revoke_dir",
+      "(소유자 전용) 등록된 허용 폴더를 해제합니다.",
+      { path: z.string().describe("해제할 폴더의 경로") },
+      async (args) => textResult(await revokeDirHandler(ctx, args)),
+    ),
+    tool(
+      "list_dirs",
+      "(소유자 전용) 현재 허용된 폴더 목록을 보여줍니다.",
+      {},
+      async () => textResult(await listDirsHandler(ctx)),
+    ),
+    tool(
+      "db_schema",
+      "(소유자 전용) 내 데이터베이스의 테이블·컬럼 구조를 보여줍니다.",
+      {},
+      async () => textResult(await dbSchemaHandler(ctx)),
+    ),
+    tool(
+      "db_query",
+      "(소유자 전용) 읽기 전용 SELECT 로 내 데이터를 조회합니다. SELECT 만 가능합니다.",
+      { sql: z.string().describe("실행할 읽기 전용 SELECT 문") },
+      async (args) => textResult(await dbQueryHandler(ctx, args)),
+    ),
+    tool(
+      "runtime_info",
+      "(소유자 전용) 내가 어떤 모델·SDK·배포 설정으로 동작 중인지 보여줍니다.",
+      {},
+      async () => textResult(await runtimeInfoHandler(ctx)),
+    ),
+    tool(
+      "fs_read",
+      "워커 PC 의 파일을 읽습니다. offset(1부터)·limit 로 일부만 읽을 수 있습니다.",
+      { path: z.string().describe("읽을 파일의 절대경로"), offset: z.number().optional().describe("시작 줄(1부터)"), limit: z.number().optional().describe("읽을 줄 수") },
+      async (args) => remoteResult(ctx, "fs_read", args),
+    ),
+    tool(
+      "fs_write",
+      "워커 PC 에 파일을 씁니다. 상위 폴더가 없으면 만듭니다. 기존 파일은 덮어씁니다.",
+      { path: z.string().describe("쓸 파일의 절대경로"), content: z.string().describe("파일 전체 내용") },
+      async (args) => remoteResult(ctx, "fs_write", args),
+    ),
+    tool(
+      "fs_edit",
+      "워커 PC 의 파일에서 문자열을 치환합니다. 여러 번 등장하면 replaceAll 이 필요합니다.",
+      { path: z.string().describe("고칠 파일의 절대경로"), oldString: z.string().describe("찾을 문자열"), newString: z.string().describe("바꿀 문자열"), replaceAll: z.boolean().optional().describe("전부 바꿀지 여부") },
+      async (args) => remoteResult(ctx, "fs_edit", args),
+    ),
+    tool(
+      "fs_glob",
+      "워커 PC 에서 glob 패턴으로 파일을 찾습니다.",
+      { pattern: z.string().describe("예: **/*.ts"), path: z.string().optional().describe("기준 폴더의 절대경로") },
+      async (args) => remoteResult(ctx, "fs_glob", args),
+    ),
+    tool(
+      "fs_grep",
+      "워커 PC 의 파일 내용에서 정규식으로 검색합니다.",
+      { pattern: z.string().describe("찾을 정규식"), path: z.string().optional().describe("기준 폴더의 절대경로"), glob: z.string().optional().describe("검색 대상 파일 패턴") },
+      async (args) => remoteResult(ctx, "fs_grep", args),
+    ),
+    tool(
+      "fs_tree",
+      "작업 폴더의 파일·폴더 구조를 보여줍니다. 사용자가 '내 폴더에 뭐 있어?' 처럼 물으면 기억으로 답하지 말고 이 도구를 부르세요.",
+      // depth 는 min(0) 으로 음수를 1차 방어한다 — 실제 하한 강제는 executors.ts 의 fs_tree 가
+      // 스키마와 무관하게(모델이 이걸 우회해도) 한 번 더 한다(스키마만 믿지 않는다).
+      { path: z.string().optional().describe("조회할 폴더의 절대경로. 생략하면 허용된 첫 폴더"), depth: z.number().min(0).optional().describe("내려갈 깊이(기본 3, 최대 5)") },
+      async (args) => remoteResult(ctx, "fs_tree", args),
+    ),
+    tool(
+      "sh_exec",
+      "워커 PC 에서 셸 명령을 실행합니다. 강력한 도구이니 신중히 쓰세요.",
+      { command: z.string().describe("실행할 셸 명령"), timeoutMs: z.number().optional().describe("타임아웃(밀리초)") },
+      async (args) => remoteResult(ctx, "sh_exec", args),
+    ),
+];
+}
 
 export function buildTools(ctx: ToolCtx) {
   return createSdkMcpServer({
     name: TOOL_SERVER,
     version: "1.0.0",
-    tools: [
-      tool(
-        "remember",
-        "사용자에 대해 오래 기억할 사실·선호·결정·진행 중인 일을 저장합니다. 사소한 것은 저장하지 마세요.",
-        { title: z.string().describe("짧은 제목"), content: z.string().describe("기억할 내용") },
-        async (args) => textResult(await rememberHandler(ctx, args)),
-      ),
-      tool(
-        "recall",
-        "저장된 기억에서 관련 내용을 찾습니다.",
-        { query: z.string().describe("찾을 키워드") },
-        async (args) => textResult(await recallHandler(ctx, args)),
-      ),
-      tool(
-        "character_fact",
-        "대화 중 즉흥으로 지어낸 너 자신의 신상 설정을 확정해 고정합니다. 처음 말한 그 턴에만 저장하세요. 이미 저장된 설정과 충돌하는 내용은 저장하지 마세요.",
-        { title: z.string().max(CHARACTER_FACT_TITLE_MAX_LEN).describe("짧은 제목(예: 학년, 동아리부장)"), content: z.string().max(CHARACTER_FACT_MAX_LEN).describe("확정할 설정 내용") },
-        async (args) => textResult(await characterFactHandler(ctx, args)),
-      ),
-      tool(
-        "manage_access",
-        "(소유자 전용) 사용자의 접근 권한을 설정합니다. 디스코드 숫자 ID 로만. owner 는 부여할 수 없습니다.",
-        { userId: z.string().describe("디스코드 숫자 ID"), role: z.enum(["allowed", "blocked"]).describe("부여할 역할(allowed 또는 blocked)") },
-        async (args) => textResult(await manageAccessHandler(ctx, args)),
-      ),
-      tool(
-        "allow_dir",
-        "(소유자 전용) 원격 개발 작업을 허용할 폴더를 등록합니다. 실제 존재하는 디렉토리여야 합니다.",
-        { path: z.string().describe("허용할 폴더의 절대경로") },
-        async (args) => textResult(await allowDirHandler(ctx, args)),
-      ),
-      tool(
-        "revoke_dir",
-        "(소유자 전용) 등록된 허용 폴더를 해제합니다.",
-        { path: z.string().describe("해제할 폴더의 경로") },
-        async (args) => textResult(await revokeDirHandler(ctx, args)),
-      ),
-      tool(
-        "list_dirs",
-        "(소유자 전용) 현재 허용된 폴더 목록을 보여줍니다.",
-        {},
-        async () => textResult(await listDirsHandler(ctx)),
-      ),
-      tool(
-        "db_schema",
-        "(소유자 전용) 내 데이터베이스의 테이블·컬럼 구조를 보여줍니다.",
-        {},
-        async () => textResult(await dbSchemaHandler(ctx)),
-      ),
-      tool(
-        "db_query",
-        "(소유자 전용) 읽기 전용 SELECT 로 내 데이터를 조회합니다. SELECT 만 가능합니다.",
-        { sql: z.string().describe("실행할 읽기 전용 SELECT 문") },
-        async (args) => textResult(await dbQueryHandler(ctx, args)),
-      ),
-      tool(
-        "runtime_info",
-        "(소유자 전용) 내가 어떤 모델·SDK·배포 설정으로 동작 중인지 보여줍니다.",
-        {},
-        async () => textResult(await runtimeInfoHandler(ctx)),
-      ),
-      tool(
-        "fs_read",
-        "워커 PC 의 파일을 읽습니다. offset(1부터)·limit 로 일부만 읽을 수 있습니다.",
-        { path: z.string().describe("읽을 파일의 절대경로"), offset: z.number().optional().describe("시작 줄(1부터)"), limit: z.number().optional().describe("읽을 줄 수") },
-        async (args) => textResult(await remoteToolHandler(ctx, "fs_read", args)),
-      ),
-      tool(
-        "fs_write",
-        "워커 PC 에 파일을 씁니다. 상위 폴더가 없으면 만듭니다. 기존 파일은 덮어씁니다.",
-        { path: z.string().describe("쓸 파일의 절대경로"), content: z.string().describe("파일 전체 내용") },
-        async (args) => textResult(await remoteToolHandler(ctx, "fs_write", args)),
-      ),
-      tool(
-        "fs_edit",
-        "워커 PC 의 파일에서 문자열을 치환합니다. 여러 번 등장하면 replaceAll 이 필요합니다.",
-        { path: z.string().describe("고칠 파일의 절대경로"), oldString: z.string().describe("찾을 문자열"), newString: z.string().describe("바꿀 문자열"), replaceAll: z.boolean().optional().describe("전부 바꿀지 여부") },
-        async (args) => textResult(await remoteToolHandler(ctx, "fs_edit", args)),
-      ),
-      tool(
-        "fs_glob",
-        "워커 PC 에서 glob 패턴으로 파일을 찾습니다.",
-        { pattern: z.string().describe("예: **/*.ts"), path: z.string().optional().describe("기준 폴더의 절대경로") },
-        async (args) => textResult(await remoteToolHandler(ctx, "fs_glob", args)),
-      ),
-      tool(
-        "fs_grep",
-        "워커 PC 의 파일 내용에서 정규식으로 검색합니다.",
-        { pattern: z.string().describe("찾을 정규식"), path: z.string().optional().describe("기준 폴더의 절대경로"), glob: z.string().optional().describe("검색 대상 파일 패턴") },
-        async (args) => textResult(await remoteToolHandler(ctx, "fs_grep", args)),
-      ),
-      tool(
-        "sh_exec",
-        "워커 PC 에서 셸 명령을 실행합니다. 강력한 도구이니 신중히 쓰세요.",
-        { command: z.string().describe("실행할 셸 명령"), timeoutMs: z.number().optional().describe("타임아웃(밀리초)") },
-        async (args) => textResult(await remoteToolHandler(ctx, "sh_exec", args)),
-      ),
-    ],
+    tools: buildToolDefinitions(ctx),
   });
 }

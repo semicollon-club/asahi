@@ -66,7 +66,43 @@ export const COMMAND_HELP: ReadonlyArray<{ commands: readonly string[]; descript
   { commands: [...HELP_COMMANDS], description: "이 목록을 보여준다" },
 ];
 
-export function renderCommandHelp(): string {
+// 손님용 능력 안내. /help 는 손님도 보므로(예약어가 없는 부원도 이 목록으로 먼저 안내받는다),
+// 예약어처럼 정확히 쳐야 하는 게 아니라 자연어로 시키면 되는 것들을 짧게 덧붙인다. 도구가
+// 있어도 "그렇게 물어봐도 된다"는 걸 모르면 안 쓰인다 — 이 목록이 그 구멍을 메운다.
+// 소유자 전용 도구(manage_access·db_query·allow_dir 등)는 여기 넣지 않는다 — 손님에게는
+// 못 쓰는 기능을 알려줘봤자 혼란만 준다.
+//
+// Minor 7(최종 리뷰): 검색·찾기(fs_glob/fs_grep)가 빠져 있었다. 손님이 실제로 받는 원격 도구
+// 7개 중 둘인데다, "내 폴더 어디에 그거 있더라"는 손님이 가장 자주 필요로 할 요청이다. 설계 §7 의
+// 목적이 "쓸 수 있다는 사실 자체를 알리는 것"이므로 한 줄을 더한다.
+const GUEST_TIPS = [
+  "이런 것도 말로 시키면 돼:",
+  "- 내 폴더에 뭐 있는지 보여줘 — 작업 폴더 구조를 그대로 훑어서 알려줘",
+  "- 파일 만들어줘 / 읽어줘 / 고쳐줘 — 네 작업 폴더 안에서",
+  "- 이런 파일 찾아줘 / 이 내용 들어간 파일 검색해줘 — 이름이나 파일 안의 글자로",
+  "- 명령 실행해줘 — 예: 테스트 돌려줘, 빌드해줘",
+].join("\n");
+
+// 워커가 없을 때 GUEST_TIPS 대신 나가는 한 줄. 침묵하지 않는 이유: /help 를 친 사람은 "무엇을
+// 시킬 수 있나"를 물은 것이고, 아무 말도 없으면 원래 그런 기능이 없는 줄 안다. persona.ts 의
+// 미연결 분기들도 같은 방식으로 "지금은 안 되고, 연결되면 된다"를 명시한다.
+const NO_WORKER_TIP = "지금은 동아리 PC가 연결돼 있지 않아서 파일·명령 작업은 못 해. 연결되면 그때 시킬 수 있어.";
+
+// 최종 리뷰 Important 3 — 능력 안내는 워커 연결 여부로 갈린다.
+//
+// persona.ts(buildCapabilityBlock)는 같은 내용의 문장들을 네 분기 전부 workerConnected 로 갈라
+// 내보내고, 그 주석은 이 어긋남을 명시적 결함 유형으로 부른다(FIX4: "안내와 실제 도구가 어긋남").
+// 그런데 /help 는 사람이 직접 읽는 유일한 능력 안내인데도 그 규칙에서 빠져 있어서, 미니PC 가 꺼져
+// 있거나 워커가 끊긴 동안에도 "파일 만들어줘 / 명령 실행해줘" 라고 말했다 — 시키면 전부 거부되는데.
+//
+// 문구를 조건부로 바꾸는 것만으로도 어긋남 자체는 사라지지만, 인자를 받아 갈리게 했다: 이 저장소는
+// "안내와 집행이 서로 다른 계산에서 나오면 갈린다"를 반복해서 겪었고(persona.ts·core.ts 주석),
+// 그래서 페르소나도 도구셋도 전부 resolveTurnWorker 라는 하나의 판정에서 나온다. /help 만 별도
+// 규칙을 쓰면 그 하나의 판정에서 다시 이탈한다. 호출부(core.ts 두 곳)는 hint 와 registry/hub 를
+// 이미 들고 있어 같은 판정을 그대로 재사용할 수 있으므로, 비용도 사실상 없다.
+export function renderCommandHelp(workerConnected: boolean): string {
   const lines = COMMAND_HELP.map((g) => `- ${g.commands.join(" · ")} — ${g.description}`);
-  return `쓸 수 있는 명령어야.\n\n${lines.join("\n")}\n\n그 외에는 그냥 말 걸면 돼.`;
+  // 예약어 목록 자체는 워커와 무관하므로 어느 경우에도 그대로 나온다.
+  const capability = workerConnected ? GUEST_TIPS : NO_WORKER_TIP;
+  return `쓸 수 있는 명령어야.\n\n${lines.join("\n")}\n\n${capability}\n\n그 외에는 그냥 말 걸면 돼.`;
 }
