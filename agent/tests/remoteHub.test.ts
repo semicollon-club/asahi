@@ -40,6 +40,16 @@ function flush(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
+// keepalive 테스트용. 이 파일의 다른 타이머 테스트(helloTimeoutMs: 30)와 같은 방식으로,
+// 가짜 타이머 대신 짧은 실제 간격을 쓰고 넉넉한 여유를 두고 기다린다.
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function pingCount(sent: Frame[]): number {
+  return sent.filter((f) => f.type === "ping").length;
+}
+
 // 가짜 레지스트리. 실제 DB 없이 허브의 인증 판정만 검증한다.
 function fakeRegistry(rows: Record<string, string>) {
   const seen: Array<{ id: string; ts: number }> = [];
@@ -574,5 +584,109 @@ describe("WorkerHub — 실제 ws 처럼 close 가 즉시 끝나지 않을 때",
     expect(hub.isConnected("w1")).toBe(true);
     expect(hub.rootsOf("w1")).toEqual(["/b"]);
     expect(b.closed).toBe(false);
+  });
+});
+
+// 실배포에서 드러난 결함(2026-07-28) — Ping/Pong 은 protocol.ts 에 정의돼 있고 허브도 워커도
+// ping 을 받으면 pong 으로 답하지만, 어느 쪽도 먼저 보내지 않았다. 정의만 있고 아무도 시작하지
+// 않는 keepalive 였던 셈이다. 그래서 도구 호출이 없는 동안 WS 가 완전히 유휴 상태가 되고
+// Railway 엣지 프록시가 그 연결을 끊는다 — 미니PC 워커 로그에서 약 15분 간격의
+// "연결이 끊겨 재시도합니다 → 연결됨 → 준비됨" 이 반복되는 것으로 실측됐다.
+//
+// 사용자에게 보이는 증상은 로그가 아니라 간헐적 거부다: 재연결 창(고정 3초) 동안
+// hub.isConnected() 가 false 라 resolveTurnWorker 가 null 을 돌려주고, 모델은 "지금은 워커가
+// 연결돼 있지 않아 PC 작업을 할 수 없어요" 로 답한다.
+//
+// 허브 쪽에서 보낸다: 프록시의 유휴 타이머는 어느 방향의 프레임으로도 갱신되고, 워커의 pong
+// 응답 경로(workerClient.ts)는 이미 있어 워커 변경이 필요 없다.
+describe("WorkerHub — keepalive ping", () => {
+  const registry = () => fakeRegistry({ owner: hashWorkerToken("good") });
+
+  async function connected(pingIntervalMs: number) {
+    const hub = new WorkerHub({ registry: registry(), pingIntervalMs });
+    const s = fakeSocket();
+    hub.handleConnection(s.sock);
+    s.recv({ type: "hello", token: "good", workerId: "owner", roots: ["/w"] });
+    await flush();
+    return { hub, s };
+  }
+
+  it("인증된 연결에 주기적으로 ping 을 보낸다", async () => {
+    const { s } = await connected(20);
+    expect(pingCount(s.sent)).toBe(0); // ready 직후엔 아직 없다
+    await sleep(70);
+    expect(pingCount(s.sent)).toBeGreaterThanOrEqual(2);
+  });
+
+  it("인증 전 소켓에는 보내지 않는다(hello 를 기다리는 동안은 keepalive 대상이 아니다)", async () => {
+    const hub = new WorkerHub({ registry: registry(), pingIntervalMs: 20, helloTimeoutMs: 10_000 });
+    const s = fakeSocket();
+    hub.handleConnection(s.sock);
+    await sleep(70);
+    expect(pingCount(s.sent)).toBe(0);
+  });
+
+  it("연결이 끊기면 타이머가 멈춘다(닫힌 소켓에 계속 보내지 않는다)", async () => {
+    const { s } = await connected(20);
+    await sleep(50);
+    const before = pingCount(s.sent);
+    expect(before).toBeGreaterThanOrEqual(1);
+
+    s.sock.close(); // 기본 가짜는 그 자리에서 onClose 를 부른다
+    await sleep(70);
+    expect(pingCount(s.sent)).toBe(before);
+  });
+
+  it("같은 workerId 로 재연결하면 밀려난 이전 연결의 타이머도 멈춘다", async () => {
+    const hub = new WorkerHub({ registry: registry(), pingIntervalMs: 20 });
+    const a = fakeSocket({ asyncClose: true });
+    hub.handleConnection(a.sock);
+    a.recv({ type: "hello", token: "good", workerId: "owner", roots: ["/a"] });
+    await flush();
+    await sleep(50);
+    const aBefore = pingCount(a.sent);
+    expect(aBefore).toBeGreaterThanOrEqual(1);
+
+    const b = fakeSocket();
+    hub.handleConnection(b.sock);
+    b.recv({ type: "hello", token: "good", workerId: "owner", roots: ["/b"] });
+    await flush();
+    await sleep(70);
+
+    // asyncClose 라 a 는 아직 'close' 이벤트를 못 받았다 — 그래도 dropExisting 이 타이머를
+    // 직접 정리해야 한다(onClose 에만 의존하면 실제 ws 에서는 최대 30초 동안 계속 보낸다).
+    expect(pingCount(a.sent)).toBe(aBefore);
+    expect(pingCount(b.sent)).toBeGreaterThanOrEqual(1);
+  });
+
+  it("closeAll() 이후에는 멈춘다(서버 종료가 타이머 때문에 막히지 않는다)", async () => {
+    const { hub, s } = await connected(20);
+    await sleep(50);
+    const before = pingCount(s.sent);
+    expect(before).toBeGreaterThanOrEqual(1);
+
+    hub.closeAll();
+    await sleep(70);
+    expect(pingCount(s.sent)).toBe(before);
+  });
+
+  it("워커가 pong 으로 답해도 연결이 유지된다(모르는 프레임으로 끊지 않는다)", async () => {
+    const { hub, s } = await connected(20);
+    await sleep(30);
+    s.recv({ type: "pong" });
+    await flush();
+    expect(s.closed).toBe(false);
+    expect(hub.isConnected("owner")).toBe(true);
+  });
+
+  it("pingIntervalMs 를 주지 않으면 기본값이 쓰인다(짧은 테스트 구간에는 보내지 않는다)", async () => {
+    const hub = new WorkerHub({ registry: registry() });
+    const s = fakeSocket();
+    hub.handleConnection(s.sock);
+    s.recv({ type: "hello", token: "good", workerId: "owner", roots: ["/w"] });
+    await flush();
+    await sleep(70);
+    expect(pingCount(s.sent)).toBe(0);
+    hub.closeAll(); // 기본 간격 타이머가 남아 프로세스를 붙잡지 않게 정리한다
   });
 });
