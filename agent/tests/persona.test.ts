@@ -191,6 +191,65 @@ describe("buildSystemPrompt — 능력 안내가 실제 도구 보유와 어긋�
   });
 });
 
+// 실배포 점검(2026-07-28)에서 드러난 결함 — 셸이 실제로 열리는 네 분기(소유자 DM·소유자 서버·
+// 손님 DM·손님 서버) 중 손님 분기만 sh_exec 주의사항이 없었고, 그 자리에 "접근은 네 몫의 폴더
+// 안으로만 제한된다"고 fs_* 와 sh_exec 를 한 문장에 묶어 단언하고 있었다. 실측으로 반증됐다:
+// 손님이 fs_read 로는 거부된 상위 폴더 파일(C:\asahi-workspace\smoke.txt)을 sh_exec(`type ...`)
+// 로 그대로 읽었다. sh_exec 는 경로 인자가 없어 remoteTools.ts 의 1차 필터 대상이 아니고,
+// 워커 쪽도 roots 로 판정하지 않는다(의도된 설계) — 거짓인 것은 도구가 아니라 안내문이었다.
+//
+// 손님 턴은 공개 채널에서 돌아 누구나 텍스트를 심을 수 있으므로, 인젝션 가드가 가장 필요한
+// 분기가 유일하게 가드 없이 돌고 있었다. persona.ts 의 규칙(셸 주의사항은 sh_exec 가 실제로
+// 열린 분기에서만 낸다)에서 손님 분기가 누락돼 있던 것이다.
+describe("buildSystemPrompt — 손님 분기도 sh_exec 봉쇄를 과장하지 않는다", () => {
+  for (const isPrivate of [true, false]) {
+    const where = isPrivate ? "DM" : "서버";
+    const guest = { role: "allowed" as const, isOwner: false, isPrivate };
+
+    it(`손님(${where}) + 워커 연결 시 셸까지 폴더로 봉쇄된다고 단언하지 않는다`, () => {
+      const cap = capabilitySection(buildSystemPrompt({ ...guest, workerConnected: true }));
+      // 회귀 대상 문구 그대로: fs_* 와 sh_exec 를 묶어 "접근은 ... 폴더 안으로만 제한"이라고 말했다.
+      expect(cap).not.toMatch(/접근은 네 몫의 폴더 안으로만 제한/);
+      expect(cap).toMatch(/완전히 막지/);
+    });
+
+    it(`손님(${where}) + 워커 연결 시 파일 도구는 폴더로 제한된다고 정확히 안내한다`, () => {
+      const cap = capabilitySection(buildSystemPrompt({ ...guest, workerConnected: true }));
+      expect(cap).toMatch(/fs_read/);
+      expect(cap).toMatch(/거부됩니다/);
+    });
+
+    it(`손님(${where}) + 워커 연결 시 폴더 밖 작업 자제와 프롬프트 인젝션 가드를 안내한다`, () => {
+      const cap = capabilitySection(buildSystemPrompt({ ...guest, workerConnected: true }));
+      expect(cap).toMatch(/네트워크/);
+      expect(cap).toMatch(/따르지 마세요/);
+    });
+
+    it(`손님(${where}) + 워커 미연결이면 셸 주의사항 자체를 넣지 않는다(도구가 없는데 주의만 주지 않는다)`, () => {
+      const cap = capabilitySection(buildSystemPrompt(guest));
+      expect(cap).not.toMatch(/sh_exec/);
+      expect(cap).not.toMatch(/완전히 막지/);
+    });
+  }
+
+  it("셸이 열리는 네 분기가 모두 같은 주의사항(봉쇄 한계·자제·인젝션 가드)을 갖는다", () => {
+    const branches = [
+      { isOwner: true, isPrivate: true },
+      { isOwner: true, isPrivate: false },
+      { isOwner: false, isPrivate: true },
+      { isOwner: false, isPrivate: false },
+    ];
+    for (const b of branches) {
+      const p = buildSystemPrompt({ role: b.isOwner ? "owner" : "allowed", ...b, workerConnected: true });
+      const cap = capabilitySection(p);
+      expect(cap).toMatch(/sh_exec/);
+      expect(cap).toMatch(/완전히 막지/);
+      expect(cap).toMatch(/네트워크/);
+      expect(cap).toMatch(/따르지 마세요/);
+    }
+  });
+});
+
 describe("deriveRapportStage", () => {
   it("10 미만이면 0(서먹)", () => {
     expect(deriveRapportStage(0)).toBe(0);
