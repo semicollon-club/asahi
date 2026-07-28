@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { progressFromMessage, shortToolName, summarizeToolInput, type ProgressUpdate, type PendingTool } from "../src/core/agent.js";
-import { formatProgress } from "../src/core/core.js";
+import { progressFromMessage, shortToolName, summarizeToolInput, RESULT_SUMMARY_MAX, type ProgressUpdate, type PendingTool } from "../src/core/agent.js";
+import { formatProgress, PROGRESS_SUMMARY_MAX } from "../src/core/core.js";
+import { PROGRESS_DISPLAY_MAX_LINES } from "../src/adapters/discord.js";
 
 describe("shortToolName — mcp__asahi__ 접두어 제거", () => {
   it("mcp__asahi__recall → recall", () => {
@@ -181,6 +182,52 @@ describe("formatProgress — shortenPath 가 혼합 구분자·대소문자에�
       BASE,
     );
     expect(s).toBe("fs_read C:\\asahi-workspace\\1517428698368704650-backup\\a.ts");
+  });
+});
+
+// ── 최종 리뷰 Important 2 — 표시 줄이 디스코드 2000자 한도를 넘기지 못하게 한다 ────────────
+// formatProgressMessage(discord.ts)의 유일한 길이 보호는 12줄 상한(PROGRESS_DISPLAY_MAX_LINES)인데,
+// 그 값은 짧은 줄(`fs_read 완료`, 52자)을 전제로 잡힌 것이다. 이 브랜치가 summary 200자를 표시
+// 줄에 실으면서 한 줄 최악이 220자가 됐고, 12줄이면 2694자로 한도를 넘긴다. 넘으면 send/edit 이
+// reject 되고 catch 가 로그만 남겨 상태 메시지가 그 턴 내내 옛 내용으로 얼어붙는다 — 하필 도구를
+// 많이 쓴 턴, 즉 진행 표시가 가장 필요한 턴에서 그렇게 된다.
+//
+// 계층을 지켜 고친다: 이벤트의 summary 200자(RESULT_SUMMARY_MAX)는 기록 해상도이므로 그대로 두고,
+// 자르는 것은 표시 포맷터에서만 한다. 그래서 아래 테스트는 "긴 summary 를 가진 이벤트"를 넣고
+// 표시 줄의 길이만 본다 — 이벤트 자체를 짧게 만드는 방식으로 이 테스트를 통과시키면 안 된다.
+describe("formatProgress — 긴 summary 는 표시 줄에서만 자른다(최종 리뷰 Important 2)", () => {
+  const LONG = "가".repeat(RESULT_SUMMARY_MAX); // 이벤트가 실을 수 있는 최댓값
+
+  it("성공 줄이 표시 상한 안으로 잘린다", () => {
+    const s = formatProgress({ kind: "tool_result", name: "fs_read", ok: true, summary: LONG, durationMs: 320 });
+    expect([...s].length).toBeLessThanOrEqual(PROGRESS_SUMMARY_MAX + 40);
+    expect(s).toContain("✓");
+    expect(s).toContain("0.3");
+  });
+
+  it("실패 줄도 잘리되 사유의 앞부분(가장 중요한 부분)은 남는다", () => {
+    const reason = `허용된 폴더 밖 경로예요: C:\\ws\\${"x".repeat(300)}\\a.txt`.slice(0, RESULT_SUMMARY_MAX);
+    const s = formatProgress({ kind: "tool_result", name: "fs_write", ok: false, summary: reason });
+    expect([...s].length).toBeLessThanOrEqual(PROGRESS_SUMMARY_MAX + 40);
+    expect(s).toContain("✗");
+    expect(s).toContain("허용된 폴더 밖 경로예요");
+  });
+
+  it("12줄 최악 케이스가 디스코드 2000자 한도 안에 들어간다(이 수정의 실제 목적)", () => {
+    const line = formatProgress({ kind: "tool_result", name: "fs_write", ok: false, summary: LONG });
+    // formatProgressMessage 가 붙이는 머리글("처리 중")과 줄머리("· ")까지 포함해 실제로 계산한다.
+    const message = ["처리 중", ...Array.from({ length: PROGRESS_DISPLAY_MAX_LINES }, () => `· ${line}`)].join("\n");
+    expect(message.length).toBeLessThan(2000);
+  });
+
+  it("짧은 summary 는 손대지 않는다(회귀 없음)", () => {
+    const s = formatProgress({ kind: "tool_result", name: "fs_read", ok: true, summary: "본문", durationMs: 320 });
+    expect(s).toBe("✓ fs_read — 본문 (0.3초)");
+  });
+
+  it("자르기는 첫 줄을 뽑은 뒤에 한다 — 여러 줄 summary 의 둘째 줄이 새어 나오지 않는다", () => {
+    const s = formatProgress({ kind: "tool_result", name: "sh_exec", ok: true, summary: `${"a".repeat(200)}\n둘째줄` });
+    expect(s).not.toContain("둘째줄");
   });
 });
 

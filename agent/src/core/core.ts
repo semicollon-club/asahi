@@ -75,6 +75,31 @@ function seconds(ms: number): string {
   return `${(ms / 1000).toFixed(1)}초`;
 }
 
+// 표시 줄 하나에 실을 결과 요약의 상한(최종 리뷰 Important 2). 이벤트의 summary 상한
+// (agent.ts 의 RESULT_SUMMARY_MAX=200)과는 다른 값이고, 달라야 한다 — 200 은 actions.result_summary
+// 에 남길 기록 해상도이고, 이 80 은 한 줄짜리 UI 가 감당할 수 있는 길이다. 같은 값에서 나온 두
+// 소비자(표시·기록)가 서로 다른 예산을 갖는 지점이 정확히 여기다.
+//
+// 왜 자르는가: 디스코드 메시지는 2000자가 한도인데, 상태 메시지의 유일한 길이 보호는
+// discord.ts 의 12줄 상한(PROGRESS_DISPLAY_MAX_LINES)이었다. 그 값은 짧은 줄(`fs_read 완료`,
+// 52자)을 전제로 잡힌 것인데, 이 브랜치가 summary 를 표시 줄에 실으면서 한 줄 최악이 220자가
+// 됐다 — 12줄이면 2694자로 한도를 넘는다. 넘으면 send/edit 이 reject 되고 그 catch 는 로그만
+// 남기므로, 상태 메시지가 그 턴 내내 옛 내용으로 얼어붙는다(도구를 많이 쓴 턴 = 진행 표시가
+// 가장 필요한 턴에서 하필 그렇게 된다). 80 이면 머리글·줄머리·이름·소요시간까지 더해도 12줄이
+// 1400자 안쪽이라 한도까지 여유가 넉넉하다.
+export const PROGRESS_SUMMARY_MAX = 80;
+
+// 결과 요약을 표시 한 줄로 만든다: 첫 줄만 뽑고 → 경로를 사용자 폴더 기준으로 줄이고 → 상한에서
+// 자른다. 자른 자리에 말줄임표를 남긴다 — 한 줄짜리 UI 라 생략해도 되지만, 잘렸는지 아닌지를
+// 부원이 구분할 수 있어야 "사유가 원래 이게 전부"라고 오해하지 않는다.
+// 코드포인트 단위로 자른다(slice 는 UTF-16 코드유닛 기준이라 이모지가 경계에 걸리면 서로게이트
+// 쌍이 쪼개진다 — tools.ts 의 truncateChars 와 같은 이유).
+function summaryLine(summary: string, baseDirs?: string[]): string {
+  const line = shortenPath(summary.split("\n")[0]!, baseDirs);
+  const chars = [...line];
+  return chars.length > PROGRESS_SUMMARY_MAX ? `${chars.slice(0, PROGRESS_SUMMARY_MAX).join("")}…` : line;
+}
+
 // ProgressUpdate → 사용자용 짧은 텍스트(순수 함수, 디스코드 태스크가 그대로 재사용한다).
 // baseDirs(옵셔널): 그 손님의 작업 폴더 목록 — 넘기면 경로를 그 폴더 기준으로 축약한다.
 export function formatProgress(u: ProgressUpdate, baseDirs?: string[]): string {
@@ -87,8 +112,8 @@ export function formatProgress(u: ProgressUpdate, baseDirs?: string[]): string {
       const mark = u.ok ? "✓" : "✗";
       const name = u.name ?? "도구";
       const tail = u.ok
-        ? [u.summary === undefined ? undefined : shortenPath(u.summary.split("\n")[0]!, baseDirs), u.durationMs === undefined ? undefined : `(${seconds(u.durationMs)})`]
-        : [u.summary === undefined ? undefined : shortenPath(u.summary.split("\n")[0]!, baseDirs)];
+        ? [u.summary === undefined ? undefined : summaryLine(u.summary, baseDirs), u.durationMs === undefined ? undefined : `(${seconds(u.durationMs)})`]
+        : [u.summary === undefined ? undefined : summaryLine(u.summary, baseDirs)];
       const rest = tail.filter((x) => x !== undefined).join(" ");
       return rest.length > 0 ? `${mark} ${name} — ${rest}` : `${mark} ${name}`;
     }
