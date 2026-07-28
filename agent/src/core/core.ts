@@ -240,7 +240,10 @@ export class AgentCore {
     // 어댑터의 isChannelCommand 를 통과한 것만 오므로 /help 와 조사 예약어 둘뿐이다.
     if (hint.commandOnly) {
       if (parseHelpCommand(text)) {
-        this.bus.publish({ type: "assistant_message", channel: "discord", channelRef: hint.discordChannelId, text: renderCommandHelp(), ts: this.now() });
+        // 능력 안내는 워커 연결 여부로 갈린다(최종 리뷰 Important 3) — 아래 helpText 참고.
+        // commandOnly 는 일반 채널 경로라 항상 공개(isPrivate:false)다.
+        const text2 = await this.helpText(hint.userId, false);
+        this.bus.publish({ type: "assistant_message", channel: "discord", channelRef: hint.discordChannelId, text: text2, ts: this.now() });
         return;
       }
       const topic = parseDigestCommand(text);
@@ -261,7 +264,8 @@ export class AgentCore {
 
     // 도움말: 예약어 목록만 보여준다. 모델을 부르지 않는다.
     if (parseHelpCommand(text)) {
-      this.bus.publish({ type: "assistant_message", channel: "discord", channelRef: conv.discordChannelId, text: renderCommandHelp(), ts: this.now() });
+      const helpText = await this.helpText(hint.userId, conv.isPrivate);
+      this.bus.publish({ type: "assistant_message", channel: "discord", channelRef: conv.discordChannelId, text: helpText, ts: this.now() });
       return;
     }
 
@@ -549,6 +553,29 @@ export class AgentCore {
       }
       this.enqueue(this.turnChains, conv.discordChannelId, () => this.runConversationTurn(conv.id, userId, role, m.content, m.id));
     }
+  }
+
+  // /help 안내문. 최종 리뷰 Important 3 — 능력 안내(파일·명령 작업을 시킬 수 있다는 안내)는
+  // 워커가 실제로 연결돼 있을 때만 나가야 한다. 판정은 여기서 새로 만들지 않고 runConversationTurn·
+  // agent.ts 가 쓰는 것과 완전히 같은 resolveTurnWorker 를 그대로 부른다 — 안내와 집행이 서로 다른
+  // 계산에서 나오면 갈린다는 것이 이 저장소가 반복해서 겪은 결함 유형이다(persona.ts 의 FIX4 주석).
+  //
+  // 조회가 실패해도(레지스트리 DB 오류 등) /help 자체는 반드시 나가야 한다 — 도움말이 통째로
+  // 사라지는 것보다 능력 안내 한 문단이 보수적으로 빠지는 편이 낫다. 그래서 실패는 "워커 없음"으로
+  // 떨어뜨린다(fail closed: 없는 능력을 있다고 말하지 않는 쪽).
+  private async helpText(userId: string, isPrivate: boolean): Promise<string> {
+    let workerConnected = false;
+    try {
+      const worker = await resolveTurnWorker(
+        { context: { isOwner: userId === this.ownerId, isPrivate, userId } },
+        this.registry,
+        this.hub,
+      );
+      workerConnected = worker !== null;
+    } catch (err) {
+      console.error("[core] /help 워커 판정 실패 — 능력 안내 없이 진행:", err);
+    }
+    return renderCommandHelp(workerConnected);
   }
 
   // 손님에게 자기 작업 폴더 경로를 알려주기 위한 값(persona.ts 의 workspaceDirs). 게이팅에는

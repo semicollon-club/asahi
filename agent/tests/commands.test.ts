@@ -70,7 +70,7 @@ describe("parseHelpCommand", () => {
 
 describe("renderCommandHelp — 안내문이 실제 예약어와 어긋나지 않는다", () => {
   it("파싱되는 모든 예약어가 안내문에 나온다", () => {
-    const help = renderCommandHelp();
+    const help = renderCommandHelp(true);
     // 안내문에 적힌 예약어를 전부 모아, 하나도 빠짐없이 실제로 파싱되는지 확인한다.
     const listed = COMMAND_HELP.flatMap((g) => g.commands);
     expect(listed.length).toBeGreaterThan(0);
@@ -82,7 +82,7 @@ describe("renderCommandHelp — 안내문이 실제 예약어와 어긋나지 �
   });
 
   it("세션·조사·도움말 예약어가 모두 안내문에 포함된다", () => {
-    const help = renderCommandHelp();
+    const help = renderCommandHelp(true);
     for (const cmd of ["/새세션", "/대회", "/개발뉴스", "/help"]) {
       expect(help).toContain(cmd);
     }
@@ -159,13 +159,59 @@ describe("FIX1 — Object.prototype 상속 키는 예약어로 오인식되지 �
 
 describe("renderCommandHelp — 손님이 무엇을 할 수 있는지 알린다", () => {
   it("자기 폴더 조회·파일 작업을 안내한다", () => {
-    const help = renderCommandHelp();
+    const help = renderCommandHelp(true);
     expect(help).toMatch(/폴더/);
     expect(help).toMatch(/파일/);
   });
 
+  // Minor 6(최종 리뷰) — 세 번째 안내(명령 실행)에만 대응하는 단정이 없었다. 안내 항목이 조용히
+  // 사라져도 아무도 눈치채지 못하는 상태였다. `/명령/` 만으로는 부족하다 — 예약어 목록의 "/명령어"
+  // 가 그 패턴에 걸려, 이 안내가 통째로 빠져도 통과해 버린다.
+  it("명령 실행(sh_exec)도 안내한다", () => {
+    const help = renderCommandHelp(true);
+    expect(help).toMatch(/명령 실행해줘/);
+  });
+
+  // Minor 7(최종 리뷰) — 손님도 fs_glob/fs_grep 을 쓸 수 있는데 안내에 없었다. 설계 §7 의 목적이
+  // "쓸 수 있다는 사실 자체를 알리는 것"이고, 검색은 손님이 가장 자주 필요로 할 기능이다.
+  it("검색·찾기(fs_glob/fs_grep)도 안내한다", () => {
+    const help = renderCommandHelp(true);
+    expect(help).toMatch(/찾|검색/);
+  });
+
   it("소유자 전용 도구 이름은 노출하지 않는다", () => {
-    const help = renderCommandHelp();
+    const help = renderCommandHelp(true);
     expect(help).not.toMatch(/manage_access|db_query|allow_dir/);
+  });
+});
+
+// ── 최종 리뷰 Important 3 — /help 의 능력 안내가 워커 연결 여부와 무관하게 나갔다 ──────────────
+// persona.ts 는 같은 문장들을 네 분기 전부 workerConnected 로 갈라 내보내고, 그 주석은 이 어긋남을
+// 명시적 결함 유형("안내와 실제 도구가 어긋남", FIX4)으로 부른다. 그런데 /help 는 사람이 직접 읽는
+// 유일한 능력 안내인데도 그 규칙에서 빠져 있었다 — 미니PC 가 꺼져 있거나 워커가 끊긴 동안에도
+// "파일 만들어줘 / 명령 실행해줘" 라고 말했다.
+describe("renderCommandHelp — 능력 안내는 워커 연결 여부로 갈린다(최종 리뷰 Important 3)", () => {
+  it("워커가 없으면 파일·셸 능력을 시키라고 말하지 않는다", () => {
+    const help = renderCommandHelp(false);
+    expect(help).not.toMatch(/파일 만들어줘|명령 실행해줘/);
+  });
+
+  it("워커가 없으면 지금은 안 된다는 사실을 알린다(침묵하면 왜 안 되는지 알 길이 없다)", () => {
+    const help = renderCommandHelp(false);
+    expect(help).toMatch(/지금은/);
+    expect(help).toMatch(/PC|컴퓨터/);
+  });
+
+  it("워커가 없어도 예약어 목록 자체는 그대로 나온다(예약어는 워커와 무관하다)", () => {
+    const help = renderCommandHelp(false);
+    for (const cmd of ["/새세션", "/대회", "/개발뉴스", "/help"]) {
+      expect(help).toContain(cmd);
+    }
+  });
+
+  it("워커가 연결돼 있으면 예전 안내 그대로다", () => {
+    const help = renderCommandHelp(true);
+    expect(help).toMatch(/파일 만들어줘/);
+    expect(help).toMatch(/명령 실행해줘/);
   });
 });
