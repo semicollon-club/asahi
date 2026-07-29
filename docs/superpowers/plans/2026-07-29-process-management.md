@@ -113,10 +113,13 @@ describe("proc — pm2 jlist 파싱", () => {
 
 describe("proc — 표 렌더링", () => {
   const labelOf = (userId: string) => (userId === "111" ? "우성현" : userId);
-  const one: ProcInfo = { name: "asahi-111", userId: "111", command: "npm run dev", status: "online", uptimeMs: 2 * 3600_000 + 12 * 60_000, memoryBytes: 184 * 1024 * 1024, restarts: 0 };
+  // uptimeMs 는 "경과 시간"이 아니라 pm2 의 pm_uptime, 즉 **시작 시각(ms)** 이다.
+  // 경과로 바꾸는 것은 렌더러가 now 를 받아서 한다 — 그래서 아래는 시작 0, now 를 2시간 12분으로 둔다.
+  const NOW = 2 * 3600_000 + 12 * 60_000;
+  const one: ProcInfo = { name: "asahi-111", userId: "111", command: "npm run dev", status: "online", uptimeMs: 0, memoryBytes: 184 * 1024 * 1024, restarts: 0 };
 
   it("사람 이름·명령·상태·업타임·메모리·재시작 횟수를 담는다", () => {
-    const out = renderProcList([one], { labelOf });
+    const out = renderProcList([one], { labelOf, now: NOW });
     expect(out).toContain("우성현");
     expect(out).toContain("npm run dev");
     expect(out).toContain("online");
@@ -125,12 +128,21 @@ describe("proc — 표 렌더링", () => {
     expect(out).toContain("재시작 0");
   });
 
+  it("한 시간이 안 되면 분만 보여준다", () => {
+    expect(renderProcList([one], { labelOf, now: 7 * 60_000 })).toContain("7분");
+  });
+
+  it("시작 시각을 모르면 업타임 자리를 비운다(0분이라고 거짓말하지 않는다)", () => {
+    const out = renderProcList([{ ...one, uptimeMs: null }], { labelOf, now: NOW });
+    expect(out).not.toContain("분");
+  });
+
   it("비어 있으면 비었다고 말한다(빈 문자열을 돌려주지 않는다)", () => {
     expect(renderProcList([], { labelOf })).toContain("도는 것이 없");
   });
 
   it("개수를 머리글에 넣는다", () => {
-    const out = renderProcList([one, { ...one, name: "asahi-222", userId: "222" }], { labelOf });
+    const out = renderProcList([one, { ...one, name: "asahi-222", userId: "222" }], { labelOf, now: NOW });
     expect(out).toContain("2개");
   });
 });
@@ -250,13 +262,7 @@ export function renderProcList(
 - [ ] **Step 4: 통과를 확인한다**
 
 Run: `npx vitest run tests/proc.test.ts`
-Expected: PASS. 업타임 테스트가 실패하면 `renderProcList` 호출에 `now` 를 넘겨 고정한다 — 테스트의 `uptimeMs` 는 "시작 시각"이므로 `now: 0 + 2시간12분` 형태로 맞춰야 한다. 테스트를 다음과 같이 고친다:
-
-```ts
-const one: ProcInfo = { name: "asahi-111", userId: "111", command: "npm run dev", status: "online", uptimeMs: 0, memoryBytes: 184 * 1024 * 1024, restarts: 0 };
-// …
-const out = renderProcList([one], { labelOf, now: 2 * 3600_000 + 12 * 60_000 });
-```
+Expected: PASS (13개)
 
 - [ ] **Step 5: 전체 검증**
 
