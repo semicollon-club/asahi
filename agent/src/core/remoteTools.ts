@@ -205,7 +205,17 @@ export async function remoteToolHandler(
     // 그때 allowed[0] 은 undefined 라 만들 폴더 자체가 없다(이 셋은 폴더가 아니라 pm2 프로세스
     // 이름으로만 동작한다). 이 셋을 제외한 기존 경로(경로 도구 전부·proc_start)는 위 deny 가
     // 이미 allowed.length > 0 을 보장해 두므로, 이 추가 조건이 그 경로들의 동작을 바꾸지 않는다.
-    if (remote.workerKind === "shared" && !ctx.isOwner && allowed.length > 0) {
+    //
+    // 최종 리뷰 지적(Minor, Finding 6): 위 세 가지 조건(shared·손님·allowed 있음)을 전부
+    // 만족해도, 이 준비 호출이 실제로 필요한 도구는 그 폴더를 쓰는 도구뿐이다 — 경로 인자가 있는
+    // 기존 도구 전부(needsPathCheck)와 proc_start(cwd 로 이 폴더를 받는다)뿐, proc_stop·
+    // proc_list·proc_logs 는 isProcTool 이라 needsScope 는 타지만 이 폴더를 구조적으로 전혀
+    // 건드리지 않는다. 그런데도 이 호출이 needsScope 조건만 따라가면, 조회성 호출인 proc_list
+    // 하나에도 워커 왕복이 하나 더 붙고 읽기 전용 요청이 폴더 생성이라는 부작용을 낳는다.
+    // needsPathCheck 는 proc_* 이 아닌 기존 도구에 한해 needsScope 와 정확히 같으므로(위
+    // needsScope 선언부 주석 참고), 이 조건을 추가해도 그 도구들의 동작은 그대로다 — 바뀌는
+    // 것은 새로 편입된 proc_stop·proc_list·proc_logs 세 도구뿐이다.
+    if (remote.workerKind === "shared" && !ctx.isOwner && allowed.length > 0 && (tool === "proc_start" || needsPathCheck)) {
       await remote.call("fs_mkdir", { path: allowed[0] }).catch(() => {});
     }
   }

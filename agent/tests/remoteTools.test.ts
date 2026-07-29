@@ -656,6 +656,20 @@ describe("proc_* — 이름과 작업 폴더는 봇이 주입한다", () => {
     expect(calls[1]!.args.cwd).toBe("/w/111");
   });
 
+  // 리뷰 지적(Minor, Finding 6): proc_stop·proc_list·proc_logs 는 isProcTool 이라 스코프 계산
+  // (needsScope)은 타지만, 그 폴더(allowed[0])를 구조적으로 전혀 쓰지 않는다 — proc_start 만 cwd
+  // 로 받는다. 그런데도 준비 호출(fs_mkdir) 조건이 needsScope 를 그대로 따라가면, 조회성 호출인
+  // proc_list 하나에도 매번 워커 왕복이 하나 더 붙고 읽기 전용 요청이 폴더를 만드는 부작용을
+  // 낳는다. 이 셋에는 fs_mkdir 이 나가지 않아야 한다.
+  it("손님의 proc_stop·proc_list·proc_logs 앞에는 개인 폴더 준비 호출을 하지 않는다(그 폴더를 쓰지 않는 도구)", async () => {
+    for (const tool of ["proc_stop", "proc_list", "proc_logs"] as const) {
+      const calls: Array<{ tool: string; args: Record<string, unknown> }> = [];
+      const ctx = withDirs(["/w"], { call: async (t, a) => { calls.push({ tool: t, args: a }); return { ok: true, content: "" }; } });
+      await remoteToolHandler(ctx, tool, {});
+      expect(calls.map((c) => c.tool), `${tool} 호출 앞에 fs_mkdir 이 섞여 나갔다`).toEqual([tool]);
+    }
+  });
+
   it("손님의 proc_stop 도 자기 이름으로 덮어쓴다(남의 것을 못 죽인다)", async () => {
     const seen: Array<Record<string, unknown>> = [];
     const ctx = withDirs(["/w"], { call: recordArgs(seen) });
