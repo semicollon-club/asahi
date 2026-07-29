@@ -50,6 +50,15 @@ describe("proc — pm2 jlist 파싱", () => {
     expect(parsePm2List("not json")).toEqual([]);
   });
 
+  // 리뷰 지적(Important, 병합 차단 항목과 같은 자리에서 발견된 이어받은 구멍): 최상위 값이 유효한
+  // JSON 이어도 배열이 아니면(예: 객체 하나) raw.map 이 없는 메서드를 부르며 그대로 죽는다 — 아래
+  // Array.isArray 가드가 이미 막고 있지만, 이 모양(예: pm2 가 에러를 { message: ... } 객체로
+  // 뱉는 경우)을 겨냥한 테스트가 없었다.
+  it("최상위가 배열이 아니면(JSON 객체 등) 빈 목록을 돌려준다", () => {
+    expect(parsePm2List("{}")).toEqual([]);
+    expect(parsePm2List('{"message":"pm2 daemon not running"}')).toEqual([]);
+  });
+
   it("필드가 없어도 죽지 않는다", () => {
     const [p] = parsePm2List(jlist([{ name: "asahi-9" }]));
     expect(p).toMatchObject({ name: "asahi-9", status: "unknown", restarts: 0 });

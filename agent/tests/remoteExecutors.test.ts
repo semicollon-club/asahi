@@ -507,6 +507,26 @@ describe("proc_* 실행기 — PM2 위임", () => {
     expect(r.content).toContain("재시작 2");
   });
 
+  // 리뷰 지적(Important, 병합 차단): proc_list 의 onlyUserId 필터는 손님이 남의 프로세스를 못
+  // 보게 막는 유일한 격리 장치인데, 기존 테스트는 전부 ex.proc_list({}) 만 불러 only 가 항상
+  // undefined 였다 — .filter(...) 분기 자체가 스위트 어디서도 실행되지 않았다. 여기서는 3개짜리
+  // jlist(회원 둘 + 워커 자신)에 onlyUserId 를 실제로 넘겨, 지정한 회원의 것만 남는지 직접
+  // 단정한다.
+  it("proc_list 는 onlyUserId 가 있으면 그 사용자 것만 남긴다(손님 격리 — 유일한 방어선)", async () => {
+    const stdout = JSON.stringify([
+      { name: "asahi-111", pm2_env: { status: "online", pm_uptime: 0, restart_time: 0, args: ["run", "dev"], pm_exec_path: "npm" }, monit: { memory: 1 } },
+      { name: "asahi-222", pm2_env: { status: "online", pm_uptime: 0, restart_time: 0, args: ["run", "build"], pm_exec_path: "npm" }, monit: { memory: 1 } },
+      { name: "asahi-worker", pm2_env: { status: "online", pm_uptime: 0, restart_time: 0, args: [], pm_exec_path: "node" }, monit: { memory: 1 } },
+    ]);
+    const { runPm2 } = fakePm2({ jlist: { ok: true, stdout } });
+    const ex = makeExecutors(["C:\\ws"], { runPm2 });
+    const r = await ex.proc_list!({ onlyUserId: "111" });
+    expect(r.ok).toBe(true);
+    expect(r.content).toContain("asahi-111");
+    expect(r.content).not.toContain("asahi-222");
+    expect(r.content).not.toContain("asahi-worker");
+  });
+
   it("proc_logs 는 nostream 으로 부르고 줄 수를 넘긴다", async () => {
     const { calls, runPm2 } = fakePm2({ logs: { ok: true, stdout: "로그 본문" } });
     const ex = makeExecutors(["C:\\ws"], { runPm2 });
