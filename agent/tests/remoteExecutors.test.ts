@@ -403,19 +403,39 @@ describe("fs_tree 실행기", () => {
 
 describe("proc_* 실행기 — PM2 위임", () => {
   type Call = string[];
-  const fakePm2 = (replies: Record<string, { ok: boolean; stdout: string; stderr?: string }>) => {
+  type Pm2Reply = { ok: boolean; stdout: string; stderr?: string };
+  // 리뷰 지적(Minor, Finding 5): proc_start 가 시작 뒤 상태를 재조회하면서, 같은 키("jlist")를
+  // 한 호출 안에서 두 번(사전 중복 확인 + 사후 상태 확인) 부르게 됐다 — 두 번의 의미가 다르므로
+  // (전: 아직 없어야 정상, 후: 이제 있어야 정상) 같은 키에 서로 다른 답을 줄 수 있어야 한다.
+  // replies[key] 에 배열을 주면 호출 순서대로 소비하고(마지막 값은 그 뒤로도 반복), 기존처럼
+  // 객체 하나만 주면 예전과 동일하게 매 호출 같은 답을 준다 — 기존 테스트는 고칠 필요가 없다.
+  const fakePm2 = (replies: Record<string, Pm2Reply | Pm2Reply[]>) => {
     const calls: Call[] = [];
+    const seen: Record<string, number> = {};
     const runPm2 = async (args: string[]) => {
       calls.push(args);
       const key = args[0]!;
-      const r = replies[key] ?? { ok: true, stdout: "" };
+      const entry = replies[key];
+      let r: Pm2Reply;
+      if (Array.isArray(entry)) {
+        const idx = seen[key] ?? 0;
+        seen[key] = idx + 1;
+        r = entry[idx] ?? entry[entry.length - 1] ?? { ok: true, stdout: "" };
+      } else {
+        r = entry ?? { ok: true, stdout: "" };
+      }
       return { ok: r.ok, stdout: r.stdout, stderr: r.stderr ?? "" };
     };
     return { calls, runPm2 };
   };
+  // Finding 5: proc_start 가 시작 뒤 재조회할 때 "정상적으로 떴다"고 볼 jlist 응답을 만든다.
+  const onlineJlist = (name: string, over: Record<string, unknown> = {}) =>
+    JSON.stringify([{ name, pm2_env: { status: "online", pm_uptime: Date.now(), restart_time: 0, args: [], pm_exec_path: "node", ...over }, monit: { memory: 1 } }]);
 
   it("proc_start 는 주입된 이름과 cwd 로 pm2 start 를 부른다", async () => {
-    const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: "[]" } });
+    // 첫 jlist(사전 중복 확인)는 비어 있고, start 이후 재조회(Finding 5)는 online 을 돌려준다 —
+    // 실제 성공 경로를 그대로 흉내낸다.
+    const { calls, runPm2 } = fakePm2({ jlist: [{ ok: true, stdout: "[]" }, { ok: true, stdout: onlineJlist("asahi-111") }] });
     const ex = makeExecutors(["C:\\ws"], { runPm2 });
     const r = await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: "C:\\ws\\111" });
     expect(r.ok).toBe(true);
@@ -452,10 +472,31 @@ describe("proc_* 실행기 — PM2 위임", () => {
   });
 
   it("proc_start 성공 응답은 멈추는 법을 그 자리에서 알려준다", async () => {
-    const { runPm2 } = fakePm2({ jlist: { ok: true, stdout: "[]" } });
+    const { runPm2 } = fakePm2({ jlist: [{ ok: true, stdout: "[]" }, { ok: true, stdout: onlineJlist("asahi-111") }] });
     const ex = makeExecutors(["C:\\ws"], { runPm2 });
     const r = await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: "C:\\ws\\111" });
     expect(r.content).toContain("멈추");
+  });
+
+  // 리뷰 지적(Minor, Finding 5): pm2 의 기본 autorestart 때문에, pm2 start 호출 자체는 성공해도
+  // (pm2 가 프로세스 "등록"에 성공했다는 뜻일 뿐) 명령이 오타 등으로 즉시 죽으면 재시작을
+  // 반복한다("errored"↔재시작을 오간다). start 호출의 ok:true 만 보고 "띄웠어요"라고 먼저
+  // 알리면 이런 크래시 루프도 성공으로 들린다 — 시작 직후 jlist 를 다시 조회해 실제 상태가
+  // online 이 아니면 성공을 주장하지 않는다.
+  it("proc_start 는 시작 직후 재조회에서 online 이 아니면(크래시 루프 등) 성공을 주장하지 않는다", async () => {
+    const crashLooping = onlineJlist("asahi-111", { status: "errored", restart_time: 3 });
+    const { runPm2 } = fakePm2({ jlist: [{ ok: true, stdout: "[]" }, { ok: true, stdout: crashLooping }] });
+    const ex = makeExecutors(["C:\\ws"], { runPm2 });
+    const r = await ex.proc_start!({ command: "오타난명령", name: "asahi-111", cwd: "C:\\ws\\111" });
+    expect(r.ok).toBe(false);
+    expect(r.content).toContain("errored");
+  });
+
+  it("proc_start 는 시작 직후 재조회 자체가 실패해도(연결 끊김 등) 성공을 주장하지 않는다", async () => {
+    const { runPm2 } = fakePm2({ jlist: [{ ok: true, stdout: "[]" }, { ok: false, stdout: "", stderr: "연결 끊김" }] });
+    const ex = makeExecutors(["C:\\ws"], { runPm2 });
+    const r = await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: "C:\\ws\\111" });
+    expect(r.ok).toBe(false);
   });
 
   // 리뷰 지적(Minor 3): name·cwd 누락 거절은 프로세스 소유권·1인 1개 상한의 전제 조건인데

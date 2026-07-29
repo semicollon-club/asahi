@@ -532,6 +532,20 @@ export function makeExecutors(roots: string[], opts: { runPm2?: RunPm2 } = {}): 
       const sh = shellFor();
       const r = await runPm2(["start", sh.bin, "--name", name, "--cwd", cwd, "--", sh.flag, command]);
       if (!r.ok) return { ok: false, content: `띄우지 못했어요: ${r.stderr.trim() || r.stdout.trim() || "알 수 없는 오류"}` };
+
+      // 리뷰 지적(Minor, Finding 5): pm2 의 기본 autorestart 때문에 위 start 호출이 ok:true 여도
+      // "pm2 가 프로세스 등록에 성공했다"는 뜻일 뿐, 명령 자체가 오타 등으로 즉시 죽으면 재시작을
+      // 반복한다 — 여기서 바로 "띄웠어요"라고 알리면 크래시 루프도 성공으로 들린다. 재조회 한
+      // 번으로 실제 상태를 확인해 보고한다(재시도·대기 루프는 두지 않는다 — 그 순간의 스냅샷만
+      // 정직하게 전달하면 충분하고, pm2 가 안정화되길 기다리는 건 별개의 더 큰 설계다).
+      const after = await listProcs();
+      const status = after.ok ? after.procs.find((p) => p.name === name)?.status : undefined;
+      if (status !== "online") {
+        return {
+          ok: false,
+          content: `띄우긴 했는데 상태가 정상이 아니에요(${status ?? "확인 불가"}). "로그 보여줘" 라고 하면 원인을 확인할 수 있어요.`,
+        };
+      }
       // 발견성: 시작한 그 순간이 멈추는 법을 알려주기 가장 좋은 시점이다(설계 §6).
       return { ok: true, content: `띄웠어요: ${command}\n멈추려면 "돌고 있는 거 꺼줘" 라고 말하면 돼요. "뭐 돌고 있어?" 로 확인할 수 있어요.` };
     },
