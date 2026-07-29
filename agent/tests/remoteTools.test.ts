@@ -629,12 +629,11 @@ describe("proc_* — 이름과 작업 폴더는 봇이 주입한다", () => {
       return { ok: true, content: "" };
     };
 
-  it("도구 이름 11개를 고정으로 노출한다", () => {
-    expect([...REMOTE_TOOL_NAMES].sort()).toEqual([
-      "fs_edit", "fs_glob", "fs_grep", "fs_read", "fs_tree", "fs_write",
-      "proc_list", "proc_logs", "proc_start", "proc_stop", "sh_exec",
-    ]);
-  });
+  // 리뷰 Finding 2: "도구 이름 11개를 고정으로 노출한다" 단정은 위 "원격 도구" describe(파일
+  // 상단, :43)에 이미 원문 그대로 있다 — 브리프 Step 1 이 이 describe 안에도 같은 단정을
+  // 요구했고 Step 4 가 기존 것을 11개로 갱신하라고 지시해 두 벌이 됐던 것으로, 어느 쪽도 다른
+  // 쪽이 검증하지 않는 걸 검증하지 않는다. 이 describe 의 제목("proc_* — 이름과 작업 폴더는
+  // 봇이 주입한다")과 실제로 맞는 원본은 저 위쪽 것이므로 이쪽 사본을 지운다.
 
   it("손님의 proc_start 는 모델이 준 name·cwd 를 무시하고 덮어쓴다", async () => {
     const seen: Array<Record<string, unknown>> = [];
@@ -664,6 +663,19 @@ describe("proc_* — 이름과 작업 폴더는 봇이 주입한다", () => {
     expect(seen[0]!.name).toBe("asahi-111");
   });
 
+  // 리뷰 Finding 1(중요): remoteTools.ts 에서 proc_stop·proc_logs 는 한 줄에서 같이 처리되는데
+  // (`if (tool === "proc_stop" || tool === "proc_logs")`), proc_logs 를 실제로 호출하는 테스트가
+  // 이 파일에 하나도 없었다 — "|| tool === "proc_logs"" 를 지워도 통과하는 테스트가 없다는 뜻이다.
+  // tools.ts 는 모든 호출자에게 name 을 선택 인자로 노출하고 executors.ts(557행 부근)는 받은
+  // 이름을 그대로 믿으므로, 이 구멍을 그대로 두면 남의 로그를 읽을 수 있었다. proc_stop 과
+  // 대칭으로 손님·소유자 케이스를 채운다.
+  it("손님의 proc_logs 도 자기 이름으로 덮어쓴다(남의 로그를 못 본다)", async () => {
+    const seen: Array<Record<string, unknown>> = [];
+    const ctx = withDirs(["/w"], { call: recordArgs(seen) });
+    await remoteToolHandler(ctx, "proc_logs", { name: "asahi-999" });
+    expect(seen[0]!.name).toBe("asahi-111");
+  });
+
   it("손님의 proc_list 는 자기 것만 보도록 필터가 주입된다", async () => {
     const seen: Array<Record<string, unknown>> = [];
     const ctx = withDirs(["/w"], { call: recordArgs(seen) });
@@ -671,10 +683,16 @@ describe("proc_* — 이름과 작업 폴더는 봇이 주입한다", () => {
     expect(seen[0]!.onlyUserId).toBe("111");
   });
 
+  // 리뷰 Finding 4(사소함): "필터 없이 전원을 본다"는 onlyUserId 가 undefined 라는 것만으로는
+  // 증명되지 않는다 — 아래 isProcTool 주입 블록을 통째로 지워도 args 에 onlyUserId 키 자체가
+  // 생기지 않으니 결과는 마찬가지로 undefined 다("명시적으로 비웠다"와 "애초에 안 건드렸다"가
+  // 구분이 안 된다). 키의 존재 여부까지 확인해야 주입이 실제로 실행됐다는 증거가 된다
+  // (remoteTools.ts 는 소유자에게도 `onlyUserId: undefined` 를 키째로 싣는다 — 주석 참고).
   it("소유자의 proc_list 는 필터 없이 전원을 본다", async () => {
     const seen: Array<Record<string, unknown>> = [];
     const ctx = withDirs(["/w"], { call: recordArgs(seen) }, { isOwner: true });
     await remoteToolHandler(ctx, "proc_list", {});
+    expect("onlyUserId" in seen[0]!).toBe(true);
     expect(seen[0]!.onlyUserId).toBeUndefined();
   });
 
@@ -685,6 +703,35 @@ describe("proc_* — 이름과 작업 폴더는 봇이 주입한다", () => {
     expect(seen[0]!.name).toBe("asahi-999");
   });
 
+  // 리뷰 Finding 4(사소함): 바로 위 테스트는 소유자가 준 이름이 "그대로 전달"됨을 보이는데, 이는
+  // 주입 블록이 소유자 분기를 타서 존중한 결과와 주입 블록 자체가 없어 값을 아예 안 건드린 결과를
+  // 구분하지 못한다 — 둘 다 seen[0].name 이 "asahi-999"로 같다. 이름을 생략하면 갈린다: 주입이
+  // 돌면 반드시 본인 이름(mine = procNameFor(ctx.userId))이 채워지고, 주입이 없으면 undefined 인
+  // 채로 허브까지 간다.
+  it("소유자가 이름 없이 proc_stop 을 불러도 자기 이름이 채워진다(주입이 실제로 도는지 확인 — 이름을 지정하는 위 테스트만으로는 주입이 삭제돼도 통과한다)", async () => {
+    const seen: Array<Record<string, unknown>> = [];
+    const ctx = withDirs(["/w"], { call: recordArgs(seen) }, { isOwner: true });
+    await remoteToolHandler(ctx, "proc_stop", {});
+    expect(seen[0]!.name).toBe("asahi-111");
+  });
+
+  // 리뷰 Finding 1: proc_logs 도 proc_stop 과 같은 줄에서 처리되므로 소유자 케이스를 대칭으로
+  // 채운다(위 손님 케이스 참고). Finding 4 와 같은 이유로, 이름을 지정한 케이스와 생략한 케이스를
+  // 둘 다 둔다 — 생략 케이스가 없으면 이 역시 주입 삭제와 구분되지 않는다.
+  it("소유자의 proc_logs 는 지정한 이름을 존중한다(관리자)", async () => {
+    const seen: Array<Record<string, unknown>> = [];
+    const ctx = withDirs(["/w"], { call: recordArgs(seen) }, { isOwner: true });
+    await remoteToolHandler(ctx, "proc_logs", { name: "asahi-999" });
+    expect(seen[0]!.name).toBe("asahi-999");
+  });
+
+  it("소유자가 이름 없이 proc_logs 를 불러도 자기 이름이 채워진다(주입이 실제로 도는지 확인)", async () => {
+    const seen: Array<Record<string, unknown>> = [];
+    const ctx = withDirs(["/w"], { call: recordArgs(seen) }, { isOwner: true });
+    await remoteToolHandler(ctx, "proc_logs", {});
+    expect(seen[0]!.name).toBe("asahi-111");
+  });
+
   it("허용 폴더가 없으면 proc_start 는 허브를 부르지 않고 거절한다", async () => {
     let called = false;
     const ctx = withDirs([], { call: async () => { called = true; return { ok: true, content: "" }; } });
@@ -692,5 +739,38 @@ describe("proc_* — 이름과 작업 폴더는 봇이 주입한다", () => {
     expect(called).toBe(false);
     expect(out.ok).toBe(false);
     expect(out.content).toContain("allow_dir");
+  });
+
+  // 리뷰 Finding 3(중요, 컨트롤러 결정): proc_stop·proc_list·proc_logs 는 allowed 를 전혀 읽지
+  // 않는다 — 신원 인자(name·onlyUserId)는 위 손님/소유자 테스트들이 보이듯 언제나 ctx.userId 로만
+  // 계산되고 무조건 주입된다. 그러니 allowed_dirs 가 비어 있어도 이 셋에는 지켜야 할 대상
+  // (cross-member exposure)이 없다 — 오히려 종전 게이팅은 함정이었다: 관리자가 회원의 allow_dir
+  // 를 회수했는데 그 회원의 dev 서버가 여전히 돌고 있으면, 회원도 관리자도 그 프로세스를 멈추거나
+  // 로그를 들여다볼 방법이 없어지고, 그 순간 나가는 안내 문구("allow_dir 로 폴더를 허용해
+  // 주세요")조차 이 세 도구와 무관한 조치를 가리킨다. "띄운 것은 항상 멈출 수 있어야 한다"는
+  // 컨트롤러의 결정에 따라 이 셋만 예외로 둔다 — proc_start 는 cwd 로 쓸 allowed[0] 이 그대로
+  // 필요하므로(바로 위 테스트) 계속 거부된다.
+  it("허용 폴더가 없어도 proc_stop 은 허브를 부른다(떠 있는 걸 멈추는 데는 allow_dir 가 필요 없다)", async () => {
+    let called = false;
+    const ctx = withDirs([], { call: async () => { called = true; return { ok: true, content: "" }; } });
+    const out = await remoteToolHandler(ctx, "proc_stop", { name: "asahi-999" });
+    expect(called).toBe(true);
+    expect(out.ok).toBe(true);
+  });
+
+  it("허용 폴더가 없어도 proc_list 는 허브를 부른다", async () => {
+    let called = false;
+    const ctx = withDirs([], { call: async () => { called = true; return { ok: true, content: "" }; } });
+    const out = await remoteToolHandler(ctx, "proc_list", {});
+    expect(called).toBe(true);
+    expect(out.ok).toBe(true);
+  });
+
+  it("허용 폴더가 없어도 proc_logs 는 허브를 부른다", async () => {
+    let called = false;
+    const ctx = withDirs([], { call: async () => { called = true; return { ok: true, content: "" }; } });
+    const out = await remoteToolHandler(ctx, "proc_logs", { name: "asahi-999" });
+    expect(called).toBe(true);
+    expect(out.ok).toBe(true);
   });
 });

@@ -104,6 +104,23 @@ export async function remoteToolHandler(
   const isProcTool = (PROC_TOOL_NAMES as readonly string[]).includes(tool);
   const needsScope = needsPathCheck || isProcTool;
 
+  // 리뷰 Finding 3(중요, 컨트롤러 결정): needsScope(=needsPathCheck || isProcTool) 를 타는 도구
+  // 전부가 "allowed 가 비어 있으면 안 된다"는 아니다. proc_stop·proc_list·proc_logs 는 아래
+  // isProcTool 주입 블록에서 신원 인자(name·onlyUserId)를 allowed 가 아니라 ctx.userId 로부터
+  // 무조건 계산한다 — allowed 를 단 한 번도 읽지 않는다. 반면 proc_start 는 allowed[0] 을 cwd 로
+  // 그대로 주입해야 하므로(아래) 빈 목록으로는 애초에 진행할 수 없다. 경로 도구(needsPathCheck)도
+  // 전부 allowed 로 후보 경로를 검사하므로 마찬가지다.
+  //
+  // 종전에는 이 네 도구가 전부 "allowed 가 비면 거부"를 공유했는데, 이게 proc_stop·proc_list·
+  // proc_logs 에는 보호가 아니라 함정이었다 — 관리자가 회원의 allow_dir 를 회수했는데 그 회원의
+  // dev 서버가 여전히 돌고 있으면, 회원도 관리자도 그 프로세스를 멈추거나 로그를 볼 방법이
+  // 없어졌고, 그 순간 나가는 안내 문구("allow_dir 로 폴더를 허용해 주세요")조차 이 세 도구와
+  // 무관한 조치를 가리켰다. "띄운 것은 항상 멈출 수 있어야 한다"는 컨트롤러의 결정에 따라 이
+  // 셋만 빼낸다. 이 상수가 "proc_start 는 빈 allowed 로 주입부까지 흘러가지 않는다"는 불변식을
+  // 코드로 고정한다 — 아래 deny 가 이 상수를 그대로 조건으로 쓰므로, 누가 proc_* 이름을 늘려도
+  // 이 판정 하나만 보면 된다.
+  const needsAllowedNonEmpty = needsPathCheck || tool === "proc_start";
+
   let allowed: string[] = [];
   if (needsScope) {
     // 빈 문자열/공백 문자열은 "경로 인자 없음"이 아니라 "잘못된 경로 인자"다 — 여기서 걸러내지
@@ -132,7 +149,10 @@ export async function remoteToolHandler(
       // 경로 조각을 거부해 던지는 예외도 여기서 같은 방식으로 잡힌다.
       return deny(`허용 폴더 확인 중 오류가 발생했어요: ${e instanceof Error ? e.message : String(e)}`);
     }
-    if (allowed.length === 0) return deny("먼저 allow_dir 로 작업할 폴더를 허용해 주세요.");
+    // 리뷰 Finding 3: 위 needsAllowedNonEmpty 가 false 인 도구(proc_stop·proc_list·proc_logs)는
+    // allowed 가 비어 있어도 이 줄을 그냥 지나간다 — 문구·조건 자체는 그대로 두고 "누가 이 줄을
+    // 맞는지"만 좁혔다.
+    if (needsAllowedNonEmpty && allowed.length === 0) return deny("먼저 allow_dir 로 작업할 폴더를 허용해 주세요.");
 
     // Task 8: 손님의 개인 폴더는 첫 접근 때 만든다("1인당 1폴더"가 규칙이라 없다고 거부할 이유가
     // 없다). 모델에게 시키지 않고 봇이 직접 끼워 넣는다 — 모델이 fs_write 나 sh_exec 로 제각각
@@ -154,7 +174,13 @@ export async function remoteToolHandler(
     // 일부가 아니다 — 실패하는 이유(권한, 디스크 오류 등)는 뒤이은 진짜 호출에서도 똑같이
     // 겪을 테니 거기서 한 번만 사용자에게 보고되면 충분하고, 준비 단계의 실패로 요청 자체를
     // 막을 이유는 없다.
-    if (remote.workerKind === "shared" && !ctx.isOwner) {
+    //
+    // 리뷰 Finding 3: allowed.length > 0 을 추가로 확인한다. 위에서 조건을 좁힌 뒤로
+    // proc_stop·proc_list·proc_logs 는 allowed 가 빈 채로 바로 이 지점까지 올 수 있게 됐다 —
+    // 그때 allowed[0] 은 undefined 라 만들 폴더 자체가 없다(이 셋은 폴더가 아니라 pm2 프로세스
+    // 이름으로만 동작한다). 이 셋을 제외한 기존 경로(경로 도구 전부·proc_start)는 위 deny 가
+    // 이미 allowed.length > 0 을 보장해 두므로, 이 추가 조건이 그 경로들의 동작을 바꾸지 않는다.
+    if (remote.workerKind === "shared" && !ctx.isOwner && allowed.length > 0) {
       await remote.call("fs_mkdir", { path: allowed[0] }).catch(() => {});
     }
   }
