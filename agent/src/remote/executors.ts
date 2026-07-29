@@ -523,6 +523,29 @@ export function makeExecutors(roots: string[], opts: { runPm2?: RunPm2 } = {}): 
       // 이름 없이 띄우면 소유권도 1인 1개 상한도 성립하지 않는다.
       if (!name || !cwd) return { ok: false, content: "프로세스 이름·작업 폴더가 지정되지 않았어요." };
 
+      // Defect 1(운영 중 발견): 봇(remoteTools.ts)이 allowed_dirs 로 cwd 를 이미 한 번 걸렀지만,
+      // 그 검증이 이 프로세스까지 그대로 왔는지는 워커 자신만 안다 — fs_* 실행기의 gate()(위 참고)
+      // 와 정확히 같은 이유로 checkPath 를 여기서도 최종 관문으로 한 번 더 돌린다. 봇은
+      // allowed_dirs 를, 워커는 WORKER_ROOTS 를 검사한다 — 다른 모든 원격 도구와 마찬가지로 두
+      // 겹 다 걸어야 하며, 어느 한쪽만으로는 부족하다(remoteTools.ts 의 FIX1 원칙과 같다: 검사한
+      // 값과 실제로 쓰는 값이 같아야 검사가 의미를 갖는다).
+      const cwdCheck = checkPath(cwd, roots);
+      if (!cwdCheck.ok) return { ok: false, content: cwdCheck.message };
+
+      // 운영 중 실제로 겪은 결함: 회원의 프로젝트는 폴더 루트가 아니라 그 아래 하위 폴더(예:
+      // "…\<id>\테스트 1\")에 있는 게 보통인데, 그 폴더가 실제로 없으면(오타 등) pm2 가 --cwd 에서
+      // 그 자리에서 실패한다 — 회원은 원인을 알 방법이 없어 cd/--prefix 변형을 여러 번 시도하며
+      // 헤맸다. pm2 를 부르기 전에 여기서 먼저 확인해 원인을 한국어로 명확히 알린다.
+      let cwdStat: Awaited<ReturnType<typeof fs.stat>>;
+      try {
+        cwdStat = await fs.stat(cwdCheck.path);
+      } catch {
+        return { ok: false, content: `그 폴더가 없어요: ${cwdCheck.path} — 경로를 다시 확인해 주세요.` };
+      }
+      if (!cwdStat.isDirectory()) {
+        return { ok: false, content: `그 경로는 폴더가 아니에요: ${cwdCheck.path}` };
+      }
+
       const before = await listProcs();
       if (!before.ok) return { ok: false, content: before.message };
       const dup = before.procs.find((p) => p.name === name);
@@ -530,7 +553,9 @@ export function makeExecutors(roots: string[], opts: { runPm2?: RunPm2 } = {}): 
       if (dup) return { ok: false, content: `이미 돌고 있는 게 있어요: ${dup.command} (${dup.status}). 먼저 멈춰야 새로 띄울 수 있어요.` };
 
       const sh = shellFor();
-      const r = await runPm2(["start", sh.bin, "--name", name, "--cwd", cwd, "--", sh.flag, command]);
+      // cwd 가 아니라 cwdCheck.path 를 쓴다 — fs_* 의 gate() 가 g.path(검사에서 나온 실경로)로 실제
+      // 파일시스템 작업을 하는 것과 같은 이유다(심볼릭 링크 등을 해석한 정규화된 값).
+      const r = await runPm2(["start", sh.bin, "--name", name, "--cwd", cwdCheck.path, "--", sh.flag, command]);
       if (!r.ok) return { ok: false, content: `띄우지 못했어요: ${r.stderr.trim() || r.stdout.trim() || "알 수 없는 오류"}` };
 
       // 리뷰 지적(Minor, Finding 5): pm2 의 기본 autorestart 때문에 위 start 호출이 ok:true 여도

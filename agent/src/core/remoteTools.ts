@@ -266,7 +266,18 @@ export async function remoteToolHandler(
     const mine = procNameFor(ctx.userId);
     // proc_start 의 cwd 는 위에서 검사·생성까지 끝낸 그 폴더다. 모델이 준 cwd 는 쳐다보지 않는다 —
     // 손님이 cwd 를 고를 수 있으면 폴더 격리가 셸 한 줄로 무너진다.
-    if (tool === "proc_start") args = { ...args, name: mine, cwd: allowed[0] };
+    //
+    // Defect 1(운영 중 발견): 예전엔 여기서 무조건 allowed[0](회원 폴더 루트)을 cwd 로 썼다 —
+    // 그런데 프로젝트가 폴더 루트가 아니라 그 아래 하위 폴더(예: "…\<id>\테스트 1\")에 있는 게
+    // 보통이라, package.json 을 못 찾고 npm run dev 가 그 자리에서 실패했다. 이제 proc_start 는
+    // 선택적 path 인자를 받는다 — pathArgOf 가 이미 "path" 라는 이름의 인자를 읽으므로, path 를
+    // 실어 보내는 것만으로 위 needsPathCheck 가 켜지고 기존 후보 경로 검사(allowed 대조)를 그대로
+    // 탄다(새 게이트를 만들지 않는다). 여기서는 그 검사에 실제로 쓰인 값(singlePathArg)을 그대로
+    // cwd 로 옮길 뿐이다 — FIX1 원칙(검사한 값과 실제로 쓰는 값이 같아야 한다) 그대로다. args.path
+    // 는 이 지점까지 오는 동안 한 번도 재작성되지 않았다(proc_start 는 LOCAL_TOOL_NAME 에 없어
+    // 위 FIX1 주입 대상이 아니다 — path 가 필수인 fs_read 등과 같은 부류다). path 를 생략하면
+    // (singlePathArg===undefined) 예전 그대로 allowed[0]을 쓴다.
+    if (tool === "proc_start") args = { ...args, name: mine, cwd: singlePathArg ?? allowed[0] };
     if (tool === "proc_stop" || tool === "proc_logs") {
       args = ctx.isOwner && typeof args.name === "string" && args.name.length > 0 ? args : { ...args, name: mine };
     }

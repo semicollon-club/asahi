@@ -828,3 +828,84 @@ describe("proc_* — 이름과 작업 폴더는 봇이 주입한다", () => {
     expect(out.content).toContain("사용자 식별자");
   });
 });
+
+// ── Defect 1(운영 중 발견): proc_start 가 cwd 를 항상 allowed[0](회원 폴더 루트)로 고정해서, 실제
+// 프로젝트가 그 하위 폴더(예: "C:\asahi-workspace\<id>\테스트 1\")에 있는 흔한 경우 npm run dev 가
+// package.json 을 못 찾고 즉시 실패했다. proc_start 에 선택적 path 인자를 추가해 프로젝트 폴더를
+// 직접 가리킬 수 있게 한다 — 새 게이트를 만들지 않고 기존 pathArgOf/needsPathCheck 를 그대로
+// 재사용한다("path" 라는 이름으로만 받으면 기존 후보 경로 검사가 자동으로 켜진다). cwd 주입은 그
+// 검사에 쓴 값(singlePathArg) 그대로 써야 한다는 FIX1 원칙은 그대로 지킨다.
+describe("proc_start — path 인자로 프로젝트 하위 폴더를 지정할 수 있다(Defect 1)", () => {
+  const withDirs = (dirs: string[], remote: Partial<NonNullable<ToolCtx["remote"]>>, over: Record<string, unknown> = {}): ToolCtx =>
+    ({
+      remote: { roots: ["/w"], workerId: "shared", workerKind: "shared", ...remote },
+      isOwner: false, isPrivate: false, userId: "111",
+      repos: { allowedDirs: { list: async () => dirs } },
+      ...over,
+    } as unknown as ToolCtx);
+
+  // 위 "proc_* — 이름과 작업 폴더는 봇이 주입한다" 의 recordArgs 와 같은 이유(Task 8 의 fs_mkdir
+  // 준비 호출을 기록에서 뺀다) — 여기서도 그대로 반복한다.
+  const recordArgs = (seen: Array<Record<string, unknown>>) =>
+    async (tool: string, args: Record<string, unknown>) => {
+      if (tool !== "fs_mkdir") seen.push(args);
+      return { ok: true, content: "" };
+    };
+
+  it("허용된 자기 폴더 하위의 path 를 주면 그 경로가 그대로 cwd 로 주입된다(프로젝트가 폴더 루트가 아닌 하위 폴더에 있는 실제 사례 — 한글·공백 포함 폴더명도 그대로)", async () => {
+    const seen: Array<Record<string, unknown>> = [];
+    const ctx = withDirs(["/w"], { call: recordArgs(seen) });
+    await remoteToolHandler(ctx, "proc_start", { command: "npm run dev", path: "/w/111/테스트 1" });
+    expect(seen[0]!.cwd).toBe("/w/111/테스트 1");
+    expect(seen[0]!.name).toBe("asahi-111"); // name 은 path 와 무관하게 여전히 봇이 정한다
+  });
+
+  it("다른 회원 폴더를 가리키는 path 는 허브를 부르지 않고 거부한다(fs_read 등과 동일한 1차 필터)", async () => {
+    const calls: Array<{ tool: string; args: Record<string, unknown> }> = [];
+    const ctx = withDirs(["/w"], { call: async (tool, args) => { calls.push({ tool, args }); return { ok: true, content: "" }; } });
+    const out = await remoteToolHandler(ctx, "proc_start", { command: "npm run dev", path: "/w/222/project" });
+    expect(out.ok).toBe(false);
+    expect(out.content).toContain("허용된 폴더 밖");
+    expect(calls.filter((c) => c.tool === "proc_start")).toHaveLength(0);
+  });
+
+  it("path 가 빈 문자열이면 거부한다(FIX3 과 같은 규칙이 proc_start 에도 그대로 적용된다)", async () => {
+    const calls: Array<{ tool: string; args: Record<string, unknown> }> = [];
+    const ctx = withDirs(["/w"], { call: async (tool, args) => { calls.push({ tool, args }); return { ok: true, content: "" }; } });
+    const out = await remoteToolHandler(ctx, "proc_start", { command: "npm run dev", path: "" });
+    expect(out.ok).toBe(false);
+    expect(out.content).toContain("비어");
+    expect(calls.filter((c) => c.tool === "proc_start")).toHaveLength(0);
+  });
+
+  it("path 를 생략하면 예전처럼 allowed[0](자기 폴더 루트)이 cwd 로 쓰인다(회귀 없음)", async () => {
+    const seen: Array<Record<string, unknown>> = [];
+    const ctx = withDirs(["/w"], { call: recordArgs(seen) });
+    await remoteToolHandler(ctx, "proc_start", { command: "npm run dev" });
+    expect(seen[0]!.cwd).toBe("/w/111");
+  });
+
+  it("소유자도 path 로 프로젝트 하위 폴더를 지정할 수 있다(관리자도 동일한 경로 게이트를 탄다)", async () => {
+    // isOwner 만 덮어쓰고 userId 는 기본값("111", 유효한 디스코드 스노플레이크 형태)을 그대로
+    // 쓴다 — 위 "proc_* — 이름과 작업 폴더는 봇이 주입한다" 의 소유자 케이스들과 같은 관례다.
+    // 문자열 "owner" 를 userId 로 쓰면 isValidUserId(숫자만 허용)에 걸려 이 테스트가 의도와
+    // 다른 이유(신원 거부)로 실패한다.
+    const seen: Array<Record<string, unknown>> = [];
+    const ctx = withDirs(["C:\\ws"], { call: recordArgs(seen) }, { isOwner: true, isPrivate: true });
+    await remoteToolHandler(ctx, "proc_start", { command: "npm run dev", path: "C:\\ws\\sub\\project" });
+    expect(seen[0]!.cwd).toBe("C:\\ws\\sub\\project");
+  });
+
+  it("소유자도 허용 폴더 밖 path 는 거부된다(경로 게이트는 신원과 무관하다)", async () => {
+    const calls: Array<{ tool: string; args: Record<string, unknown> }> = [];
+    const ctx = withDirs(
+      ["C:\\ws"],
+      { call: async (tool, args) => { calls.push({ tool, args }); return { ok: true, content: "" }; } },
+      { isOwner: true, isPrivate: true },
+    );
+    const out = await remoteToolHandler(ctx, "proc_start", { command: "npm run dev", path: "C:\\other\\project" });
+    expect(out.ok).toBe(false);
+    expect(out.content).toContain("허용된 폴더 밖");
+    expect(calls.filter((c) => c.tool === "proc_start")).toHaveLength(0);
+  });
+});

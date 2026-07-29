@@ -432,26 +432,39 @@ describe("proc_* 실행기 — PM2 위임", () => {
   const onlineJlist = (name: string, over: Record<string, unknown> = {}) =>
     JSON.stringify([{ name, pm2_env: { status: "online", pm_uptime: Date.now(), restart_time: 0, args: [], pm_exec_path: "node", ...over }, monit: { memory: 1 } }]);
 
+  // Defect 1(운영 중 발견): proc_start 는 이제 cwd 를 checkPath(WORKER_ROOTS, roots.ts)로 검사하고
+  // 실제로 존재하는 폴더인지도 확인한다(아래 참고) — fs_* 실행기(위 "워커 실행기" describe)와 같은
+  // 이유로, 더 이상 임의의 문자열을 cwd 로 써서는 안 되고 실제 임시 폴더가 있어야 한다. root 는
+  // WORKER_ROOTS, projectDir 는 그 안의(회원 "111"의) 프로젝트 폴더 역할이다.
+  let root: string;
+  let projectDir: string;
+  beforeEach(() => {
+    root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "asahi-proc-")));
+    projectDir = path.join(root, "111");
+    fs.mkdirSync(projectDir, { recursive: true });
+  });
+  afterEach(() => fs.rmSync(root, { recursive: true, force: true }));
+
   it("proc_start 는 주입된 이름과 cwd 로 pm2 start 를 부른다", async () => {
     // 첫 jlist(사전 중복 확인)는 비어 있고, start 이후 재조회(Finding 5)는 online 을 돌려준다 —
     // 실제 성공 경로를 그대로 흉내낸다.
     const { calls, runPm2 } = fakePm2({ jlist: [{ ok: true, stdout: "[]" }, { ok: true, stdout: onlineJlist("asahi-111") }] });
-    const ex = makeExecutors(["C:\\ws"], { runPm2 });
-    const r = await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: "C:\\ws\\111" });
+    const ex = makeExecutors([root], { runPm2 });
+    const r = await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: projectDir });
     expect(r.ok).toBe(true);
     const start = calls.find((c) => c[0] === "start")!;
     expect(start).toContain("--name");
     expect(start).toContain("asahi-111");
     expect(start).toContain("--cwd");
-    expect(start).toContain("C:\\ws\\111");
+    expect(start).toContain(projectDir);
     expect(start.join(" ")).toContain("npm run dev");
   });
 
   it("proc_start 는 같은 이름이 이미 있으면 pm2 를 부르지 않고 거절한다(조용한 교체 금지)", async () => {
     const existing = JSON.stringify([{ name: "asahi-111", pm2_env: { status: "online", pm_uptime: 0, restart_time: 0, args: ["run", "dev"], pm_exec_path: "npm" }, monit: { memory: 1 } }]);
     const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: existing } });
-    const ex = makeExecutors(["C:\\ws"], { runPm2 });
-    const r = await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: "C:\\ws\\111" });
+    const ex = makeExecutors([root], { runPm2 });
+    const r = await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: projectDir });
     expect(r.ok).toBe(false);
     expect(r.content).toContain("이미");
     expect(calls.some((c) => c[0] === "start")).toBe(false);
@@ -463,8 +476,8 @@ describe("proc_* 실행기 — PM2 위임", () => {
   it("이름 충돌 거절 메시지는 실제 proc_start 모양(셸 래퍼)에서도 셸 껍데기 없이 명령만 보여준다", async () => {
     const existing = JSON.stringify([{ name: "asahi-111", pm2_env: { status: "online", pm_uptime: 0, restart_time: 0, args: ["/c", "npm run dev"], pm_exec_path: "C:\\Windows\\System32\\cmd.exe" }, monit: { memory: 1 } }]);
     const { runPm2 } = fakePm2({ jlist: { ok: true, stdout: existing } });
-    const ex = makeExecutors(["C:\\ws"], { runPm2 });
-    const r = await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: "C:\\ws\\111" });
+    const ex = makeExecutors([root], { runPm2 });
+    const r = await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: projectDir });
     expect(r.ok).toBe(false);
     expect(r.content).toContain("npm run dev");
     expect(r.content).not.toContain("cmd.exe");
@@ -473,8 +486,8 @@ describe("proc_* 실행기 — PM2 위임", () => {
 
   it("proc_start 성공 응답은 멈추는 법을 그 자리에서 알려준다", async () => {
     const { runPm2 } = fakePm2({ jlist: [{ ok: true, stdout: "[]" }, { ok: true, stdout: onlineJlist("asahi-111") }] });
-    const ex = makeExecutors(["C:\\ws"], { runPm2 });
-    const r = await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: "C:\\ws\\111" });
+    const ex = makeExecutors([root], { runPm2 });
+    const r = await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: projectDir });
     expect(r.content).toContain("멈추");
   });
 
@@ -486,16 +499,16 @@ describe("proc_* 실행기 — PM2 위임", () => {
   it("proc_start 는 시작 직후 재조회에서 online 이 아니면(크래시 루프 등) 성공을 주장하지 않는다", async () => {
     const crashLooping = onlineJlist("asahi-111", { status: "errored", restart_time: 3 });
     const { runPm2 } = fakePm2({ jlist: [{ ok: true, stdout: "[]" }, { ok: true, stdout: crashLooping }] });
-    const ex = makeExecutors(["C:\\ws"], { runPm2 });
-    const r = await ex.proc_start!({ command: "오타난명령", name: "asahi-111", cwd: "C:\\ws\\111" });
+    const ex = makeExecutors([root], { runPm2 });
+    const r = await ex.proc_start!({ command: "오타난명령", name: "asahi-111", cwd: projectDir });
     expect(r.ok).toBe(false);
     expect(r.content).toContain("errored");
   });
 
   it("proc_start 는 시작 직후 재조회 자체가 실패해도(연결 끊김 등) 성공을 주장하지 않는다", async () => {
     const { runPm2 } = fakePm2({ jlist: [{ ok: true, stdout: "[]" }, { ok: false, stdout: "", stderr: "연결 끊김" }] });
-    const ex = makeExecutors(["C:\\ws"], { runPm2 });
-    const r = await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: "C:\\ws\\111" });
+    const ex = makeExecutors([root], { runPm2 });
+    const r = await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: projectDir });
     expect(r.ok).toBe(false);
   });
 
@@ -505,41 +518,111 @@ describe("proc_* 실행기 — PM2 위임", () => {
   // 확인해야 "아무 것도 시작하지 않는다"는 보장이 선다.
   it("proc_start 는 name·cwd 가 없으면 pm2 를 전혀 부르지 않고 거절한다(배선 오류 방어)", async () => {
     const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: "[]" } });
-    const ex = makeExecutors(["C:\\ws"], { runPm2 });
-    expect((await ex.proc_start!({ command: "npm run dev", cwd: "C:\\ws\\111" })).ok).toBe(false); // name 없음
+    const ex = makeExecutors([root], { runPm2 });
+    expect((await ex.proc_start!({ command: "npm run dev", cwd: projectDir })).ok).toBe(false); // name 없음
     expect((await ex.proc_start!({ command: "npm run dev", name: "asahi-111" })).ok).toBe(false); // cwd 없음
     expect((await ex.proc_start!({ command: "npm run dev" })).ok).toBe(false); // 둘 다 없음
     expect(calls).toEqual([]); // jlist 조회조차 없다 — 이름 없이는 아무 것도 시작하지 않는다
   });
 
   // 리뷰 지적(Minor 2): shellFor() 는 "워커 루트로 셸을 정한다(호스트 플랫폼이 아니라)"는 규칙을
-  // 구현하지만 직접 단정하는 테스트가 없었다 — 기존 9개는 전부 윈도우 루트("C:\\ws")만 써서
-  // sh.bin·sh.flag 를 하드코딩해도 통과했을 것이다. 두 플레이버를 각각 확인한다.
-  it("proc_start 는 POSIX 루트에서 sh·-c 로 pm2 를 부른다(호스트 플랫폼이 아니라 워커 루트 기준)", async () => {
-    const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: "[]" } });
-    const ex = makeExecutors(["/w"], { runPm2 });
-    await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: "/w/111" });
-    const start = calls.find((c) => c[0] === "start")!;
-    expect(start).toContain("sh");
-    expect(start).toContain("-c");
-    expect(start).not.toContain("cmd.exe");
-    expect(start).not.toContain("/c");
-  });
+  // 구현하지만 직접 단정하는 테스트가 없었다 — 두 플레이버를 각각 확인한다.
+  //
+  // Defect 1 이후: cwd 가 checkPath(roots.ts, 읽기 전용)의 실제 검사를 받게 되면서, "루트 유효성"
+  // 자체의 기준(isUnambiguousRoot)이 실행 중인 호스트 플랫폼에 따라 달라진다 — POSIX 호스트에서만
+  // posix 스타일 루트("/...")를 유효한 절대경로로 인정하고, win32 호스트에서만 드라이브 문자·UNC
+  // 루트를 인정한다(paths.ts 의 hasUnambiguousWindowsRoot 주석 참고). 그래서 아래 두 테스트는 각자
+  // 자신이 검증하려는 플레이버와 실제로 실행 중인 호스트가 일치할 때만 의미가 있다 — 그렇지 않으면
+  // (예: win32 호스트에서 "/w" 를 루트로 주면) checkPath 가 "워커 루트 설정이 잘못됐어요"로 무조건
+  // 거부해 shellFor() 의 선택 자체를 검증하지 못한 채 실패한다. remoteRoots.test.ts 가 반대 방향
+  // (윈도우 전용 케이스를 POSIX 호스트에서 건너뜀)으로 이미 쓰는 것과 같은 관례로, it.skipIf 를
+  // 대칭으로 적용한다 — 공유 root/projectDir(위 beforeEach)는 이 테스트가 실제로 실행되는 호스트
+  // 위에서 만들어지므로 그 호스트의 flavor 를 자연히 따른다.
+  it.skipIf(process.platform !== "win32")(
+    "proc_start 는 윈도우 루트에서 cmd.exe·/c 로 pm2 를 부른다",
+    async () => {
+      const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: "[]" } });
+      const ex = makeExecutors([root], { runPm2 });
+      await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: projectDir });
+      const start = calls.find((c) => c[0] === "start")!;
+      expect(start).toContain("cmd.exe");
+      expect(start).toContain("/c");
+      expect(start).not.toContain("sh");
+      expect(start).not.toContain("-c");
+    },
+  );
 
-  it("proc_start 는 윈도우 루트에서 cmd.exe·/c 로 pm2 를 부른다", async () => {
-    const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: "[]" } });
-    const ex = makeExecutors(["C:\\ws"], { runPm2 });
-    await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: "C:\\ws\\111" });
-    const start = calls.find((c) => c[0] === "start")!;
-    expect(start).toContain("cmd.exe");
-    expect(start).toContain("/c");
-    expect(start).not.toContain("sh");
-    expect(start).not.toContain("-c");
+  it.skipIf(process.platform === "win32")(
+    "proc_start 는 POSIX 루트에서 sh·-c 로 pm2 를 부른다(호스트 플랫폼이 아니라 워커 루트 기준)",
+    async () => {
+      const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: "[]" } });
+      const ex = makeExecutors([root], { runPm2 });
+      await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: projectDir });
+      const start = calls.find((c) => c[0] === "start")!;
+      expect(start).toContain("sh");
+      expect(start).toContain("-c");
+      expect(start).not.toContain("cmd.exe");
+      expect(start).not.toContain("/c");
+    },
+  );
+
+  // ── Defect 1(운영 중 발견) — proc_start 의 cwd 는 이제 워커 쪽 최종 게이트를 거친다 ──────────
+  // 봇(remoteTools.ts)이 allowed_dirs 로 cwd 를 한 번 걸렀더라도, fs_* 실행기가 gate()/checkPath 로
+  // 다시 한번 걸러 두 겹을 유지하는 것과 같은 이유로, proc_start 도 WORKER_ROOTS 를 최종 관문으로
+  // 확인해야 한다. 아울러 회원의 프로젝트가 하위 폴더에 있는데 그 폴더가 실제로 없으면(오타 등)
+  // pm2 가 --cwd 에서 바로 실패해 원인을 알 수 없었다는 게 운영 중 실제로 겪은 결함이다 — 존재
+  // 여부까지 미리 확인해 한국어로 명확히 안내한다.
+  describe("proc_start — cwd 는 WORKER_ROOTS 와 실존 여부를 워커가 최종적으로 검사한다(Defect 1)", () => {
+    it("WORKER_ROOTS 밖 cwd 는 pm2 를 전혀 부르지 않고 거절한다(봇의 1차 필터를 우회해도 워커가 최종 관문)", async () => {
+      const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "asahi-proc-outside-")));
+      try {
+        const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: "[]" } });
+        const ex = makeExecutors([root], { runPm2 });
+        const r = await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: outside });
+        expect(r.ok).toBe(false);
+        expect(r.content).toContain("워커 작업 폴더 밖");
+        expect(calls).toEqual([]); // jlist 조회조차 없다 — 경로 검사가 가장 먼저다
+      } finally {
+        fs.rmSync(outside, { recursive: true, force: true });
+      }
+    });
+
+    it("존재하지 않는 cwd 는 pm2 를 부르지 않고 한국어로 명확히 거절한다(운영 중 실제로 겪은 결함 — 프로젝트가 하위 폴더에 있는데 그 폴더가 없으면 pm2 가 --cwd 에서 바로 실패해 원인을 알 수 없었다)", async () => {
+      const noSuchDir = path.join(root, "없는-프로젝트");
+      const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: "[]" } });
+      const ex = makeExecutors([root], { runPm2 });
+      const r = await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: noSuchDir });
+      expect(r.ok).toBe(false);
+      expect(r.content).toContain("폴더가 없어요");
+      expect(calls).toEqual([]);
+    });
+
+    it("cwd 가 폴더가 아니라 파일이면 pm2 를 부르지 않고 거절한다", async () => {
+      const filePath = path.join(root, "이건-파일.txt");
+      fs.writeFileSync(filePath, "x");
+      const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: "[]" } });
+      const ex = makeExecutors([root], { runPm2 });
+      const r = await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: filePath });
+      expect(r.ok).toBe(false);
+      expect(r.content).toContain("폴더가 아니에요");
+      expect(calls).toEqual([]);
+    });
+
+    it("한글·공백이 섞인 실제 하위 폴더는 정상적으로 띄운다(운영 중 재현 — '테스트 1' 폴더)", async () => {
+      const koreanProject = path.join(root, "테스트 1");
+      fs.mkdirSync(koreanProject, { recursive: true });
+      const { calls, runPm2 } = fakePm2({ jlist: [{ ok: true, stdout: "[]" }, { ok: true, stdout: onlineJlist("asahi-111") }] });
+      const ex = makeExecutors([root], { runPm2 });
+      const r = await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: koreanProject });
+      expect(r.ok).toBe(true);
+      const start = calls.find((c) => c[0] === "start")!;
+      expect(start).toContain(koreanProject);
+    });
   });
 
   it("proc_stop 은 pm2 delete 를 부른다", async () => {
     const { calls, runPm2 } = fakePm2({ delete: { ok: true, stdout: "" } });
-    const ex = makeExecutors(["C:\\ws"], { runPm2 });
+    const ex = makeExecutors([root], { runPm2 });
     const r = await ex.proc_stop!({ name: "asahi-111" });
     expect(r.ok).toBe(true);
     expect(calls).toContainEqual(["delete", "asahi-111"]);
@@ -547,7 +630,7 @@ describe("proc_* 실행기 — PM2 위임", () => {
 
   it("proc_stop 은 없는 이름이면 실패로 돌려준다", async () => {
     const { runPm2 } = fakePm2({ delete: { ok: false, stdout: "", stderr: "Process not found" } });
-    const ex = makeExecutors(["C:\\ws"], { runPm2 });
+    const ex = makeExecutors([root], { runPm2 });
     const r = await ex.proc_stop!({ name: "asahi-111" });
     expect(r.ok).toBe(false);
   });
@@ -561,7 +644,7 @@ describe("proc_* 실행기 — PM2 위임", () => {
   it("proc_stop 은 asahi-<숫자> 형식이 아닌 이름(봇·워커 자신)을 pm2 를 부르지 않고 거절한다", async () => {
     for (const infraName of ["asahi-worker", "asahi-assistant", "something-else"]) {
       const { calls, runPm2 } = fakePm2({ delete: { ok: true, stdout: "" } });
-      const ex = makeExecutors(["C:\\ws"], { runPm2 });
+      const ex = makeExecutors([root], { runPm2 });
       const r = await ex.proc_stop!({ name: infraName });
       expect(r.ok, `${infraName} 을 멈출 수 있었다`).toBe(false);
       expect(r.content).toContain("회원");
@@ -572,7 +655,7 @@ describe("proc_* 실행기 — PM2 위임", () => {
   it("proc_list 는 jlist 를 파싱해 표로 돌려준다", async () => {
     const stdout = JSON.stringify([{ name: "asahi-111", pm2_env: { status: "online", pm_uptime: 0, restart_time: 2, args: ["run", "dev"], pm_exec_path: "npm" }, monit: { memory: 5 * 1024 * 1024 } }]);
     const { runPm2 } = fakePm2({ jlist: { ok: true, stdout } });
-    const ex = makeExecutors(["C:\\ws"], { runPm2 });
+    const ex = makeExecutors([root], { runPm2 });
     const r = await ex.proc_list!({});
     expect(r.ok).toBe(true);
     expect(r.content).toContain("asahi-111");
@@ -591,7 +674,7 @@ describe("proc_* 실행기 — PM2 위임", () => {
       { name: "asahi-worker", pm2_env: { status: "online", pm_uptime: 0, restart_time: 0, args: [], pm_exec_path: "node" }, monit: { memory: 1 } },
     ]);
     const { runPm2 } = fakePm2({ jlist: { ok: true, stdout } });
-    const ex = makeExecutors(["C:\\ws"], { runPm2 });
+    const ex = makeExecutors([root], { runPm2 });
     const r = await ex.proc_list!({ onlyUserId: "111" });
     expect(r.ok).toBe(true);
     expect(r.content).toContain("asahi-111");
@@ -601,7 +684,7 @@ describe("proc_* 실행기 — PM2 위임", () => {
 
   it("proc_logs 는 nostream 으로 부르고 줄 수를 넘긴다", async () => {
     const { calls, runPm2 } = fakePm2({ logs: { ok: true, stdout: "로그 본문" } });
-    const ex = makeExecutors(["C:\\ws"], { runPm2 });
+    const ex = makeExecutors([root], { runPm2 });
     const r = await ex.proc_logs!({ name: "asahi-111", lines: 30 });
     expect(r.ok).toBe(true);
     expect(r.content).toContain("로그 본문");
@@ -615,7 +698,7 @@ describe("proc_* 실행기 — PM2 위임", () => {
   // 않았다. 세 경우를 모두 채운다 — lines 생략(기본값), 하한 미만(0 이하), 상한 초과(200 초과).
   it("proc_logs 는 lines 를 생략하면 기본값 50줄을 쓴다", async () => {
     const { calls, runPm2 } = fakePm2({ logs: { ok: true, stdout: "로그" } });
-    const ex = makeExecutors(["C:\\ws"], { runPm2 });
+    const ex = makeExecutors([root], { runPm2 });
     await ex.proc_logs!({ name: "asahi-111" });
     const logs = calls.find((c) => c[0] === "logs")!;
     expect(logs).toContain("50");
@@ -623,7 +706,7 @@ describe("proc_* 실행기 — PM2 위임", () => {
 
   it("proc_logs 는 lines 하한(1) 밑으로 내려가지 않는다", async () => {
     const { calls, runPm2 } = fakePm2({ logs: { ok: true, stdout: "로그" } });
-    const ex = makeExecutors(["C:\\ws"], { runPm2 });
+    const ex = makeExecutors([root], { runPm2 });
     await ex.proc_logs!({ name: "asahi-111", lines: -5 });
     const logs = calls.find((c) => c[0] === "logs")!;
     expect(logs).toContain("1");
@@ -632,7 +715,7 @@ describe("proc_* 실행기 — PM2 위임", () => {
 
   it("proc_logs 는 lines 상한(200)을 넘지 않는다", async () => {
     const { calls, runPm2 } = fakePm2({ logs: { ok: true, stdout: "로그" } });
-    const ex = makeExecutors(["C:\\ws"], { runPm2 });
+    const ex = makeExecutors([root], { runPm2 });
     await ex.proc_logs!({ name: "asahi-111", lines: 9999 });
     const logs = calls.find((c) => c[0] === "logs")!;
     expect(logs).toContain("200");
@@ -645,7 +728,7 @@ describe("proc_* 실행기 — PM2 위임", () => {
   it("proc_logs 는 asahi-<숫자> 형식이 아닌 이름(봇·워커 자신)을 pm2 를 부르지 않고 거절한다", async () => {
     for (const infraName of ["asahi-worker", "asahi-assistant"]) {
       const { calls, runPm2 } = fakePm2({ logs: { ok: true, stdout: "로그 본문" } });
-      const ex = makeExecutors(["C:\\ws"], { runPm2 });
+      const ex = makeExecutors([root], { runPm2 });
       const r = await ex.proc_logs!({ name: infraName });
       expect(r.ok, `${infraName} 의 로그를 볼 수 있었다`).toBe(false);
       expect(r.content).toContain("회원");
@@ -655,7 +738,7 @@ describe("proc_* 실행기 — PM2 위임", () => {
 
   it("pm2 가 실패하면 stderr 를 사유로 돌려준다", async () => {
     const { runPm2 } = fakePm2({ jlist: { ok: false, stdout: "", stderr: "pm2 를 찾을 수 없습니다" } });
-    const ex = makeExecutors(["C:\\ws"], { runPm2 });
+    const ex = makeExecutors([root], { runPm2 });
     const r = await ex.proc_list!({});
     expect(r.ok).toBe(false);
     expect(r.content).toContain("pm2");
