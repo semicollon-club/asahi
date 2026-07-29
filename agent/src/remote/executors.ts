@@ -12,6 +12,8 @@ import {
   type TreeEntry,
   type TreeTruncReason,
 } from "./tree.js";
+import { pathFlavorOf } from "../core/paths.js";
+import { parsePm2List, renderProcList, procNameFor } from "./proc.js";
 
 export type ExecResult = { ok: boolean; content: string };
 export type Executors = Record<string, (args: Record<string, unknown>) => Promise<ExecResult>>;
@@ -33,6 +35,13 @@ const KILL_GRACE_MS = 3_000;
 //    감안한 버퍼. 이 시간이 지나면 프로세스 생사와 무관하게 무조건 resolve 한다.
 const FORCE_KILL_GRACE_MS = 2_000;
 
+// PM2 CLI 호출을 이음매 뒤로 뺀다. 테스트가 실제 PM2 설치를 요구하면 그 경로는 CI 에서도
+// 개발자 기계에서도 한 번도 지나가지 않는다 — 2026-07-28 최종 리뷰가 잡은 Critical(실패 신호
+// 소실)이 정확히 그렇게 다섯 번의 리뷰를 통과했다.
+export type RunPm2 = (args: string[]) => Promise<{ ok: boolean; stdout: string; stderr: string }>;
+
+const PROC_LOG_DEFAULT_LINES = 50;
+
 function truncate(s: string): string {
   return s.length <= OUTPUT_MAX ? s : `${s.slice(0, OUTPUT_MAX)}\n… (출력이 길어 ${OUTPUT_MAX}자에서 잘랐어요)`;
 }
@@ -40,13 +49,46 @@ function truncate(s: string): string {
 const str = (v: unknown): string | undefined => (typeof v === "string" && v.length > 0 ? v : undefined);
 const num = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
 
-export function makeExecutors(roots: string[]): Executors {
+export function makeExecutors(roots: string[], opts: { runPm2?: RunPm2 } = {}): Executors {
+  const runPm2: RunPm2 =
+    opts.runPm2 ??
+    ((args) =>
+      new Promise((resolve) => {
+        // shell:true 로 부르는 이유는 sh_exec 와 같다 — 윈도우에서 pm2 는 pm2.cmd 셰임이라
+        // 셸을 거치지 않으면 실행 파일을 찾지 못한다.
+        const child = spawn("pm2", args, { shell: true });
+        let stdout = "";
+        let stderr = "";
+        child.stdout.on("data", (c: Buffer) => { stdout += c.toString(); });
+        child.stderr.on("data", (c: Buffer) => { stderr += c.toString(); });
+        child.on("error", (e) => resolve({ ok: false, stdout, stderr: String(e) }));
+        child.on("close", (code) => resolve({ ok: code === 0, stdout, stderr }));
+      }));
+
   // 경로 인자를 검사해 실경로를 돌려준다. 거부되면 그대로 ExecResult 로 반환한다.
   const gate = (raw: unknown): { ok: true; path: string } | { ok: false; res: ExecResult } => {
     const p = str(raw);
     if (!p) return { ok: false, res: { ok: false, content: "path 인자가 필요해요." } };
     const c = checkPath(p, roots);
     return c.ok ? { ok: true, path: c.path } : { ok: false, res: { ok: false, content: c.message } };
+  };
+
+  // pm2 에 임의 명령을 넘기는 안전한 형태. pm2 는 "스크립트 파일"을 기대하므로, 셸 명령은
+  // 인터프리터를 명시해 넘겨야 한다. 어느 셸인지는 워커 루트의 플레이버로 정한다 — 봇은
+  // 리눅스, 워커는 윈도우일 수 있어 호스트 플랫폼으로 정하면 어긋난다(paths.ts 와 같은 이유).
+  const shellFor = (): { bin: string; flag: string } =>
+    pathFlavorOf(roots[0] ?? "/") === path.win32 ? { bin: "cmd.exe", flag: "/c" } : { bin: "sh", flag: "-c" };
+
+  const procGate = (): { ok: true } | { ok: false; res: ExecResult } =>
+    roots.length === 0
+      ? { ok: false, res: { ok: false, content: "워커에 열린 작업 폴더가 없어요." } }
+      : { ok: true };
+
+  const listProcs = async () => {
+    const r = await runPm2(["jlist"]);
+    return r.ok
+      ? { ok: true as const, procs: parsePm2List(r.stdout) }
+      : { ok: false as const, message: `pm2 목록을 가져오지 못했어요: ${r.stderr.trim() || "알 수 없는 오류"}` };
   };
 
   return {
@@ -357,6 +399,69 @@ export function makeExecutors(roots: string[]): Executors {
       } catch (e) {
         return { ok: false, content: `폴더를 만들지 못했어요: ${e instanceof Error ? e.message : String(e)}` };
       }
+    },
+
+    async proc_start(args) {
+      const g = procGate();
+      if (!g.ok) return g.res;
+      const command = str(args.command);
+      const name = str(args.name);
+      const cwd = str(args.cwd);
+      if (!command) return { ok: false, content: "실행할 명령이 필요해요." };
+      // name·cwd 는 봇이 주입한다(remoteTools.ts). 없으면 배선이 깨진 것이므로 실행하지 않는다 —
+      // 이름 없이 띄우면 소유권도 1인 1개 상한도 성립하지 않는다.
+      if (!name || !cwd) return { ok: false, content: "프로세스 이름·작업 폴더가 지정되지 않았어요." };
+
+      const before = await listProcs();
+      if (!before.ok) return { ok: false, content: before.message };
+      const dup = before.procs.find((p) => p.name === name);
+      // 조용히 교체하지 않는다 — 부원이 자기도 모르게 돌던 서버를 잃는다. 바꾸려면 멈추고 다시 띄운다.
+      if (dup) return { ok: false, content: `이미 돌고 있는 게 있어요: ${dup.command} (${dup.status}). 먼저 멈춰야 새로 띄울 수 있어요.` };
+
+      const sh = shellFor();
+      const r = await runPm2(["start", sh.bin, "--name", name, "--cwd", cwd, "--", sh.flag, command]);
+      if (!r.ok) return { ok: false, content: `띄우지 못했어요: ${r.stderr.trim() || r.stdout.trim() || "알 수 없는 오류"}` };
+      // 발견성: 시작한 그 순간이 멈추는 법을 알려주기 가장 좋은 시점이다(설계 §6).
+      return { ok: true, content: `띄웠어요: ${command}\n멈추려면 "돌고 있는 거 꺼줘" 라고 말하면 돼요. "뭐 돌고 있어?" 로 확인할 수 있어요.` };
+    },
+
+    async proc_stop(args) {
+      const g = procGate();
+      if (!g.ok) return g.res;
+      const name = str(args.name);
+      if (!name) return { ok: false, content: "멈출 프로세스가 지정되지 않았어요." };
+      const r = await runPm2(["delete", name]);
+      return r.ok
+        ? { ok: true, content: `멈췄어요: ${name}` }
+        : { ok: false, content: `멈추지 못했어요: ${r.stderr.trim() || "그런 프로세스가 없어요"}` };
+    },
+
+    async proc_list(args) {
+      const g = procGate();
+      if (!g.ok) return g.res;
+      const r = await listProcs();
+      if (!r.ok) return { ok: false, content: r.message };
+      // 필터는 봇이 하지 않고 여기서 한다 — onlyUserId 는 remoteTools.ts 가 주입한다(손님이면
+      // 자기 것만, 소유자면 생략해 전원).
+      const only = str(args.onlyUserId);
+      const procs = only === undefined ? r.procs : r.procs.filter((p) => p.userId === only);
+      // labelOf 는 "디스코드 userId → 사람이 알아볼 이름"을 위한 자리지만, 워커는 디스코드를
+      // 전혀 모른다(신원 해석은 봇만 할 수 있다 — proc.ts 상단 주석과 동일한 이유). 실제 이름
+      // 해석은 이 범위 밖이므로, 최소한 pm2 프로세스 이름(asahi-<id>)으로 되돌려 누구 것인지
+      // 알아볼 수 있게 한다 — procNameFor 는 parseProcName 의 역함수라 원래 이름과 정확히 같다.
+      return { ok: true, content: truncate(renderProcList(procs, { labelOf: (id) => procNameFor(id) })) };
+    },
+
+    async proc_logs(args) {
+      const g = procGate();
+      if (!g.ok) return g.res;
+      const name = str(args.name);
+      if (!name) return { ok: false, content: "로그를 볼 프로세스가 지정되지 않았어요." };
+      const lines = Math.max(1, Math.min(num(args.lines) ?? PROC_LOG_DEFAULT_LINES, 200));
+      const r = await runPm2(["logs", name, "--nostream", "--lines", String(lines)]);
+      if (!r.ok) return { ok: false, content: `로그를 가져오지 못했어요: ${r.stderr.trim() || "그런 프로세스가 없어요"}` };
+      const body = r.stdout.trim();
+      return { ok: true, content: truncate(body.length > 0 ? body : "(로그가 비어 있어요)") };
     },
   };
 }
