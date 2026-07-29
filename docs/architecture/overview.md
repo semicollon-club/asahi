@@ -1,5 +1,5 @@
 ---
-lastReviewed: 2026-07-28
+lastReviewed: 2026-07-29
 ---
 
 # 아키텍처 개요
@@ -77,12 +77,12 @@ Agent SDK 세션으로 직접 실행한다** — 위임이라는 개념은 이�
 ## 원격 도구 호출
 
 봇의 SDK 세션이 파일/셸 작업이 필요하면, SDK 내장 도구(Read/Write/Edit/Glob/Grep/Bash)
-대신 인프로세스 MCP 도구 6종(`fs_read`/`fs_write`/`fs_edit`/`fs_glob`/`fs_grep`/`sh_exec`,
-`agent/src/core/tools.ts`)을 호출한다 — 내장 도구는 `builtinTools: []`로 아예 닫혀 있다
-(`agent/src/core/agent.ts`). 이 도구들의 핸들러(`agent/src/core/remoteTools.ts`의
-`remoteToolHandler`)는 이 턴에 워커가 배선돼 있는지(`ctx.remote`) 확인하고 경로를 1차로
-거른 뒤, `WorkerHub.call`(`agent/src/remote/hub.ts`)로 그 턴이 쓰는 워커에게 도구 이름과
-인자를 실어 보내고 결과를 기다린다.
+대신 인프로세스 MCP 도구 11종(`fs_read`/`fs_write`/`fs_edit`/`fs_glob`/`fs_grep`/`fs_tree`/
+`sh_exec`/`proc_start`/`proc_stop`/`proc_list`/`proc_logs`, `agent/src/core/tools.ts`)을
+호출한다 — 내장 도구는 `builtinTools: []`로 아예 닫혀 있다(`agent/src/core/agent.ts`). 이
+도구들의 핸들러(`agent/src/core/remoteTools.ts`의 `remoteToolHandler`)는 이 턴에 워커가
+배선돼 있는지(`ctx.remote`) 확인하고 경로를 1차로 거른 뒤, `WorkerHub.call`(`agent/src/
+remote/hub.ts`)로 그 턴이 쓰는 워커에게 도구 이름과 인자를 실어 보내고 결과를 기다린다.
 
 - **연결 여부가 도구 노출을 결정한다** — `resolveTurnWorker`(`agent/src/core/agent.ts`)가
   매 턴 이 턴이 쓸 워커를 정한다: `resolveWorkerSelector`(`agent/src/core/workerSelect.ts`)의
@@ -147,8 +147,8 @@ flowchart LR
   B <--> DB[(Supabase Postgres\n정본 상태 + workers 레지스트리 — 봇만 접속)]
   W1["개인 워커\nworker.ts · 소유자 PC\n(kind=personal)"] -- "아웃바운드 WebSocket\nhello: workerId+토큰" --> B
   W2["공유 워커\nworker.ts · 동아리 미니PC\n(kind=shared)"] -- "아웃바운드 WebSocket\nhello: workerId+토큰" --> B
-  B -- "도구 호출(fs_*/sh_exec) → 결과" --> W1
-  B -- "도구 호출(fs_*/sh_exec) → 결과" --> W2
+  B -- "도구 호출(fs_*/sh_exec/proc_*) → 결과" --> W1
+  B -- "도구 호출(fs_*/sh_exec/proc_*) → 결과" --> W2
 ```
 
 ## 관련 문서

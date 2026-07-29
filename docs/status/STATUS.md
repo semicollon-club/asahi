@@ -1,6 +1,6 @@
 ---
 title: 프로젝트 현재 상태
-lastReviewed: 2026-07-28
+lastReviewed: 2026-07-29
 ---
 
 # 현재 상태
@@ -31,10 +31,14 @@ lastReviewed: 2026-07-28
   DM은 그 소유자의 **개인 워커**(`allowed_dirs` 그대로), 소유자의 서버 채널은 동아리 **공유
   워커**의 **루트 전체**(관리자), 손님은 DM·서버 어디서든 같은 공유 워커의 **본인 폴더**
   (`<루트>/<디스코드 userId>/`, 첫 접근 때 자동 생성)로만 좁혀진다. 워커가 연결돼 있을 때만
-  원격 도구(`fs_read`/`fs_write`/`fs_edit`/`fs_glob`/`fs_grep`/`sh_exec`)가 열린다 — 이제
-  손님과 소유자의 서버 채널도 포함한다(이전엔 소유자 DM 전용이었다). 경로 검사는 봇 쪽 1차
-  필터(허용 폴더를 워커별로 관리 + 손님은 본인 폴더로 재차 스코프) + 워커 쪽 최종 판정 두
-  겹이며, `sh_exec`는 이 스코프의 대상이 아니다 — 경로로 봉쇄되지 않으므로 폴더 격리는 실수
+  원격 도구 11종(`fs_read`/`fs_write`/`fs_edit`/`fs_glob`/`fs_grep`/`fs_tree`/`sh_exec`/
+  `proc_start`/`proc_stop`/`proc_list`/`proc_logs`)이 열린다 — 이제 손님과 소유자의 서버
+  채널도 포함한다(이전엔 소유자 DM 전용이었다). 마지막 넷(`proc_*`)은 개발서버 같은 장기
+  실행 프로세스를 PM2 에 위임하는 도구로, 경로가 아니라 PM2 프로세스 이름으로 소유권이
+  갈린다(`docs/security/capability-model.md` "장기 실행 프로세스의 한계" 참고). 경로 검사는
+  `fs_*` 기준으로 봇 쪽 1차 필터(허용 폴더를 워커별로 관리 + 손님은 본인 폴더로 재차 스코프)
+  + 워커 쪽 최종 판정 두 겹이며, `sh_exec`는 이 스코프의 대상이 아니다 — 경로로 봉쇄되지
+  않으므로 폴더 격리는 실수
   방지선일 뿐 의도적 접근의 경계는 아니다(의도된 설계). `allowed_dirs`는 마이그레이션 없이
   `worker_id` 키로 바뀌었다 — 워커 등록 후 `allow_dir`로 폴더를 다시 등록해야 한다. 상세
   위협모델은 `docs/security/capability-model.md`, `docs/security/risk-register.md` 참고.
