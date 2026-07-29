@@ -63,7 +63,7 @@ describe("proc — pm2 jlist 파싱", () => {
     const [p] = parsePm2List(jlist([{ name: "asahi-9" }]));
     expect(p).toMatchObject({ name: "asahi-9", status: "unknown", restarts: 0 });
     expect(p!.memoryBytes).toBeNull();
-    expect(p!.uptimeMs).toBeNull();
+    expect(p!.startedAtMs).toBeNull();
   });
 
   // 리뷰 지적(Minor): executors.ts 의 proc_start 는 pm2 의 "스크립트" 자리에 셸(cmd.exe/sh)을
@@ -85,10 +85,10 @@ describe("proc — pm2 jlist 파싱", () => {
 
 describe("proc — 표 렌더링", () => {
   const labelOf = (userId: string) => (userId === "111" ? "우성현" : userId);
-  // uptimeMs 는 "경과 시간"이 아니라 pm2 의 pm_uptime, 즉 **시작 시각(ms)** 이다.
+  // startedAtMs 는 "경과 시간"이 아니라 pm2 의 pm_uptime, 즉 **시작 시각(ms)** 이다.
   // 경과로 바꾸는 것은 렌더러가 now 를 받아서 한다 — 그래서 아래는 시작 0, now 를 2시간 12분으로 둔다.
   const NOW = 2 * 3600_000 + 12 * 60_000;
-  const one: ProcInfo = { name: "asahi-111", userId: "111", command: "npm run dev", status: "online", uptimeMs: 0, memoryBytes: 184 * 1024 * 1024, restarts: 0 };
+  const one: ProcInfo = { name: "asahi-111", userId: "111", command: "npm run dev", status: "online", startedAtMs: 0, memoryBytes: 184 * 1024 * 1024, restarts: 0 };
 
   it("사람 이름·명령·상태·업타임·메모리·재시작 횟수를 담는다", () => {
     const out = renderProcList([one], { labelOf, now: NOW });
@@ -105,7 +105,7 @@ describe("proc — 표 렌더링", () => {
   });
 
   it("시작 시각을 모르면 업타임 자리를 비운다(0분이라고 거짓말하지 않는다)", () => {
-    const out = renderProcList([{ ...one, uptimeMs: null }], { labelOf, now: NOW });
+    const out = renderProcList([{ ...one, startedAtMs: null }], { labelOf, now: NOW });
     expect(out).not.toContain("분");
   });
 
@@ -125,7 +125,7 @@ describe("proc — 표 렌더링", () => {
   // 수 있다 — parseProcName 이 이미 이 둘을 구분하므로(파일 상단 주석·테스트) 그 정보를 표시에도
   // 반영해, 인프라 행에만 눈에 띄는 표식을 붙인다.
   it("userId 가 없는 행(봇·워커 자신)에는 회원 행에 없는 구분 표식이 붙는다", () => {
-    const infra: ProcInfo = { name: "asahi-worker", userId: null, command: "node dist/worker.js", status: "online", uptimeMs: 0, memoryBytes: 60 * 1024 * 1024, restarts: 0 };
+    const infra: ProcInfo = { name: "asahi-worker", userId: null, command: "node dist/worker.js", status: "online", startedAtMs: 0, memoryBytes: 60 * 1024 * 1024, restarts: 0 };
     const out = renderProcList([one, infra], { labelOf, now: NOW });
     const lines = out.split("\n");
     const memberLine = lines.find((l) => l.includes("asahi-111") || l.startsWith("우성현"))!;

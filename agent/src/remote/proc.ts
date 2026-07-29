@@ -35,7 +35,11 @@ export type ProcInfo = {
   userId: string | null;
   command: string;
   status: string;
-  uptimeMs: number | null;
+  // 리뷰 지적(Minor): 예전 이름 uptimeMs 는 "경과 시간"으로 읽히지만 실제 값은 pm2 의
+  // pm_uptime, 즉 시작 시각(ms)이다 — 이 오해로 계획서 테스트를 다시 고치는 커밋까지 나왔다.
+  // 값을 담는 humanUptime 의 매개변수는 이미 startedAtMs 로 정확히 불렸으므로, 타입도 거기에
+  // 맞춘다(파서·렌더러·테스트 전부 동일하게 고친다).
+  startedAtMs: number | null;
   memoryBytes: number | null;
   restarts: number;
 };
@@ -85,7 +89,7 @@ export function parsePm2List(json: string): ProcInfo[] {
       status: typeof p.pm2_env?.status === "string" ? p.pm2_env.status : "unknown",
       // pm_uptime 은 "시작 시각(ms)"이지 경과 시간이 아니다. 경과로 바꾸는 것은 시계를 아는
       // 호출측의 몫이라, 여기서는 시작 시각을 그대로 담고 렌더러가 뺀다.
-      uptimeMs: started,
+      startedAtMs: started,
       memoryBytes: num(p.monit?.memory),
       restarts: num(p.pm2_env?.restart_time) ?? 0,
     };
@@ -119,7 +123,7 @@ export function renderProcList(
     // 이름)과 형식이 똑같아 보여, "돌고 있는 거 다 정리해줘" 를 받은 모델이 인프라 행까지 회원
     // 것으로 착각해 지울 수 있다 — 표식을 붙여 한눈에 다르게 보이게 한다.
     const who = p.userId === null ? `[인프라] ${p.name}` : o.labelOf(p.userId);
-    return `${who}  ${p.command}  ${p.status}  ${humanUptime(p.uptimeMs, now)}  ${humanMem(p.memoryBytes)}  재시작 ${p.restarts}`;
+    return `${who}  ${p.command}  ${p.status}  ${humanUptime(p.startedAtMs, now)}  ${humanMem(p.memoryBytes)}  재시작 ${p.restarts}`;
   });
   return [`지금 도는 것 (${procs.length}개)`, "", ...lines].join("\n");
 }
