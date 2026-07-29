@@ -12,6 +12,8 @@ import {
   type TreeEntry,
   type TreeTruncReason,
 } from "./tree.js";
+import { pathFlavorOf } from "../core/paths.js";
+import { parsePm2List, renderProcList, procNameFor, parseProcName } from "./proc.js";
 
 export type ExecResult = { ok: boolean; content: string };
 export type Executors = Record<string, (args: Record<string, unknown>) => Promise<ExecResult>>;
@@ -33,6 +35,120 @@ const KILL_GRACE_MS = 3_000;
 //    감안한 버퍼. 이 시간이 지나면 프로세스 생사와 무관하게 무조건 resolve 한다.
 const FORCE_KILL_GRACE_MS = 2_000;
 
+// PM2 CLI 호출을 이음매 뒤로 뺀다. 테스트가 실제 PM2 설치를 요구하면 그 경로는 CI 에서도
+// 개발자 기계에서도 한 번도 지나가지 않는다 — 2026-07-28 최종 리뷰가 잡은 Critical(실패 신호
+// 소실)이 정확히 그렇게 다섯 번의 리뷰를 통과했다.
+export type RunPm2 = (args: string[]) => Promise<{ ok: boolean; stdout: string; stderr: string }>;
+
+// shellFor()·기본 runPm2(아래)가 함께 쓰는 "워커가 윈도우인지 POSIX 인지" 판정 결과 타입.
+export type ShellFlavor = "win32" | "posix";
+
+// 리뷰 지적(Important): 기본 runPm2 는 spawn("pm2", args, {shell:true}) 로 pm2 를 불렀다. Node 의
+// spawn(file, args, {shell:true}) 는 [file, ...args] 를 공백 하나로 join 만 할 뿐 인자별 따옴표를
+// 붙이지 않는다 — 실측: ["--name","asahi-111","--","-c","npm run dev"] 를 넘기면 자식 프로세스는
+// argv 5개가 아니라 7개를 받는다("npm run dev" 가 공백마다 셋으로 쪼개진다). 그러면 pm2 는 "npm"
+// 만 스크립트로 알아듣고 "run"·"dev" 는 흘려버린다. 공백이 든 --cwd 경로(예: 사용자 이름에 공백이
+// 섞인 윈도우 작업폴더 "C:\Users\Jane Smith\ws\111")도 똑같이 쪼개진다. 모든 테스트가 runPm2 를
+// 주입해 실제 spawn 경로를 한 번도 타지 않으므로, 이 결함은 스위트 전체로도 드러나지 않았다.
+//
+// 고치는 형태는 sh_exec(아래, spawn(command, {shell:true}))와 같다 — 명령줄 전체를 "하나의"
+// 문자열로 미리 인용해 만들고, 그 문자열 하나만 file 자리에 넘긴다(별도 args 배열은 쓰지 않는다).
+// 인용 로직을 순수 함수로 떼어 export 하는 이유는, 이번 결함의 진짜 원인이 "프로덕션 경로에 테스트
+// 표면이 아예 없었다"는 것이었기 때문이다 — 같은 실수를 반복하지 않도록 인용 결과 자체를 직접
+// 단정할 수 있게 남긴다.
+//
+// 인용은 이 바깥 셸 레이어에서 "정확히 한 번"만 한다. pm2 는 이 명령줄을 넘겨받아 다시 sh/cmd.exe
+// 를 [flag, command] 배열로 직접 띄운다(shell:true 를 또 쓰는 게 아니라 argv 배열로 바로 spawn
+// 하므로 세 번째 셸이 끼지 않는다) — 그래서 command 문자열 안쪽은 한 번 더 인용할 필요가 없다(더
+// 하면 따옴표가 겹쳐서 오히려 깨진다).
+//
+// 인용 규칙은 "공백(또는 빈 문자열) 인자를 하나의 토큰으로 지킨다"와 "POSIX 작은따옴표 자체가
+// 토큰 경계를 깨는 것을 막는다"까지만 다룬다. cmd.exe 의 &·|·^·% 같은 특수문자까지 모든 경우에
+// 안전한 인용은 셸마다 규칙이 다르고 표준이 없어 범위 밖이다 — 여기서 고치는 건 딱 보고된 실패
+// (공백 든 인자가 쪼개지는 것)뿐이다.
+function needsQuoting(arg: string, flavor: ShellFlavor): boolean {
+  if (arg.length === 0 || /\s/.test(arg)) return true;
+  // POSIX 는 작은따옴표, 윈도우는 큰따옴표 — 각 플레이버의 인용 문자가 인자 안에 있으면 공백이
+  // 없어도 인용 대상이다. 윈도우 쪽을 빠뜨리면(공백 없이 큰따옴표만 든 인자) 아래에서 quote()
+  // 가 아예 호출되지 않아 quoteWin32 의 이스케이프 로직이 있어도 이 인자에는 한 번도 적용되지
+  // 않는다 — 인용되지 않은 토큰 안의 " 는 (앞의 백슬래시 개수가 짝수라서) 그 자체로 표준 윈도우
+  // argv 파서의 따옴표 모드를 토글해버려, 공백이 없어도 조용히 다른 방식으로 깨진다.
+  return flavor === "posix" ? arg.includes("'") : arg.includes('"');
+}
+
+// POSIX(sh) 인용 — 작은따옴표로 감싼다. 작은따옴표 안에는 이스케이프가 없으므로, 인자에 작은
+// 따옴표가 있으면 그 지점에서 일단 닫고(') 이스케이프된 따옴표(\')를 따옴표 밖에 쓴 뒤 다시
+// 연다(') — 표준적인 기법이다.
+function quotePosix(arg: string): string {
+  return `'${arg.replace(/'/g, "'\\''")}'`;
+}
+
+// cmd.exe 인용 — MSVCRT/CommandLineToArgvW 의 표준 명령줄 인용 알고리즘을 그대로 구현한다(근사치가
+// 아니라 문서화된 그 규칙 자체 — Python subprocess.list2cmdline 과 같은 알고리즘이다). 큰따옴표
+// 바로 앞의 백슬래시들은 두 배로 늘린 뒤 \" 를 쓴다(따옴표는 리터럴로 살리고, 그 앞의 백슬래시도
+// 리터럴로 보존한다). 백슬래시가 아닌 문자 앞에서는 백슬래시를 그대로 둔다(늘리지 않는다). 인자
+// 끝에 남는 백슬래시(바로 뒤에 우리가 붙이는 닫는 큰따옴표가 오는 자리)도 두 배로 늘린다 — 안
+// 그러면 그 백슬래시가 우리가 붙이는 닫는 큰따옴표를 이스케이프해버려 따옴표가 안 닫힌 것처럼
+// 파싱된다.
+//
+// 이 인용이 다루는 건 "표준 윈도우 argv 파싱"이라는 한 겹뿐이다. proc_start 가 pm2 에 넘기는
+// command 인자(예: npm run dev -- --title="hi there")처럼 모델·사용자가 자유롭게 채우는 값이
+// 실제로 큰따옴표를 담을 수 있는 바로 그 필드이고, quoteWin32 가 존재하는 이유이기도 하다 — cwd
+// 는 애초에 큰따옴표를 쓸 수 없는 윈도우 경로라 이 계층에서는 참고 사례일 뿐이다. 다만 cmd.exe
+// 는 이 표준 argv 파싱 위에 자기만의 인용·특수문자 해석 계층을 하나 더 얹는다: 여기서 만든 큰
+// 따옴표 쌍 안이든 밖이든 &·|·^·% 같은 cmd.exe 메타문자는 cmd.exe 가 명령 구분자·파이프·이스케이프
+// 문자로 재해석할 수 있다. 그 계층까지 모든 경우에 안전한 인용은 셸마다 규칙이 다르고 표준이
+// 없어 여전히 범위 밖이다(위 needsQuoting 주석의 범위 설명과 같은 이유) — 이번에 고친 건 표준
+// argv 파싱 단계에서 인자가 깨지는 것(공백·큰따옴표로 토큰이 쪼개지거나 따옴표가 조용히 사라지는
+// 것)뿐이다.
+function quoteWin32(arg: string): string {
+  let escaped = "";
+  let backslashes = 0;
+  for (const ch of arg) {
+    if (ch === "\\") {
+      backslashes++;
+      continue;
+    }
+    if (ch === '"') {
+      escaped += "\\".repeat(backslashes * 2 + 1) + '"';
+    } else {
+      escaped += "\\".repeat(backslashes) + ch;
+    }
+    backslashes = 0;
+  }
+  escaped += "\\".repeat(backslashes * 2);
+  return `"${escaped}"`;
+}
+
+// pm2 CLI 호출 전체를 "하나의" 명령줄 문자열로 만드는 순수 함수. flavor 는 shellFor() 와 똑같이
+// 워커 루트의 플레이버로 정해야 한다(shellFlavorOf 참고) — 호스트 플랫폼으로 정하면 안 되는
+// 이유는 shellFor 의 주석과 같다.
+export function buildPm2CommandLine(args: string[], flavor: ShellFlavor): string {
+  const quote = flavor === "win32" ? quoteWin32 : quotePosix;
+  // 단순한 토큰(start·--name·asahi-111 등)은 따옴표 없이 그대로 둬 로그에서 읽기 쉽게 한다.
+  return ["pm2", ...args].map((a) => (needsQuoting(a, flavor) ? quote(a) : a)).join(" ");
+}
+
+// shellFor()·기본 runPm2 가 공유하는 플레이버 판정 — 두 곳이 각자 계산하면 언젠가 갈릴 수 있어
+// 한 곳으로 모은다.
+function shellFlavorOf(roots: string[]): ShellFlavor {
+  return pathFlavorOf(roots[0] ?? "/") === path.win32 ? "win32" : "posix";
+}
+
+const PROC_LOG_DEFAULT_LINES = 50;
+
+// 리뷰 지적(Important, 병합 차단): proc_list 는 소유자에게 필터를 걸지 않으므로 asahi-assistant·
+// asahi-worker(봇·워커 자신, deploy/ecosystem.config.cjs 로 관리되는 PM2 앱)도 평범한 회원 행처럼
+// 보인다. remoteTools.ts 는 소유자가 지정한 이름을 검증 없이 그대로 proc_stop·proc_logs 로
+// 넘기므로(모델이 정한 이름을 신뢰), "돌고 있는 거 다 정리해줘" 같은 지시 한 번으로 워커나 봇
+// 자신이 pm2 delete 로 사라질 수 있었다 — pm2 delete 는 완전히 제거해 autorestart 로도 못
+// 돌아오고, 복구하려면 기계에 직접 접근해야 한다. parseProcName(proc.ts)이 이미 회원 이름
+// (asahi-<숫자>)과 인프라 이름을 구분하므로, 그 판정을 pm2 를 실제로 부르는 이 계층(실행기)이
+// 강제한다 — 봇(remoteTools.ts)이 아니라 여기서 막는 이유는, sh_exec 로 pm2 명령을 직접 쓰는
+// 것은 여전히 허용된 탈출구이기 때문이다(소유자가 정말로 의도했다면 그 경로가 남아 있다).
+const NOT_MEMBER_PROC_MSG =
+  "그건 회원 프로세스가 아니에요 — 봇·워커 같은 인프라는 이 도구로 건드리지 않아요. 정말 필요하면 sh_exec 로 직접 하세요.";
+
 function truncate(s: string): string {
   return s.length <= OUTPUT_MAX ? s : `${s.slice(0, OUTPUT_MAX)}\n… (출력이 길어 ${OUTPUT_MAX}자에서 잘랐어요)`;
 }
@@ -40,13 +156,50 @@ function truncate(s: string): string {
 const str = (v: unknown): string | undefined => (typeof v === "string" && v.length > 0 ? v : undefined);
 const num = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
 
-export function makeExecutors(roots: string[]): Executors {
+export function makeExecutors(roots: string[], opts: { runPm2?: RunPm2 } = {}): Executors {
+  const runPm2: RunPm2 =
+    opts.runPm2 ??
+    ((args) =>
+      new Promise((resolve) => {
+        // shell:true 로 부르는 이유는 sh_exec 와 같다 — 윈도우에서 pm2 는 pm2.cmd 셰임이라
+        // 셸을 거치지 않으면 실행 파일을 찾지 못한다. args 를 별도 배열로 넘기지 않고 명령줄
+        // 전체를 문자열 하나로 미리 인용해 file 자리에 통째로 넘기는 이유는 위 buildPm2CommandLine
+        // 주석 참고 — spawn(file, args, {shell:true}) 는 인자별 따옴표를 붙여주지 않는다.
+        const commandLine = buildPm2CommandLine(args, shellFlavorOf(roots));
+        const child = spawn(commandLine, { shell: true });
+        let stdout = "";
+        let stderr = "";
+        child.stdout.on("data", (c: Buffer) => { stdout += c.toString(); });
+        child.stderr.on("data", (c: Buffer) => { stderr += c.toString(); });
+        child.on("error", (e) => resolve({ ok: false, stdout, stderr: String(e) }));
+        child.on("close", (code) => resolve({ ok: code === 0, stdout, stderr }));
+      }));
+
   // 경로 인자를 검사해 실경로를 돌려준다. 거부되면 그대로 ExecResult 로 반환한다.
   const gate = (raw: unknown): { ok: true; path: string } | { ok: false; res: ExecResult } => {
     const p = str(raw);
     if (!p) return { ok: false, res: { ok: false, content: "path 인자가 필요해요." } };
     const c = checkPath(p, roots);
     return c.ok ? { ok: true, path: c.path } : { ok: false, res: { ok: false, content: c.message } };
+  };
+
+  // pm2 에 임의 명령을 넘기는 안전한 형태. pm2 는 "스크립트 파일"을 기대하므로, 셸 명령은
+  // 인터프리터를 명시해 넘겨야 한다. 어느 셸인지는 워커 루트의 플레이버로 정한다 — 봇은
+  // 리눅스, 워커는 윈도우일 수 있어 호스트 플랫폼으로 정하면 어긋난다(paths.ts 와 같은 이유).
+  // 이 판정은 기본 runPm2(위)의 명령줄 인용과 같은 기준을 써야 하므로 shellFlavorOf 로 뺐다.
+  const shellFor = (): { bin: string; flag: string } =>
+    shellFlavorOf(roots) === "win32" ? { bin: "cmd.exe", flag: "/c" } : { bin: "sh", flag: "-c" };
+
+  const procGate = (): { ok: true } | { ok: false; res: ExecResult } =>
+    roots.length === 0
+      ? { ok: false, res: { ok: false, content: "워커에 열린 작업 폴더가 없어요." } }
+      : { ok: true };
+
+  const listProcs = async () => {
+    const r = await runPm2(["jlist"]);
+    return r.ok
+      ? { ok: true as const, procs: parsePm2List(r.stdout) }
+      : { ok: false as const, message: `pm2 목록을 가져오지 못했어요: ${r.stderr.trim() || "알 수 없는 오류"}` };
   };
 
   return {
@@ -357,6 +510,89 @@ export function makeExecutors(roots: string[]): Executors {
       } catch (e) {
         return { ok: false, content: `폴더를 만들지 못했어요: ${e instanceof Error ? e.message : String(e)}` };
       }
+    },
+
+    async proc_start(args) {
+      const g = procGate();
+      if (!g.ok) return g.res;
+      const command = str(args.command);
+      const name = str(args.name);
+      const cwd = str(args.cwd);
+      if (!command) return { ok: false, content: "실행할 명령이 필요해요." };
+      // name·cwd 는 봇이 주입한다(remoteTools.ts). 없으면 배선이 깨진 것이므로 실행하지 않는다 —
+      // 이름 없이 띄우면 소유권도 1인 1개 상한도 성립하지 않는다.
+      if (!name || !cwd) return { ok: false, content: "프로세스 이름·작업 폴더가 지정되지 않았어요." };
+
+      const before = await listProcs();
+      if (!before.ok) return { ok: false, content: before.message };
+      const dup = before.procs.find((p) => p.name === name);
+      // 조용히 교체하지 않는다 — 부원이 자기도 모르게 돌던 서버를 잃는다. 바꾸려면 멈추고 다시 띄운다.
+      if (dup) return { ok: false, content: `이미 돌고 있는 게 있어요: ${dup.command} (${dup.status}). 먼저 멈춰야 새로 띄울 수 있어요.` };
+
+      const sh = shellFor();
+      const r = await runPm2(["start", sh.bin, "--name", name, "--cwd", cwd, "--", sh.flag, command]);
+      if (!r.ok) return { ok: false, content: `띄우지 못했어요: ${r.stderr.trim() || r.stdout.trim() || "알 수 없는 오류"}` };
+
+      // 리뷰 지적(Minor, Finding 5): pm2 의 기본 autorestart 때문에 위 start 호출이 ok:true 여도
+      // "pm2 가 프로세스 등록에 성공했다"는 뜻일 뿐, 명령 자체가 오타 등으로 즉시 죽으면 재시작을
+      // 반복한다 — 여기서 바로 "띄웠어요"라고 알리면 크래시 루프도 성공으로 들린다. 재조회 한
+      // 번으로 실제 상태를 확인해 보고한다(재시도·대기 루프는 두지 않는다 — 그 순간의 스냅샷만
+      // 정직하게 전달하면 충분하고, pm2 가 안정화되길 기다리는 건 별개의 더 큰 설계다).
+      const after = await listProcs();
+      const status = after.ok ? after.procs.find((p) => p.name === name)?.status : undefined;
+      if (status !== "online") {
+        return {
+          ok: false,
+          content: `띄우긴 했는데 상태가 정상이 아니에요(${status ?? "확인 불가"}). "로그 보여줘" 라고 하면 원인을 확인할 수 있어요.`,
+        };
+      }
+      // 발견성: 시작한 그 순간이 멈추는 법을 알려주기 가장 좋은 시점이다(설계 §6).
+      return { ok: true, content: `띄웠어요: ${command}\n멈추려면 "돌고 있는 거 꺼줘" 라고 말하면 돼요. "뭐 돌고 있어?" 로 확인할 수 있어요.` };
+    },
+
+    async proc_stop(args) {
+      const g = procGate();
+      if (!g.ok) return g.res;
+      const name = str(args.name);
+      if (!name) return { ok: false, content: "멈출 프로세스가 지정되지 않았어요." };
+      // NOT_MEMBER_PROC_MSG 선언부 주석 참고 — pm2 를 부르기 전에 반드시 걸러야, 이미 나간
+      // delete 를 되돌리는 게 아니라 애초에 나가지 않게 막는다.
+      if (parseProcName(name) === null) return { ok: false, content: NOT_MEMBER_PROC_MSG };
+      const r = await runPm2(["delete", name]);
+      return r.ok
+        ? { ok: true, content: `멈췄어요: ${name}` }
+        : { ok: false, content: `멈추지 못했어요: ${r.stderr.trim() || "그런 프로세스가 없어요"}` };
+    },
+
+    async proc_list(args) {
+      const g = procGate();
+      if (!g.ok) return g.res;
+      const r = await listProcs();
+      if (!r.ok) return { ok: false, content: r.message };
+      // 필터는 봇이 하지 않고 여기서 한다 — onlyUserId 는 remoteTools.ts 가 주입한다(손님이면
+      // 자기 것만, 소유자면 생략해 전원).
+      const only = str(args.onlyUserId);
+      const procs = only === undefined ? r.procs : r.procs.filter((p) => p.userId === only);
+      // labelOf 는 "디스코드 userId → 사람이 알아볼 이름"을 위한 자리지만, 워커는 디스코드를
+      // 전혀 모른다(신원 해석은 봇만 할 수 있다 — proc.ts 상단 주석과 동일한 이유). 실제 이름
+      // 해석은 이 범위 밖이므로, 최소한 pm2 프로세스 이름(asahi-<id>)으로 되돌려 누구 것인지
+      // 알아볼 수 있게 한다 — procNameFor 는 parseProcName 의 역함수라 원래 이름과 정확히 같다.
+      return { ok: true, content: truncate(renderProcList(procs, { labelOf: (id) => procNameFor(id) })) };
+    },
+
+    async proc_logs(args) {
+      const g = procGate();
+      if (!g.ok) return g.res;
+      const name = str(args.name);
+      if (!name) return { ok: false, content: "로그를 볼 프로세스가 지정되지 않았어요." };
+      // proc_stop 과 같은 이유(NOT_MEMBER_PROC_MSG 선언부 주석 참고) — 봇·워커 자신의 로그를
+      // 회원에게 그대로 노출하지 않는다.
+      if (parseProcName(name) === null) return { ok: false, content: NOT_MEMBER_PROC_MSG };
+      const lines = Math.max(1, Math.min(num(args.lines) ?? PROC_LOG_DEFAULT_LINES, 200));
+      const r = await runPm2(["logs", name, "--nostream", "--lines", String(lines)]);
+      if (!r.ok) return { ok: false, content: `로그를 가져오지 못했어요: ${r.stderr.trim() || "그런 프로세스가 없어요"}` };
+      const body = r.stdout.trim();
+      return { ok: true, content: truncate(body.length > 0 ? body : "(로그가 비어 있어요)") };
     },
   };
 }

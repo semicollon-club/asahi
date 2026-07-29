@@ -1,5 +1,5 @@
 ---
-lastReviewed: 2026-07-28
+lastReviewed: 2026-07-29
 ---
 
 # 능력 계층 모델 (Capability Model)
@@ -53,10 +53,10 @@ Asahi 비서는 대화·모델 호출·기억·세션을 전담하는 **봇** �
 
 | 계층 | 조건 | 워커 | 열리는 도구 |
 | --- | --- | --- | --- |
-| 소유자 DM | `isOwner && isPrivate`(local·cloud 동일) | 그 소유자의 **개인 워커** | `remember`/`recall`(전원) + `character_fact` + `manage_access` + `db_schema`/`db_query`/`runtime_info` + `WebSearch`. **워커 연결 시**(`workerConnected`) `allow_dir`/`revoke_dir`/`list_dirs` 와 `fs_read`/`fs_write`/`fs_edit`/`fs_glob`/`fs_grep`/`sh_exec` 가 함께 추가된다(그 개인 워커의 `allowed_dirs` 전체 — 좁혀지지 않는다) — `deployTarget`(local/cloud)은 더 이상 이 계층의 도구 목록에 영향을 주지 않는다(최종 리뷰 FIX2) |
-| 소유자 서버/스레드 | `isOwner && !isPrivate` | **공유 워커**(동아리 미니PC), 관리자 스코프 | `recall`(공용) + `WebSearch`. **워커 연결 시** `allow_dir`/`revoke_dir`/`list_dirs` 와 `fs_*`/`sh_exec` 가 추가된다 — `scopeDirs` 가 소유자는 좁히지 않으므로 손님 폴더를 포함한 그 기계의 `allowed_dirs` 전체에 접근한다(관리자). DB·접근관리(`db_query`/`manage_access`)는 주지 않는다 — 기계가 아니라 봇 자신에 대한 권한이라 공개 채널에서 열 이유가 없다 |
-| 손님 DM | `isPrivate && role in {allowed, owner}`, `isOwner` 는 아님 | **공유 워커**, 본인 폴더로 스코프 | `remember`/`recall`(본인 스코프만) + `character_fact` + `WebSearch`. **워커 연결 시** `fs_*`/`sh_exec` 가 추가된다 — `fs_*` 는 `scopeDirs` 가 `<루트>/<디스코드 userId>/` 하위로 좁히지만, **`sh_exec` 는 이 스코프의 대상이 아니다**(아래 "경로 게이팅" 참고). dir 관리 도구는 절대 받지 않는다 |
-| 손님 서버/스레드 | 그 외(`!isPrivate`, 손님) | **공유 워커**, 본인 폴더로 스코프 | `recall`(공용 스코프만) + `WebSearch`. **워커 연결 시** `fs_*`/`sh_exec` 가 추가된다 — 손님 DM 행과 동일하게 `fs_*` 만 자기 폴더로 좁혀지고 `sh_exec` 는 좁혀지지 않는다 |
+| 소유자 DM | `isOwner && isPrivate`(local·cloud 동일) | 그 소유자의 **개인 워커** | `remember`/`recall`(전원) + `character_fact` + `manage_access` + `db_schema`/`db_query`/`runtime_info` + `WebSearch`. **워커 연결 시**(`workerConnected`) `allow_dir`/`revoke_dir`/`list_dirs` 와 `fs_read`/`fs_write`/`fs_edit`/`fs_glob`/`fs_grep`/`fs_tree`/`sh_exec`/`proc_start`/`proc_stop`/`proc_list`/`proc_logs` 가 함께 추가된다(그 개인 워커의 `allowed_dirs` 전체 — 좁혀지지 않는다) — `deployTarget`(local/cloud)은 더 이상 이 계층의 도구 목록에 영향을 주지 않는다(최종 리뷰 FIX2). `proc_*`(장기 실행 프로세스 관리) 의 한계는 아래 "장기 실행 프로세스의 한계" 절 참고 |
+| 소유자 서버/스레드 | `isOwner && !isPrivate` | **공유 워커**(동아리 미니PC), 관리자 스코프 | `recall`(공용) + `WebSearch`. **워커 연결 시** `allow_dir`/`revoke_dir`/`list_dirs` 와 `fs_*`/`sh_exec`/`proc_*`(4개) 가 추가된다 — `scopeDirs` 가 소유자는 좁히지 않으므로 손님 폴더를 포함한 그 기계의 `allowed_dirs` 전체에 접근한다(관리자). `proc_list` 도 필터 없이 전원이 보이고 `proc_stop`/`proc_logs` 는 이름을 지정해 남의 프로세스를 다룰 수 있다(아래 "장기 실행 프로세스의 한계" 참고). DB·접근관리(`db_query`/`manage_access`)는 주지 않는다 — 기계가 아니라 봇 자신에 대한 권한이라 공개 채널에서 열 이유가 없다 |
+| 손님 DM | `isPrivate && role in {allowed, owner}`, `isOwner` 는 아님 | **공유 워커**, 본인 폴더로 스코프 | `remember`/`recall`(본인 스코프만) + `character_fact` + `WebSearch`. **워커 연결 시** `fs_*`/`sh_exec`/`proc_*`(4개) 가 추가된다 — `fs_*` 는 `scopeDirs` 가 `<루트>/<디스코드 userId>/` 하위로 좁히지만, **`sh_exec` 는 이 스코프의 대상이 아니다**(아래 "경로 게이팅" 참고). `proc_*` 는 경로가 아니라 이름으로 좁혀진다 — `proc_start` 의 이름·작업폴더, `proc_stop`/`proc_logs` 의 대상 이름, `proc_list` 의 필터가 전부 본인 것으로 강제 주입되고 모델이 준 값은 무시된다(아래 "장기 실행 프로세스의 한계" 참고). dir 관리 도구는 절대 받지 않는다 |
+| 손님 서버/스레드 | 그 외(`!isPrivate`, 손님) | **공유 워커**, 본인 폴더로 스코프 | `recall`(공용 스코프만) + `WebSearch`. **워커 연결 시** `fs_*`/`sh_exec`/`proc_*`(4개) 가 추가된다 — 손님 DM 행과 동일하게 `fs_*` 만 자기 폴더로 좁혀지고 `sh_exec` 는 좁혀지지 않으며, `proc_*` 는 이름으로 본인 것에 강제로 좁혀진다 |
 
 `character_fact`(캐릭터가 지어낸 자기 설정 고정)는 DM 계열 두 계층(소유자·손님)에만 열린다.
 공개 서버 채널에서는 조작으로 설정을 오염시킬 여지가 크고 얻는 값이 작아 읽기(`recall`)만
@@ -171,6 +171,76 @@ Asahi 비서는 대화·모델 호출·기억·세션을 전담하는 **봇** �
 에만 나타난다. `remote`(`fs_*`/`sh_exec`)는 그와 별개로 `workerConnected` 하나만 보고 네
 분기 모두에 스플라이스된다(위 능력 계층표) — 원격 도구 자체가 소유자 DM 에만 나타난다는
 서술은 Task 7 이후 더 이상 맞지 않는다.
+
+## 장기 실행 프로세스의 한계
+
+위 표의 `proc_start`/`proc_stop`/`proc_list`/`proc_logs` 는 개발서버 같은 장기 실행 프로세스를
+새 감독자 없이 PM2 에 위임한다(`agent/src/remote/executors.ts`) — `REMOTE_TOOL_NAMES`
+(`agent/src/core/remoteTools.ts`)에 `fs_*`/`sh_exec` 와 함께 들어 있어 `workerConnected` 축을
+그대로 공유한다(위 능력 계층표). 프로세스 이름(`asahi-<디스코드 userId>`)과 `proc_start` 의
+작업 폴더는 모델이 정하지 않고 `remoteToolHandler`(`agent/src/core/remoteTools.ts`)가 호출마다
+주입한다 — 그 이름이 곧 소유권이자 "1인 1개" 상한이다(`agent/src/remote/proc.ts` 의
+`procNameFor`). 손님은 `proc_stop`/`proc_logs` 에 이름을 지정할 수 없고(생략하면 자기 이름으로
+채워진다), `proc_list` 에도 자기 것만 보도록 필터가 강제 주입된다 — 소유자만 그 기계의
+관리자로서 이름을 지정해 남의 프로세스를 멈추거나 로그를 보고, 필터 없이 전원의 목록을 본다.
+**소유자도 `proc_start` 의 작업 폴더는 고르지 못한다** — 모델이 무엇을 보내든(소유자·손님
+구분 없이) 항상 그 턴에 계산된 첫 번째 허용 폴더(`allowed[0]`)로 덮어써진다.
+
+**소유자의 이름 지정권도 회원 프로세스로 한정된다.** `remoteToolHandler`(`agent/src/core/
+remoteTools.ts`)는 소유자가 지정한 `name` 을 검증 없이 그대로 실행기에 넘기지만, 실행기
+(`agent/src/remote/executors.ts`)의 `proc_stop`/`proc_logs` 는 pm2 를 부르기 전에
+`parseProcName(name)` 이 `null` 인 이름 — 즉 `asahi-<디스코드 userId>` 형식이 아닌 이름 —
+을 거절한다. 봇·워커 자기 자신의 PM2 앱(`asahi-assistant`·`asahi-worker`,
+`deploy/ecosystem.config.cjs`)이 정확히 그 경우다 — 소유자가 "돌고 있는 거 다 정리해줘" 같은
+지시로 이 도구를 통해 봇이나 워커 자신을 `pm2 delete` 하는 경로는 없다. 이름 인자를 봇
+(`remoteTools.ts`)이 아니라 실제로 pm2 를 부르는 실행기 쪽에서 막는 이유는, `sh_exec` 로
+`pm2` 를 직접 호출하는 경로는 여전히 의도적으로 열어 둔 탈출구이기 때문이다(소유자가 정말로
+봇·워커를 내리려면 그 경로가 남아 있다). `proc_list` 표에서도 이런 인프라 행은
+`renderProcList`(`agent/src/remote/proc.ts`)가 `[인프라] <이름>` 으로 표시해(`userId` 가
+`null` 인 행) 회원 행과 한눈에 구분되게 한다 — "다 정리해줘" 를 받은 모델이 표만 보고 인프라
+행까지 회원 것으로 착각하는 것을 막는 두 번째 방어선이다.
+
+**"1인 1개" 상한은 강제가 아니다.** 손님은 이미 `sh_exec` 로 임의 셸을 돌릴 수 있으므로
+`pm2 start --name asahi-<남의id>` 를 직접 칠 수 있고, `pm2 delete` 로 남의 것을 죽일 수도
+있다. 위 "손님·공유 기계 — 확장된 위협 표면" 절의 폴더 격리와 정확히 같은 성격이다 —
+실수 방지선이지 작정한 접근의 경계가 아니며, 실제 경계는 공유 워커를 돌리는 OS 계정
+하나다.
+
+**`proc_stop`·`proc_list`·`proc_logs` 는 허용 폴더가 비어 있어도 통과하지만, `proc_start`
+는 막힌다.** 경로가 필요한 도구(`fs_*`)와 작업 폴더가 필요한 `proc_start` 는 `allow_dir`
+로 등록된 폴더가 하나도 없으면 거부되지만(아래 "경로 게이팅"), 나머지 셋은 폴더가 아니라
+PM2 프로세스 이름만으로 동작하므로 걸릴 이유가 없다(`agent/src/core/remoteTools.ts` 의
+`needsAllowedNonEmpty`). 처음에는 넷 모두 같은 "허용 폴더 없으면 거부"를 공유했으나, 그러면
+관리자가 회원의 `allow_dir` 를 회수한 뒤에도 그 회원의 dev 서버가 계속 돌고 있을 때 회원도
+관리자도 그것을 멈추거나 로그를 볼 방법이 없어졌다 — 그 순간 나가는 "allow_dir 로 폴더를
+허용해 주세요" 안내조차 이 세 도구와는 무관한 조치를 가리켰다. "띄운 것은 항상 멈출 수
+있어야 한다"는 원칙에 따라 리뷰 중 이 셋을 뺐다.
+
+**자원 상한이 없다.** 윈도우에는 리눅스 cgroup 같은 수단이 없어 한 프로세스가 미니PC 의
+메모리를 전부 먹을 수 있다. "1인 1개" 상한은 "여러 개가 쌓이는 것"만 막을 뿐, 하나가 자원을
+다 쓰는 것은 막지 못한다.
+
+**재부팅하면 전부 사라진다.** `pm2 save`/`resurrect` 를 일부러 쓰지 않는다 — 잊고 켜둔 것이
+재부팅 후에도 되살아나는 것은 놀라운 동작이고 방치를 늘린다(`asahi-assistant` 자신의 로컬
+자동시작에는 이 둘을 쓰지만 — `deploy/PM2-명령어.md` — 그건 봇 프로세스 얘기이고 회원의
+`proc_*` 프로세스와는 무관하다).
+
+**상태 표에 회원 이름이 아니라 `asahi-<id>` 가 그대로 나온다.** `proc_list` 의 표는 워커
+(`agent/src/remote/executors.ts`)가 렌더링하는데, 워커는 디스코드를 전혀 몰라 `userId` 를
+표시 이름으로 바꿀 수 없다 — `renderProcList`(`agent/src/remote/proc.ts`)의 `labelOf` 콜백
+자리는 마련돼 있지만, 실제로 주어지는 값은 `procNameFor`(원래 이름을 그대로 돌려주는
+역함수)라 결국 `asahi-<id>` 그대로 보인다. 설계 의도(표에 사람 이름이 보이는 것)에는 못
+미치는, 알려진 격차다.
+
+**윈도우 명령줄 인용은 표준 argv 파싱까지만 다룬다.** `buildPm2CommandLine`
+(`agent/src/remote/executors.ts`)은 pm2 인자를 윈도우 표준 인용 규칙(`CommandLineToArgvW`)에
+맞춰 감싸, 공백·큰따옴표가 든 인자(공백 섞인 작업 폴더, `command` 안의 따옴표 등)가 조용히
+쪼개지거나 사라지는 것을 막는다. 다만 이 인용은 그 한 겹만 보장한다고 코드 스스로 명시한다 —
+cmd.exe 자신이 그 위에 또 얹는 `&`·`|`·`^`·`%` 같은 메타문자 해석까지는 다루지 않는다.
+`proc_start` 의 `command` 는 손님이 채우는 자유 텍스트이므로, 이 메타문자를 포함하면
+cmd.exe 가 명령 구분자·파이프로 재해석할 수 있다 — `sh_exec` 가 원래 갖고 있던 것과 같은
+종류의 한계이지 `proc_*` 가 새로 들여온 것이 아니다(아래 "경로 게이팅"의 `sh_exec` 서술
+참고).
 
 ## character_fact 전역 스코프와 DM→공개 데이터 흐름
 
@@ -339,8 +409,9 @@ Asahi 비서는 대화·모델 호출·기억·세션을 전담하는 **봇** �
 | `agent/src/core/agent.ts` | `resolveTurnWorker` 는 `resolveWorkerSelector`(개인/공유 선택) → 레지스트리(`personalWorkerOf`/`sharedWorkerId`) → `hub.isConnected(workerId)` 순으로 이 턴이 쓸 워커를 정한다(예전 `shouldConnectWorker`/`resolveWorkerConnected` 를 대체 — Task 7). `req.noRemoteTools===true` 면(유휴 요약 턴) 레지스트리·허브 조회 자체를 건너뛰고 무조건 `null`(=워커 없음)이다(최종 리뷰 FIX4 유지). 이 결과가 `buildRemoteCtx`(`workerId`·`workerKind`·`roots`·`call` 을 채운다)의 입력이자 `allowedToolsFor` 에 넘길 `workerConnected` 이므로, "도구는 보이는데 실행은 거부"(또는 그 반대) 불일치가 생기지 않는다. `resolveWebToolsEnabled` 는 `req.noWebTools===true` 면 무조건 false 를 돌려준다(최종 리뷰 3차 FIX3). `builtinTools` 는 이 값이 참이면 `["WebSearch"]`, 거짓이면 `[]` 다. SDK 내장 파일/Bash 도구(Read/Write/Edit/Glob/Grep/Bash)는 이 배열에 애초에 이름을 올리지 않는다. |
 | `agent/src/core/workerSelect.ts` | `resolveWorkerSelector` 는 "어디서 말하느냐가 어느 기계냐를 정한다" 규칙 하나다 — `isOwner && isPrivate` 만 개인 워커, 그 외(소유자 서버·손님 DM·손님 서버)는 전부 공유 워커. `scopeDirs` 는 공유 워커 + 손님(`!isOwner`)일 때만 각 허용 폴더를 `joinUnderRoot`로 그 사람의 `userId` 하위로 좁힌다 — 개인 워커거나 소유자면 목록을 그대로 돌려준다(빈 목록은 빈 목록 그대로 — fail closed 유지). `joinUnderRoot`(`agent/src/core/paths.ts`)가 `userId` 를 평범한 식별자(영숫자·밑줄·하이픈)로만 제한해, 크래프트한 값으로 상위 폴더를 탈출하는 경로 자체가 만들어지지 않게 한다(회원 격리의 마지막 경계). |
 | `agent/src/store/workersRepo.ts` | 토큰은 `sha256` 해시(`hashWorkerToken`)로만 저장한다 — 평문은 DB 에 남지 않는다. `personalWorkerOf`/`sharedWorkerId` 는 동률(같은 `user_id` 또는 같은 `kind='shared'`)이 여럿이어도 `created_ts, id` 정렬로 결정적으로 하나만 고른다(DB 가 임의로 고르게 두지 않는다). `upsert` 로 같은 `id` 를 재등록하면 토큰 해시가 교체되지만(회전), `created_ts` 와 `label`(명시적으로 새로 주지 않는 한)은 보존한다. |
-| `agent/src/core/remoteTools.ts` | `remoteToolHandler` 는 `ctx.remote`(=`resolveTurnWorker` 판정 결과)가 없으면 항상 거부한다 — 예전처럼 `isOwnerDm` 을 독립적으로 다시 확인하지 않는다(Task 7, 이 판정은 이제 `agent.ts` 하나뿐이다). `fs_read`/`fs_write`/`fs_edit`/`fs_glob`/`fs_grep` 의 경로 후보는 그 워커의 `allowed_dirs` 를 `scopeDirs` 로 좁힌 범위 안에 있어야 하며, 빈 경로 문자열·빈 허용 목록·리포 조회 실패는 모두 거부(fail-closed)로 처리한다. `fs_glob`/`fs_grep` 은 `path` 생략 시 검사에 쓴 기본값을 `args` 에 실제로 주입해 워커로 보낸다(최종 리뷰 FIX1). `sh_exec` 는 이 경로 필터의 대상이 아니다(의도된 설계 — 위 "손님·공유 기계" 절 참고). |
+| `agent/src/core/remoteTools.ts` | `remoteToolHandler` 는 `ctx.remote`(=`resolveTurnWorker` 판정 결과)가 없으면 항상 거부한다 — 예전처럼 `isOwnerDm` 을 독립적으로 다시 확인하지 않는다(Task 7, 이 판정은 이제 `agent.ts` 하나뿐이다). `fs_read`/`fs_write`/`fs_edit`/`fs_glob`/`fs_grep` 의 경로 후보는 그 워커의 `allowed_dirs` 를 `scopeDirs` 로 좁힌 범위 안에 있어야 하며, 빈 경로 문자열·빈 허용 목록·리포 조회 실패는 모두 거부(fail-closed)로 처리한다. `fs_glob`/`fs_grep` 은 `path` 생략 시 검사에 쓴 기본값을 `args` 에 실제로 주입해 워커로 보낸다(최종 리뷰 FIX1). `sh_exec` 는 이 경로 필터의 대상이 아니다(의도된 설계 — 위 "손님·공유 기계" 절 참고). `proc_*` 는 이름(`name`)·작업폴더(`cwd`)·목록 필터(`onlyUserId`)를 모델이 아니라 이 핸들러가 주입한다 — 손님이 준 값은 셋 다 무시되고 각각 `procNameFor(ctx.userId)`(`name`)·`allowed[0]`(`cwd`)·`ctx.userId`(`onlyUserId`, 접두어 없는 원래 값)로 덮어써진다(위 "장기 실행 프로세스의 한계" 참고). `proc_stop`/`proc_list`/`proc_logs` 는 `needsAllowedNonEmpty` 가 `false` 라 허용 폴더가 비어 있어도 통과한다 — `proc_start` 만 여전히 막힌다. |
 | `agent/src/remote/roots.ts` | `checkPath` 는 워커의 최종 경로 관문이다 — `WORKER_ROOTS` 항목이 모호한 절대경로(윈도우에서 드라이브 문자·UNC 없음)면 무조건 거부하고, `resolveRealOrNearestAncestor` 로 realpath 정규화한 뒤 그 워커의 `WORKER_ROOTS` 밖이면 거부한다. **이 검사는 워커의 루트 기준이지 손님 개인의 스코프 기준이 아니다** — 손님 폴더 안 심볼릭 링크가 이 두 기준의 차이를 파고드는 받아들인 위험이다(`docs/security/risk-register.md`). |
+| `agent/src/remote/executors.ts` | 워커 쪽 `proc_*` 실행기다. `procGate()` 는 `roots.length === 0` 이면 넷 전부를 거부한다(`sh_exec` 와 같은 규칙). `proc_start` 는 `pm2 jlist` 에 같은 이름이 이미 있으면 조용히 교체하지 않고 거부한다 — "1인 1개" 충돌은 실제로 여기서 집행된다(봇 쪽 `remoteTools.ts` 는 이름을 주입만 한다). `proc_stop`/`proc_logs` 는 `parseProcName(name)` 이 `null` 인 이름(봇·워커 자신의 PM2 앱)을 pm2 를 부르기 전에 거절한다 — 이름 주입은 `remoteTools.ts` 가 하지만, 그 이름이 회원 형식인지의 최종 판정은 여기(실행기)가 한다(위 "장기 실행 프로세스의 한계"). `buildPm2CommandLine` 은 표준 윈도우 argv 인용(`CommandLineToArgvW`)까지만 보장하고 cmd.exe 메타문자(`&`·`|`·`^`·`%`)는 다루지 않는다고 스스로 문서화한다(위 "장기 실행 프로세스의 한계"). 기본 `runPm2`(실제 `spawn`)는 테스트가 전부 가짜 `runPm2` 를 주입해 우회하므로, 이 파일을 고칠 때는 그 이음매 자체가 프로덕션 경로를 가린다는 것을 잊지 않는다(2026-07-28 최종 리뷰가 잡은 Critical — 실패 신호 소실이 이 이음매 부재로 다섯 번의 리뷰를 통과했다). `agent/src/remote/proc.ts`(이름 규칙·`pm2 jlist` 파싱·표 렌더링, 순수 함수)를 쓰는 두 프로덕션 파일 중 하나다 — 나머지 하나가 `agent/src/core/remoteTools.ts`(`procNameFor`·`isValidUserId`)이므로, `proc.ts` 의 이름 규칙을 고치면 워커 쪽 표시뿐 아니라 봇 쪽 신원 주입까지 함께 다시 확인해야 한다. |
 | `agent/src/remote/hub.ts` | `WorkerHub.handleConnection` 은 `hello` 의 토큰을 상수 시간(`timingSafeEqual`)으로 비교하고, 빈 토큰은 길이 검사로 먼저 거부하며, 등록되지 않은 `workerId` 와 토큰 불일치를 같은 거부 사유(`DENIED_REASON`)로 응답해 인증 오라클을 막는다(대조값 자체도 프로세스별 랜덤이라 "없는 워커" 경로를 맞출 수 없다). `unauth`/`authenticating` 상태에서는 어떤 프레임도 처리하지 않는다(`hello` 재전송 포함 — 레지스트리 조회가 비동기가 되며 생긴 창을 `authenticating` 상태로 막는다). `rootsOf(workerId)` 는 `agent.ts` 의 `buildRemoteCtx` 가 실제로 호출한다(§능력 계층표 참고). |
 | `agent/src/core/pathPermission.ts` | `extractCandidatePaths`(`remoteTools.ts` 가 재사용)는 Glob 의 `pattern` 과 Grep 의 `glob`(최종 리뷰 FIX1 — 검색 대상 파일 필터도 경로를 담을 수 있다) 리터럴 접두를 후보에서 빠뜨리지 않는다. 그 리터럴을 base 에 결합할 때는 `paths.ts` 의 `pathFlavorOf` 로 대상 문자열의 플레이버(윈도우/POSIX)를 판정한다 — host 프로세스의 `process.platform` 을 따르는 `node:path` 기본 export 를 쓰면, 리눅스에 배포된 봇이 윈도우 워커의 경로(`C:\ws\...`)를 다룰 때 정상 호출을 "허용된 폴더 밖"으로 오거부한다(최종 pre-merge 리뷰 FIX2, 리뷰 재현). `resolveRealOrNearestAncestor`(`roots.ts` 가 재사용)는 존재하지 않는 경로도 가장 가까운 실재 조상까지 realpath 한다. `isPathGatedTool` 은 `extractCandidatePaths` 의 cwd 폴백 조건으로 지금도 쓰인다. `decidePathPermission`(옛 `canUseTool` 전용 최종 allow/deny 판정 함수)은 프로덕션 호출자가 없어 삭제했다(최종 pre-merge 리뷰 FIX6) — 남겨 두면 이 브랜치가 뒤집은 정책("PC 작업은 소유자 DM 에서만")을 그대로 반환하는 죽은 함수가 새 경로 검사 로직의 근거로 오인될 위험이 있었다. |
 | `agent/src/core/sqlGuard.ts` | `assertReadOnlySql` 은 다중 문장과 `SELECT`/`WITH` 이외 시작 키워드를 거부한다(1차 방어). |
@@ -351,12 +422,17 @@ Asahi 비서는 대화·모델 호출·기억·세션을 전담하는 **봇** �
 `resolveWebToolsEnabled`), `agent/tests/workerSelect.test.ts`(`resolveWorkerSelector`·`scopeDirs`·
 `joinUnderRoot` 세그먼트 검증), `agent/tests/workersRepo.test.ts`(토큰 해시·회전·
 `personalWorkerOf`/`sharedWorkerId` 결정성), `agent/tests/remoteTools.test.ts`(1차 필터
-허용/거부/빈 경로/`sh_exec` 예외/FIX1 주입/공유 기계 사용자별 격리), `agent/tests/remoteRoots.test.ts`
+허용/거부/빈 경로/`sh_exec` 예외/FIX1 주입/공유 기계 사용자별 격리/`proc_*` 이름·cwd·필터
+주입과 빈 허용 목록 예외), `agent/tests/remoteRoots.test.ts`
 (워커 최종 판정), `agent/tests/remoteHub.test.ts`(워커 레지스트리 인증·인증 오라클 방지·3-상태
-인증), `agent/tests/pathPermission.test.ts`(재사용되는 순수 함수), `agent/tests/coreMulti.test.ts`
+인증), `agent/tests/remoteExecutors.test.ts`(`proc_*` 실행기의 PM2 위임·`buildPm2CommandLine`
+의 POSIX/윈도우 명령줄 인용, 윈도우 큰따옴표 이스케이프), `agent/tests/proc.test.ts`(이름
+규칙·`pm2 jlist` 파싱·표 렌더링 순수 함수), `agent/tests/pathPermission.test.ts`(재사용되는
+순수 함수), `agent/tests/coreMulti.test.ts`
 (능력 안내에 반영되는 `workerConnected`·유휴 요약 턴의 `noRemoteTools`/`noWebTools`),
 `agent/tests/sqlGuard.test.ts`, `agent/tests/persona.test.ts`(외부 관찰 콘텐츠 불신 규칙이 웹
-검색 결과를 명시하는지, 최종 리뷰 3차 FIX5) — 케이스별로 검증한다. 핵심 불변식("손님이
+검색 결과를 명시하는지, 최종 리뷰 3차 FIX5 · 손님 분기의 "1인 1개"·재부팅 소멸 안내가 실제
+동작과 일치하는지) — 케이스별로 검증한다. 핵심 불변식("손님이
 `<루트>/<남의 userId>/...` 를 요청하면 거부된다")은 `remoteTools.test.ts`의 "공유 기계에서
 사용자별 격리" describe 블록이 회귀 가드다. 스케줄 재진입 가드·일일 재시도 상한(최종 리뷰
 3차 FIX1·FIX2, 정기 게시 자체의 실행 빈도·비용 문제)은 이 능력 계층 문제와 별개 축이라

@@ -318,7 +318,7 @@ const textResult = (text: string, isError = false) => ({
   ...(isError ? { isError: true } : {}),
 });
 
-// 원격 도구 7개의 공통 배선. remoteToolHandler 가 돌려주는 { content, ok } 의 ok 를 그대로
+// 원격 도구 11개의 공통 배선. remoteToolHandler 가 돌려주는 { content, ok } 의 ok 를 그대로
 // isError 로 뒤집어 싣는다 — 이 한 줄이 "워커가 계산한 성패"와 "모델·표시·기록이 보는 성패"를
 // 잇는 이음매다(예전엔 여기서 문자열만 받아 ok 가 버려졌다).
 const remoteResult = async (ctx: ToolCtx, tool: string, args: Record<string, unknown>) => {
@@ -436,6 +436,37 @@ export function buildToolDefinitions(ctx: ToolCtx) {
       "워커 PC 에서 셸 명령을 실행합니다. 강력한 도구이니 신중히 쓰세요.",
       { command: z.string().describe("실행할 셸 명령"), timeoutMs: z.number().optional().describe("타임아웃(밀리초)") },
       async (args) => remoteResult(ctx, "sh_exec", args),
+    ),
+    // proc_* 넷의 스키마에 name·cwd 가 없거나 "(소유자 전용)"으로만 있는 것은 실수가 아니다 —
+    // 이 값들은 모델이 정하지 않고 remoteToolHandler 가 주입한다(거기 주석 참고). 스키마에 열어
+    // 두면 모델이 남의 프로세스 이름을 만들어 낼 수 있고, 그러면 핸들러의 주입이 "모델이 준 값을
+    // 덮어쓰는" 일이 되어 도구 설명과 실제 동작이 어긋난다.
+    tool(
+      "proc_start",
+      "개발서버처럼 오래 도는 프로세스를 띄웁니다. 한 사람당 하나만 띄울 수 있습니다.",
+      { command: z.string().describe("실행할 명령. 예: npm run dev") },
+      async (args) => remoteResult(ctx, "proc_start", args),
+    ),
+    tool(
+      "proc_stop",
+      "돌고 있는 프로세스를 멈춥니다.",
+      { name: z.string().optional().describe("(소유자 전용) 멈출 프로세스 이름. 생략하면 본인 것") },
+      async (args) => remoteResult(ctx, "proc_stop", args),
+    ),
+    tool(
+      "proc_list",
+      "지금 돌고 있는 프로세스를 보여줍니다. 무엇이 도는지 기억으로 답하지 말고 이 도구를 부르세요.",
+      {},
+      async (args) => remoteResult(ctx, "proc_list", args),
+    ),
+    tool(
+      "proc_logs",
+      "돌고 있는 프로세스의 최근 로그를 봅니다.",
+      {
+        lines: z.number().min(1).optional().describe("가져올 줄 수(기본 50, 최대 200)"),
+        name: z.string().optional().describe("(소유자 전용) 대상 프로세스 이름. 생략하면 본인 것"),
+      },
+      async (args) => remoteResult(ctx, "proc_logs", args),
     ),
 ];
 }

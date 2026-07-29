@@ -215,3 +215,21 @@ describe("renderCommandHelp — 능력 안내는 워커 연결 여부로 갈린�
     expect(help).toMatch(/명령 실행해줘/);
   });
 });
+
+// renderCommandHelp 는 workerConnected 를 위치 인자(boolean)로 받는다 — 객체가 아니다.
+describe("renderCommandHelp — 오래 도는 프로세스를 안내한다", () => {
+  it("워커가 연결돼 있으면 개발서버 안내가 있다", () => {
+    expect(renderCommandHelp(true)).toMatch(/개발서버|오래 도는/);
+  });
+
+  it("워커가 연결돼 있지 않으면 안내하지 않는다", () => {
+    expect(renderCommandHelp(false)).not.toMatch(/개발서버/);
+  });
+
+  // 2차 리뷰 Important — 이름만 보던 위 테스트(/개발서버|오래 도는/)는 "한 사람당 하나까지"가
+  // "여러 개 띄울 수 있어"로 뒤집혀도 통과한다. 이 상한은 executors.ts 의 proc_start 중복 거부와
+  // 일치해야 하는 클레임이므로 substring 을 직접 고정한다.
+  it("한 사람당 하나까지라는 상한을 안내한다", () => {
+    expect(renderCommandHelp(true)).toMatch(/한 사람당 하나/);
+  });
+});

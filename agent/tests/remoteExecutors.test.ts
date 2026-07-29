@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { makeExecutors, OUTPUT_MAX } from "../src/remote/executors.js";
+import { makeExecutors, OUTPUT_MAX, buildPm2CommandLine } from "../src/remote/executors.js";
 import { TREE_MAX_ENTRIES } from "../src/remote/tree.js";
 
 describe("워커 실행기", () => {
@@ -17,11 +17,16 @@ describe("워커 실행기", () => {
   });
   afterEach(() => fs.rmSync(root, { recursive: true, force: true }));
 
-  it("도구 8개를 정확히 노출한다", () => {
+  it("도구 12개를 정확히 노출한다", () => {
     // Task 8: fs_mkdir 추가. 모델이 부르는 도구 목록(REMOTE_TOOL_NAMES)에는 안 들어가지만, 워커
     // 실행기 자체는 다른 fs_* 와 나란히 이 객체에 존재한다.
     // Task 4: fs_tree 추가 — 폴더 구조 전용 조회 도구(모델이 부르는 목록에도 들어간다).
-    expect(Object.keys(ex).sort()).toEqual(["fs_edit", "fs_glob", "fs_grep", "fs_mkdir", "fs_read", "fs_tree", "fs_write", "sh_exec"]);
+    // M2 Task 2: proc_start·proc_stop·proc_list·proc_logs 추가 — 장기 실행 프로세스를 PM2 에
+    // 위임하는 실행기 넷(모델이 부르는 도구 목록에도 들어간다).
+    expect(Object.keys(ex).sort()).toEqual([
+      "fs_edit", "fs_glob", "fs_grep", "fs_mkdir", "fs_read", "fs_tree", "fs_write",
+      "proc_list", "proc_logs", "proc_start", "proc_stop", "sh_exec",
+    ]);
   });
 
   it("fs_read 는 줄번호를 붙여 읽는다", async () => {
@@ -393,5 +398,351 @@ describe("fs_tree 실행기", () => {
     expect(r.ok).toBe(true);
     expect(r.content).toContain("a.txt");
     expect(r.content).not.toContain("비어");
+  });
+});
+
+describe("proc_* 실행기 — PM2 위임", () => {
+  type Call = string[];
+  type Pm2Reply = { ok: boolean; stdout: string; stderr?: string };
+  // 리뷰 지적(Minor, Finding 5): proc_start 가 시작 뒤 상태를 재조회하면서, 같은 키("jlist")를
+  // 한 호출 안에서 두 번(사전 중복 확인 + 사후 상태 확인) 부르게 됐다 — 두 번의 의미가 다르므로
+  // (전: 아직 없어야 정상, 후: 이제 있어야 정상) 같은 키에 서로 다른 답을 줄 수 있어야 한다.
+  // replies[key] 에 배열을 주면 호출 순서대로 소비하고(마지막 값은 그 뒤로도 반복), 기존처럼
+  // 객체 하나만 주면 예전과 동일하게 매 호출 같은 답을 준다 — 기존 테스트는 고칠 필요가 없다.
+  const fakePm2 = (replies: Record<string, Pm2Reply | Pm2Reply[]>) => {
+    const calls: Call[] = [];
+    const seen: Record<string, number> = {};
+    const runPm2 = async (args: string[]) => {
+      calls.push(args);
+      const key = args[0]!;
+      const entry = replies[key];
+      let r: Pm2Reply;
+      if (Array.isArray(entry)) {
+        const idx = seen[key] ?? 0;
+        seen[key] = idx + 1;
+        r = entry[idx] ?? entry[entry.length - 1] ?? { ok: true, stdout: "" };
+      } else {
+        r = entry ?? { ok: true, stdout: "" };
+      }
+      return { ok: r.ok, stdout: r.stdout, stderr: r.stderr ?? "" };
+    };
+    return { calls, runPm2 };
+  };
+  // Finding 5: proc_start 가 시작 뒤 재조회할 때 "정상적으로 떴다"고 볼 jlist 응답을 만든다.
+  const onlineJlist = (name: string, over: Record<string, unknown> = {}) =>
+    JSON.stringify([{ name, pm2_env: { status: "online", pm_uptime: Date.now(), restart_time: 0, args: [], pm_exec_path: "node", ...over }, monit: { memory: 1 } }]);
+
+  it("proc_start 는 주입된 이름과 cwd 로 pm2 start 를 부른다", async () => {
+    // 첫 jlist(사전 중복 확인)는 비어 있고, start 이후 재조회(Finding 5)는 online 을 돌려준다 —
+    // 실제 성공 경로를 그대로 흉내낸다.
+    const { calls, runPm2 } = fakePm2({ jlist: [{ ok: true, stdout: "[]" }, { ok: true, stdout: onlineJlist("asahi-111") }] });
+    const ex = makeExecutors(["C:\\ws"], { runPm2 });
+    const r = await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: "C:\\ws\\111" });
+    expect(r.ok).toBe(true);
+    const start = calls.find((c) => c[0] === "start")!;
+    expect(start).toContain("--name");
+    expect(start).toContain("asahi-111");
+    expect(start).toContain("--cwd");
+    expect(start).toContain("C:\\ws\\111");
+    expect(start.join(" ")).toContain("npm run dev");
+  });
+
+  it("proc_start 는 같은 이름이 이미 있으면 pm2 를 부르지 않고 거절한다(조용한 교체 금지)", async () => {
+    const existing = JSON.stringify([{ name: "asahi-111", pm2_env: { status: "online", pm_uptime: 0, restart_time: 0, args: ["run", "dev"], pm_exec_path: "npm" }, monit: { memory: 1 } }]);
+    const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: existing } });
+    const ex = makeExecutors(["C:\\ws"], { runPm2 });
+    const r = await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: "C:\\ws\\111" });
+    expect(r.ok).toBe(false);
+    expect(r.content).toContain("이미");
+    expect(calls.some((c) => c[0] === "start")).toBe(false);
+  });
+
+  // 리뷰 지적(Minor): 위 중복 거절 메시지는 dup.command 를 그대로 보여준다 — proc_start 가 실제로
+  // 만드는 셸 래퍼 모양(cmd.exe/sh 를 스크립트 자리에 넣는다, 위 commandOf 관련 테스트 참고)으로
+  // 이미 떠 있는 프로세스를 시뮬레이션해, 이 메시지에도 셸 껍데기가 새지 않는지 확인한다.
+  it("이름 충돌 거절 메시지는 실제 proc_start 모양(셸 래퍼)에서도 셸 껍데기 없이 명령만 보여준다", async () => {
+    const existing = JSON.stringify([{ name: "asahi-111", pm2_env: { status: "online", pm_uptime: 0, restart_time: 0, args: ["/c", "npm run dev"], pm_exec_path: "C:\\Windows\\System32\\cmd.exe" }, monit: { memory: 1 } }]);
+    const { runPm2 } = fakePm2({ jlist: { ok: true, stdout: existing } });
+    const ex = makeExecutors(["C:\\ws"], { runPm2 });
+    const r = await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: "C:\\ws\\111" });
+    expect(r.ok).toBe(false);
+    expect(r.content).toContain("npm run dev");
+    expect(r.content).not.toContain("cmd.exe");
+    expect(r.content).not.toContain("/c");
+  });
+
+  it("proc_start 성공 응답은 멈추는 법을 그 자리에서 알려준다", async () => {
+    const { runPm2 } = fakePm2({ jlist: [{ ok: true, stdout: "[]" }, { ok: true, stdout: onlineJlist("asahi-111") }] });
+    const ex = makeExecutors(["C:\\ws"], { runPm2 });
+    const r = await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: "C:\\ws\\111" });
+    expect(r.content).toContain("멈추");
+  });
+
+  // 리뷰 지적(Minor, Finding 5): pm2 의 기본 autorestart 때문에, pm2 start 호출 자체는 성공해도
+  // (pm2 가 프로세스 "등록"에 성공했다는 뜻일 뿐) 명령이 오타 등으로 즉시 죽으면 재시작을
+  // 반복한다("errored"↔재시작을 오간다). start 호출의 ok:true 만 보고 "띄웠어요"라고 먼저
+  // 알리면 이런 크래시 루프도 성공으로 들린다 — 시작 직후 jlist 를 다시 조회해 실제 상태가
+  // online 이 아니면 성공을 주장하지 않는다.
+  it("proc_start 는 시작 직후 재조회에서 online 이 아니면(크래시 루프 등) 성공을 주장하지 않는다", async () => {
+    const crashLooping = onlineJlist("asahi-111", { status: "errored", restart_time: 3 });
+    const { runPm2 } = fakePm2({ jlist: [{ ok: true, stdout: "[]" }, { ok: true, stdout: crashLooping }] });
+    const ex = makeExecutors(["C:\\ws"], { runPm2 });
+    const r = await ex.proc_start!({ command: "오타난명령", name: "asahi-111", cwd: "C:\\ws\\111" });
+    expect(r.ok).toBe(false);
+    expect(r.content).toContain("errored");
+  });
+
+  it("proc_start 는 시작 직후 재조회 자체가 실패해도(연결 끊김 등) 성공을 주장하지 않는다", async () => {
+    const { runPm2 } = fakePm2({ jlist: [{ ok: true, stdout: "[]" }, { ok: false, stdout: "", stderr: "연결 끊김" }] });
+    const ex = makeExecutors(["C:\\ws"], { runPm2 });
+    const r = await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: "C:\\ws\\111" });
+    expect(r.ok).toBe(false);
+  });
+
+  // 리뷰 지적(Minor 3): name·cwd 누락 거절은 프로세스 소유권·1인 1개 상한의 전제 조건인데
+  // 전용 테스트가 없었다. name·cwd 는 봇이 주입하므로(remoteTools.ts, 이후 태스크) 누락은 배선이
+  // 깨졌다는 뜻이고, 그럴 때는 pm2 를 아예 부르지 않아야 한다 — jlist 조회조차 없는지까지
+  // 확인해야 "아무 것도 시작하지 않는다"는 보장이 선다.
+  it("proc_start 는 name·cwd 가 없으면 pm2 를 전혀 부르지 않고 거절한다(배선 오류 방어)", async () => {
+    const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: "[]" } });
+    const ex = makeExecutors(["C:\\ws"], { runPm2 });
+    expect((await ex.proc_start!({ command: "npm run dev", cwd: "C:\\ws\\111" })).ok).toBe(false); // name 없음
+    expect((await ex.proc_start!({ command: "npm run dev", name: "asahi-111" })).ok).toBe(false); // cwd 없음
+    expect((await ex.proc_start!({ command: "npm run dev" })).ok).toBe(false); // 둘 다 없음
+    expect(calls).toEqual([]); // jlist 조회조차 없다 — 이름 없이는 아무 것도 시작하지 않는다
+  });
+
+  // 리뷰 지적(Minor 2): shellFor() 는 "워커 루트로 셸을 정한다(호스트 플랫폼이 아니라)"는 규칙을
+  // 구현하지만 직접 단정하는 테스트가 없었다 — 기존 9개는 전부 윈도우 루트("C:\\ws")만 써서
+  // sh.bin·sh.flag 를 하드코딩해도 통과했을 것이다. 두 플레이버를 각각 확인한다.
+  it("proc_start 는 POSIX 루트에서 sh·-c 로 pm2 를 부른다(호스트 플랫폼이 아니라 워커 루트 기준)", async () => {
+    const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: "[]" } });
+    const ex = makeExecutors(["/w"], { runPm2 });
+    await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: "/w/111" });
+    const start = calls.find((c) => c[0] === "start")!;
+    expect(start).toContain("sh");
+    expect(start).toContain("-c");
+    expect(start).not.toContain("cmd.exe");
+    expect(start).not.toContain("/c");
+  });
+
+  it("proc_start 는 윈도우 루트에서 cmd.exe·/c 로 pm2 를 부른다", async () => {
+    const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: "[]" } });
+    const ex = makeExecutors(["C:\\ws"], { runPm2 });
+    await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: "C:\\ws\\111" });
+    const start = calls.find((c) => c[0] === "start")!;
+    expect(start).toContain("cmd.exe");
+    expect(start).toContain("/c");
+    expect(start).not.toContain("sh");
+    expect(start).not.toContain("-c");
+  });
+
+  it("proc_stop 은 pm2 delete 를 부른다", async () => {
+    const { calls, runPm2 } = fakePm2({ delete: { ok: true, stdout: "" } });
+    const ex = makeExecutors(["C:\\ws"], { runPm2 });
+    const r = await ex.proc_stop!({ name: "asahi-111" });
+    expect(r.ok).toBe(true);
+    expect(calls).toContainEqual(["delete", "asahi-111"]);
+  });
+
+  it("proc_stop 은 없는 이름이면 실패로 돌려준다", async () => {
+    const { runPm2 } = fakePm2({ delete: { ok: false, stdout: "", stderr: "Process not found" } });
+    const ex = makeExecutors(["C:\\ws"], { runPm2 });
+    const r = await ex.proc_stop!({ name: "asahi-111" });
+    expect(r.ok).toBe(false);
+  });
+
+  // 리뷰 지적(Important, 병합 차단): proc_list 는 소유자에게 필터를 걸지 않으므로 asahi-assistant·
+  // asahi-worker(봇·워커 자신, deploy/ecosystem.config.cjs)도 평범한 회원 행처럼 보인다.
+  // remoteTools.ts 는 소유자가 지정한 이름을 검증 없이 그대로 pm2 delete 로 넘기므로(260행 부근),
+  // "돌고 있는 거 다 정리해줘" 같은 지시가 모델을 거쳐 워커 자체를 지울 수 있었다 — pm2 delete 는
+  // 완전히 제거하므로 autorestart 로도 못 돌아온다. parseProcName 이 이미 회원 이름과 인프라
+  // 이름을 구분하므로(asahi-<숫자> 만 회원), 그 판정을 실행기 자신이 pm2 를 부르기 "전"에 강제한다.
+  it("proc_stop 은 asahi-<숫자> 형식이 아닌 이름(봇·워커 자신)을 pm2 를 부르지 않고 거절한다", async () => {
+    for (const infraName of ["asahi-worker", "asahi-assistant", "something-else"]) {
+      const { calls, runPm2 } = fakePm2({ delete: { ok: true, stdout: "" } });
+      const ex = makeExecutors(["C:\\ws"], { runPm2 });
+      const r = await ex.proc_stop!({ name: infraName });
+      expect(r.ok, `${infraName} 을 멈출 수 있었다`).toBe(false);
+      expect(r.content).toContain("회원");
+      expect(calls.some((c) => c[0] === "delete"), `${infraName} 에 pm2 delete 가 호출됐다`).toBe(false);
+    }
+  });
+
+  it("proc_list 는 jlist 를 파싱해 표로 돌려준다", async () => {
+    const stdout = JSON.stringify([{ name: "asahi-111", pm2_env: { status: "online", pm_uptime: 0, restart_time: 2, args: ["run", "dev"], pm_exec_path: "npm" }, monit: { memory: 5 * 1024 * 1024 } }]);
+    const { runPm2 } = fakePm2({ jlist: { ok: true, stdout } });
+    const ex = makeExecutors(["C:\\ws"], { runPm2 });
+    const r = await ex.proc_list!({});
+    expect(r.ok).toBe(true);
+    expect(r.content).toContain("asahi-111");
+    expect(r.content).toContain("재시작 2");
+  });
+
+  // 리뷰 지적(Important, 병합 차단): proc_list 의 onlyUserId 필터는 손님이 남의 프로세스를 못
+  // 보게 막는 유일한 격리 장치인데, 기존 테스트는 전부 ex.proc_list({}) 만 불러 only 가 항상
+  // undefined 였다 — .filter(...) 분기 자체가 스위트 어디서도 실행되지 않았다. 여기서는 3개짜리
+  // jlist(회원 둘 + 워커 자신)에 onlyUserId 를 실제로 넘겨, 지정한 회원의 것만 남는지 직접
+  // 단정한다.
+  it("proc_list 는 onlyUserId 가 있으면 그 사용자 것만 남긴다(손님 격리 — 유일한 방어선)", async () => {
+    const stdout = JSON.stringify([
+      { name: "asahi-111", pm2_env: { status: "online", pm_uptime: 0, restart_time: 0, args: ["run", "dev"], pm_exec_path: "npm" }, monit: { memory: 1 } },
+      { name: "asahi-222", pm2_env: { status: "online", pm_uptime: 0, restart_time: 0, args: ["run", "build"], pm_exec_path: "npm" }, monit: { memory: 1 } },
+      { name: "asahi-worker", pm2_env: { status: "online", pm_uptime: 0, restart_time: 0, args: [], pm_exec_path: "node" }, monit: { memory: 1 } },
+    ]);
+    const { runPm2 } = fakePm2({ jlist: { ok: true, stdout } });
+    const ex = makeExecutors(["C:\\ws"], { runPm2 });
+    const r = await ex.proc_list!({ onlyUserId: "111" });
+    expect(r.ok).toBe(true);
+    expect(r.content).toContain("asahi-111");
+    expect(r.content).not.toContain("asahi-222");
+    expect(r.content).not.toContain("asahi-worker");
+  });
+
+  it("proc_logs 는 nostream 으로 부르고 줄 수를 넘긴다", async () => {
+    const { calls, runPm2 } = fakePm2({ logs: { ok: true, stdout: "로그 본문" } });
+    const ex = makeExecutors(["C:\\ws"], { runPm2 });
+    const r = await ex.proc_logs!({ name: "asahi-111", lines: 30 });
+    expect(r.ok).toBe(true);
+    expect(r.content).toContain("로그 본문");
+    const logs = calls.find((c) => c[0] === "logs")!;
+    expect(logs).toContain("--nostream");
+    expect(logs).toContain("30");
+  });
+
+  // 리뷰 지적(Minor, Finding 7): lines 는 1..200 으로 클램프되고 기본값은 50 인데, 기존 테스트는
+  // lines:30(클램프 범위 안의 평범한 값) 하나만 다뤄 기본값과 양쪽 클램프 경계가 전혀 검증되지
+  // 않았다. 세 경우를 모두 채운다 — lines 생략(기본값), 하한 미만(0 이하), 상한 초과(200 초과).
+  it("proc_logs 는 lines 를 생략하면 기본값 50줄을 쓴다", async () => {
+    const { calls, runPm2 } = fakePm2({ logs: { ok: true, stdout: "로그" } });
+    const ex = makeExecutors(["C:\\ws"], { runPm2 });
+    await ex.proc_logs!({ name: "asahi-111" });
+    const logs = calls.find((c) => c[0] === "logs")!;
+    expect(logs).toContain("50");
+  });
+
+  it("proc_logs 는 lines 하한(1) 밑으로 내려가지 않는다", async () => {
+    const { calls, runPm2 } = fakePm2({ logs: { ok: true, stdout: "로그" } });
+    const ex = makeExecutors(["C:\\ws"], { runPm2 });
+    await ex.proc_logs!({ name: "asahi-111", lines: -5 });
+    const logs = calls.find((c) => c[0] === "logs")!;
+    expect(logs).toContain("1");
+    expect(logs).not.toContain("-5");
+  });
+
+  it("proc_logs 는 lines 상한(200)을 넘지 않는다", async () => {
+    const { calls, runPm2 } = fakePm2({ logs: { ok: true, stdout: "로그" } });
+    const ex = makeExecutors(["C:\\ws"], { runPm2 });
+    await ex.proc_logs!({ name: "asahi-111", lines: 9999 });
+    const logs = calls.find((c) => c[0] === "logs")!;
+    expect(logs).toContain("200");
+    expect(logs).not.toContain("9999");
+  });
+
+  // 리뷰 지적(Important, 병합 차단): proc_stop 과 같은 이유로 proc_logs 도 봇·워커 자신의 로그를
+  // 회원에게 그대로 노출할 수 있었다 — 이름 형식 검증이 없어 asahi-assistant·asahi-worker 를
+  // 그대로 pm2 logs 에 넘겼다.
+  it("proc_logs 는 asahi-<숫자> 형식이 아닌 이름(봇·워커 자신)을 pm2 를 부르지 않고 거절한다", async () => {
+    for (const infraName of ["asahi-worker", "asahi-assistant"]) {
+      const { calls, runPm2 } = fakePm2({ logs: { ok: true, stdout: "로그 본문" } });
+      const ex = makeExecutors(["C:\\ws"], { runPm2 });
+      const r = await ex.proc_logs!({ name: infraName });
+      expect(r.ok, `${infraName} 의 로그를 볼 수 있었다`).toBe(false);
+      expect(r.content).toContain("회원");
+      expect(calls.some((c) => c[0] === "logs"), `${infraName} 에 pm2 logs 가 호출됐다`).toBe(false);
+    }
+  });
+
+  it("pm2 가 실패하면 stderr 를 사유로 돌려준다", async () => {
+    const { runPm2 } = fakePm2({ jlist: { ok: false, stdout: "", stderr: "pm2 를 찾을 수 없습니다" } });
+    const ex = makeExecutors(["C:\\ws"], { runPm2 });
+    const r = await ex.proc_list!({});
+    expect(r.ok).toBe(false);
+    expect(r.content).toContain("pm2");
+  });
+
+  it("roots 가 비면 거절한다(sh_exec 와 같은 규칙)", async () => {
+    const { runPm2 } = fakePm2({});
+    const ex = makeExecutors([], { runPm2 });
+    expect((await ex.proc_list!({})).ok).toBe(false);
+  });
+});
+
+// 리뷰 지적(Important) 수정 검증. 기본 runPm2 의 실제 spawn 경로는 이음매 설계상 이 스위트 어디서도
+// 지나가지 않는다(위 블록 전부 fakePm2 를 주입한다) — 그래서 인용 로직 자체를 순수 함수로 떼어
+// 여기서 직접 단정한다. buildPm2CommandLine 은 executors.ts 의 기본 runPm2 가 실제로 호출하는 바로
+// 그 함수다(재구현이 아니다). 기대값은 Node 의 실제 spawn(그 문자열, {shell:true}) 라운드트립으로
+// 먼저 실측 확인했다 — 인용 없이 join 만 하면(예전 버그) 같은 인자가 7개가 아니라 10개 토큰으로
+// 쪼개졌고, 여기 인용을 거치면 정확히 원래 개수로 돌아온다.
+describe("buildPm2CommandLine — pm2 명령줄 인용(리뷰 Important 수정)", () => {
+  it("공백 없는 단순 토큰은 따옴표 없이 그대로 둔다(로그 가독성)", () => {
+    const line = buildPm2CommandLine(["start", "sh", "--name", "asahi-111"], "posix");
+    expect(line).toBe("pm2 start sh --name asahi-111");
+  });
+
+  it("POSIX 플레이버는 공백 든 인자를 작은따옴표로 감싼다(리뷰가 실측한 인자 배열)", () => {
+    // 예전 코드(join(' ')) 라면 "npm run dev" 가 공백마다 쪼개져 pm2 에 5개가 아니라 7개의
+    // argv 가 전달됐다 — 리뷰가 실측한 바로 그 사례.
+    const line = buildPm2CommandLine(["--name", "asahi-111", "--", "-c", "npm run dev"], "posix");
+    expect(line).toBe("pm2 --name asahi-111 -- -c 'npm run dev'");
+  });
+
+  it("윈도우 플레이버는 공백 든 인자를 큰따옴표로 감싼다(공백 든 --cwd 경로 포함)", () => {
+    // 실제 윈도우 작업폴더는 사용자 이름에 공백이 들어갈 수 있다(예: "Jane Smith").
+    const line = buildPm2CommandLine(
+      ["start", "cmd.exe", "--name", "asahi-111", "--cwd", "C:\\Users\\Jane Smith\\ws\\111", "--", "/c", "npm run dev"],
+      "win32",
+    );
+    expect(line).toBe(
+      'pm2 start cmd.exe --name asahi-111 --cwd "C:\\Users\\Jane Smith\\ws\\111" -- /c "npm run dev"',
+    );
+  });
+
+  it("POSIX 는 인자에 든 작은따옴표를 이스케이프한다(따옴표 자체가 토큰 경계를 깨지 않게)", () => {
+    // 작은따옴표 안에는 이스케이프가 없으므로 공백이 없어도 인용 대상이다 — needsQuoting 이
+    // 공백만 보면 이 경우를 놓친다.
+    const line = buildPm2CommandLine(["it's"], "posix");
+    expect(line).toBe("pm2 'it'\\''s'");
+  });
+
+  it("빈 문자열 인자도 따옴표로 감싸 사라지지 않게 한다", () => {
+    const line = buildPm2CommandLine(["start", ""], "posix");
+    expect(line).toBe("pm2 start ''");
+  });
+});
+
+// 후속 리뷰 지적(Important) 수정 검증. 위 5개 테스트가 통과하던 시점에도 quoteWin32 는 인자를
+// "..." 로 감싸기만 했고, 인자 안의 큰따옴표 자체는 전혀 이스케이프하지 않았다. 실측(리뷰가 실제
+// cmd.exe 로 확인): buildPm2CommandLine([..., 'npm run dev -- --title="hi there"'], "win32") 를
+// 그대로 다시 spawn(그 문자열, {shell:true}) 하면 큰따옴표가 조용히 사라지고 인자가 둘로 쪼개진다
+// ("npm run dev -- --title=hi" 와 "there") — 공백 대신 큰따옴표가 방아쇠라는 점만 다를 뿐, 원래
+// 버그와 같은 조용한 손상 클래스다. 아래는 MSVCRT/CommandLineToArgvW 표준 인용 규칙(큰따옴표
+// 앞의 백슬래시만 두 배로 늘리고 큰따옴표는 \" 로 이스케이프)을 정확한 문자열로 고정한다. 기대값은
+// POSIX 인용 테스트와 같은 원칙으로, 손으로 지어내지 않고 이 인자들을 실제
+// spawn(문자열, {shell:true})로 다시 라운드트립해 원래 배열과 바이트 단위로 같아지는 것까지 먼저
+// 실측 확인한 뒤 옮겨 적었다.
+describe("buildPm2CommandLine — 윈도우 큰따옴표 이스케이프(추가 리뷰 Important 수정)", () => {
+  it("윈도우 플레이버는 인자에 든 큰따옴표를 이스케이프한다(리뷰가 실측한 cmd.exe 라운드트립 사례)", () => {
+    // 리뷰가 실측으로 보고한 바로 그 사례 — 공백이 있어 인용 대상인 건 이전 라운드부터 그랬지만,
+    // 감싸는 큰따옴표 안의 두 " 가 지금까지는 전혀 이스케이프되지 않았다.
+    const line = buildPm2CommandLine(['npm run dev -- --title="hi there"'], "win32");
+    expect(line).toBe('pm2 "npm run dev -- --title=\\"hi there\\""');
+  });
+
+  it("윈도우 플레이버는 인자 끝의 백슬래시를 닫는 큰따옴표 앞에서 두 배로 늘린다", () => {
+    // 실제 윈도우 작업폴더가 백슬래시로 끝나는 경우(예: 사용자가 트레일링 슬래시를 붙인 cwd).
+    // 늘리지 않으면 그 백슬래시가 우리가 붙이는 닫는 큰따옴표를 이스케이프해버려 따옴표가 안
+    // 닫힌 것처럼 파싱된다.
+    const line = buildPm2CommandLine(["C:\\Users\\Jane Smith\\ws\\111\\"], "win32");
+    expect(line).toBe('pm2 "C:\\Users\\Jane Smith\\ws\\111\\\\"');
+  });
+
+  it("윈도우 플레이버는 백슬래시가 바로 앞에 오는 큰따옴표도 이스케이프한다(공백 없이 큰따옴표만 있어도 인용 대상)", () => {
+    // 공백이 전혀 없는 인자 — needsQuoting 이 윈도우에서도 큰따옴표 포함 여부를 보도록 고치지
+    // 않으면 이 인자는 애초에 인용조차 되지 않아 quoteWin32 의 이스케이프가 한 번도 호출되지
+    // 않는다(그러면 인용 안 된 토큰 안의 "가 표준 argv 파서의 따옴표 모드를 그 자체로 토글해버려
+    // 공백 없이도 조용히 다른 방식으로 깨진다).
+    const line = buildPm2CommandLine(['a\\"b'], "win32");
+    expect(line).toBe('pm2 "a\\\\\\"b"');
   });
 });
