@@ -437,6 +437,20 @@ describe("proc_* 실행기 — PM2 위임", () => {
     expect(calls.some((c) => c[0] === "start")).toBe(false);
   });
 
+  // 리뷰 지적(Minor): 위 중복 거절 메시지는 dup.command 를 그대로 보여준다 — proc_start 가 실제로
+  // 만드는 셸 래퍼 모양(cmd.exe/sh 를 스크립트 자리에 넣는다, 위 commandOf 관련 테스트 참고)으로
+  // 이미 떠 있는 프로세스를 시뮬레이션해, 이 메시지에도 셸 껍데기가 새지 않는지 확인한다.
+  it("이름 충돌 거절 메시지는 실제 proc_start 모양(셸 래퍼)에서도 셸 껍데기 없이 명령만 보여준다", async () => {
+    const existing = JSON.stringify([{ name: "asahi-111", pm2_env: { status: "online", pm_uptime: 0, restart_time: 0, args: ["/c", "npm run dev"], pm_exec_path: "C:\\Windows\\System32\\cmd.exe" }, monit: { memory: 1 } }]);
+    const { runPm2 } = fakePm2({ jlist: { ok: true, stdout: existing } });
+    const ex = makeExecutors(["C:\\ws"], { runPm2 });
+    const r = await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: "C:\\ws\\111" });
+    expect(r.ok).toBe(false);
+    expect(r.content).toContain("npm run dev");
+    expect(r.content).not.toContain("cmd.exe");
+    expect(r.content).not.toContain("/c");
+  });
+
   it("proc_start 성공 응답은 멈추는 법을 그 자리에서 알려준다", async () => {
     const { runPm2 } = fakePm2({ jlist: { ok: true, stdout: "[]" } });
     const ex = makeExecutors(["C:\\ws"], { runPm2 });

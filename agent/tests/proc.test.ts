@@ -65,6 +65,22 @@ describe("proc — pm2 jlist 파싱", () => {
     expect(p!.memoryBytes).toBeNull();
     expect(p!.uptimeMs).toBeNull();
   });
+
+  // 리뷰 지적(Minor): executors.ts 의 proc_start 는 pm2 의 "스크립트" 자리에 셸(cmd.exe/sh)을
+  // 넣고 실제 명령은 "-- <flag> <command>" 로 넘긴다 — pm2 는 그 셸을 pm_exec_path 로, [flag,
+  // command] 를 args 로 그대로 돌려주므로, 위 row() 의 기본 픽스처(pm_exec_path: npm.cmd,
+  // args: ["run","dev"])는 이 브랜치의 proc_start 가 절대 만들 수 없는 모양이다 — 그래서 이
+  // 구멍이 스위트 전체로도 드러나지 않았다. proc_start 가 실제로 만드는 모양을 그대로 재현해
+  // commandOf 가 셸 이름·플래그를 걷어내고 진짜 명령만 보여주는지 확인한다.
+  it("proc_start 가 실제로 만드는 모양(윈도우 셸 래퍼)은 cmd.exe·/c 를 걷어내고 명령만 보여준다", () => {
+    const [p] = parsePm2List(jlist([row("asahi-111", { pm2_env: { pm_exec_path: "C:\\Windows\\System32\\cmd.exe", args: ["/c", "npm run dev"] } })]));
+    expect(p!.command).toBe("npm run dev");
+  });
+
+  it("proc_start 가 실제로 만드는 모양(POSIX 셸 래퍼)은 sh·-c 를 걷어내고 명령만 보여준다", () => {
+    const [p] = parsePm2List(jlist([row("asahi-111", { pm2_env: { pm_exec_path: "/bin/sh", args: ["-c", "npm run dev"] } })]));
+    expect(p!.command).toBe("npm run dev");
+  });
 });
 
 describe("proc — 표 렌더링", () => {

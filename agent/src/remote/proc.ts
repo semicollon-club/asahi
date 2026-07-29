@@ -47,10 +47,20 @@ const num = (v: unknown): number | null => (typeof v === "number" && Number.isFi
 
 // pm2 가 실행 중인 명령을 하나의 문자열로 복원한다. pm_exec_path 는 절대경로라 그대로 보여주면
 // 한 줄을 잡아먹으므로 마지막 조각만 쓴다(사람이 알아보는 데는 그것으로 충분하다).
+//
+// 리뷰 지적(Minor): proc_start(executors.ts)는 pm2 의 "스크립트" 자리에 cmd.exe/sh 를 넣고 실제
+// 명령은 "-- <flag> <command>" 로 넘긴다(shellFor() 참고) — pm2 는 그 셸을 pm_exec_path 로,
+// [flag, command] 를 그대로 args 로 돌려준다. 아무 가공 없이 이어붙이면 "cmd.exe /c npm run dev"
+// 처럼 셸 껍데기가 그대로 드러나 "npm run dev" 로 읽히도록 설계한 의도가 깨진다. 맨 앞 인자가 그
+// 두 플래그(/c 또는 -c) 중 하나면 셸 호출로 보고, exec(셸 이름)는 버리고 플래그를 뗀 나머지(실제
+// 명령)만 보여준다 — 이 파일은 executors.ts 를 모르므로(파일 상단 주석) shellFor() 의 flag 값을
+// 문자열 리터럴로 직접 안다.
 function commandOf(env: RawEnv | undefined): string {
   const exec = typeof env?.pm_exec_path === "string" ? env.pm_exec_path.split(/[\\/]/).pop() ?? "" : "";
   const args = Array.isArray(env?.args) ? env.args.filter((a): a is string => typeof a === "string") : [];
-  return [exec, ...args].filter((s) => s.length > 0).join(" ") || "(알 수 없음)";
+  const isShellWrapper = args[0] === "/c" || args[0] === "-c";
+  const parts = isShellWrapper ? args.slice(1) : [exec, ...args];
+  return parts.filter((s) => s.length > 0).join(" ") || "(알 수 없음)";
 }
 
 // pm2 는 경고를 stdout 에 섞어 뱉는 경우가 있다. 파싱 실패로 도구 전체를 죽이지 않고 빈 목록으로
