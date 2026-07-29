@@ -685,6 +685,15 @@ export function makeExecutors(roots: string[], opts: { runPm2?: RunPm2; killTree
       // proc_stop 과 같은 이유(NOT_MEMBER_PROC_MSG 선언부 주석 참고) — 봇·워커 자신의 로그를
       // 회원에게 그대로 노출하지 않는다.
       if (parseProcName(name) === null) return { ok: false, content: NOT_MEMBER_PROC_MSG };
+      // Defect 3(운영 중 발견, 문서만): pm2 가 캡처하는 stdout 은 파이프 버퍼링을 거친다 — 자식
+      // 프로세스가 stdout 을 파일이 아니라 파이프로 볼 때, 많은 런타임의 표준 출력 버퍼가 줄
+      // 단위(line-buffered)가 아니라 블록 단위(fully-buffered)로 바뀌는 게 원인이다(터미널에
+      // 붙어 있을 때만 줄 단위가 되는 게 흔한 기본값이다). 실측: 계속 출력을 내는 `ping -t` 를
+      // pm2 로 띄웠더니 "정상적으로 실행 중"인데도 이 도구가 돌려주는 로그가 0바이트였다 — 같은
+      // 명령을 파일로 리다이렉트해서 실제로 출력이 쌓이고 있음을 별도로 확인했다(pm2 문제가
+      // 아니라 파이프 자체의 특성). 그래서 이 도구가 빈 로그("(로그가 비어 있어요)")를 돌려줘도
+      // "그 프로세스가 안 돌고 있다"거나 "출력을 안 냈다"는 뜻이 아니다 — proc_list 로 status 를
+      // 함께 확인해야 한다. 다음에 이걸로 헤매지 않도록 여기 남긴다 — 동작은 바꾸지 않는다.
       const lines = Math.max(1, Math.min(num(args.lines) ?? PROC_LOG_DEFAULT_LINES, 200));
       const r = await runPm2(["logs", name, "--nostream", "--lines", String(lines)]);
       if (!r.ok) return { ok: false, content: `로그를 가져오지 못했어요: ${r.stderr.trim() || "그런 프로세스가 없어요"}` };
