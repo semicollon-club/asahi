@@ -610,6 +610,35 @@ describe("proc_* 실행기 — PM2 위임", () => {
     expect(logs).toContain("30");
   });
 
+  // 리뷰 지적(Minor, Finding 7): lines 는 1..200 으로 클램프되고 기본값은 50 인데, 기존 테스트는
+  // lines:30(클램프 범위 안의 평범한 값) 하나만 다뤄 기본값과 양쪽 클램프 경계가 전혀 검증되지
+  // 않았다. 세 경우를 모두 채운다 — lines 생략(기본값), 하한 미만(0 이하), 상한 초과(200 초과).
+  it("proc_logs 는 lines 를 생략하면 기본값 50줄을 쓴다", async () => {
+    const { calls, runPm2 } = fakePm2({ logs: { ok: true, stdout: "로그" } });
+    const ex = makeExecutors(["C:\\ws"], { runPm2 });
+    await ex.proc_logs!({ name: "asahi-111" });
+    const logs = calls.find((c) => c[0] === "logs")!;
+    expect(logs).toContain("50");
+  });
+
+  it("proc_logs 는 lines 하한(1) 밑으로 내려가지 않는다", async () => {
+    const { calls, runPm2 } = fakePm2({ logs: { ok: true, stdout: "로그" } });
+    const ex = makeExecutors(["C:\\ws"], { runPm2 });
+    await ex.proc_logs!({ name: "asahi-111", lines: -5 });
+    const logs = calls.find((c) => c[0] === "logs")!;
+    expect(logs).toContain("1");
+    expect(logs).not.toContain("-5");
+  });
+
+  it("proc_logs 는 lines 상한(200)을 넘지 않는다", async () => {
+    const { calls, runPm2 } = fakePm2({ logs: { ok: true, stdout: "로그" } });
+    const ex = makeExecutors(["C:\\ws"], { runPm2 });
+    await ex.proc_logs!({ name: "asahi-111", lines: 9999 });
+    const logs = calls.find((c) => c[0] === "logs")!;
+    expect(logs).toContain("200");
+    expect(logs).not.toContain("9999");
+  });
+
   // 리뷰 지적(Important, 병합 차단): proc_stop 과 같은 이유로 proc_logs 도 봇·워커 자신의 로그를
   // 회원에게 그대로 노출할 수 있었다 — 이름 형식 검증이 없어 asahi-assistant·asahi-worker 를
   // 그대로 pm2 logs 에 넘겼다.
