@@ -515,4 +515,27 @@ describe("buildSystemPrompt — 장기 실행 프로세스 도구를 안내한�
     const cap = capabilitySection(buildSystemPrompt({ role: "allowed", isPrivate: false, isOwner: false }));
     expect(cap).not.toMatch(/proc_start/);
   });
+
+  // 2차 리뷰 Important — 아래 두 클레임은 손님이 그대로 믿고 행동하는 내용이다(executors.ts 가
+  // 실제로 강제하는 동작과 일치해야 한다). 이름 존재(/proc_start/)만 보는 위 테스트로는 이 문장이
+  // 통째로 뒤집혀도(예: "여러 개 띄울 수 있고", "재부팅해도 유지됩니다") 잡아내지 못한다.
+  it("손님 분기는 한 사람당 하나만 띄울 수 있다고 안내한다(executors.ts 의 중복 거부와 일치)", () => {
+    const guestBranches = [{ isPrivate: true }, { isPrivate: false }];
+    for (const b of guestBranches) {
+      const p = buildSystemPrompt({ role: "allowed", isOwner: false, ...b, workerConnected: true });
+      // "여러 개 띄울 수 있고" 로 뒤집히면 "한 사람당 하나"라는 substring 자체가 사라진다.
+      expect(capabilitySection(p)).toMatch(/한 사람당 하나/);
+    }
+  });
+
+  it("손님 분기는 공유 기계가 재부팅되면 프로세스가 전부 사라진다고 안내한다(pm2 save/resurrect 없음과 일치)", () => {
+    const guestBranches = [{ isPrivate: true }, { isPrivate: false }];
+    for (const b of guestBranches) {
+      const p = buildSystemPrompt({ role: "allowed", isOwner: false, ...b, workerConnected: true });
+      // "재부팅해도 유지됩니다" 로 뒤집히면 "사라집니다"가 사라진다. 어간 "사라"만 보면
+      // "사라지지 않습니다" 같은 부정문(같은 어간을 공유)에도 걸려 뒤집힘을 놓치므로,
+      // 활용까지 포함한 "사라집니다"를 "재부팅"과 함께 고정한다.
+      expect(capabilitySection(p)).toMatch(/재부팅.*사라집니다/);
+    }
+  });
 });
