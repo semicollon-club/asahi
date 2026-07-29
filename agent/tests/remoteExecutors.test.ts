@@ -652,6 +652,81 @@ describe("proc_* 실행기 — PM2 위임", () => {
     }
   });
 
+  // ── Defect 2(운영 중 발견): pm2 delete 는 pm2 가 직접 아는 자식(cmd.exe/sh)만 죽이고, 그 밑의
+  // 실제 프로세스 트리(회원의 npm·vite 등, 손자 프로세스)는 그대로 남는다 — 운영 재현: "멈췄어요"
+  // 응답 뒤에도 npm run dev·vite.js 가 포트를 붙든 채 계속 돌았고 proc_list 에는 아예 나타나지
+  // 않는 고아가 됐다. proc_stop 은 pm2 delete 전에 jlist 로 pid 를 찾아 트리 전체를 끝낸다. 실제
+  // 프로세스를 하나도 죽이지 않도록, 이 kill 은 runPm2 와 같은 이유로 이음매(opts.killTree) 뒤에서
+  // 검증한다.
+  describe("proc_stop — pm2 delete 전에 프로세스 트리 전체를 끝낸다(Defect 2)", () => {
+    const jlistWith = (name: string, pid: number) =>
+      JSON.stringify([{ name, pid, pm2_env: { status: "online", pm_uptime: 0, restart_time: 0, args: ["run", "dev"], pm_exec_path: "npm" }, monit: { memory: 1 } }]);
+
+    it("jlist 에서 pid 를 찾아 pm2 delete 보다 먼저 killTree 를 부른다(순서까지 확인)", async () => {
+      const order: string[] = [];
+      const { runPm2 } = fakePm2({ jlist: { ok: true, stdout: jlistWith("asahi-111", 7872) }, delete: { ok: true, stdout: "" } });
+      const wrappedRunPm2 = async (args: string[]) => {
+        order.push(`pm2:${args[0]}`);
+        return runPm2(args);
+      };
+      const killTree = async (pid: number) => { order.push(`kill:${pid}`); };
+      const ex = makeExecutors([root], { runPm2: wrappedRunPm2, killTree });
+      const r = await ex.proc_stop!({ name: "asahi-111" });
+      expect(r.ok).toBe(true);
+      expect(order).toEqual(["pm2:jlist", "kill:7872", "pm2:delete"]);
+    });
+
+    it("jlist 에 그 이름이 없으면(이미 사라졌거나 목록 조회가 비어 있으면) killTree 를 건너뛰고 pm2 delete 는 그대로 시도한다", async () => {
+      const killCalls: number[] = [];
+      const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: "[]" }, delete: { ok: true, stdout: "" } });
+      const killTree = async (pid: number) => { killCalls.push(pid); };
+      const ex = makeExecutors([root], { runPm2, killTree });
+      const r = await ex.proc_stop!({ name: "asahi-111" });
+      expect(r.ok).toBe(true);
+      expect(killCalls).toEqual([]);
+      expect(calls).toContainEqual(["delete", "asahi-111"]);
+    });
+
+    it("pid 필드가 없는 jlist 항목(예: 파싱 실패)이어도 killTree 를 부르지 않고 delete 는 그대로 진행한다", async () => {
+      const killCalls: number[] = [];
+      const noPidJlist = JSON.stringify([{ name: "asahi-111", pm2_env: { status: "online" } }]); // pid 없음
+      const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: noPidJlist }, delete: { ok: true, stdout: "" } });
+      const killTree = async (pid: number) => { killCalls.push(pid); };
+      const ex = makeExecutors([root], { runPm2, killTree });
+      const r = await ex.proc_stop!({ name: "asahi-111" });
+      expect(r.ok).toBe(true);
+      expect(killCalls).toEqual([]);
+      expect(calls).toContainEqual(["delete", "asahi-111"]);
+    });
+
+    it("killTree 를 주입하지 않아도(opts 생략) proc_stop 은 그대로 동작한다 — 기존 호출부(worker.ts)는 손댈 필요가 없다", async () => {
+      const { runPm2 } = fakePm2({ jlist: { ok: true, stdout: jlistWith("asahi-111", 111) }, delete: { ok: true, stdout: "" } });
+      const ex = makeExecutors([root], { runPm2 }); // killTree 생략 — 기본 구현으로 떨어진다
+      const r = await ex.proc_stop!({ name: "asahi-111" });
+      expect(r.ok).toBe(true);
+    });
+
+    it("killTree 가 실패해도(이미 죽었거나 권한 문제) pm2 delete 는 계속 진행하고 그 성패로 응답한다", async () => {
+      const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: jlistWith("asahi-111", 7872) }, delete: { ok: true, stdout: "" } });
+      const killTree = async () => { throw new Error("이미 죽은 프로세스"); };
+      const ex = makeExecutors([root], { runPm2, killTree });
+      const r = await ex.proc_stop!({ name: "asahi-111" });
+      expect(r.ok).toBe(true);
+      expect(calls).toContainEqual(["delete", "asahi-111"]);
+    });
+
+    it("asahi-<숫자> 형식이 아닌 이름(봇·워커 자신)은 killTree 도, jlist 조회도 없이 그대로 거절한다(기존 방어선 그대로)", async () => {
+      const killCalls: number[] = [];
+      const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: jlistWith("asahi-worker", 999) }, delete: { ok: true, stdout: "" } });
+      const killTree = async (pid: number) => { killCalls.push(pid); };
+      const ex = makeExecutors([root], { runPm2, killTree });
+      const r = await ex.proc_stop!({ name: "asahi-worker" });
+      expect(r.ok).toBe(false);
+      expect(killCalls).toEqual([]);
+      expect(calls).toEqual([]); // jlist 조회조차 없다 — 회원 이름 검증이 가장 먼저다
+    });
+  });
+
   it("proc_list 는 jlist 를 파싱해 표로 돌려준다", async () => {
     const stdout = JSON.stringify([{ name: "asahi-111", pm2_env: { status: "online", pm_uptime: 0, restart_time: 2, args: ["run", "dev"], pm_exec_path: "npm" }, monit: { memory: 5 * 1024 * 1024 } }]);
     const { runPm2 } = fakePm2({ jlist: { ok: true, stdout } });

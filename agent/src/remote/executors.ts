@@ -40,6 +40,15 @@ const FORCE_KILL_GRACE_MS = 2_000;
 // 소실)이 정확히 그렇게 다섯 번의 리뷰를 통과했다.
 export type RunPm2 = (args: string[]) => Promise<{ ok: boolean; stdout: string; stderr: string }>;
 
+// Defect 2(운영 중 발견): pm2 delete 는 pm2 가 직접 아는 자식(cmd.exe/sh)만 죽이고 그 밑의 실제
+// 프로세스 트리(회원의 npm·vite 등, 손자 프로세스)는 그대로 남는다 — 운영 재현: proc_stop 이
+// "멈췄어요"를 응답한 뒤에도 npm run dev·vite.js 가 포트를 붙든 채 계속 돌았고 proc_list 에는
+// 아예 나타나지 않는 고아가 됐다(pm2 의 treekill 옵션이 윈도우에서 기본 true 라고 알려져 있지만,
+// 이 사고에서는 그 기본값이 실제로 트리를 못 죽였다). RunPm2 와 같은 이유로 이음매 뒤로 뺀다 —
+// 테스트가 실제 프로세스를 하나도 죽이지 않고도 "정확한 pid 로, pm2 delete 보다 먼저 불렸는지"를
+// 확인할 수 있어야 한다.
+export type KillTree = (pid: number) => Promise<void>;
+
 // shellFor()·기본 runPm2(아래)가 함께 쓰는 "워커가 윈도우인지 POSIX 인지" 판정 결과 타입.
 export type ShellFlavor = "win32" | "posix";
 
@@ -156,7 +165,7 @@ function truncate(s: string): string {
 const str = (v: unknown): string | undefined => (typeof v === "string" && v.length > 0 ? v : undefined);
 const num = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
 
-export function makeExecutors(roots: string[], opts: { runPm2?: RunPm2 } = {}): Executors {
+export function makeExecutors(roots: string[], opts: { runPm2?: RunPm2; killTree?: KillTree } = {}): Executors {
   const runPm2: RunPm2 =
     opts.runPm2 ??
     ((args) =>
@@ -173,6 +182,50 @@ export function makeExecutors(roots: string[], opts: { runPm2?: RunPm2 } = {}): 
         child.stderr.on("data", (c: Buffer) => { stderr += c.toString(); });
         child.on("error", (e) => resolve({ ok: false, stdout, stderr: String(e) }));
         child.on("close", (code) => resolve({ ok: code === 0, stdout, stderr }));
+      }));
+
+  // Defect 2 기본 구현. 플랫폼은 shellFor()·기본 runPm2 와 정확히 같은 기준(shellFlavorOf →
+  // pathFlavorOf(roots[0]))으로 고른다 — process.platform 을 쓰면 안 되는 이유도 같다: 이
+  // executors.ts 모듈 자체는 실제로 워커 프로세스 위에서 실행되므로 오늘은 결과가 같지만, "무엇을
+  // 신뢰의 기준으로 삼는가"를 이미 검증된 WORKER_ROOTS(설정)로 통일해 두면 이 함수가 언제 어디서
+  // 불려도(예: 테스트) 근거가 하나뿐이다.
+  const killTree: KillTree =
+    opts.killTree ??
+    ((pid) =>
+      new Promise((resolve) => {
+        if (shellFlavorOf(roots) === "win32") {
+          // pm2 는 cmd.exe /c <command> 를 띄우고, 회원의 실제 서버(npm/vite 등)는 그 자식(pm2
+          // 입장에서는 손자) 프로세스다 — pm2 delete 는 pm2 가 직접 아는 cmd.exe 만 죽이고 그
+          // 밑의 트리는 그대로 둔다(운영 실측: pm2 delete 뒤에도 npm run dev·vite.js 가 포트를
+          // 잡은 채 계속 돌았다 — pm2 의 treekill 옵션이 윈도우 기본값 true 라고 알려져 있지만
+          // 실측에서 트리를 못 죽였다). sh_exec 의 forceKill(위)과 같은 도구, 같은 이유로
+          // taskkill /T(트리 전체) /F(강제)를 직접 쓴다.
+          try {
+            const killer = spawn("taskkill", ["/PID", String(pid), "/T", "/F"]);
+            killer.on("error", () => resolve());
+            killer.on("close", () => resolve());
+          } catch {
+            resolve();
+          }
+        } else {
+          // POSIX: 이 클럽의 실제 워커는 전부 회원 개인 PC·공유 미니 PC 로, 오늘은 전부 윈도우다
+          // — 이 분기가 실제 배포에서 지나가는 경로는 없다. 그래도 미래를 위해 taskkill 을 그대로
+          // 옮겨 심는(윈도우 전용 도구를 POSIX 에 억지로 흉내 내는) 대신, POSIX 표준 방식으로
+          // 올바른 것을 쓴다: pm2 가 sh -c <command> 로 띄우므로 회원의 실제 명령도 sh 의 자식(같은
+          // 모양의 손자 프로세스)이 될 수 있다 — process.kill(-pid, …) 는 pid 를 그룹 리더로 하는
+          // 프로세스 그룹 전체에 신호를 보내는 POSIX 표준 동작이라, sh 와 그 자식들을 한 번에
+          // 정리한다(pm2 가 별도로 setsid 등을 하지 않는 한 자식들이 같은 그룹에 남는다). 다만
+          // POSIX 셸은 "마지막 명령을 exec 로 대체"하는 최적화가 흔해(sh -c "npm run dev" 가 exec
+          // 로 npm 프로세스 자체가 되어 애초에 손자를 두지 않는 경우가 많다) 윈도우만큼 사무적이지
+          // 않다 — 이 캐비엇을 인지한 채로, "적어도 표준적이고 틀리지 않은" 선택을 한다.
+          try {
+            process.kill(-pid, "SIGKILL");
+          } catch {
+            // 이미 죽었거나 권한 문제 — proc_stop 의 최종 판정은 아래 pm2 delete 의 성패로 하므로
+            // 여기서 실패해도 무시해도 안전하다(최선을 다하는 정리일 뿐).
+          }
+          resolve();
+        }
       }));
 
   // 경로 인자를 검사해 실경로를 돌려준다. 거부되면 그대로 ExecResult 로 반환한다.
@@ -583,6 +636,25 @@ export function makeExecutors(roots: string[], opts: { runPm2?: RunPm2 } = {}): 
       // NOT_MEMBER_PROC_MSG 선언부 주석 참고 — pm2 를 부르기 전에 반드시 걸러야, 이미 나간
       // delete 를 되돌리는 게 아니라 애초에 나가지 않게 막는다.
       if (parseProcName(name) === null) return { ok: false, content: NOT_MEMBER_PROC_MSG };
+
+      // Defect 2(운영 중 발견, KillTree 선언부 주석 참고): pm2 delete 는 자기 자식(cmd.exe/sh)만
+      // 죽이고 그 밑의 실제 프로세스 트리는 못 죽인다 — delete 전에 jlist 로 pid 를 찾아 트리
+      // 전체를 먼저 끝낸다. 이름을 못 찾으면(이미 사라졌거나 jlist 자체가 실패했으면) 죽일 pid 가
+      // 없다는 뜻이므로 트리 kill 은 건너뛰고 아래 delete 로 그대로 진행한다 — "pid 를 못 구했다"는
+      // "delete 도 하지 않는다"는 뜻이 아니다(예전에도 jlist 조회 없이 곧장 delete 를 불렀으니,
+      // 최소한 그 동작은 그대로 보장한다).
+      const before = await listProcs();
+      const proc = before.ok ? before.procs.find((p) => p.name === name) : undefined;
+      if (proc && proc.pid !== null) {
+        try {
+          await killTree(proc.pid);
+        } catch {
+          // 트리 kill 은 최선을 다하는 정리일 뿐 이 도구의 성패를 좌우하지 않는다 — 실패해도
+          // (이미 죽었거나 권한 문제) 아래 pm2 delete 로 계속 진행한다. 최종 응답은 언제나
+          // pm2 delete 자신의 성패다.
+        }
+      }
+
       const r = await runPm2(["delete", name]);
       return r.ok
         ? { ok: true, content: `멈췄어요: ${name}` }

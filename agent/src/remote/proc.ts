@@ -42,10 +42,15 @@ export type ProcInfo = {
   startedAtMs: number | null;
   memoryBytes: number | null;
   restarts: number;
+  // Defect 2(운영 중 발견): pm2 delete 는 pm2 가 직접 아는 자식(cmd.exe/sh)만 죽이고 그 밑의 실제
+  // 프로세스 트리(회원의 npm·vite 등, 손자 프로세스)는 그대로 남는다 — executors.ts 의 proc_stop 이
+  // pm2 delete 전에 taskkill /T 등으로 이 pid 로 트리 전체를 끝낸다. jlist 최상위 필드(pm2_env 밖)를
+  // 그대로 옮겨 온다.
+  pid: number | null;
 };
 
 type RawEnv = { status?: unknown; pm_uptime?: unknown; restart_time?: unknown; args?: unknown; pm_exec_path?: unknown };
-type RawProc = { name?: unknown; pm2_env?: RawEnv; monit?: { memory?: unknown } };
+type RawProc = { name?: unknown; pid?: unknown; pm2_env?: RawEnv; monit?: { memory?: unknown } };
 
 const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
 
@@ -92,6 +97,7 @@ export function parsePm2List(json: string): ProcInfo[] {
       startedAtMs: started,
       memoryBytes: num(p.monit?.memory),
       restarts: num(p.pm2_env?.restart_time) ?? 0,
+      pid: num(p.pid),
     };
   });
 }
