@@ -750,27 +750,67 @@ describe("proc_* — 이름과 작업 폴더는 봇이 주입한다", () => {
   // 주세요")조차 이 세 도구와 무관한 조치를 가리킨다. "띄운 것은 항상 멈출 수 있어야 한다"는
   // 컨트롤러의 결정에 따라 이 셋만 예외로 둔다 — proc_start 는 cwd 로 쓸 allowed[0] 이 그대로
   // 필요하므로(바로 위 테스트) 계속 거부된다.
-  it("허용 폴더가 없어도 proc_stop 은 허브를 부른다(떠 있는 걸 멈추는 데는 allow_dir 가 필요 없다)", async () => {
-    let called = false;
-    const ctx = withDirs([], { call: async () => { called = true; return { ok: true, content: "" }; } });
+  // 최종 리뷰 Finding 1(중요): 위 세 테스트는 원래 `call: async () => { called = true; ... }` 로
+  // "허브가 불렸는가"만 봤다 — 이미 남의 이름("asahi-999")을 넘기고 있었는데도 그 값이 실제로
+  // 손님 자신의 이름으로 덮어써졌는지는 한 번도 확인하지 않았다. 그 결과 다음 두 변이(mutation)가
+  // 스위트 전체를 그대로 통과했다(실제로 넣어서 확인함 — 태스크 보고서 참고):
+  //   (A) remoteTools.ts 의 `if (isProcTool)` 를 `if (isProcTool && allowed.length > 0)` 로 바꾸면
+  //       — 바로 두 줄 위에 이미 같은 모양의 가드(fs_mkdir 준비 호출)가 있어 다음 편집으로 나오기
+  //       쉽다. 이 describe 의 다른 테스트는 전부 `withDirs(["/w"])`(allowed 가 비지 않음)라 안
+  //       걸리고, allowed 가 실제로 빈 이 세 테스트만 injection 자체가 통째로 스킵된다. 그런데도
+  //       `called`/`out.ok` 만 보면 여전히 참이다 — allow_dir 가 회수된 손님이 `proc_stop { name:
+  //       "asahi-<다른 회원>" }` 로 남의 dev 서버를 끄고, `proc_logs` 로 남의 로그를 읽고,
+  //       `proc_list {}` 로 전원의 목록을 볼 수 있게 됐는데도 테스트는 초록불이었다.
+  //   (B) 위 fs_mkdir 준비 호출 가드의 `&& allowed.length > 0` 을 지우면 — `allowed[0]` 이
+  //       `undefined` 인 채로 fs_mkdir 가 매 호출마다 섞여 나간다. `called` 는 어느 호출이 왔든
+  //       true 이므로 이 변이도 잡히지 않는다.
+  // 그래서 불리언 대신 (tool, args) 쌍을 전부 기록해 "정확히 그 도구 하나만 불렸는가"(B 를 잡는다)와
+  // "신원이 실제로 강제됐는가"(A 를 잡는다)를 함께 확인한다 — recordArgs 는 fs_mkdir 을 기록에서
+  // 빼므로 여기서는 쓰지 않는다(그러면 B 가 다시 안 잡힌다).
+  const recordCalls = (calls: Array<{ tool: string; args: Record<string, unknown> }>) =>
+    async (tool: string, args: Record<string, unknown>) => {
+      calls.push({ tool, args });
+      return { ok: true, content: "" };
+    };
+
+  it("허용 폴더가 없어도 proc_stop 은 허브를 부른다(떠 있는 걸 멈추는 데는 allow_dir 가 필요 없다) — 신원 주입도 여전히 강제된다", async () => {
+    const calls: Array<{ tool: string; args: Record<string, unknown> }> = [];
+    const ctx = withDirs([], { call: recordCalls(calls) });
     const out = await remoteToolHandler(ctx, "proc_stop", { name: "asahi-999" });
-    expect(called).toBe(true);
+    expect(calls.map((c) => c.tool)).toEqual(["proc_stop"]);
+    expect(calls[0]!.args.name).toBe("asahi-111");
     expect(out.ok).toBe(true);
   });
 
-  it("허용 폴더가 없어도 proc_list 는 허브를 부른다", async () => {
-    let called = false;
-    const ctx = withDirs([], { call: async () => { called = true; return { ok: true, content: "" }; } });
+  it("허용 폴더가 없어도 proc_list 는 허브를 부른다 — 필터 주입도 여전히 강제된다", async () => {
+    const calls: Array<{ tool: string; args: Record<string, unknown> }> = [];
+    const ctx = withDirs([], { call: recordCalls(calls) });
     const out = await remoteToolHandler(ctx, "proc_list", {});
-    expect(called).toBe(true);
+    expect(calls.map((c) => c.tool)).toEqual(["proc_list"]);
+    expect(calls[0]!.args.onlyUserId).toBe("111");
     expect(out.ok).toBe(true);
   });
 
-  it("허용 폴더가 없어도 proc_logs 는 허브를 부른다", async () => {
-    let called = false;
-    const ctx = withDirs([], { call: async () => { called = true; return { ok: true, content: "" }; } });
+  it("허용 폴더가 없어도 proc_logs 는 허브를 부른다 — 신원 주입도 여전히 강제된다", async () => {
+    const calls: Array<{ tool: string; args: Record<string, unknown> }> = [];
+    const ctx = withDirs([], { call: recordCalls(calls) });
     const out = await remoteToolHandler(ctx, "proc_logs", { name: "asahi-999" });
-    expect(called).toBe(true);
+    expect(calls.map((c) => c.tool)).toEqual(["proc_logs"]);
+    expect(calls[0]!.args.name).toBe("asahi-111");
     expect(out.ok).toBe(true);
+  });
+
+  // 리뷰 Finding 2(사소함, 방어적 계층): allowed_dirs 가 빈 워커에서는 scopeDirs 가 joinUnderRoot 를
+  // 한 번도 안 돌리므로(위 세 테스트와 같은 조건) ctx.userId 가 이 지점까지 전혀 검증되지 않은 채
+  // 온다 — remoteTools.ts 의 isProcTool 블록 앞 isValidUserId 가드가 그 마지막 방어선이다. 오늘은
+  // ctx.userId 가 항상 디스코드 스노플레이크라 실제로 이 경로를 타지 않지만(회원이 바꿔치기할 방법이
+  // 없다), 그 사실에 기대지 않고 코드로도 막아 둔다는 것 자체를 이 테스트가 고정한다.
+  it("ctx.userId 가 디스코드 스노플레이크 형태가 아니면(오늘은 일어나지 않는 입력) proc_* 를 거부한다 — 방어적 계층", async () => {
+    let called = false;
+    const ctx = withDirs([], { call: async () => { called = true; return { ok: true, content: "" }; } }, { userId: "not-a-snowflake" });
+    const out = await remoteToolHandler(ctx, "proc_stop", { name: "asahi-999" });
+    expect(called).toBe(false);
+    expect(out.ok).toBe(false);
+    expect(out.content).toContain("사용자 식별자");
   });
 });

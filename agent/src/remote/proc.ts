@@ -11,6 +11,15 @@ const PREFIX = "asahi-";
 // asahi-worker)까지 "누군가의 프로세스"로 오해하지 않는다.
 const USER_ID = /^\d+$/;
 
+// procNameFor(짓는 방향)는 입력을 검증하지 않고 그대로 이어붙인다 — 지금까지는 호출측
+// (remoteTools.ts)이 이미 검증된 ctx.userId 만 넘긴다는 전제에 기댔다. 이 파일은 fs·CLI 를 모르는
+// 순수 로직만 담으므로(파일 상단 주석 참고) 그 전제를 여기서 강제하지는 않지만, parseProcName
+// (푸는 방향)이 이미 쓰는 것과 같은 규칙을 호출측이 재사용할 수 있게 내보낸다 — 같은 판정 규칙이
+// 두 곳에 따로 있으면 한쪽만 고쳐지는 날이 온다.
+export function isValidUserId(id: string): boolean {
+  return USER_ID.test(id);
+}
+
 export function procNameFor(userId: string): string {
   return `${PREFIX}${userId}`;
 }
