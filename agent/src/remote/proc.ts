@@ -103,7 +103,12 @@ export function renderProcList(
   if (procs.length === 0) return "지금 도는 것이 없어요.";
   const now = o.now ?? Date.now();
   const lines = procs.map((p) => {
-    const who = p.userId === null ? p.name : o.labelOf(p.userId);
+    // userId 가 null 이면 parseProcName 이 회원 이름으로 풀지 못한 것 — 봇·워커 자신처럼 PM2 가
+    // 관리하는 인프라 프로세스다(deploy/ecosystem.config.cjs). labelOf(회원 userId → 사람 이름)와
+    // 같은 자리에 그냥 p.name 을 꽂으면(예: "asahi-worker") 회원 행("asahi-111" 또는 그 사람
+    // 이름)과 형식이 똑같아 보여, "돌고 있는 거 다 정리해줘" 를 받은 모델이 인프라 행까지 회원
+    // 것으로 착각해 지울 수 있다 — 표식을 붙여 한눈에 다르게 보이게 한다.
+    const who = p.userId === null ? `[인프라] ${p.name}` : o.labelOf(p.userId);
     return `${who}  ${p.command}  ${p.status}  ${humanUptime(p.uptimeMs, now)}  ${humanMem(p.memoryBytes)}  재시작 ${p.restarts}`;
   });
   return [`지금 도는 것 (${procs.length}개)`, "", ...lines].join("\n");

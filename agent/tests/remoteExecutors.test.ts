@@ -497,6 +497,23 @@ describe("proc_* 실행기 — PM2 위임", () => {
     expect(r.ok).toBe(false);
   });
 
+  // 리뷰 지적(Important, 병합 차단): proc_list 는 소유자에게 필터를 걸지 않으므로 asahi-assistant·
+  // asahi-worker(봇·워커 자신, deploy/ecosystem.config.cjs)도 평범한 회원 행처럼 보인다.
+  // remoteTools.ts 는 소유자가 지정한 이름을 검증 없이 그대로 pm2 delete 로 넘기므로(260행 부근),
+  // "돌고 있는 거 다 정리해줘" 같은 지시가 모델을 거쳐 워커 자체를 지울 수 있었다 — pm2 delete 는
+  // 완전히 제거하므로 autorestart 로도 못 돌아온다. parseProcName 이 이미 회원 이름과 인프라
+  // 이름을 구분하므로(asahi-<숫자> 만 회원), 그 판정을 실행기 자신이 pm2 를 부르기 "전"에 강제한다.
+  it("proc_stop 은 asahi-<숫자> 형식이 아닌 이름(봇·워커 자신)을 pm2 를 부르지 않고 거절한다", async () => {
+    for (const infraName of ["asahi-worker", "asahi-assistant", "something-else"]) {
+      const { calls, runPm2 } = fakePm2({ delete: { ok: true, stdout: "" } });
+      const ex = makeExecutors(["C:\\ws"], { runPm2 });
+      const r = await ex.proc_stop!({ name: infraName });
+      expect(r.ok, `${infraName} 을 멈출 수 있었다`).toBe(false);
+      expect(r.content).toContain("회원");
+      expect(calls.some((c) => c[0] === "delete"), `${infraName} 에 pm2 delete 가 호출됐다`).toBe(false);
+    }
+  });
+
   it("proc_list 는 jlist 를 파싱해 표로 돌려준다", async () => {
     const stdout = JSON.stringify([{ name: "asahi-111", pm2_env: { status: "online", pm_uptime: 0, restart_time: 2, args: ["run", "dev"], pm_exec_path: "npm" }, monit: { memory: 5 * 1024 * 1024 } }]);
     const { runPm2 } = fakePm2({ jlist: { ok: true, stdout } });
@@ -536,6 +553,20 @@ describe("proc_* 실행기 — PM2 위임", () => {
     const logs = calls.find((c) => c[0] === "logs")!;
     expect(logs).toContain("--nostream");
     expect(logs).toContain("30");
+  });
+
+  // 리뷰 지적(Important, 병합 차단): proc_stop 과 같은 이유로 proc_logs 도 봇·워커 자신의 로그를
+  // 회원에게 그대로 노출할 수 있었다 — 이름 형식 검증이 없어 asahi-assistant·asahi-worker 를
+  // 그대로 pm2 logs 에 넘겼다.
+  it("proc_logs 는 asahi-<숫자> 형식이 아닌 이름(봇·워커 자신)을 pm2 를 부르지 않고 거절한다", async () => {
+    for (const infraName of ["asahi-worker", "asahi-assistant"]) {
+      const { calls, runPm2 } = fakePm2({ logs: { ok: true, stdout: "로그 본문" } });
+      const ex = makeExecutors(["C:\\ws"], { runPm2 });
+      const r = await ex.proc_logs!({ name: infraName });
+      expect(r.ok, `${infraName} 의 로그를 볼 수 있었다`).toBe(false);
+      expect(r.content).toContain("회원");
+      expect(calls.some((c) => c[0] === "logs"), `${infraName} 에 pm2 logs 가 호출됐다`).toBe(false);
+    }
   });
 
   it("pm2 가 실패하면 stderr 를 사유로 돌려준다", async () => {

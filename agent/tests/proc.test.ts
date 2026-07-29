@@ -101,4 +101,21 @@ describe("proc — 표 렌더링", () => {
     const out = renderProcList([one, { ...one, name: "asahi-222", userId: "222" }], { labelOf, now: NOW });
     expect(out).toContain("2개");
   });
+
+  // 리뷰 지적(Important, 병합 차단): userId 가 null(봇·워커 자신, 예: asahi-worker)이면 who 가
+  // p.name 그대로 떨어지고, 회원은 labelOf(userId) — 실행기가 실제로 주입하는 labelOf 는
+  // procNameFor 라 회원 행도 결국 "asahi-<id>" 모양이다. 그러면 두 종류의 행이 형식상 구분되지
+  // 않아, "돌고 있는 거 다 정리해줘" 같은 지시를 받은 모델이 인프라 행을 회원 행과 똑같이 취급할
+  // 수 있다 — parseProcName 이 이미 이 둘을 구분하므로(파일 상단 주석·테스트) 그 정보를 표시에도
+  // 반영해, 인프라 행에만 눈에 띄는 표식을 붙인다.
+  it("userId 가 없는 행(봇·워커 자신)에는 회원 행에 없는 구분 표식이 붙는다", () => {
+    const infra: ProcInfo = { name: "asahi-worker", userId: null, command: "node dist/worker.js", status: "online", uptimeMs: 0, memoryBytes: 60 * 1024 * 1024, restarts: 0 };
+    const out = renderProcList([one, infra], { labelOf, now: NOW });
+    const lines = out.split("\n");
+    const memberLine = lines.find((l) => l.includes("asahi-111") || l.startsWith("우성현"))!;
+    const infraLine = lines.find((l) => l.includes("asahi-worker"))!;
+    expect(infraLine).toContain("인프라");
+    expect(memberLine).not.toContain("인프라");
+    expect(infraLine).toContain("asahi-worker"); // 원래 pm2 이름은 그대로 남는다(무엇인지는 여전히 알아볼 수 있어야 한다)
+  });
 });

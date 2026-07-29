@@ -13,7 +13,7 @@ import {
   type TreeTruncReason,
 } from "./tree.js";
 import { pathFlavorOf } from "../core/paths.js";
-import { parsePm2List, renderProcList, procNameFor } from "./proc.js";
+import { parsePm2List, renderProcList, procNameFor, parseProcName } from "./proc.js";
 
 export type ExecResult = { ok: boolean; content: string };
 export type Executors = Record<string, (args: Record<string, unknown>) => Promise<ExecResult>>;
@@ -136,6 +136,18 @@ function shellFlavorOf(roots: string[]): ShellFlavor {
 }
 
 const PROC_LOG_DEFAULT_LINES = 50;
+
+// 리뷰 지적(Important, 병합 차단): proc_list 는 소유자에게 필터를 걸지 않으므로 asahi-assistant·
+// asahi-worker(봇·워커 자신, deploy/ecosystem.config.cjs 로 관리되는 PM2 앱)도 평범한 회원 행처럼
+// 보인다. remoteTools.ts 는 소유자가 지정한 이름을 검증 없이 그대로 proc_stop·proc_logs 로
+// 넘기므로(모델이 정한 이름을 신뢰), "돌고 있는 거 다 정리해줘" 같은 지시 한 번으로 워커나 봇
+// 자신이 pm2 delete 로 사라질 수 있었다 — pm2 delete 는 완전히 제거해 autorestart 로도 못
+// 돌아오고, 복구하려면 기계에 직접 접근해야 한다. parseProcName(proc.ts)이 이미 회원 이름
+// (asahi-<숫자>)과 인프라 이름을 구분하므로, 그 판정을 pm2 를 실제로 부르는 이 계층(실행기)이
+// 강제한다 — 봇(remoteTools.ts)이 아니라 여기서 막는 이유는, sh_exec 로 pm2 명령을 직접 쓰는
+// 것은 여전히 허용된 탈출구이기 때문이다(소유자가 정말로 의도했다면 그 경로가 남아 있다).
+const NOT_MEMBER_PROC_MSG =
+  "그건 회원 프로세스가 아니에요 — 봇·워커 같은 인프라는 이 도구로 건드리지 않아요. 정말 필요하면 sh_exec 로 직접 하세요.";
 
 function truncate(s: string): string {
   return s.length <= OUTPUT_MAX ? s : `${s.slice(0, OUTPUT_MAX)}\n… (출력이 길어 ${OUTPUT_MAX}자에서 잘랐어요)`;
@@ -529,6 +541,9 @@ export function makeExecutors(roots: string[], opts: { runPm2?: RunPm2 } = {}): 
       if (!g.ok) return g.res;
       const name = str(args.name);
       if (!name) return { ok: false, content: "멈출 프로세스가 지정되지 않았어요." };
+      // NOT_MEMBER_PROC_MSG 선언부 주석 참고 — pm2 를 부르기 전에 반드시 걸러야, 이미 나간
+      // delete 를 되돌리는 게 아니라 애초에 나가지 않게 막는다.
+      if (parseProcName(name) === null) return { ok: false, content: NOT_MEMBER_PROC_MSG };
       const r = await runPm2(["delete", name]);
       return r.ok
         ? { ok: true, content: `멈췄어요: ${name}` }
@@ -556,6 +571,9 @@ export function makeExecutors(roots: string[], opts: { runPm2?: RunPm2 } = {}): 
       if (!g.ok) return g.res;
       const name = str(args.name);
       if (!name) return { ok: false, content: "로그를 볼 프로세스가 지정되지 않았어요." };
+      // proc_stop 과 같은 이유(NOT_MEMBER_PROC_MSG 선언부 주석 참고) — 봇·워커 자신의 로그를
+      // 회원에게 그대로 노출하지 않는다.
+      if (parseProcName(name) === null) return { ok: false, content: NOT_MEMBER_PROC_MSG };
       const lines = Math.max(1, Math.min(num(args.lines) ?? PROC_LOG_DEFAULT_LINES, 200));
       const r = await runPm2(["logs", name, "--nostream", "--lines", String(lines)]);
       if (!r.ok) return { ok: false, content: `로그를 가져오지 못했어요: ${r.stderr.trim() || "그런 프로세스가 없어요"}` };
