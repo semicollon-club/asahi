@@ -904,14 +904,31 @@ npm i -g pm2; pm2 --version
 버전이 찍히면 성공이다. 안 찍히면 `asahi` 의 PATH 에 npm 전역 bin 이 없는 것이므로
 `npm config get prefix` 로 경로를 확인해 PATH 에 넣는다.
 
-- [ ] **Step 5: 주 1회 로테이션에 `pm2 flush` 를 더한다 (관리자 계정)**
+- [ ] **Step 5: 주 1회 `pm2 flush` 를 추가한다**
 
-`C:\ProgramData\asahi-maintenance\rotate-worker-log.ps1` 의 `Start-ScheduledTask` 앞에 한 줄을
-넣는다. PM2 로그도 무한히 커지므로 같은 주기로 비운다.
+> **정정 (2026-07-29, 문서 리뷰).** 아래 원안 — 관리자 계정의
+> `C:\ProgramData\asahi-maintenance\rotate-worker-log.ps1`(`Start-ScheduledTask` 앞)에
+> `pm2 flush 2>$null` 한 줄을 끼워 넣는 것 — 은 **틀렸고, 그대로 실행하면 안 된다.** PM2 는
+> `asahi` 계정에 전역 설치된다(§8) — npm 전역 설치는 계정 프로필에 들어가므로, 관리자
+> 계정에서는 `pm2` 실행 파일도 그 데이터 위치(`PM2_HOME`)도 보이지 않는다. 관리자 계정이 이
+> 줄을 실행하면 `pm2` 가 PATH 에 없어 명령 자체가 실패하거나, 어떻게든 `pm2` 를 찾더라도
+> 관리자 프로필의 (비어 있는) `PM2_HOME` 을 봐서 아무 데몬도 비우지 못한다 — 어느 쪽이든 이
+> 태스크가 없애려던 무한 증가 PM2 로그는 그대로 남는다. `2>$null` 이 그 실패를 조용히 삼켜
+> 아무도 눈치채지 못하게 만드는 것도 별개의 문제다.
+>
+> 올바른 형태는 `asahi` 계정 몫의 **별도** 예약 작업이다 — 관리자 계정의
+> `rotate-worker-log.ps1` 안에 끼워 넣지 않는다. `asahi` 계정으로 실행되도록 등록하고(작업
+> 스케줄러의 "사용자 계정"을 `asahi` 로 지정하거나 `schtasks /RU asahi`), `2>$null` 없이 같은
+> 주 1회 주기로 아래 한 줄만 실행한다 — 실패는 삼키지 않고 다음 점검에서 보여야 한다.
+>
+> ```powershell
+> pm2 flush
+> ```
 
-```powershell
-pm2 flush 2>$null
-```
+(원안 — 위 정정으로 대체됨) `C:\ProgramData\asahi-maintenance\rotate-worker-log.ps1`(관리자
+계정)의 `Start-ScheduledTask` 앞에 `pm2 flush 2>$null` 한 줄을 넣는다는 것이었다. PM2 로그도
+무한히 커지므로 같은 주기로 비운다는 의도는 맞지만, 관리자 계정에서는 위 이유로 동작하지
+않는다.
 
 - [ ] **Step 6: 배포와 스모크**
 
