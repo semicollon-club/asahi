@@ -40,9 +40,14 @@ const ctxWith = (
 const contentOf = async (p: Promise<{ content: string; ok: boolean }>): Promise<string> => (await p).content;
 
 describe("원격 도구", () => {
-  it("도구 이름 7개를 고정으로 노출한다", () => {
+  it("도구 이름 11개를 고정으로 노출한다", () => {
     // Task 4: fs_tree 추가 — 폴더 구조 전용 조회 도구.
-    expect([...REMOTE_TOOL_NAMES].sort()).toEqual(["fs_edit", "fs_glob", "fs_grep", "fs_read", "fs_tree", "fs_write", "sh_exec"]);
+    // proc_* 넷은 PROC_TOOL_NAMES(proc.ts)를 펴서 들어온다 — 이 목록이 늘어난다는 건 게이트를
+    // 타야 할 도구가 늘었다는 뜻이므로, 개수 자체를 여기서 고정해 조용한 추가를 막는다.
+    expect([...REMOTE_TOOL_NAMES].sort()).toEqual([
+      "fs_edit", "fs_glob", "fs_grep", "fs_read", "fs_tree", "fs_write",
+      "proc_list", "proc_logs", "proc_start", "proc_stop", "sh_exec",
+    ]);
   });
 
   it("허브 호출 결과를 그대로 돌려준다 — 내용도, 성패(ok)도", async () => {
@@ -601,5 +606,91 @@ describe("fs_tree 는 fs_glob 과 동일하게 1차 필터를 탄다", () => {
     const out = await remoteToolHandler(ctx, "fs_tree", { path: "/etc" });
     expect(out.content).toContain("허용된 폴더 밖");
     expect(out.ok).toBe(false);
+  });
+});
+
+describe("proc_* — 이름과 작업 폴더는 봇이 주입한다", () => {
+  const withDirs = (dirs: string[], remote: Partial<NonNullable<ToolCtx["remote"]>>, over: Record<string, unknown> = {}): ToolCtx =>
+    ({
+      remote: { roots: ["/w"], workerId: "shared", workerKind: "shared", ...remote },
+      isOwner: false, isPrivate: false, userId: "111",
+      repos: { allowedDirs: { list: async () => dirs } },
+      ...over,
+    } as unknown as ToolCtx);
+
+  // 이 describe 의 기본 ctx 는 손님 + 공유 워커라, remoteToolHandler 가 실제 proc_* 호출 앞에
+  // 개인 폴더 생성(fs_mkdir) 준비 호출을 하나 끼워 넣는다 — proc_start 의 cwd 가 바로 그 폴더라
+  // 이 준비는 proc 도구에도 필요하다(remoteTools.ts 참고). 그래서 인자를 위치로 세면 seen[0] 이
+  // proc_* 이 아니라 그 준비 호출이 된다. 위 "공유 기계에서 사용자별 격리" 의 realCalls 와 같은
+  // 이유로, 준비 호출은 기록에서 빼고 진짜 도구 호출의 인자만 본다.
+  const recordArgs = (seen: Array<Record<string, unknown>>) =>
+    async (tool: string, args: Record<string, unknown>) => {
+      if (tool !== "fs_mkdir") seen.push(args);
+      return { ok: true, content: "" };
+    };
+
+  it("도구 이름 11개를 고정으로 노출한다", () => {
+    expect([...REMOTE_TOOL_NAMES].sort()).toEqual([
+      "fs_edit", "fs_glob", "fs_grep", "fs_read", "fs_tree", "fs_write",
+      "proc_list", "proc_logs", "proc_start", "proc_stop", "sh_exec",
+    ]);
+  });
+
+  it("손님의 proc_start 는 모델이 준 name·cwd 를 무시하고 덮어쓴다", async () => {
+    const seen: Array<Record<string, unknown>> = [];
+    const ctx = withDirs(["/w"], { call: recordArgs(seen) });
+    await remoteToolHandler(ctx, "proc_start", { command: "npm run dev", name: "asahi-999", cwd: "/etc" });
+    expect(seen[0]!.name).toBe("asahi-111");
+    expect(seen[0]!.cwd).toBe("/w/111");
+  });
+
+  // 위 recordArgs 가 준비 호출을 기록에서 빼므로, 그 준비 호출 자체는 여기서 따로 고정한다 —
+  // 스코프 계산을 needsPathCheck 밖으로 끌어올린 이유가 정확히 이것이다. 이 단정이 없으면 훗날
+  // 누군가 fs_mkdir 을 다시 경로 검사 블록 안으로 되돌려도 proc 테스트는 전부 통과하고, 손님의
+  // 첫 proc_start 만 "그런 폴더가 없다"로 조용히 깨진다.
+  it("손님의 proc_start 앞에 cwd 로 쓸 개인 폴더를 만든다(경로 인자가 없는 도구에도 준비가 필요하다)", async () => {
+    const calls: Array<{ tool: string; args: Record<string, unknown> }> = [];
+    const ctx = withDirs(["/w"], { call: async (tool, args) => { calls.push({ tool, args }); return { ok: true, content: "" }; } });
+    await remoteToolHandler(ctx, "proc_start", { command: "npm run dev" });
+    expect(calls[0]).toEqual({ tool: "fs_mkdir", args: { path: "/w/111" } });
+    expect(calls[1]!.tool).toBe("proc_start");
+    expect(calls[1]!.args.cwd).toBe("/w/111");
+  });
+
+  it("손님의 proc_stop 도 자기 이름으로 덮어쓴다(남의 것을 못 죽인다)", async () => {
+    const seen: Array<Record<string, unknown>> = [];
+    const ctx = withDirs(["/w"], { call: recordArgs(seen) });
+    await remoteToolHandler(ctx, "proc_stop", { name: "asahi-999" });
+    expect(seen[0]!.name).toBe("asahi-111");
+  });
+
+  it("손님의 proc_list 는 자기 것만 보도록 필터가 주입된다", async () => {
+    const seen: Array<Record<string, unknown>> = [];
+    const ctx = withDirs(["/w"], { call: recordArgs(seen) });
+    await remoteToolHandler(ctx, "proc_list", {});
+    expect(seen[0]!.onlyUserId).toBe("111");
+  });
+
+  it("소유자의 proc_list 는 필터 없이 전원을 본다", async () => {
+    const seen: Array<Record<string, unknown>> = [];
+    const ctx = withDirs(["/w"], { call: recordArgs(seen) }, { isOwner: true });
+    await remoteToolHandler(ctx, "proc_list", {});
+    expect(seen[0]!.onlyUserId).toBeUndefined();
+  });
+
+  it("소유자의 proc_stop 은 지정한 이름을 존중한다(관리자)", async () => {
+    const seen: Array<Record<string, unknown>> = [];
+    const ctx = withDirs(["/w"], { call: recordArgs(seen) }, { isOwner: true });
+    await remoteToolHandler(ctx, "proc_stop", { name: "asahi-999" });
+    expect(seen[0]!.name).toBe("asahi-999");
+  });
+
+  it("허용 폴더가 없으면 proc_start 는 허브를 부르지 않고 거절한다", async () => {
+    let called = false;
+    const ctx = withDirs([], { call: async () => { called = true; return { ok: true, content: "" }; } });
+    const out = await remoteToolHandler(ctx, "proc_start", { command: "npm run dev" });
+    expect(called).toBe(false);
+    expect(out.ok).toBe(false);
+    expect(out.content).toContain("allow_dir");
   });
 });

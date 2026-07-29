@@ -1,11 +1,17 @@
 import { isPathWithinAny } from "./paths.js";
 import { extractCandidatePaths } from "./pathPermission.js";
 import { scopeDirs } from "./workerSelect.js";
+import { PROC_TOOL_NAMES, procNameFor } from "../remote/proc.js";
 import type { ToolCtx } from "./tools.js";
 
 // 워커에서 실행되는 원격 도구 이름. SDK 내장 Read/Write/Edit/Glob/Grep/Bash 를 대체한다.
 // 이름을 달리 지은 이유: 내장 도구와 이름이 겹치면 어느 쪽이 도는지 알 수 없다.
-export const REMOTE_TOOL_NAMES = ["fs_read", "fs_write", "fs_edit", "fs_glob", "fs_grep", "fs_tree", "sh_exec"] as const;
+// proc_* 넷은 이름 목록을 여기서 다시 적지 않고 proc.ts 의 것을 그대로 편다 — 목록이 두 곳에
+// 있으면 한쪽만 늘어나는 날이 오고, 그때 "게이트를 안 타는 도구"가 조용히 생긴다.
+export const REMOTE_TOOL_NAMES = [
+  "fs_read", "fs_write", "fs_edit", "fs_glob", "fs_grep", "fs_tree", "sh_exec",
+  ...PROC_TOOL_NAMES,
+] as const;
 
 // 인자에서 1차 필터를 걸 경로를 뽑는다(fs_read/fs_write/fs_edit 용 — fs_glob/fs_grep 은 아래
 // LOCAL_TOOL_NAME 경로로 별도 처리한다). sh_exec 는 경로 인자가 없으므로 대상이 아니다 — 뿐만
@@ -90,7 +96,16 @@ export async function remoteToolHandler(
   // sh_exec 는 path 도 없고 localTool 도 없으므로 이 필터의 대상이 아니다(위 주석 참고).
   const needsPathCheck = singlePathArg !== undefined || localTool !== undefined;
 
-  if (needsPathCheck) {
+  // proc_* 은 경로 인자가 없어 위 needsPathCheck 가 false 인데도 "이 사람의 폴더가 어디인가"를
+  // 알아야 한다 — proc_start 의 cwd 가 바로 그 폴더다. 그래서 스코프 계산(allowedDirs 조회 +
+  // scopeDirs)만은 경로 검사와 별개의 조건으로 돌린다. 아래 needsPathCheck 블록(후보 경로 검사와
+  // FIX1 주입)은 예전 그대로 경로 도구만 탄다 — 계산을 밖으로 끌어올렸을 뿐, 어떤 도구가 무엇을
+  // 검사받는지는 하나도 바뀌지 않았다.
+  const isProcTool = (PROC_TOOL_NAMES as readonly string[]).includes(tool);
+  const needsScope = needsPathCheck || isProcTool;
+
+  let allowed: string[] = [];
+  if (needsScope) {
     // 빈 문자열/공백 문자열은 "경로 인자 없음"이 아니라 "잘못된 경로 인자"다 — 여기서 걸러내지
     // 않으면 아래 필터 전체가 조용히 스킵되고 호출이 그대로 워커로 넘어간다.
     if (singlePathArg !== undefined && singlePathArg.trim().length === 0) {
@@ -108,7 +123,6 @@ export async function remoteToolHandler(
     // 그대로(관리자는 좁히지 않는다). scopeDirs(→joinUnderRoot)는 ctx.userId 를 경로 조각으로
     // 그대로 쓰므로, Discord 스노플레이크가 아닌 값(예: 크래프트한 조각)이 오면 예외를 던진다 —
     // 아래 catch 가 허용 폴더 확인 오류와 동일하게 fail closed 로 처리한다.
-    let allowed: string[];
     try {
       const dirs = await ctx.repos.allowedDirs.list(remote.workerId);
       allowed = scopeDirs(dirs, { workerKind: remote.workerKind, isOwner: ctx.isOwner, userId: ctx.userId });
@@ -126,7 +140,11 @@ export async function remoteToolHandler(
     // 그 소유자 한 명 몫이라 "손님용 하위 폴더" 개념이 없고, 소유자는 scopeDirs 가 좁히지 않으므로
     // allowed[0]이 "그 사람의 폴더" 하나로 특정되지 않는다(관리자 권한으로 아무 폴더나 다룬다).
     //
-    // 이 호출은 매 fs_* 호출(경로 검사를 타는 도구는 전부)마다 반복된다 — "최초 1회만" 판정하는
+    // 이 생성이 needsPathCheck 가 아니라 needsScope 아래에 있는 이유: proc_start 는 이 폴더를
+    // cwd 로 받는데(아래 주입 참고), 폴더가 없으면 pm2 가 그 자리에서 실패한다 — 경로 인자가
+    // 없는 도구라고 준비를 건너뛰면 손님의 첫 proc_start 는 항상 실패한다.
+    //
+    // 이 호출은 매 원격 호출(스코프 계산을 타는 도구는 전부)마다 반복된다 — "최초 1회만" 판정하는
     // 캐시를 일부러 두지 않았다. fs_mkdir(recursive:true)은 이미 있으면 그대로 성공하는 멱등
     // 연산이라 반복 호출 자체에 부작용이 없고, 캐시를 두면 "그 사이 누군가 그 폴더를 지웠다"는
     // 경우를 다음 호출까지 놓친다 — 상태 없이 매번 확인하는 쪽이 더 단순하고 더 안전하다. 비용은
@@ -139,7 +157,9 @@ export async function remoteToolHandler(
     if (remote.workerKind === "shared" && !ctx.isOwner) {
       await remote.call("fs_mkdir", { path: allowed[0] }).catch(() => {});
     }
+  }
 
+  if (needsPathCheck) {
     // FIX6: fs_glob/fs_grep 은 path·pattern(fs_grep 은 +glob) 양쪽에서 후보 경로를 뽑는다
     // (extractCandidatePaths 가 path 생략 시 allowed[0] 기본값까지 포함해 처리한다). 나머지
     // 도구는 기존처럼 path 하나만 본다.
@@ -160,6 +180,30 @@ export async function remoteToolHandler(
     // 지정했다면(singlePathArg !== undefined) 그 값을 존중해 덮어쓰지 않는다.
     if (localTool && singlePathArg === undefined) {
       args = { ...args, path: allowed[0] };
+    }
+  }
+
+  // 이름·작업 폴더·목록 필터는 검증이 아니라 주입이다. 모델이 name 을 정하게 두면 부원 A 가
+  // "B 가 돌리는 서버 좀 꺼줘"로 남의 프로세스를 죽일 수 있다 — 위 FIX1 과 정확히 같은 구조의
+  // 문제다(검사한 값과 워커가 실제로 쓰는 값이 다르면 검사 자체가 무의미해진다). 그래서 이름을
+  // "검사"하지 않고 아예 봇이 정한다: 모델이 무엇을 넘기든 손님 몫은 procNameFor(ctx.userId)
+  // 하나뿐이고, 그 이름이 곧 소유권이자 1인 1개 상한이다(proc.ts).
+  //
+  // 소유자는 그 기계의 관리자이므로 이름을 지정할 수 있고 목록도 좁히지 않는다 — scopeDirs 가
+  // 소유자의 허용 폴더를 좁히지 않는 것과 똑같은 규칙이다(두 곳이 서로 다른 기준을 쓰면 "폴더는
+  // 다 보이는데 프로세스는 내 것만 보인다" 같은 앞뒤 안 맞는 권한이 생긴다).
+  if (isProcTool) {
+    const mine = procNameFor(ctx.userId);
+    // proc_start 의 cwd 는 위에서 검사·생성까지 끝낸 그 폴더다. 모델이 준 cwd 는 쳐다보지 않는다 —
+    // 손님이 cwd 를 고를 수 있으면 폴더 격리가 셸 한 줄로 무너진다.
+    if (tool === "proc_start") args = { ...args, name: mine, cwd: allowed[0] };
+    if (tool === "proc_stop" || tool === "proc_logs") {
+      args = ctx.isOwner && typeof args.name === "string" && args.name.length > 0 ? args : { ...args, name: mine };
+    }
+    // 소유자에게도 키를 undefined 로 실어 보낸다(키 자체를 지우지 않는다) — 실행기(executors.ts)는
+    // str(args.onlyUserId) 가 undefined 면 필터를 걸지 않으므로 결과는 "전원"이다.
+    if (tool === "proc_list") {
+      args = ctx.isOwner ? { ...args, onlyUserId: undefined } : { ...args, onlyUserId: ctx.userId };
     }
   }
 
