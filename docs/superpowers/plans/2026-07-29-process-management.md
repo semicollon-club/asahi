@@ -418,6 +418,17 @@ const PROC_LOG_DEFAULT_LINES = 50;
 네 곳(`src/worker.ts:49`, `tests/failureSeam.test.ts`, `tests/remoteExecutors.test.ts`,
 `tests/remoteTools.test.ts`)은 **한 줄도 고치지 않는다.**
 
+> **정정 (2026-07-29, 구현 후).** 아래 `spawn("pm2", args, { shell: true })` 는 **틀렸고, 그대로
+> 머지되지 않았다.** Node 는 `shell: true` 일 때 `[file, ...args]` 를 공백으로 이어붙여 셸에
+> 넘길 뿐 인자별 인용을 하지 않는다 — 그래서 `"npm run dev"` 가 세 조각으로 쪼개져 pm2 는
+> 맨 `npm` 만 띄우고, 공백 든 `--cwd` 경로도 잘린다. 모든 테스트가 가짜 `runPm2` 를 주입하는
+> 구조라 스위트는 내내 녹색이었다.
+>
+> 실제로 머지된 형태는 `buildPm2CommandLine(args, flavor)` 라는 순수 함수로 **인용된 명령줄
+> 하나**를 만든 뒤 `spawn(commandLine, { shell: true })` 를 부르는 것이다(`sh_exec` 와 같은
+> 모양). 윈도우 인용은 표준 `CommandLineToArgvW` 규칙(따옴표 앞 백슬래시 `2n+1`)까지만
+> 보장하고 cmd.exe 메타문자는 다루지 않는다. 정본은 `agent/src/remote/executors.ts` 다.
+
 ```ts
 export function makeExecutors(roots: string[], opts: { runPm2?: RunPm2 } = {}): Executors {
   const runPm2: RunPm2 =
@@ -426,7 +437,7 @@ export function makeExecutors(roots: string[], opts: { runPm2?: RunPm2 } = {}): 
       new Promise((resolve) => {
         // shell:true 로 부르는 이유는 sh_exec 와 같다 — 윈도우에서 pm2 는 pm2.cmd 셰임이라
         // 셸을 거치지 않으면 실행 파일을 찾지 못한다.
-        const child = spawn("pm2", args, { shell: true });
+        const child = spawn("pm2", args, { shell: true });   // ← 아래 정정 참고. 이대로 쓰면 안 된다.
         let stdout = "";
         let stderr = "";
         child.stdout.on("data", (c: Buffer) => { stdout += c.toString(); });
