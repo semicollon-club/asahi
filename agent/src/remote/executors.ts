@@ -40,6 +40,66 @@ const FORCE_KILL_GRACE_MS = 2_000;
 // 소실)이 정확히 그렇게 다섯 번의 리뷰를 통과했다.
 export type RunPm2 = (args: string[]) => Promise<{ ok: boolean; stdout: string; stderr: string }>;
 
+// shellFor()·기본 runPm2(아래)가 함께 쓰는 "워커가 윈도우인지 POSIX 인지" 판정 결과 타입.
+export type ShellFlavor = "win32" | "posix";
+
+// 리뷰 지적(Important): 기본 runPm2 는 spawn("pm2", args, {shell:true}) 로 pm2 를 불렀다. Node 의
+// spawn(file, args, {shell:true}) 는 [file, ...args] 를 공백 하나로 join 만 할 뿐 인자별 따옴표를
+// 붙이지 않는다 — 실측: ["--name","asahi-111","--","-c","npm run dev"] 를 넘기면 자식 프로세스는
+// argv 5개가 아니라 7개를 받는다("npm run dev" 가 공백마다 셋으로 쪼개진다). 그러면 pm2 는 "npm"
+// 만 스크립트로 알아듣고 "run"·"dev" 는 흘려버린다. 공백이 든 --cwd 경로(예: 사용자 이름에 공백이
+// 섞인 윈도우 작업폴더 "C:\Users\Jane Smith\ws\111")도 똑같이 쪼개진다. 모든 테스트가 runPm2 를
+// 주입해 실제 spawn 경로를 한 번도 타지 않으므로, 이 결함은 스위트 전체로도 드러나지 않았다.
+//
+// 고치는 형태는 sh_exec(아래, spawn(command, {shell:true}))와 같다 — 명령줄 전체를 "하나의"
+// 문자열로 미리 인용해 만들고, 그 문자열 하나만 file 자리에 넘긴다(별도 args 배열은 쓰지 않는다).
+// 인용 로직을 순수 함수로 떼어 export 하는 이유는, 이번 결함의 진짜 원인이 "프로덕션 경로에 테스트
+// 표면이 아예 없었다"는 것이었기 때문이다 — 같은 실수를 반복하지 않도록 인용 결과 자체를 직접
+// 단정할 수 있게 남긴다.
+//
+// 인용은 이 바깥 셸 레이어에서 "정확히 한 번"만 한다. pm2 는 이 명령줄을 넘겨받아 다시 sh/cmd.exe
+// 를 [flag, command] 배열로 직접 띄운다(shell:true 를 또 쓰는 게 아니라 argv 배열로 바로 spawn
+// 하므로 세 번째 셸이 끼지 않는다) — 그래서 command 문자열 안쪽은 한 번 더 인용할 필요가 없다(더
+// 하면 따옴표가 겹쳐서 오히려 깨진다).
+//
+// 인용 규칙은 "공백(또는 빈 문자열) 인자를 하나의 토큰으로 지킨다"와 "POSIX 작은따옴표 자체가
+// 토큰 경계를 깨는 것을 막는다"까지만 다룬다. cmd.exe 의 &·|·^·% 같은 특수문자까지 모든 경우에
+// 안전한 인용은 셸마다 규칙이 다르고 표준이 없어 범위 밖이다 — 여기서 고치는 건 딱 보고된 실패
+// (공백 든 인자가 쪼개지는 것)뿐이다.
+function needsQuoting(arg: string, flavor: ShellFlavor): boolean {
+  if (arg.length === 0 || /\s/.test(arg)) return true;
+  return flavor === "posix" && arg.includes("'");
+}
+
+// POSIX(sh) 인용 — 작은따옴표로 감싼다. 작은따옴표 안에는 이스케이프가 없으므로, 인자에 작은
+// 따옴표가 있으면 그 지점에서 일단 닫고(') 이스케이프된 따옴표(\')를 따옴표 밖에 쓴 뒤 다시
+// 연다(') — 표준적인 기법이다.
+function quotePosix(arg: string): string {
+  return `'${arg.replace(/'/g, "'\\''")}'`;
+}
+
+// cmd.exe 인용 — 큰따옴표로 감싸기만 한다. 인자 안에 큰따옴표 자체가 섞인 경우까지는 다루지 않는다
+// (위 needsQuoting 주석의 범위 설명 참고) — 다만 cwd 는 애초에 큰따옴표를 쓸 수 없는 윈도우 경로라
+// 이 한계에 실제로 부딪힐 일은 드물다.
+function quoteWin32(arg: string): string {
+  return `"${arg}"`;
+}
+
+// pm2 CLI 호출 전체를 "하나의" 명령줄 문자열로 만드는 순수 함수. flavor 는 shellFor() 와 똑같이
+// 워커 루트의 플레이버로 정해야 한다(shellFlavorOf 참고) — 호스트 플랫폼으로 정하면 안 되는
+// 이유는 shellFor 의 주석과 같다.
+export function buildPm2CommandLine(args: string[], flavor: ShellFlavor): string {
+  const quote = flavor === "win32" ? quoteWin32 : quotePosix;
+  // 단순한 토큰(start·--name·asahi-111 등)은 따옴표 없이 그대로 둬 로그에서 읽기 쉽게 한다.
+  return ["pm2", ...args].map((a) => (needsQuoting(a, flavor) ? quote(a) : a)).join(" ");
+}
+
+// shellFor()·기본 runPm2 가 공유하는 플레이버 판정 — 두 곳이 각자 계산하면 언젠가 갈릴 수 있어
+// 한 곳으로 모은다.
+function shellFlavorOf(roots: string[]): ShellFlavor {
+  return pathFlavorOf(roots[0] ?? "/") === path.win32 ? "win32" : "posix";
+}
+
 const PROC_LOG_DEFAULT_LINES = 50;
 
 function truncate(s: string): string {
@@ -55,8 +115,11 @@ export function makeExecutors(roots: string[], opts: { runPm2?: RunPm2 } = {}): 
     ((args) =>
       new Promise((resolve) => {
         // shell:true 로 부르는 이유는 sh_exec 와 같다 — 윈도우에서 pm2 는 pm2.cmd 셰임이라
-        // 셸을 거치지 않으면 실행 파일을 찾지 못한다.
-        const child = spawn("pm2", args, { shell: true });
+        // 셸을 거치지 않으면 실행 파일을 찾지 못한다. args 를 별도 배열로 넘기지 않고 명령줄
+        // 전체를 문자열 하나로 미리 인용해 file 자리에 통째로 넘기는 이유는 위 buildPm2CommandLine
+        // 주석 참고 — spawn(file, args, {shell:true}) 는 인자별 따옴표를 붙여주지 않는다.
+        const commandLine = buildPm2CommandLine(args, shellFlavorOf(roots));
+        const child = spawn(commandLine, { shell: true });
         let stdout = "";
         let stderr = "";
         child.stdout.on("data", (c: Buffer) => { stdout += c.toString(); });
@@ -76,8 +139,9 @@ export function makeExecutors(roots: string[], opts: { runPm2?: RunPm2 } = {}): 
   // pm2 에 임의 명령을 넘기는 안전한 형태. pm2 는 "스크립트 파일"을 기대하므로, 셸 명령은
   // 인터프리터를 명시해 넘겨야 한다. 어느 셸인지는 워커 루트의 플레이버로 정한다 — 봇은
   // 리눅스, 워커는 윈도우일 수 있어 호스트 플랫폼으로 정하면 어긋난다(paths.ts 와 같은 이유).
+  // 이 판정은 기본 runPm2(위)의 명령줄 인용과 같은 기준을 써야 하므로 shellFlavorOf 로 뺐다.
   const shellFor = (): { bin: string; flag: string } =>
-    pathFlavorOf(roots[0] ?? "/") === path.win32 ? { bin: "cmd.exe", flag: "/c" } : { bin: "sh", flag: "-c" };
+    shellFlavorOf(roots) === "win32" ? { bin: "cmd.exe", flag: "/c" } : { bin: "sh", flag: "-c" };
 
   const procGate = (): { ok: true } | { ok: false; res: ExecResult } =>
     roots.length === 0

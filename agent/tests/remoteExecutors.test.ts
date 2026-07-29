@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { makeExecutors, OUTPUT_MAX } from "../src/remote/executors.js";
+import { makeExecutors, OUTPUT_MAX, buildPm2CommandLine } from "../src/remote/executors.js";
 import { TREE_MAX_ENTRIES } from "../src/remote/tree.js";
 
 describe("워커 실행기", () => {
@@ -444,6 +444,44 @@ describe("proc_* 실행기 — PM2 위임", () => {
     expect(r.content).toContain("멈추");
   });
 
+  // 리뷰 지적(Minor 3): name·cwd 누락 거절은 프로세스 소유권·1인 1개 상한의 전제 조건인데
+  // 전용 테스트가 없었다. name·cwd 는 봇이 주입하므로(remoteTools.ts, 이후 태스크) 누락은 배선이
+  // 깨졌다는 뜻이고, 그럴 때는 pm2 를 아예 부르지 않아야 한다 — jlist 조회조차 없는지까지
+  // 확인해야 "아무 것도 시작하지 않는다"는 보장이 선다.
+  it("proc_start 는 name·cwd 가 없으면 pm2 를 전혀 부르지 않고 거절한다(배선 오류 방어)", async () => {
+    const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: "[]" } });
+    const ex = makeExecutors(["C:\\ws"], { runPm2 });
+    expect((await ex.proc_start!({ command: "npm run dev", cwd: "C:\\ws\\111" })).ok).toBe(false); // name 없음
+    expect((await ex.proc_start!({ command: "npm run dev", name: "asahi-111" })).ok).toBe(false); // cwd 없음
+    expect((await ex.proc_start!({ command: "npm run dev" })).ok).toBe(false); // 둘 다 없음
+    expect(calls).toEqual([]); // jlist 조회조차 없다 — 이름 없이는 아무 것도 시작하지 않는다
+  });
+
+  // 리뷰 지적(Minor 2): shellFor() 는 "워커 루트로 셸을 정한다(호스트 플랫폼이 아니라)"는 규칙을
+  // 구현하지만 직접 단정하는 테스트가 없었다 — 기존 9개는 전부 윈도우 루트("C:\\ws")만 써서
+  // sh.bin·sh.flag 를 하드코딩해도 통과했을 것이다. 두 플레이버를 각각 확인한다.
+  it("proc_start 는 POSIX 루트에서 sh·-c 로 pm2 를 부른다(호스트 플랫폼이 아니라 워커 루트 기준)", async () => {
+    const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: "[]" } });
+    const ex = makeExecutors(["/w"], { runPm2 });
+    await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: "/w/111" });
+    const start = calls.find((c) => c[0] === "start")!;
+    expect(start).toContain("sh");
+    expect(start).toContain("-c");
+    expect(start).not.toContain("cmd.exe");
+    expect(start).not.toContain("/c");
+  });
+
+  it("proc_start 는 윈도우 루트에서 cmd.exe·/c 로 pm2 를 부른다", async () => {
+    const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: "[]" } });
+    const ex = makeExecutors(["C:\\ws"], { runPm2 });
+    await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: "C:\\ws\\111" });
+    const start = calls.find((c) => c[0] === "start")!;
+    expect(start).toContain("cmd.exe");
+    expect(start).toContain("/c");
+    expect(start).not.toContain("sh");
+    expect(start).not.toContain("-c");
+  });
+
   it("proc_stop 은 pm2 delete 를 부른다", async () => {
     const { calls, runPm2 } = fakePm2({ delete: { ok: true, stdout: "" } });
     const ex = makeExecutors(["C:\\ws"], { runPm2 });
@@ -492,5 +530,48 @@ describe("proc_* 실행기 — PM2 위임", () => {
     const { runPm2 } = fakePm2({});
     const ex = makeExecutors([], { runPm2 });
     expect((await ex.proc_list!({})).ok).toBe(false);
+  });
+});
+
+// 리뷰 지적(Important) 수정 검증. 기본 runPm2 의 실제 spawn 경로는 이음매 설계상 이 스위트 어디서도
+// 지나가지 않는다(위 블록 전부 fakePm2 를 주입한다) — 그래서 인용 로직 자체를 순수 함수로 떼어
+// 여기서 직접 단정한다. buildPm2CommandLine 은 executors.ts 의 기본 runPm2 가 실제로 호출하는 바로
+// 그 함수다(재구현이 아니다). 기대값은 Node 의 실제 spawn(그 문자열, {shell:true}) 라운드트립으로
+// 먼저 실측 확인했다 — 인용 없이 join 만 하면(예전 버그) 같은 인자가 7개가 아니라 10개 토큰으로
+// 쪼개졌고, 여기 인용을 거치면 정확히 원래 개수로 돌아온다.
+describe("buildPm2CommandLine — pm2 명령줄 인용(리뷰 Important 수정)", () => {
+  it("공백 없는 단순 토큰은 따옴표 없이 그대로 둔다(로그 가독성)", () => {
+    const line = buildPm2CommandLine(["start", "sh", "--name", "asahi-111"], "posix");
+    expect(line).toBe("pm2 start sh --name asahi-111");
+  });
+
+  it("POSIX 플레이버는 공백 든 인자를 작은따옴표로 감싼다(리뷰가 실측한 인자 배열)", () => {
+    // 예전 코드(join(' ')) 라면 "npm run dev" 가 공백마다 쪼개져 pm2 에 5개가 아니라 7개의
+    // argv 가 전달됐다 — 리뷰가 실측한 바로 그 사례.
+    const line = buildPm2CommandLine(["--name", "asahi-111", "--", "-c", "npm run dev"], "posix");
+    expect(line).toBe("pm2 --name asahi-111 -- -c 'npm run dev'");
+  });
+
+  it("윈도우 플레이버는 공백 든 인자를 큰따옴표로 감싼다(공백 든 --cwd 경로 포함)", () => {
+    // 실제 윈도우 작업폴더는 사용자 이름에 공백이 들어갈 수 있다(예: "Jane Smith").
+    const line = buildPm2CommandLine(
+      ["start", "cmd.exe", "--name", "asahi-111", "--cwd", "C:\\Users\\Jane Smith\\ws\\111", "--", "/c", "npm run dev"],
+      "win32",
+    );
+    expect(line).toBe(
+      'pm2 start cmd.exe --name asahi-111 --cwd "C:\\Users\\Jane Smith\\ws\\111" -- /c "npm run dev"',
+    );
+  });
+
+  it("POSIX 는 인자에 든 작은따옴표를 이스케이프한다(따옴표 자체가 토큰 경계를 깨지 않게)", () => {
+    // 작은따옴표 안에는 이스케이프가 없으므로 공백이 없어도 인용 대상이다 — needsQuoting 이
+    // 공백만 보면 이 경우를 놓친다.
+    const line = buildPm2CommandLine(["it's"], "posix");
+    expect(line).toBe("pm2 'it'\\''s'");
+  });
+
+  it("빈 문자열 인자도 따옴표로 감싸 사라지지 않게 한다", () => {
+    const line = buildPm2CommandLine(["start", ""], "posix");
+    expect(line).toBe("pm2 start ''");
   });
 });
