@@ -498,3 +498,21 @@ describe("buildSystemPrompt — 표정 이미지", () => {
     expect(buildSystemPrompt({ ...OWNER, emotions: EMOTIONS })).toMatch(/이모지/);
   });
 });
+
+describe("buildSystemPrompt — 장기 실행 프로세스 도구를 안내한다", () => {
+  it("워커가 연결된 네 분기 모두 proc_start 를 언급한다", () => {
+    const branches = [
+      { isOwner: true, isPrivate: true }, { isOwner: true, isPrivate: false },
+      { isOwner: false, isPrivate: true }, { isOwner: false, isPrivate: false },
+    ];
+    for (const b of branches) {
+      const p = buildSystemPrompt({ role: b.isOwner ? "owner" : "allowed", ...b, workerConnected: true });
+      expect(capabilitySection(p)).toMatch(/proc_start/);
+    }
+  });
+
+  it("워커 미연결이면 언급하지 않는다", () => {
+    const cap = capabilitySection(buildSystemPrompt({ role: "allowed", isPrivate: false, isOwner: false }));
+    expect(cap).not.toMatch(/proc_start/);
+  });
+});

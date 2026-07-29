@@ -215,3 +215,14 @@ describe("renderCommandHelp — 능력 안내는 워커 연결 여부로 갈린�
     expect(help).toMatch(/명령 실행해줘/);
   });
 });
+
+// renderCommandHelp 는 workerConnected 를 위치 인자(boolean)로 받는다 — 객체가 아니다.
+describe("renderCommandHelp — 오래 도는 프로세스를 안내한다", () => {
+  it("워커가 연결돼 있으면 개발서버 안내가 있다", () => {
+    expect(renderCommandHelp(true)).toMatch(/개발서버|오래 도는/);
+  });
+
+  it("워커가 연결돼 있지 않으면 안내하지 않는다", () => {
+    expect(renderCommandHelp(false)).not.toMatch(/개발서버/);
+  });
+});
