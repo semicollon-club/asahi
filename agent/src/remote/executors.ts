@@ -68,7 +68,12 @@ export type ShellFlavor = "win32" | "posix";
 // (공백 든 인자가 쪼개지는 것)뿐이다.
 function needsQuoting(arg: string, flavor: ShellFlavor): boolean {
   if (arg.length === 0 || /\s/.test(arg)) return true;
-  return flavor === "posix" && arg.includes("'");
+  // POSIX 는 작은따옴표, 윈도우는 큰따옴표 — 각 플레이버의 인용 문자가 인자 안에 있으면 공백이
+  // 없어도 인용 대상이다. 윈도우 쪽을 빠뜨리면(공백 없이 큰따옴표만 든 인자) 아래에서 quote()
+  // 가 아예 호출되지 않아 quoteWin32 의 이스케이프 로직이 있어도 이 인자에는 한 번도 적용되지
+  // 않는다 — 인용되지 않은 토큰 안의 " 는 (앞의 백슬래시 개수가 짝수라서) 그 자체로 표준 윈도우
+  // argv 파서의 따옴표 모드를 토글해버려, 공백이 없어도 조용히 다른 방식으로 깨진다.
+  return flavor === "posix" ? arg.includes("'") : arg.includes('"');
 }
 
 // POSIX(sh) 인용 — 작은따옴표로 감싼다. 작은따옴표 안에는 이스케이프가 없으므로, 인자에 작은
@@ -78,11 +83,41 @@ function quotePosix(arg: string): string {
   return `'${arg.replace(/'/g, "'\\''")}'`;
 }
 
-// cmd.exe 인용 — 큰따옴표로 감싸기만 한다. 인자 안에 큰따옴표 자체가 섞인 경우까지는 다루지 않는다
-// (위 needsQuoting 주석의 범위 설명 참고) — 다만 cwd 는 애초에 큰따옴표를 쓸 수 없는 윈도우 경로라
-// 이 한계에 실제로 부딪힐 일은 드물다.
+// cmd.exe 인용 — MSVCRT/CommandLineToArgvW 의 표준 명령줄 인용 알고리즘을 그대로 구현한다(근사치가
+// 아니라 문서화된 그 규칙 자체 — Python subprocess.list2cmdline 과 같은 알고리즘이다). 큰따옴표
+// 바로 앞의 백슬래시들은 두 배로 늘린 뒤 \" 를 쓴다(따옴표는 리터럴로 살리고, 그 앞의 백슬래시도
+// 리터럴로 보존한다). 백슬래시가 아닌 문자 앞에서는 백슬래시를 그대로 둔다(늘리지 않는다). 인자
+// 끝에 남는 백슬래시(바로 뒤에 우리가 붙이는 닫는 큰따옴표가 오는 자리)도 두 배로 늘린다 — 안
+// 그러면 그 백슬래시가 우리가 붙이는 닫는 큰따옴표를 이스케이프해버려 따옴표가 안 닫힌 것처럼
+// 파싱된다.
+//
+// 이 인용이 다루는 건 "표준 윈도우 argv 파싱"이라는 한 겹뿐이다. proc_start 가 pm2 에 넘기는
+// command 인자(예: npm run dev -- --title="hi there")처럼 모델·사용자가 자유롭게 채우는 값이
+// 실제로 큰따옴표를 담을 수 있는 바로 그 필드이고, quoteWin32 가 존재하는 이유이기도 하다 — cwd
+// 는 애초에 큰따옴표를 쓸 수 없는 윈도우 경로라 이 계층에서는 참고 사례일 뿐이다. 다만 cmd.exe
+// 는 이 표준 argv 파싱 위에 자기만의 인용·특수문자 해석 계층을 하나 더 얹는다: 여기서 만든 큰
+// 따옴표 쌍 안이든 밖이든 &·|·^·% 같은 cmd.exe 메타문자는 cmd.exe 가 명령 구분자·파이프·이스케이프
+// 문자로 재해석할 수 있다. 그 계층까지 모든 경우에 안전한 인용은 셸마다 규칙이 다르고 표준이
+// 없어 여전히 범위 밖이다(위 needsQuoting 주석의 범위 설명과 같은 이유) — 이번에 고친 건 표준
+// argv 파싱 단계에서 인자가 깨지는 것(공백·큰따옴표로 토큰이 쪼개지거나 따옴표가 조용히 사라지는
+// 것)뿐이다.
 function quoteWin32(arg: string): string {
-  return `"${arg}"`;
+  let escaped = "";
+  let backslashes = 0;
+  for (const ch of arg) {
+    if (ch === "\\") {
+      backslashes++;
+      continue;
+    }
+    if (ch === '"') {
+      escaped += "\\".repeat(backslashes * 2 + 1) + '"';
+    } else {
+      escaped += "\\".repeat(backslashes) + ch;
+    }
+    backslashes = 0;
+  }
+  escaped += "\\".repeat(backslashes * 2);
+  return `"${escaped}"`;
 }
 
 // pm2 CLI 호출 전체를 "하나의" 명령줄 문자열로 만드는 순수 함수. flavor 는 shellFor() 와 똑같이

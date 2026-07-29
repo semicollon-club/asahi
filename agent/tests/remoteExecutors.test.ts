@@ -575,3 +575,39 @@ describe("buildPm2CommandLine — pm2 명령줄 인용(리뷰 Important 수정)"
     expect(line).toBe("pm2 start ''");
   });
 });
+
+// 후속 리뷰 지적(Important) 수정 검증. 위 5개 테스트가 통과하던 시점에도 quoteWin32 는 인자를
+// "..." 로 감싸기만 했고, 인자 안의 큰따옴표 자체는 전혀 이스케이프하지 않았다. 실측(리뷰가 실제
+// cmd.exe 로 확인): buildPm2CommandLine([..., 'npm run dev -- --title="hi there"'], "win32") 를
+// 그대로 다시 spawn(그 문자열, {shell:true}) 하면 큰따옴표가 조용히 사라지고 인자가 둘로 쪼개진다
+// ("npm run dev -- --title=hi" 와 "there") — 공백 대신 큰따옴표가 방아쇠라는 점만 다를 뿐, 원래
+// 버그와 같은 조용한 손상 클래스다. 아래는 MSVCRT/CommandLineToArgvW 표준 인용 규칙(큰따옴표
+// 앞의 백슬래시만 두 배로 늘리고 큰따옴표는 \" 로 이스케이프)을 정확한 문자열로 고정한다. 기대값은
+// POSIX 인용 테스트와 같은 원칙으로, 손으로 지어내지 않고 이 인자들을 실제
+// spawn(문자열, {shell:true})로 다시 라운드트립해 원래 배열과 바이트 단위로 같아지는 것까지 먼저
+// 실측 확인한 뒤 옮겨 적었다.
+describe("buildPm2CommandLine — 윈도우 큰따옴표 이스케이프(추가 리뷰 Important 수정)", () => {
+  it("윈도우 플레이버는 인자에 든 큰따옴표를 이스케이프한다(리뷰가 실측한 cmd.exe 라운드트립 사례)", () => {
+    // 리뷰가 실측으로 보고한 바로 그 사례 — 공백이 있어 인용 대상인 건 이전 라운드부터 그랬지만,
+    // 감싸는 큰따옴표 안의 두 " 가 지금까지는 전혀 이스케이프되지 않았다.
+    const line = buildPm2CommandLine(['npm run dev -- --title="hi there"'], "win32");
+    expect(line).toBe('pm2 "npm run dev -- --title=\\"hi there\\""');
+  });
+
+  it("윈도우 플레이버는 인자 끝의 백슬래시를 닫는 큰따옴표 앞에서 두 배로 늘린다", () => {
+    // 실제 윈도우 작업폴더가 백슬래시로 끝나는 경우(예: 사용자가 트레일링 슬래시를 붙인 cwd).
+    // 늘리지 않으면 그 백슬래시가 우리가 붙이는 닫는 큰따옴표를 이스케이프해버려 따옴표가 안
+    // 닫힌 것처럼 파싱된다.
+    const line = buildPm2CommandLine(["C:\\Users\\Jane Smith\\ws\\111\\"], "win32");
+    expect(line).toBe('pm2 "C:\\Users\\Jane Smith\\ws\\111\\\\"');
+  });
+
+  it("윈도우 플레이버는 백슬래시가 바로 앞에 오는 큰따옴표도 이스케이프한다(공백 없이 큰따옴표만 있어도 인용 대상)", () => {
+    // 공백이 전혀 없는 인자 — needsQuoting 이 윈도우에서도 큰따옴표 포함 여부를 보도록 고치지
+    // 않으면 이 인자는 애초에 인용조차 되지 않아 quoteWin32 의 이스케이프가 한 번도 호출되지
+    // 않는다(그러면 인용 안 된 토큰 안의 "가 표준 argv 파서의 따옴표 모드를 그 자체로 토글해버려
+    // 공백 없이도 조용히 다른 방식으로 깨진다).
+    const line = buildPm2CommandLine(['a\\"b'], "win32");
+    expect(line).toBe('pm2 "a\\\\\\"b"');
+  });
+});
