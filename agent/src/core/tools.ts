@@ -452,7 +452,7 @@ export function buildToolDefinitions(ctx: ToolCtx) {
       "개발서버처럼 오래 도는 프로세스를 띄웁니다. 한 사람당 하나만 띄울 수 있습니다.",
       {
         command: z.string().describe("실행할 명령. 예: npm run dev"),
-        path: z.string().optional().describe("npm run dev 등을 실행할 프로젝트 폴더의 절대경로(package.json 이 있는 폴더 등). 생략하면 본인 폴더 루트예요."),
+        path: z.string().optional().describe("npm run dev 등을 실행할 프로젝트 폴더의 절대경로(package.json 이 있는 폴더 등). 생략하면 허용된 폴더 중 첫 번째를 써요."),
       },
       async (args) => remoteResult(ctx, "proc_start", args),
     ),
