@@ -473,6 +473,19 @@ describe("proc_* 실행기 — PM2 위임", () => {
     await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: projectDir });
     const start = calls.find((c) => c[0] === "start")!;
     expect(start).toContain("--no-autorestart");
+    // 커버리지 공백 보완(Gap 3): 존재 여부(toContain)만으로는 부족하다 — pm2 는 "--" 앞의
+    // 토큰만 자기 옵션으로 해석하고, 그 뒤는 그대로 cmd.exe/sh 스크립트 인자로 흘려보낸다
+    // (바로 뒤 sh.flag·command 가 실행할 명령 그 자체인 이유). --no-autorestart 가 "--" 뒤로
+    // 밀리면 pm2 에게는 안 보이는 문자열 하나가 될 뿐이라 autorestart 는 계속 켜진 채로
+    // 남는다 — 그러면 트리 kill 과 pm2 delete 사이 몇백 ms 동안 pm2 가 cmd.exe/npm/vite 를
+    // 되살려, delete 는 그 "새" cmd.exe 만 거두고 새 손자는 다시 고아가 된다(이 플래그를
+    // 넣은 이유 그 자체인 경쟁 조건). 위 toContain 은 이 회귀를 못 잡는다 — "--" 뒤로 옮겨도
+    // 배열엔 여전히 들어 있기 때문이다. 위치까지 직접 고정한다.
+    const flagIndex = start.indexOf("--no-autorestart");
+    const sepIndex = start.indexOf("--");
+    expect(flagIndex).toBeGreaterThanOrEqual(0);
+    expect(sepIndex).toBeGreaterThanOrEqual(0);
+    expect(flagIndex).toBeLessThan(sepIndex);
   });
 
   it("proc_start 는 같은 이름이 이미 있으면 pm2 를 부르지 않고 거절한다(조용한 교체 금지)", async () => {
@@ -695,6 +708,26 @@ describe("proc_* 실행기 — PM2 위임", () => {
       expect(r.content).toBe("멈췄어요: asahi-111");
     });
 
+    // 커버리지 공백 보완(Gap 2): proc_stop 자신의 jlist 실패 경로는 지금까지 아무 테스트도
+    // 지나지 않았다 — proc_start(위 "재조회 자체가 실패해도" 테스트)·proc_list(아래 "pm2 가
+    // 실패하면" 테스트)는 각각 jlist 실패를 검증하지만, proc_stop 은 before.ok 가 false 일 때
+    // proc 를 undefined 로 떨어뜨리는 그 자신의 분기(`before.ok ? ... : undefined`)를 아무도
+    // 겨냥하지 않았다. 코드 자체는 옳다 — proc 가 없으니 트리 kill 가드를 자연히 건너뛴다.
+    // 하지만 "jlist 가 실패하면 트리 정리를 확인 못 했다고 알리는 대신, 아예 조기 반환으로
+    // 무조건 '멈췄어요'만 돌려준다" 같은 회귀가 들어와도 이 경로를 지나가는 테스트가 하나도
+    // 없으면 잡아내지 못한다.
+    it("jlist 조회 자체가 실패해도(pm2 응답 없음 등) killTree 를 건너뛰고 pm2 delete 는 그대로 시도하며, 확인 못 했다고 알린다", async () => {
+      const killCalls: number[] = [];
+      const { calls, runPm2 } = fakePm2({ jlist: { ok: false, stdout: "", stderr: "pm2 응답 없음" }, delete: { ok: true, stdout: "" } });
+      const killTree = async (pid: number) => { killCalls.push(pid); };
+      const ex = makeExecutors([root], { runPm2, killTree });
+      const r = await ex.proc_stop!({ name: "asahi-111" });
+      expect(r.ok).toBe(true);
+      expect(killCalls).toEqual([]);
+      expect(calls).toContainEqual(["delete", "asahi-111"]); // jlist 가 실패해도 delete 시도 자체는 예전과 같이 보장돼야 한다
+      expect(r.content).toContain("확인하지 못했");
+    });
+
     it("jlist 에 그 이름이 없으면(이미 사라졌거나 목록 조회가 비어 있으면) killTree 를 건너뛰고 pm2 delete 는 그대로 시도한다", async () => {
       const killCalls: number[] = [];
       const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: "[]" }, delete: { ok: true, stdout: "" } });
@@ -742,6 +775,28 @@ describe("proc_* 실행기 — PM2 위임", () => {
       expect(killCalls).toEqual([]); // killTree(0) 이 불렸다면 POSIX 에서 process.kill(-0, …) 로 워커 자신을 죽였을 것이다
       expect(calls).toContainEqual(["delete", "asahi-111"]);
       expect(r.content).toContain("확인하지 못했"); // Finding 3 — 트리 kill 을 걸지 않았으니 그 사실을 그대로 알린다
+    });
+
+    // 커버리지 공백 보완(Gap 1): 위 테스트(pid:0)는 status:"errored" 와 함께, 아래 테스트
+    // (pid:4321)는 status:"stopped" 와 함께 온다 — 둘 다 status 조건에서 이미 걸러지므로,
+    // 가드에서 "&& proc.pid > 0" 을 통째로 빼도(= status==="online" 만으로 통과) 이 두
+    // 테스트는 여전히 초록불이다. pid 조건 자신이 실제로 일한 적이 한 번도 없다는 뜻이다.
+    // status:"online" 과 pid:0 을 함께 줘서 pid 조건만 단독으로 겨냥한다 — 이게 통과하면
+    // POSIX 분기에서 killTree(0) → process.kill(-0, "SIGKILL") 로 워커가 자기 자신의 프로세스
+    // 그룹을 죽인다(위 killTree 선언부 주석 참고).
+    it("jlist 의 status 가 online 이어도 pid 가 0 이면 killTree 를 부르지 않는다(self-kill 방지 — pid 조건은 status 와 별개로 검사돼야 한다)", async () => {
+      const killCalls: number[] = [];
+      const onlineButZeroPidJlist = JSON.stringify([
+        { name: "asahi-111", pid: 0, pm2_env: { status: "online", restart_time: 0, args: ["run", "dev"], pm_exec_path: "npm" }, monit: { memory: 1 } },
+      ]);
+      const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: onlineButZeroPidJlist }, delete: { ok: true, stdout: "" } });
+      const killTree = async (pid: number) => { killCalls.push(pid); };
+      const ex = makeExecutors([root], { runPm2, killTree });
+      const r = await ex.proc_stop!({ name: "asahi-111" });
+      expect(r.ok).toBe(true);
+      expect(killCalls).toEqual([]); // killTree(0) 이 불렸다면 POSIX 에서 process.kill(-0, …) 로 워커 자신을 죽였을 것이다
+      expect(calls).toContainEqual(["delete", "asahi-111"]);
+      expect(r.content).toContain("확인하지 못했");
     });
 
     // 리뷰 지적(Important, Finding 1, 컨트롤러 결정): pid 가 양수여도 status 가 "online" 이 아니면
