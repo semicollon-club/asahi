@@ -42,10 +42,20 @@ export type ProcInfo = {
   startedAtMs: number | null;
   memoryBytes: number | null;
   restarts: number;
+  // Defect 2(운영 중 발견): pm2 delete 는 pm2 가 직접 아는 자식(cmd.exe/sh)만 죽이고 그 밑의 실제
+  // 프로세스 트리(회원의 npm·vite 등, 손자 프로세스)는 그대로 남는다 — executors.ts 의 proc_stop 이
+  // pm2 delete 전에 taskkill /T 등으로 이 pid 로 트리 전체를 끝낸다. jlist 최상위 필드(pm2_env 밖)를
+  // 그대로 옮겨 온다.
+  //
+  // 정정(이 브랜치 후속 리뷰 Finding 4): 이 pid 로 트리를 끝내는 것만으로 고아가 안 생긴다고
+  // 보장되지는 않는다 — kill 시점에 앱이 여전히 pm2 에 등록돼 있어, autorestart 가 켜져 있으면
+  // kill과 pm2 delete 사이에 pm2 가 새 프로세스 트리를 다시 살릴 수 있다(executors.ts 의 killTree
+  // 선언부 주석 참고). proc_start 가 --no-autorestart 로 띄우는 것이 이 경쟁을 막는 전제 조건이다.
+  pid: number | null;
 };
 
 type RawEnv = { status?: unknown; pm_uptime?: unknown; restart_time?: unknown; args?: unknown; pm_exec_path?: unknown };
-type RawProc = { name?: unknown; pm2_env?: RawEnv; monit?: { memory?: unknown } };
+type RawProc = { name?: unknown; pid?: unknown; pm2_env?: RawEnv; monit?: { memory?: unknown } };
 
 const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
 
@@ -92,6 +102,7 @@ export function parsePm2List(json: string): ProcInfo[] {
       startedAtMs: started,
       memoryBytes: num(p.monit?.memory),
       restarts: num(p.pm2_env?.restart_time) ?? 0,
+      pid: num(p.pid),
     };
   });
 }

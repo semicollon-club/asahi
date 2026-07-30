@@ -441,10 +441,19 @@ export function buildToolDefinitions(ctx: ToolCtx) {
     // 이 값들은 모델이 정하지 않고 remoteToolHandler 가 주입한다(거기 주석 참고). 스키마에 열어
     // 두면 모델이 남의 프로세스 이름을 만들어 낼 수 있고, 그러면 핸들러의 주입이 "모델이 준 값을
     // 덮어쓰는" 일이 되어 도구 설명과 실제 동작이 어긋난다.
+    // path 는 name·cwd 와 다르다 — 모델이 정해도 된다. 대부분의 프로젝트는 회원 폴더 루트가 아니라
+    // 그 아래 하위 폴더(예: "…\<id>\테스트 1\")에 있으므로, 모델이 실제 프로젝트 위치를 알려줄 수
+    // 있어야 한다(운영 중 발견: path 가 없어 루트로 고정되던 시절엔 package.json 을 못 찾고 npm run
+    // dev 가 항상 실패했다). remoteToolHandler 의 기존 경로 게이트(pathArgOf → needsPathCheck)가
+    // 이 값을 allowed_dirs 로 그대로 검사하고, 검사를 통과한 값 그대로 cwd 로 주입한다(FIX1) —
+    // name·cwd 처럼 봇이 값 자체를 정하는 게 아니라 모델이 제안한 값을 "검증"만 한다는 점이 다르다.
     tool(
       "proc_start",
       "개발서버처럼 오래 도는 프로세스를 띄웁니다. 한 사람당 하나만 띄울 수 있습니다.",
-      { command: z.string().describe("실행할 명령. 예: npm run dev") },
+      {
+        command: z.string().describe("실행할 명령. 예: npm run dev"),
+        path: z.string().optional().describe("npm run dev 등을 실행할 프로젝트 폴더의 절대경로(package.json 이 있는 폴더 등). 생략하면 허용된 폴더 중 첫 번째를 써요."),
+      },
       async (args) => remoteResult(ctx, "proc_start", args),
     ),
     tool(

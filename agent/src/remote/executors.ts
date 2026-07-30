@@ -40,6 +40,20 @@ const FORCE_KILL_GRACE_MS = 2_000;
 // 소실)이 정확히 그렇게 다섯 번의 리뷰를 통과했다.
 export type RunPm2 = (args: string[]) => Promise<{ ok: boolean; stdout: string; stderr: string }>;
 
+// Defect 2(운영 중 발견): pm2 delete 는 pm2 가 직접 아는 자식(cmd.exe/sh)만 죽이고 그 밑의 실제
+// 프로세스 트리(회원의 npm·vite 등, 손자 프로세스)는 그대로 남는다 — 운영 재현: proc_stop 이
+// "멈췄어요"를 응답한 뒤에도 npm run dev·vite.js 가 포트를 붙든 채 계속 돌았고 proc_list 에는
+// 아예 나타나지 않는 고아가 됐다(pm2 의 treekill 옵션이 윈도우에서 기본 true 라고 알려져 있지만,
+// 이 사고에서는 그 기본값이 실제로 트리를 못 죽였다). RunPm2 와 같은 이유로 이음매 뒤로 뺀다 —
+// 테스트가 실제 프로세스를 하나도 죽이지 않고도 "정확한 pid 로, pm2 delete 보다 먼저 불렸는지"를
+// 확인할 수 있어야 한다.
+//
+// 리뷰 지적(Important, Finding 3): 실패하면 반드시 reject 해야 한다 — 예전 기본 구현은 taskkill의
+// 종료 코드를 보지 않고 항상 resolve 했다(아래 참고). proc_stop 은 이 Promise 가 정상 종료했는지로
+// "트리 정리를 확인했다"는 메시지를 결정하므로(treeKilled), 실패를 삼키고 resolve 하면 회원에게
+// 거짓 확신을 준다 — throw(reject) 가 유일한 실패 신호다.
+export type KillTree = (pid: number) => Promise<void>;
+
 // shellFor()·기본 runPm2(아래)가 함께 쓰는 "워커가 윈도우인지 POSIX 인지" 판정 결과 타입.
 export type ShellFlavor = "win32" | "posix";
 
@@ -156,7 +170,7 @@ function truncate(s: string): string {
 const str = (v: unknown): string | undefined => (typeof v === "string" && v.length > 0 ? v : undefined);
 const num = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
 
-export function makeExecutors(roots: string[], opts: { runPm2?: RunPm2 } = {}): Executors {
+export function makeExecutors(roots: string[], opts: { runPm2?: RunPm2; killTree?: KillTree } = {}): Executors {
   const runPm2: RunPm2 =
     opts.runPm2 ??
     ((args) =>
@@ -173,6 +187,65 @@ export function makeExecutors(roots: string[], opts: { runPm2?: RunPm2 } = {}): 
         child.stderr.on("data", (c: Buffer) => { stderr += c.toString(); });
         child.on("error", (e) => resolve({ ok: false, stdout, stderr: String(e) }));
         child.on("close", (code) => resolve({ ok: code === 0, stdout, stderr }));
+      }));
+
+  // Defect 2 기본 구현. 플랫폼은 shellFor()·기본 runPm2 와 정확히 같은 기준(shellFlavorOf →
+  // pathFlavorOf(roots[0]))으로 고른다 — process.platform 을 쓰면 안 되는 이유도 같다: 이
+  // executors.ts 모듈 자체는 실제로 워커 프로세스 위에서 실행되므로 오늘은 결과가 같지만, "무엇을
+  // 신뢰의 기준으로 삼는가"를 이미 검증된 WORKER_ROOTS(설정)로 통일해 두면 이 함수가 언제 어디서
+  // 불려도(예: 테스트) 근거가 하나뿐이다.
+  //
+  // 정정(이 브랜치 후속 리뷰 Finding 4): 이 트리 kill 은 그 자체만으로 고아 문제를 항상 해결하지
+  // 않는다 — proc_stop 이 이 kill 을 부르는 시점에 앱은 여전히 pm2 에 등록돼 있다. autorestart 가
+  // 켜져 있으면 pm2 는 외부에서 cmd.exe 가 죽은 것을 "크래시"로 보고, 이 kill 과 뒤이은 pm2
+  // delete 사이의 몇백 ms 동안 cmd.exe/npm/vite 를 다시 살릴 수 있다 — 그러면 delete 는 그 "새"
+  // cmd.exe 만 거두고 그 밑의 새 손자는 다시 고아가 된다. 이 경쟁을 실제로 닫는 것은 proc_start 가
+  // --no-autorestart 로 띄우는 것이다(아래 proc_start 의 pm2 start 호출 참고) — 그 전제 위에서만
+  // 이 함수가 "트리 kill 후 delete"로 고아를 남기지 않는다고 말할 수 있다.
+  const killTree: KillTree =
+    opts.killTree ??
+    ((pid) =>
+      new Promise<void>((resolve, reject) => {
+        if (shellFlavorOf(roots) === "win32") {
+          // pm2 는 cmd.exe /c <command> 를 띄우고, 회원의 실제 서버(npm/vite 등)는 그 자식(pm2
+          // 입장에서는 손자) 프로세스다 — pm2 delete 는 pm2 가 직접 아는 cmd.exe 만 죽이고 그
+          // 밑의 트리는 그대로 둔다(운영 실측: pm2 delete 뒤에도 npm run dev·vite.js 가 포트를
+          // 잡은 채 계속 돌았다 — pm2 의 treekill 옵션이 윈도우 기본값 true 라고 알려져 있지만
+          // 실측에서 트리를 못 죽였다). sh_exec 의 forceKill(위)과 같은 도구, 같은 이유로
+          // taskkill /T(트리 전체) /F(강제)를 직접 쓴다.
+          try {
+            const killer = spawn("taskkill", ["/PID", String(pid), "/T", "/F"]);
+            killer.on("error", (e) => reject(e));
+            // 리뷰 지적(Important, Finding 3): 예전엔 close 이벤트만 보고 종료 코드를 확인하지
+            // 않아, taskkill 이 실패해도(이미 없는 pid, 권한 부족 등) 항상 "성공"으로 resolve 했다
+            // — proc_stop 이 이 결과를 "트리를 실제로 정리했다"는 신호로 못 쓰는 원인이었다. 0 이
+            // 아니면 reject 해 호출측(proc_stop)의 catch/treeKilled 로 실패가 그대로 전달되게 한다.
+            killer.on("close", (code) => (code === 0 ? resolve() : reject(new Error(`taskkill 종료 코드 ${code}`))));
+          } catch (e) {
+            reject(e);
+          }
+        } else {
+          // POSIX: 이 클럽의 실제 워커는 전부 회원 개인 PC·공유 미니 PC 로, 오늘은 전부 윈도우다
+          // — 이 분기가 실제 배포에서 지나가는 경로는 없다. 그래도 미래를 위해 taskkill 을 그대로
+          // 옮겨 심는(윈도우 전용 도구를 POSIX 에 억지로 흉내 내는) 대신, POSIX 표준 방식으로
+          // 올바른 것을 쓴다: pm2 가 sh -c <command> 로 띄우므로 회원의 실제 명령도 sh 의 자식(같은
+          // 모양의 손자 프로세스)이 될 수 있다 — process.kill(-pid, …) 는 pid 를 그룹 리더로 하는
+          // 프로세스 그룹 전체에 신호를 보내는 POSIX 표준 동작이라, sh 와 그 자식들을 한 번에
+          // 정리한다(pm2 가 별도로 setsid 등을 하지 않는 한 자식들이 같은 그룹에 남는다). 다만
+          // POSIX 셸은 "마지막 명령을 exec 로 대체"하는 최적화가 흔해(sh -c "npm run dev" 가 exec
+          // 로 npm 프로세스 자체가 되어 애초에 손자를 두지 않는 경우가 많다) 윈도우만큼 사무적이지
+          // 않다 — 이 캐비엇을 인지한 채로, "적어도 표준적이고 틀리지 않은" 선택을 한다.
+          try {
+            process.kill(-pid, "SIGKILL");
+            resolve();
+          } catch (e) {
+            // 리뷰 지적(Important, Finding 3): 윈도우 분기와 같은 이유로 여기서도 실패를 삼키지
+            // 않는다 — 이미 죽었거나(ESRCH) 권한 문제(EPERM)면 reject 해 proc_stop 이 "확인하지
+            // 못했다"고 정직하게 알리게 한다. 최종 판정은 여전히 pm2 delete 의 성패이므로(proc_stop
+            // 의 catch 참고) 이 reject 자체가 도구 호출을 실패시키지는 않는다.
+            reject(e);
+          }
+        }
       }));
 
   // 경로 인자를 검사해 실경로를 돌려준다. 거부되면 그대로 ExecResult 로 반환한다.
@@ -523,6 +596,29 @@ export function makeExecutors(roots: string[], opts: { runPm2?: RunPm2 } = {}): 
       // 이름 없이 띄우면 소유권도 1인 1개 상한도 성립하지 않는다.
       if (!name || !cwd) return { ok: false, content: "프로세스 이름·작업 폴더가 지정되지 않았어요." };
 
+      // Defect 1(운영 중 발견): 봇(remoteTools.ts)이 allowed_dirs 로 cwd 를 이미 한 번 걸렀지만,
+      // 그 검증이 이 프로세스까지 그대로 왔는지는 워커 자신만 안다 — fs_* 실행기의 gate()(위 참고)
+      // 와 정확히 같은 이유로 checkPath 를 여기서도 최종 관문으로 한 번 더 돌린다. 봇은
+      // allowed_dirs 를, 워커는 WORKER_ROOTS 를 검사한다 — 다른 모든 원격 도구와 마찬가지로 두
+      // 겹 다 걸어야 하며, 어느 한쪽만으로는 부족하다(remoteTools.ts 의 FIX1 원칙과 같다: 검사한
+      // 값과 실제로 쓰는 값이 같아야 검사가 의미를 갖는다).
+      const cwdCheck = checkPath(cwd, roots);
+      if (!cwdCheck.ok) return { ok: false, content: cwdCheck.message };
+
+      // 운영 중 실제로 겪은 결함: 회원의 프로젝트는 폴더 루트가 아니라 그 아래 하위 폴더(예:
+      // "…\<id>\테스트 1\")에 있는 게 보통인데, 그 폴더가 실제로 없으면(오타 등) pm2 가 --cwd 에서
+      // 그 자리에서 실패한다 — 회원은 원인을 알 방법이 없어 cd/--prefix 변형을 여러 번 시도하며
+      // 헤맸다. pm2 를 부르기 전에 여기서 먼저 확인해 원인을 한국어로 명확히 알린다.
+      let cwdStat: Awaited<ReturnType<typeof fs.stat>>;
+      try {
+        cwdStat = await fs.stat(cwdCheck.path);
+      } catch {
+        return { ok: false, content: `그 폴더가 없어요: ${cwdCheck.path} — 경로를 다시 확인해 주세요.` };
+      }
+      if (!cwdStat.isDirectory()) {
+        return { ok: false, content: `그 경로는 폴더가 아니에요: ${cwdCheck.path}` };
+      }
+
       const before = await listProcs();
       if (!before.ok) return { ok: false, content: before.message };
       const dup = before.procs.find((p) => p.name === name);
@@ -530,14 +626,27 @@ export function makeExecutors(roots: string[], opts: { runPm2?: RunPm2 } = {}): 
       if (dup) return { ok: false, content: `이미 돌고 있는 게 있어요: ${dup.command} (${dup.status}). 먼저 멈춰야 새로 띄울 수 있어요.` };
 
       const sh = shellFor();
-      const r = await runPm2(["start", sh.bin, "--name", name, "--cwd", cwd, "--", sh.flag, command]);
+      // cwd 가 아니라 cwdCheck.path 를 쓴다 — fs_* 의 gate() 가 g.path(검사에서 나온 실경로)로 실제
+      // 파일시스템 작업을 하는 것과 같은 이유다(심볼릭 링크 등을 해석한 정규화된 값).
+      //
+      // 리뷰 지적(Important, 이 브랜치 후속 리뷰 Finding 4, 컨트롤러 결정): --no-autorestart 로
+      // 띄운다. proc_stop 의 트리 kill(위 killTree 선언부 참고)은 앱이 여전히 pm2 에 등록된 채로
+      // 실행되므로, autorestart 가 켜져 있으면 외부에서 cmd.exe 를 죽인 것을 pm2 가 "크래시"로 보고
+      // 트리 kill 과 뒤이은 pm2 delete 사이의 몇백 ms 동안 cmd.exe/npm/vite 를 다시 살릴 수 있다 —
+      // 그 delete 는 그 "새" cmd.exe 만 거두고 그 밑의 새 손자는 다시 고아가 된다. autorestart 를
+      // 꺼서 이 경쟁 자체를 없앤다. 부수적으로도 이 쓰임에 더 맞는 동작이다 — 오타 난 개발서버가
+      // 보이지 않게 재시작을 반복하는 대신 한 번 죽고 그대로 멈춰 있으면, 아래 재조회가 그 실패를
+      // 매번 결정론적으로(재시작 타이밍에 따라 흔들리지 않고) 잡아낸다.
+      const r = await runPm2(["start", sh.bin, "--name", name, "--cwd", cwdCheck.path, "--no-autorestart", "--", sh.flag, command]);
       if (!r.ok) return { ok: false, content: `띄우지 못했어요: ${r.stderr.trim() || r.stdout.trim() || "알 수 없는 오류"}` };
 
-      // 리뷰 지적(Minor, Finding 5): pm2 의 기본 autorestart 때문에 위 start 호출이 ok:true 여도
-      // "pm2 가 프로세스 등록에 성공했다"는 뜻일 뿐, 명령 자체가 오타 등으로 즉시 죽으면 재시작을
-      // 반복한다 — 여기서 바로 "띄웠어요"라고 알리면 크래시 루프도 성공으로 들린다. 재조회 한
-      // 번으로 실제 상태를 확인해 보고한다(재시도·대기 루프는 두지 않는다 — 그 순간의 스냅샷만
-      // 정직하게 전달하면 충분하고, pm2 가 안정화되길 기다리는 건 별개의 더 큰 설계다).
+      // 리뷰 지적(Minor, Finding 5 — 원래 M2 리뷰): pm2 의 start 호출이 ok:true 여도 "pm2 가 프로세스
+      // 등록에 성공했다"는 뜻일 뿐, 명령 자체가 오타 등으로 즉시 죽으면 상태가 곧바로 무너진다 —
+      // 여기서 바로 "띄웠어요"라고 알리면 그 실패도 성공으로 들린다. 재조회 한 번으로 실제 상태를
+      // 확인해 보고한다(재시도·대기 루프는 두지 않는다 — 그 순간의 스냅샷만 정직하게 전달하면
+      // 충분하고, pm2 가 안정화되길 기다리는 건 별개의 더 큰 설계다). 위에서 --no-autorestart 를
+      // 켠 뒤로는(이 브랜치 후속 리뷰 Finding 4) 이 재조회가 잡아내는 것이 "크래시 루프 중간의 스냅샷"이
+      // 아니라 "한 번 죽고 멈춘, 흔들리지 않는 결과"라 이 확인이 오히려 더 믿을 만해졌다.
       const after = await listProcs();
       const status = after.ok ? after.procs.find((p) => p.name === name)?.status : undefined;
       if (status !== "online") {
@@ -558,10 +667,57 @@ export function makeExecutors(roots: string[], opts: { runPm2?: RunPm2 } = {}): 
       // NOT_MEMBER_PROC_MSG 선언부 주석 참고 — pm2 를 부르기 전에 반드시 걸러야, 이미 나간
       // delete 를 되돌리는 게 아니라 애초에 나가지 않게 막는다.
       if (parseProcName(name) === null) return { ok: false, content: NOT_MEMBER_PROC_MSG };
+
+      // Defect 2(운영 중 발견, KillTree 선언부 주석 참고): pm2 delete 는 자기 자식(cmd.exe/sh)만
+      // 죽이고 그 밑의 실제 프로세스 트리는 못 죽인다 — delete 전에 jlist 로 pid 를 찾아 트리
+      // 전체를 먼저 끝낸다. 이름을 못 찾으면(이미 사라졌거나 jlist 자체가 실패했으면) 죽일 pid 가
+      // 없다는 뜻이므로 트리 kill 은 건너뛰고 아래 delete 로 그대로 진행한다 — "pid 를 못 구했다"는
+      // "delete 도 하지 않는다"는 뜻이 아니다(예전에도 jlist 조회 없이 곧장 delete 를 불렀으니,
+      // 최소한 그 동작은 그대로 보장한다).
+      const before = await listProcs();
+      const proc = before.ok ? before.procs.find((p) => p.name === name) : undefined;
+      // 리뷰 지적(Important, Finding 1): pid !== null 만으로는 부족하다 — pm2 는 정지·오류 상태의
+      // 앱에 pid:0 을 돌려준다(회원의 크래시한 개인 서버에 "꺼줘"를 부르는 보통의 경로가 정확히
+      // 이 상태다). pid:0 이 이 검사를 통과하면 POSIX 분기의 process.kill(-pid, "SIGKILL")(위
+      // killTree 선언부 참고)이 process.kill(-0, …) 이 되고, POSIX 표준은 pid 0 을 "신호를 보내는
+      // 프로세스 자신의 그룹"으로 해석한다 — 워커가 도구 요청 하나로 자기 자신을 죽인다. pid 가
+      // 양수인지까지 반드시 확인한다.
+      //
+      // status === "online" 도 함께 요구한다(컨트롤러 결정) — 공유 기계에서는 OS 가 pid 번호를
+      // 재사용하므로, pm2 jlist 가 들고 있는 pid 가 이미 죽은 뒤 갱신되지 않은 값이라면 그 번호가
+      // 지금 이 순간 완전히 다른(어쩌면 다른 회원의) 프로세스를 가리킬 수 있다. "online" 은 pm2
+      // 자신이 "이 pid 가 바로 지금 이 앱의 것"이라고 확인해 주는 유일한 근거이고, 그 밖의
+      // 상태(정지·오류 등)에는 그 근거가 없다 — 회원 하나를 멈추려다 공유 기계의 다른 무언가를
+      // 죽이는 것보다는, 트리 kill을 건너뛰고 그 사실을 정직하게 알리는 쪽(아래 Finding 3)이 안전하다.
+      // 리뷰 지적(Important, Finding 3): treeKilled 는 "트리 kill을 실제로 걸었고, killTree 가
+      // 실패 신호(reject) 없이 끝났다"는 것만 뜻한다 — jlist 실패·이름 못 찾음·pid 무효(Finding 1)로
+      // 아예 시도하지 않은 경우는 물론, 시도했지만 killTree 가 던진 경우(catch)까지 전부 false 로
+      // 남는다. 아래 최종 메시지가 이 값을 그대로 반영한다.
+      let treeKilled = false;
+      if (proc && proc.status === "online" && proc.pid !== null && proc.pid > 0) {
+        try {
+          await killTree(proc.pid);
+          treeKilled = true;
+        } catch {
+          // 트리 kill은 최선을 다하는 정리일 뿐 이 도구의 성패(delete 여부)를 좌우하지 않는다 —
+          // 실패해도(이미 죽었거나 권한 문제) 아래 pm2 delete로 계속 진행한다. 다만 treeKilled는
+          // false로 남겨, 아래 메시지가 "정리를 확인하지 못했다"고 정직하게 알리게 한다.
+        }
+      }
+
       const r = await runPm2(["delete", name]);
-      return r.ok
+      if (!r.ok) return { ok: false, content: `멈추지 못했어요: ${r.stderr.trim() || "그런 프로세스가 없어요"}` };
+      // 리뷰 지적(Important, Finding 3): pm2 delete 가 성공해도 그건 pm2 가 아는 자식(cmd.exe/sh)
+      // 까지만 보장한다(KillTree 선언부 주석 참고) — treeKilled 가 false 면 그 밑의 진짜 서버
+      // 프로세스가 여전히 돌고 있을 수 있는데, 예전엔 이 경우에도 "멈췄어요"만 그대로 돌려줘 이
+      // 결함을 처음 만든 바로 그 증상(회원은 멈췄다고 믿지만 npm run dev 가 포트를 붙든 채
+      // 남는다)을 되풀이했다. 확인하지 못했다는 사실 자체를 회원에게 그대로 전달한다.
+      return treeKilled
         ? { ok: true, content: `멈췄어요: ${name}` }
-        : { ok: false, content: `멈추지 못했어요: ${r.stderr.trim() || "그런 프로세스가 없어요"}` };
+        : {
+            ok: true,
+            content: `멈췄어요 — 다만 하위 프로세스까지 정리했는지는 확인하지 못했어요. "뭐 돌고 있어?" 로 확인해 주세요.`,
+          };
     },
 
     async proc_list(args) {
@@ -588,6 +744,15 @@ export function makeExecutors(roots: string[], opts: { runPm2?: RunPm2 } = {}): 
       // proc_stop 과 같은 이유(NOT_MEMBER_PROC_MSG 선언부 주석 참고) — 봇·워커 자신의 로그를
       // 회원에게 그대로 노출하지 않는다.
       if (parseProcName(name) === null) return { ok: false, content: NOT_MEMBER_PROC_MSG };
+      // Defect 3(운영 중 발견, 문서만): pm2 가 캡처하는 stdout 은 파이프 버퍼링을 거친다 — 자식
+      // 프로세스가 stdout 을 파일이 아니라 파이프로 볼 때, 많은 런타임의 표준 출력 버퍼가 줄
+      // 단위(line-buffered)가 아니라 블록 단위(fully-buffered)로 바뀌는 게 원인이다(터미널에
+      // 붙어 있을 때만 줄 단위가 되는 게 흔한 기본값이다). 실측: 계속 출력을 내는 `ping -t` 를
+      // pm2 로 띄웠더니 "정상적으로 실행 중"인데도 이 도구가 돌려주는 로그가 0바이트였다 — 같은
+      // 명령을 파일로 리다이렉트해서 실제로 출력이 쌓이고 있음을 별도로 확인했다(pm2 문제가
+      // 아니라 파이프 자체의 특성). 그래서 이 도구가 빈 로그("(로그가 비어 있어요)")를 돌려줘도
+      // "그 프로세스가 안 돌고 있다"거나 "출력을 안 냈다"는 뜻이 아니다 — proc_list 로 status 를
+      // 함께 확인해야 한다. 다음에 이걸로 헤매지 않도록 여기 남긴다 — 동작은 바꾸지 않는다.
       const lines = Math.max(1, Math.min(num(args.lines) ?? PROC_LOG_DEFAULT_LINES, 200));
       const r = await runPm2(["logs", name, "--nostream", "--lines", String(lines)]);
       if (!r.ok) return { ok: false, content: `로그를 가져오지 못했어요: ${r.stderr.trim() || "그런 프로세스가 없어요"}` };

@@ -64,6 +64,16 @@ describe("proc — pm2 jlist 파싱", () => {
     expect(p).toMatchObject({ name: "asahi-9", status: "unknown", restarts: 0 });
     expect(p!.memoryBytes).toBeNull();
     expect(p!.startedAtMs).toBeNull();
+    expect(p!.pid).toBeNull(); // Defect 2 — pid 가 없으면 executors.ts 의 proc_stop 이 트리 kill 을 건너뛴다
+  });
+
+  // Defect 2(운영 중 발견): pm2 delete 는 pm2 가 직접 아는 자식(cmd.exe/sh)만 죽이고, 그 밑에서
+  // 실제로 도는 회원의 서버(npm·vite 등)는 손자 프로세스라 그대로 남았다 — proc_stop(executors.ts)
+  // 이 pm2 delete 전에 이 pid 로 프로세스 트리 전체를 끝낸다. jlist 최상위 필드(pm2_env 밖)를
+  // 그대로 옮겨 온다.
+  it("pid 를 뽑아 온다(Defect 2 — proc_stop 의 트리 kill 이 이 값을 쓴다)", () => {
+    const [p] = parsePm2List(jlist([row("asahi-111")]));
+    expect(p!.pid).toBe(1234);
   });
 
   // 리뷰 지적(Minor): executors.ts 의 proc_start 는 pm2 의 "스크립트" 자리에 셸(cmd.exe/sh)을
@@ -88,7 +98,7 @@ describe("proc — 표 렌더링", () => {
   // startedAtMs 는 "경과 시간"이 아니라 pm2 의 pm_uptime, 즉 **시작 시각(ms)** 이다.
   // 경과로 바꾸는 것은 렌더러가 now 를 받아서 한다 — 그래서 아래는 시작 0, now 를 2시간 12분으로 둔다.
   const NOW = 2 * 3600_000 + 12 * 60_000;
-  const one: ProcInfo = { name: "asahi-111", userId: "111", command: "npm run dev", status: "online", startedAtMs: 0, memoryBytes: 184 * 1024 * 1024, restarts: 0 };
+  const one: ProcInfo = { name: "asahi-111", userId: "111", command: "npm run dev", status: "online", startedAtMs: 0, memoryBytes: 184 * 1024 * 1024, restarts: 0, pid: 1234 };
 
   it("사람 이름·명령·상태·업타임·메모리·재시작 횟수를 담는다", () => {
     const out = renderProcList([one], { labelOf, now: NOW });
@@ -125,7 +135,7 @@ describe("proc — 표 렌더링", () => {
   // 수 있다 — parseProcName 이 이미 이 둘을 구분하므로(파일 상단 주석·테스트) 그 정보를 표시에도
   // 반영해, 인프라 행에만 눈에 띄는 표식을 붙인다.
   it("userId 가 없는 행(봇·워커 자신)에는 회원 행에 없는 구분 표식이 붙는다", () => {
-    const infra: ProcInfo = { name: "asahi-worker", userId: null, command: "node dist/worker.js", status: "online", startedAtMs: 0, memoryBytes: 60 * 1024 * 1024, restarts: 0 };
+    const infra: ProcInfo = { name: "asahi-worker", userId: null, command: "node dist/worker.js", status: "online", startedAtMs: 0, memoryBytes: 60 * 1024 * 1024, restarts: 0, pid: 5678 };
     const out = renderProcList([one, infra], { labelOf, now: NOW });
     const lines = out.split("\n");
     const memberLine = lines.find((l) => l.includes("asahi-111") || l.startsWith("우성현"))!;

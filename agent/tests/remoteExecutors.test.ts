@@ -432,26 +432,67 @@ describe("proc_* 실행기 — PM2 위임", () => {
   const onlineJlist = (name: string, over: Record<string, unknown> = {}) =>
     JSON.stringify([{ name, pm2_env: { status: "online", pm_uptime: Date.now(), restart_time: 0, args: [], pm_exec_path: "node", ...over }, monit: { memory: 1 } }]);
 
+  // Defect 1(운영 중 발견): proc_start 는 이제 cwd 를 checkPath(WORKER_ROOTS, roots.ts)로 검사하고
+  // 실제로 존재하는 폴더인지도 확인한다(아래 참고) — fs_* 실행기(위 "워커 실행기" describe)와 같은
+  // 이유로, 더 이상 임의의 문자열을 cwd 로 써서는 안 되고 실제 임시 폴더가 있어야 한다. root 는
+  // WORKER_ROOTS, projectDir 는 그 안의(회원 "111"의) 프로젝트 폴더 역할이다.
+  let root: string;
+  let projectDir: string;
+  beforeEach(() => {
+    root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "asahi-proc-")));
+    projectDir = path.join(root, "111");
+    fs.mkdirSync(projectDir, { recursive: true });
+  });
+  afterEach(() => fs.rmSync(root, { recursive: true, force: true }));
+
   it("proc_start 는 주입된 이름과 cwd 로 pm2 start 를 부른다", async () => {
     // 첫 jlist(사전 중복 확인)는 비어 있고, start 이후 재조회(Finding 5)는 online 을 돌려준다 —
     // 실제 성공 경로를 그대로 흉내낸다.
     const { calls, runPm2 } = fakePm2({ jlist: [{ ok: true, stdout: "[]" }, { ok: true, stdout: onlineJlist("asahi-111") }] });
-    const ex = makeExecutors(["C:\\ws"], { runPm2 });
-    const r = await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: "C:\\ws\\111" });
+    const ex = makeExecutors([root], { runPm2 });
+    const r = await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: projectDir });
     expect(r.ok).toBe(true);
     const start = calls.find((c) => c[0] === "start")!;
     expect(start).toContain("--name");
     expect(start).toContain("asahi-111");
     expect(start).toContain("--cwd");
-    expect(start).toContain("C:\\ws\\111");
+    expect(start).toContain(projectDir);
     expect(start.join(" ")).toContain("npm run dev");
+  });
+
+  // 리뷰 지적(Important, 이 브랜치 후속 리뷰 Finding 4 — 아래 "재조회" 관련 기존 Finding 5 주석과는
+  // 다른 지적이다): proc_stop 의 트리 kill(위 killTree)은 앱이 여전히 pm2 에 등록된 채로 실행된다
+  // — 외부에서 cmd.exe 를 죽이면 pm2 에게는 그냥 "죽었다"로 보이므로, autorestart 가 켜져 있으면
+  // 트리 kill 과 뒤이은 pm2 delete 사이의 몇백 ms 동안 pm2 가 cmd.exe/npm/vite 를 다시 살릴 수
+  // 있다 — 그 delete 는 그 "새" cmd.exe 만 거두고, 그 밑의 새 손자는 다시 고아가 된다. --no-autorestart
+  // 로 띄우면 이 경쟁 자체가 생기지 않는다 — 죽은 뒤 pm2 가 아무것도 다시 살리지 않으므로 트리
+  // kill 이 마지막으로 본 프로세스 그림이 delete 시점까지 그대로 유지된다.
+  it("proc_start 는 --no-autorestart 로 띄운다(트리 kill 과 pm2 재시작의 경쟁을 막는다)", async () => {
+    const { calls, runPm2 } = fakePm2({ jlist: [{ ok: true, stdout: "[]" }, { ok: true, stdout: onlineJlist("asahi-111") }] });
+    const ex = makeExecutors([root], { runPm2 });
+    await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: projectDir });
+    const start = calls.find((c) => c[0] === "start")!;
+    expect(start).toContain("--no-autorestart");
+    // 커버리지 공백 보완(Gap 3): 존재 여부(toContain)만으로는 부족하다 — pm2 는 "--" 앞의
+    // 토큰만 자기 옵션으로 해석하고, 그 뒤는 그대로 cmd.exe/sh 스크립트 인자로 흘려보낸다
+    // (바로 뒤 sh.flag·command 가 실행할 명령 그 자체인 이유). --no-autorestart 가 "--" 뒤로
+    // 밀리면 pm2 에게는 안 보이는 문자열 하나가 될 뿐이라 autorestart 는 계속 켜진 채로
+    // 남는다 — 그러면 트리 kill 과 pm2 delete 사이 몇백 ms 동안 pm2 가 cmd.exe/npm/vite 를
+    // 되살려, delete 는 그 "새" cmd.exe 만 거두고 새 손자는 다시 고아가 된다(이 플래그를
+    // 넣은 이유 그 자체인 경쟁 조건). 위 toContain 은 이 회귀를 못 잡는다 — "--" 뒤로 옮겨도
+    // 배열엔 여전히 들어 있기 때문이다. 위치까지 직접 고정한다.
+    const flagIndex = start.indexOf("--no-autorestart");
+    const sepIndex = start.indexOf("--");
+    expect(flagIndex).toBeGreaterThanOrEqual(0);
+    expect(sepIndex).toBeGreaterThanOrEqual(0);
+    expect(flagIndex).toBeLessThan(sepIndex);
   });
 
   it("proc_start 는 같은 이름이 이미 있으면 pm2 를 부르지 않고 거절한다(조용한 교체 금지)", async () => {
     const existing = JSON.stringify([{ name: "asahi-111", pm2_env: { status: "online", pm_uptime: 0, restart_time: 0, args: ["run", "dev"], pm_exec_path: "npm" }, monit: { memory: 1 } }]);
     const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: existing } });
-    const ex = makeExecutors(["C:\\ws"], { runPm2 });
-    const r = await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: "C:\\ws\\111" });
+    const ex = makeExecutors([root], { runPm2 });
+    const r = await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: projectDir });
     expect(r.ok).toBe(false);
     expect(r.content).toContain("이미");
     expect(calls.some((c) => c[0] === "start")).toBe(false);
@@ -463,8 +504,8 @@ describe("proc_* 실행기 — PM2 위임", () => {
   it("이름 충돌 거절 메시지는 실제 proc_start 모양(셸 래퍼)에서도 셸 껍데기 없이 명령만 보여준다", async () => {
     const existing = JSON.stringify([{ name: "asahi-111", pm2_env: { status: "online", pm_uptime: 0, restart_time: 0, args: ["/c", "npm run dev"], pm_exec_path: "C:\\Windows\\System32\\cmd.exe" }, monit: { memory: 1 } }]);
     const { runPm2 } = fakePm2({ jlist: { ok: true, stdout: existing } });
-    const ex = makeExecutors(["C:\\ws"], { runPm2 });
-    const r = await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: "C:\\ws\\111" });
+    const ex = makeExecutors([root], { runPm2 });
+    const r = await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: projectDir });
     expect(r.ok).toBe(false);
     expect(r.content).toContain("npm run dev");
     expect(r.content).not.toContain("cmd.exe");
@@ -473,8 +514,8 @@ describe("proc_* 실행기 — PM2 위임", () => {
 
   it("proc_start 성공 응답은 멈추는 법을 그 자리에서 알려준다", async () => {
     const { runPm2 } = fakePm2({ jlist: [{ ok: true, stdout: "[]" }, { ok: true, stdout: onlineJlist("asahi-111") }] });
-    const ex = makeExecutors(["C:\\ws"], { runPm2 });
-    const r = await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: "C:\\ws\\111" });
+    const ex = makeExecutors([root], { runPm2 });
+    const r = await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: projectDir });
     expect(r.content).toContain("멈추");
   });
 
@@ -486,16 +527,16 @@ describe("proc_* 실행기 — PM2 위임", () => {
   it("proc_start 는 시작 직후 재조회에서 online 이 아니면(크래시 루프 등) 성공을 주장하지 않는다", async () => {
     const crashLooping = onlineJlist("asahi-111", { status: "errored", restart_time: 3 });
     const { runPm2 } = fakePm2({ jlist: [{ ok: true, stdout: "[]" }, { ok: true, stdout: crashLooping }] });
-    const ex = makeExecutors(["C:\\ws"], { runPm2 });
-    const r = await ex.proc_start!({ command: "오타난명령", name: "asahi-111", cwd: "C:\\ws\\111" });
+    const ex = makeExecutors([root], { runPm2 });
+    const r = await ex.proc_start!({ command: "오타난명령", name: "asahi-111", cwd: projectDir });
     expect(r.ok).toBe(false);
     expect(r.content).toContain("errored");
   });
 
   it("proc_start 는 시작 직후 재조회 자체가 실패해도(연결 끊김 등) 성공을 주장하지 않는다", async () => {
     const { runPm2 } = fakePm2({ jlist: [{ ok: true, stdout: "[]" }, { ok: false, stdout: "", stderr: "연결 끊김" }] });
-    const ex = makeExecutors(["C:\\ws"], { runPm2 });
-    const r = await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: "C:\\ws\\111" });
+    const ex = makeExecutors([root], { runPm2 });
+    const r = await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: projectDir });
     expect(r.ok).toBe(false);
   });
 
@@ -505,41 +546,111 @@ describe("proc_* 실행기 — PM2 위임", () => {
   // 확인해야 "아무 것도 시작하지 않는다"는 보장이 선다.
   it("proc_start 는 name·cwd 가 없으면 pm2 를 전혀 부르지 않고 거절한다(배선 오류 방어)", async () => {
     const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: "[]" } });
-    const ex = makeExecutors(["C:\\ws"], { runPm2 });
-    expect((await ex.proc_start!({ command: "npm run dev", cwd: "C:\\ws\\111" })).ok).toBe(false); // name 없음
+    const ex = makeExecutors([root], { runPm2 });
+    expect((await ex.proc_start!({ command: "npm run dev", cwd: projectDir })).ok).toBe(false); // name 없음
     expect((await ex.proc_start!({ command: "npm run dev", name: "asahi-111" })).ok).toBe(false); // cwd 없음
     expect((await ex.proc_start!({ command: "npm run dev" })).ok).toBe(false); // 둘 다 없음
     expect(calls).toEqual([]); // jlist 조회조차 없다 — 이름 없이는 아무 것도 시작하지 않는다
   });
 
   // 리뷰 지적(Minor 2): shellFor() 는 "워커 루트로 셸을 정한다(호스트 플랫폼이 아니라)"는 규칙을
-  // 구현하지만 직접 단정하는 테스트가 없었다 — 기존 9개는 전부 윈도우 루트("C:\\ws")만 써서
-  // sh.bin·sh.flag 를 하드코딩해도 통과했을 것이다. 두 플레이버를 각각 확인한다.
-  it("proc_start 는 POSIX 루트에서 sh·-c 로 pm2 를 부른다(호스트 플랫폼이 아니라 워커 루트 기준)", async () => {
-    const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: "[]" } });
-    const ex = makeExecutors(["/w"], { runPm2 });
-    await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: "/w/111" });
-    const start = calls.find((c) => c[0] === "start")!;
-    expect(start).toContain("sh");
-    expect(start).toContain("-c");
-    expect(start).not.toContain("cmd.exe");
-    expect(start).not.toContain("/c");
-  });
+  // 구현하지만 직접 단정하는 테스트가 없었다 — 두 플레이버를 각각 확인한다.
+  //
+  // Defect 1 이후: cwd 가 checkPath(roots.ts, 읽기 전용)의 실제 검사를 받게 되면서, "루트 유효성"
+  // 자체의 기준(isUnambiguousRoot)이 실행 중인 호스트 플랫폼에 따라 달라진다 — POSIX 호스트에서만
+  // posix 스타일 루트("/...")를 유효한 절대경로로 인정하고, win32 호스트에서만 드라이브 문자·UNC
+  // 루트를 인정한다(paths.ts 의 hasUnambiguousWindowsRoot 주석 참고). 그래서 아래 두 테스트는 각자
+  // 자신이 검증하려는 플레이버와 실제로 실행 중인 호스트가 일치할 때만 의미가 있다 — 그렇지 않으면
+  // (예: win32 호스트에서 "/w" 를 루트로 주면) checkPath 가 "워커 루트 설정이 잘못됐어요"로 무조건
+  // 거부해 shellFor() 의 선택 자체를 검증하지 못한 채 실패한다. remoteRoots.test.ts 가 반대 방향
+  // (윈도우 전용 케이스를 POSIX 호스트에서 건너뜀)으로 이미 쓰는 것과 같은 관례로, it.skipIf 를
+  // 대칭으로 적용한다 — 공유 root/projectDir(위 beforeEach)는 이 테스트가 실제로 실행되는 호스트
+  // 위에서 만들어지므로 그 호스트의 flavor 를 자연히 따른다.
+  it.skipIf(process.platform !== "win32")(
+    "proc_start 는 윈도우 루트에서 cmd.exe·/c 로 pm2 를 부른다",
+    async () => {
+      const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: "[]" } });
+      const ex = makeExecutors([root], { runPm2 });
+      await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: projectDir });
+      const start = calls.find((c) => c[0] === "start")!;
+      expect(start).toContain("cmd.exe");
+      expect(start).toContain("/c");
+      expect(start).not.toContain("sh");
+      expect(start).not.toContain("-c");
+    },
+  );
 
-  it("proc_start 는 윈도우 루트에서 cmd.exe·/c 로 pm2 를 부른다", async () => {
-    const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: "[]" } });
-    const ex = makeExecutors(["C:\\ws"], { runPm2 });
-    await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: "C:\\ws\\111" });
-    const start = calls.find((c) => c[0] === "start")!;
-    expect(start).toContain("cmd.exe");
-    expect(start).toContain("/c");
-    expect(start).not.toContain("sh");
-    expect(start).not.toContain("-c");
+  it.skipIf(process.platform === "win32")(
+    "proc_start 는 POSIX 루트에서 sh·-c 로 pm2 를 부른다(호스트 플랫폼이 아니라 워커 루트 기준)",
+    async () => {
+      const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: "[]" } });
+      const ex = makeExecutors([root], { runPm2 });
+      await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: projectDir });
+      const start = calls.find((c) => c[0] === "start")!;
+      expect(start).toContain("sh");
+      expect(start).toContain("-c");
+      expect(start).not.toContain("cmd.exe");
+      expect(start).not.toContain("/c");
+    },
+  );
+
+  // ── Defect 1(운영 중 발견) — proc_start 의 cwd 는 이제 워커 쪽 최종 게이트를 거친다 ──────────
+  // 봇(remoteTools.ts)이 allowed_dirs 로 cwd 를 한 번 걸렀더라도, fs_* 실행기가 gate()/checkPath 로
+  // 다시 한번 걸러 두 겹을 유지하는 것과 같은 이유로, proc_start 도 WORKER_ROOTS 를 최종 관문으로
+  // 확인해야 한다. 아울러 회원의 프로젝트가 하위 폴더에 있는데 그 폴더가 실제로 없으면(오타 등)
+  // pm2 가 --cwd 에서 바로 실패해 원인을 알 수 없었다는 게 운영 중 실제로 겪은 결함이다 — 존재
+  // 여부까지 미리 확인해 한국어로 명확히 안내한다.
+  describe("proc_start — cwd 는 WORKER_ROOTS 와 실존 여부를 워커가 최종적으로 검사한다(Defect 1)", () => {
+    it("WORKER_ROOTS 밖 cwd 는 pm2 를 전혀 부르지 않고 거절한다(봇의 1차 필터를 우회해도 워커가 최종 관문)", async () => {
+      const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "asahi-proc-outside-")));
+      try {
+        const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: "[]" } });
+        const ex = makeExecutors([root], { runPm2 });
+        const r = await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: outside });
+        expect(r.ok).toBe(false);
+        expect(r.content).toContain("워커 작업 폴더 밖");
+        expect(calls).toEqual([]); // jlist 조회조차 없다 — 경로 검사가 가장 먼저다
+      } finally {
+        fs.rmSync(outside, { recursive: true, force: true });
+      }
+    });
+
+    it("존재하지 않는 cwd 는 pm2 를 부르지 않고 한국어로 명확히 거절한다(운영 중 실제로 겪은 결함 — 프로젝트가 하위 폴더에 있는데 그 폴더가 없으면 pm2 가 --cwd 에서 바로 실패해 원인을 알 수 없었다)", async () => {
+      const noSuchDir = path.join(root, "없는-프로젝트");
+      const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: "[]" } });
+      const ex = makeExecutors([root], { runPm2 });
+      const r = await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: noSuchDir });
+      expect(r.ok).toBe(false);
+      expect(r.content).toContain("폴더가 없어요");
+      expect(calls).toEqual([]);
+    });
+
+    it("cwd 가 폴더가 아니라 파일이면 pm2 를 부르지 않고 거절한다", async () => {
+      const filePath = path.join(root, "이건-파일.txt");
+      fs.writeFileSync(filePath, "x");
+      const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: "[]" } });
+      const ex = makeExecutors([root], { runPm2 });
+      const r = await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: filePath });
+      expect(r.ok).toBe(false);
+      expect(r.content).toContain("폴더가 아니에요");
+      expect(calls).toEqual([]);
+    });
+
+    it("한글·공백이 섞인 실제 하위 폴더는 정상적으로 띄운다(운영 중 재현 — '테스트 1' 폴더)", async () => {
+      const koreanProject = path.join(root, "테스트 1");
+      fs.mkdirSync(koreanProject, { recursive: true });
+      const { calls, runPm2 } = fakePm2({ jlist: [{ ok: true, stdout: "[]" }, { ok: true, stdout: onlineJlist("asahi-111") }] });
+      const ex = makeExecutors([root], { runPm2 });
+      const r = await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: koreanProject });
+      expect(r.ok).toBe(true);
+      const start = calls.find((c) => c[0] === "start")!;
+      expect(start).toContain(koreanProject);
+    });
   });
 
   it("proc_stop 은 pm2 delete 를 부른다", async () => {
     const { calls, runPm2 } = fakePm2({ delete: { ok: true, stdout: "" } });
-    const ex = makeExecutors(["C:\\ws"], { runPm2 });
+    const ex = makeExecutors([root], { runPm2 });
     const r = await ex.proc_stop!({ name: "asahi-111" });
     expect(r.ok).toBe(true);
     expect(calls).toContainEqual(["delete", "asahi-111"]);
@@ -547,7 +658,7 @@ describe("proc_* 실행기 — PM2 위임", () => {
 
   it("proc_stop 은 없는 이름이면 실패로 돌려준다", async () => {
     const { runPm2 } = fakePm2({ delete: { ok: false, stdout: "", stderr: "Process not found" } });
-    const ex = makeExecutors(["C:\\ws"], { runPm2 });
+    const ex = makeExecutors([root], { runPm2 });
     const r = await ex.proc_stop!({ name: "asahi-111" });
     expect(r.ok).toBe(false);
   });
@@ -561,7 +672,7 @@ describe("proc_* 실행기 — PM2 위임", () => {
   it("proc_stop 은 asahi-<숫자> 형식이 아닌 이름(봇·워커 자신)을 pm2 를 부르지 않고 거절한다", async () => {
     for (const infraName of ["asahi-worker", "asahi-assistant", "something-else"]) {
       const { calls, runPm2 } = fakePm2({ delete: { ok: true, stdout: "" } });
-      const ex = makeExecutors(["C:\\ws"], { runPm2 });
+      const ex = makeExecutors([root], { runPm2 });
       const r = await ex.proc_stop!({ name: infraName });
       expect(r.ok, `${infraName} 을 멈출 수 있었다`).toBe(false);
       expect(r.content).toContain("회원");
@@ -569,10 +680,197 @@ describe("proc_* 실행기 — PM2 위임", () => {
     }
   });
 
+  // ── Defect 2(운영 중 발견): pm2 delete 는 pm2 가 직접 아는 자식(cmd.exe/sh)만 죽이고, 그 밑의
+  // 실제 프로세스 트리(회원의 npm·vite 등, 손자 프로세스)는 그대로 남는다 — 운영 재현: "멈췄어요"
+  // 응답 뒤에도 npm run dev·vite.js 가 포트를 붙든 채 계속 돌았고 proc_list 에는 아예 나타나지
+  // 않는 고아가 됐다. proc_stop 은 pm2 delete 전에 jlist 로 pid 를 찾아 트리 전체를 끝낸다. 실제
+  // 프로세스를 하나도 죽이지 않도록, 이 kill 은 runPm2 와 같은 이유로 이음매(opts.killTree) 뒤에서
+  // 검증한다.
+  describe("proc_stop — pm2 delete 전에 프로세스 트리 전체를 끝낸다(Defect 2)", () => {
+    const jlistWith = (name: string, pid: number) =>
+      JSON.stringify([{ name, pid, pm2_env: { status: "online", pm_uptime: 0, restart_time: 0, args: ["run", "dev"], pm_exec_path: "npm" }, monit: { memory: 1 } }]);
+
+    it("jlist 에서 pid 를 찾아 pm2 delete 보다 먼저 killTree 를 부른다(순서까지 확인)", async () => {
+      const order: string[] = [];
+      const { runPm2 } = fakePm2({ jlist: { ok: true, stdout: jlistWith("asahi-111", 7872) }, delete: { ok: true, stdout: "" } });
+      const wrappedRunPm2 = async (args: string[]) => {
+        order.push(`pm2:${args[0]}`);
+        return runPm2(args);
+      };
+      const killTree = async (pid: number) => { order.push(`kill:${pid}`); };
+      const ex = makeExecutors([root], { runPm2: wrappedRunPm2, killTree });
+      const r = await ex.proc_stop!({ name: "asahi-111" });
+      expect(r.ok).toBe(true);
+      expect(order).toEqual(["pm2:jlist", "kill:7872", "pm2:delete"]);
+      // 리뷰 지적(Important, Finding 3): 트리 kill 이 실제로 성공한 이 경로에서는 메시지가
+      // 무조건 담백해야 한다 — 아래 "확인하지 못했다" 문구가 여기서도 나오면 성공한 케이스까지
+      // 매번 캐비엇을 붙이는 것이라 qualification 이 신호로서 무의미해진다.
+      expect(r.content).toBe("멈췄어요: asahi-111");
+    });
+
+    // 커버리지 공백 보완(Gap 2): proc_stop 자신의 jlist 실패 경로는 지금까지 아무 테스트도
+    // 지나지 않았다 — proc_start(위 "재조회 자체가 실패해도" 테스트)·proc_list(아래 "pm2 가
+    // 실패하면" 테스트)는 각각 jlist 실패를 검증하지만, proc_stop 은 before.ok 가 false 일 때
+    // proc 를 undefined 로 떨어뜨리는 그 자신의 분기(`before.ok ? ... : undefined`)를 아무도
+    // 겨냥하지 않았다. 코드 자체는 옳다 — proc 가 없으니 트리 kill 가드를 자연히 건너뛴다.
+    // 하지만 "jlist 가 실패하면 트리 정리를 확인 못 했다고 알리는 대신, 아예 조기 반환으로
+    // 무조건 '멈췄어요'만 돌려준다" 같은 회귀가 들어와도 이 경로를 지나가는 테스트가 하나도
+    // 없으면 잡아내지 못한다.
+    it("jlist 조회 자체가 실패해도(pm2 응답 없음 등) killTree 를 건너뛰고 pm2 delete 는 그대로 시도하며, 확인 못 했다고 알린다", async () => {
+      const killCalls: number[] = [];
+      const { calls, runPm2 } = fakePm2({ jlist: { ok: false, stdout: "", stderr: "pm2 응답 없음" }, delete: { ok: true, stdout: "" } });
+      const killTree = async (pid: number) => { killCalls.push(pid); };
+      const ex = makeExecutors([root], { runPm2, killTree });
+      const r = await ex.proc_stop!({ name: "asahi-111" });
+      expect(r.ok).toBe(true);
+      expect(killCalls).toEqual([]);
+      expect(calls).toContainEqual(["delete", "asahi-111"]); // jlist 가 실패해도 delete 시도 자체는 예전과 같이 보장돼야 한다
+      expect(r.content).toContain("확인하지 못했");
+    });
+
+    it("jlist 에 그 이름이 없으면(이미 사라졌거나 목록 조회가 비어 있으면) killTree 를 건너뛰고 pm2 delete 는 그대로 시도한다", async () => {
+      const killCalls: number[] = [];
+      const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: "[]" }, delete: { ok: true, stdout: "" } });
+      const killTree = async (pid: number) => { killCalls.push(pid); };
+      const ex = makeExecutors([root], { runPm2, killTree });
+      const r = await ex.proc_stop!({ name: "asahi-111" });
+      expect(r.ok).toBe(true);
+      expect(killCalls).toEqual([]);
+      expect(calls).toContainEqual(["delete", "asahi-111"]);
+      // 리뷰 지적(Important, Finding 3): 트리 kill 이 아예 걸리지 않은 이 경로에서 예전엔 "멈췄어요"만
+      // 그대로 돌려줘, pm2 가 모르는 손자 프로세스(회원의 npm·vite 등)가 남아 있어도 회원은 알
+      // 방법이 없었다 — 이 결함을 처음 만든 바로 그 증상이다. 이제는 확인하지 못했다는 사실 자체를
+      // 그대로 전달한다.
+      expect(r.content).toContain("확인하지 못했");
+    });
+
+    it("pid 필드가 없는 jlist 항목(예: 파싱 실패)이어도 killTree 를 부르지 않고 delete 는 그대로 진행한다", async () => {
+      const killCalls: number[] = [];
+      const noPidJlist = JSON.stringify([{ name: "asahi-111", pm2_env: { status: "online" } }]); // pid 없음
+      const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: noPidJlist }, delete: { ok: true, stdout: "" } });
+      const killTree = async (pid: number) => { killCalls.push(pid); };
+      const ex = makeExecutors([root], { runPm2, killTree });
+      const r = await ex.proc_stop!({ name: "asahi-111" });
+      expect(r.ok).toBe(true);
+      expect(killCalls).toEqual([]);
+      expect(calls).toContainEqual(["delete", "asahi-111"]);
+      expect(r.content).toContain("확인하지 못했"); // Finding 3 — 위 테스트와 같은 이유
+    });
+
+    // 리뷰 지적(Important, Finding 1): pm2 는 정지·오류 상태의 앱에 pid:0 을 돌려준다 — 회원의
+    // 크래시한 개인 서버에 "꺼줘"를 부르는 보통의 경로가 정확히 이 상태다. proc.pid !== null 만
+    // 보던 예전 검사는 0 도 통과시켜 killTree(0) 을 부르고, POSIX 분기의 process.kill(-0, "SIGKILL")
+    // 은 "호출자 자신의 프로세스 그룹"(워커 자신)에 신호를 보낸다 — 워커가 도구 요청 하나로 자기
+    // 자신을 죽인다. pid 가 양수인지까지 확인해야 이 사고를 막는다.
+    it("jlist 의 pid 가 0 이면(정지·오류 상태에서 pm2 가 흔히 돌려주는 값) killTree 를 부르지 않는다(self-kill 방지)", async () => {
+      const killCalls: number[] = [];
+      const zeroPidJlist = JSON.stringify([
+        { name: "asahi-111", pid: 0, pm2_env: { status: "errored", restart_time: 3, args: ["run", "dev"], pm_exec_path: "npm" }, monit: { memory: 1 } },
+      ]);
+      const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: zeroPidJlist }, delete: { ok: true, stdout: "" } });
+      const killTree = async (pid: number) => { killCalls.push(pid); };
+      const ex = makeExecutors([root], { runPm2, killTree });
+      const r = await ex.proc_stop!({ name: "asahi-111" });
+      expect(r.ok).toBe(true);
+      expect(killCalls).toEqual([]); // killTree(0) 이 불렸다면 POSIX 에서 process.kill(-0, …) 로 워커 자신을 죽였을 것이다
+      expect(calls).toContainEqual(["delete", "asahi-111"]);
+      expect(r.content).toContain("확인하지 못했"); // Finding 3 — 트리 kill 을 걸지 않았으니 그 사실을 그대로 알린다
+    });
+
+    // 커버리지 공백 보완(Gap 1): 위 테스트(pid:0)는 status:"errored" 와 함께, 아래 테스트
+    // (pid:4321)는 status:"stopped" 와 함께 온다 — 둘 다 status 조건에서 이미 걸러지므로,
+    // 가드에서 "&& proc.pid > 0" 을 통째로 빼도(= status==="online" 만으로 통과) 이 두
+    // 테스트는 여전히 초록불이다. pid 조건 자신이 실제로 일한 적이 한 번도 없다는 뜻이다.
+    // status:"online" 과 pid:0 을 함께 줘서 pid 조건만 단독으로 겨냥한다 — 이게 통과하면
+    // POSIX 분기에서 killTree(0) → process.kill(-0, "SIGKILL") 로 워커가 자기 자신의 프로세스
+    // 그룹을 죽인다(위 killTree 선언부 주석 참고).
+    it("jlist 의 status 가 online 이어도 pid 가 0 이면 killTree 를 부르지 않는다(self-kill 방지 — pid 조건은 status 와 별개로 검사돼야 한다)", async () => {
+      const killCalls: number[] = [];
+      const onlineButZeroPidJlist = JSON.stringify([
+        { name: "asahi-111", pid: 0, pm2_env: { status: "online", restart_time: 0, args: ["run", "dev"], pm_exec_path: "npm" }, monit: { memory: 1 } },
+      ]);
+      const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: onlineButZeroPidJlist }, delete: { ok: true, stdout: "" } });
+      const killTree = async (pid: number) => { killCalls.push(pid); };
+      const ex = makeExecutors([root], { runPm2, killTree });
+      const r = await ex.proc_stop!({ name: "asahi-111" });
+      expect(r.ok).toBe(true);
+      expect(killCalls).toEqual([]); // killTree(0) 이 불렸다면 POSIX 에서 process.kill(-0, …) 로 워커 자신을 죽였을 것이다
+      expect(calls).toContainEqual(["delete", "asahi-111"]);
+      expect(r.content).toContain("확인하지 못했");
+    });
+
+    // 리뷰 지적(Important, Finding 1, 컨트롤러 결정): pid 가 양수여도 status 가 "online" 이 아니면
+    // killTree 를 부르지 않는다 — 공유 기계에서는 OS 가 pid 번호를 재사용한다. pm2 jlist 가 들고
+    // 있는 pid 가 그 프로세스가 이미 죽은 뒤에도 갱신 안 된 오래된 값이라면, 그 번호는 지금 이
+    // 순간 완전히 다른(어쩌면 다른 회원의) 프로세스를 가리킬 수 있다. status:"online" 은 pm2 가
+    // "이 pid 가 바로 지금 이 앱의 것"이라고 스스로 확인해 주는 근거이고, 그 밖의 상태(정지·오류
+    // 등)에는 그 근거가 없다 — 회원 하나를 멈추려다 공유 기계의 다른 무언가를 죽이는 것보다는,
+    // 트리 kill 을 건너뛰고 그 사실을 그대로 알리는 쪽(아래 Finding 3)이 안전하다.
+    it("jlist 의 status 가 online 이 아니면 pid 가 정상이어도 killTree 를 부르지 않는다(공유 기계의 재사용된 pid 방어)", async () => {
+      const killCalls: number[] = [];
+      const staleJlist = JSON.stringify([
+        { name: "asahi-111", pid: 4321, pm2_env: { status: "stopped", restart_time: 0, args: ["run", "dev"], pm_exec_path: "npm" }, monit: { memory: 1 } },
+      ]);
+      const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: staleJlist }, delete: { ok: true, stdout: "" } });
+      const killTree = async (pid: number) => { killCalls.push(pid); };
+      const ex = makeExecutors([root], { runPm2, killTree });
+      const r = await ex.proc_stop!({ name: "asahi-111" });
+      expect(r.ok).toBe(true);
+      expect(killCalls).toEqual([]);
+      expect(calls).toContainEqual(["delete", "asahi-111"]);
+      expect(r.content).toContain("확인하지 못했"); // Finding 3 — 위 pid:0 테스트와 같은 이유
+    });
+
+    // 리뷰 지적(Important, Finding 2): 이 테스트는 opts.killTree 를 생략해 "기존 호출부(worker.ts)는
+    // 손댈 필요가 없다"만 확인하려는 의도였는데, jlistWith("asahi-111", 111)(status:"online", pid:111)
+    // 을 같이 주는 바람에 opts.killTree 가 실제로 없을 때 배선되는 진짜 기본 구현(윈도우
+    // taskkill /PID 111 /T /F, POSIX process.kill(-111, "SIGKILL"))이 그대로 호출됐다 — 이 스위트를
+    // 돌리는 기계에서 그 순간 pid 111 을 쓰는 프로세스가 있다면(그게 무엇이든) 실제로 죽이는,
+    // "테스트가 실제 프로세스를 하나도 죽이지 않는다"는 이 브랜치 자신의 제약을 어기는 테스트였다.
+    // jlist 에 pid 필드를 아예 주지 않는다(파싱하면 null) — "pid 필드가 없는 jlist 항목" 테스트가
+    // killTree 를 주입해 호출 여부를 직접 단정하는 것과 달리, 여기서는 opts.killTree 생략 자체를
+    // 검증하는 게 목적이므로 기본 구현을 그대로 두되, pid 가 없어 그 기본 구현이 (아래 Finding 1
+    // 수정 이후에는 물론 이 수정만으로도) 절대 호출되지 않게 한다.
+    it("killTree 를 주입하지 않아도(opts 생략) proc_stop 은 그대로 동작한다 — 기존 호출부(worker.ts)는 손댈 필요가 없다", async () => {
+      const noPidJlist = JSON.stringify([
+        { name: "asahi-111", pm2_env: { status: "online", restart_time: 0, args: ["run", "dev"], pm_exec_path: "npm" } },
+      ]); // pid 없음(null) — 기본 killTree 가 절대 불리지 않는다
+      const { runPm2 } = fakePm2({ jlist: { ok: true, stdout: noPidJlist }, delete: { ok: true, stdout: "" } });
+      const ex = makeExecutors([root], { runPm2 }); // killTree 생략 — 기본 구현으로 떨어지지만, pid 가 없어 호출되지는 않는다
+      const r = await ex.proc_stop!({ name: "asahi-111" });
+      expect(r.ok).toBe(true);
+      expect(r.content).toContain("확인하지 못했"); // Finding 3 — 트리 kill 을 걸지 않았으니 그 사실을 그대로 알린다
+    });
+
+    // 리뷰 지적(Important, Finding 3): killTree 가 던지면(이미 죽었거나 권한 문제) 예전엔 그 실패를
+    // catch 에서 삼키고 "멈췄어요"만 그대로 돌려줬다 — 트리 kill 이 실제로 실패했는데도 성공과
+    // 구분 못 하는 메시지였다. 이제는 treeKilled 가 false 로 남아 메시지가 그 사실을 알린다.
+    it("killTree 가 실패해도(이미 죽었거나 권한 문제) pm2 delete 는 계속 진행하고, 트리 정리는 확인 못 했다고 알린다", async () => {
+      const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: jlistWith("asahi-111", 7872) }, delete: { ok: true, stdout: "" } });
+      const killTree = async () => { throw new Error("이미 죽은 프로세스"); };
+      const ex = makeExecutors([root], { runPm2, killTree });
+      const r = await ex.proc_stop!({ name: "asahi-111" });
+      expect(r.ok).toBe(true);
+      expect(calls).toContainEqual(["delete", "asahi-111"]);
+      expect(r.content).toContain("확인하지 못했");
+    });
+
+    it("asahi-<숫자> 형식이 아닌 이름(봇·워커 자신)은 killTree 도, jlist 조회도 없이 그대로 거절한다(기존 방어선 그대로)", async () => {
+      const killCalls: number[] = [];
+      const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: jlistWith("asahi-worker", 999) }, delete: { ok: true, stdout: "" } });
+      const killTree = async (pid: number) => { killCalls.push(pid); };
+      const ex = makeExecutors([root], { runPm2, killTree });
+      const r = await ex.proc_stop!({ name: "asahi-worker" });
+      expect(r.ok).toBe(false);
+      expect(killCalls).toEqual([]);
+      expect(calls).toEqual([]); // jlist 조회조차 없다 — 회원 이름 검증이 가장 먼저다
+    });
+  });
+
   it("proc_list 는 jlist 를 파싱해 표로 돌려준다", async () => {
     const stdout = JSON.stringify([{ name: "asahi-111", pm2_env: { status: "online", pm_uptime: 0, restart_time: 2, args: ["run", "dev"], pm_exec_path: "npm" }, monit: { memory: 5 * 1024 * 1024 } }]);
     const { runPm2 } = fakePm2({ jlist: { ok: true, stdout } });
-    const ex = makeExecutors(["C:\\ws"], { runPm2 });
+    const ex = makeExecutors([root], { runPm2 });
     const r = await ex.proc_list!({});
     expect(r.ok).toBe(true);
     expect(r.content).toContain("asahi-111");
@@ -591,7 +889,7 @@ describe("proc_* 실행기 — PM2 위임", () => {
       { name: "asahi-worker", pm2_env: { status: "online", pm_uptime: 0, restart_time: 0, args: [], pm_exec_path: "node" }, monit: { memory: 1 } },
     ]);
     const { runPm2 } = fakePm2({ jlist: { ok: true, stdout } });
-    const ex = makeExecutors(["C:\\ws"], { runPm2 });
+    const ex = makeExecutors([root], { runPm2 });
     const r = await ex.proc_list!({ onlyUserId: "111" });
     expect(r.ok).toBe(true);
     expect(r.content).toContain("asahi-111");
@@ -601,7 +899,7 @@ describe("proc_* 실행기 — PM2 위임", () => {
 
   it("proc_logs 는 nostream 으로 부르고 줄 수를 넘긴다", async () => {
     const { calls, runPm2 } = fakePm2({ logs: { ok: true, stdout: "로그 본문" } });
-    const ex = makeExecutors(["C:\\ws"], { runPm2 });
+    const ex = makeExecutors([root], { runPm2 });
     const r = await ex.proc_logs!({ name: "asahi-111", lines: 30 });
     expect(r.ok).toBe(true);
     expect(r.content).toContain("로그 본문");
@@ -615,7 +913,7 @@ describe("proc_* 실행기 — PM2 위임", () => {
   // 않았다. 세 경우를 모두 채운다 — lines 생략(기본값), 하한 미만(0 이하), 상한 초과(200 초과).
   it("proc_logs 는 lines 를 생략하면 기본값 50줄을 쓴다", async () => {
     const { calls, runPm2 } = fakePm2({ logs: { ok: true, stdout: "로그" } });
-    const ex = makeExecutors(["C:\\ws"], { runPm2 });
+    const ex = makeExecutors([root], { runPm2 });
     await ex.proc_logs!({ name: "asahi-111" });
     const logs = calls.find((c) => c[0] === "logs")!;
     expect(logs).toContain("50");
@@ -623,7 +921,7 @@ describe("proc_* 실행기 — PM2 위임", () => {
 
   it("proc_logs 는 lines 하한(1) 밑으로 내려가지 않는다", async () => {
     const { calls, runPm2 } = fakePm2({ logs: { ok: true, stdout: "로그" } });
-    const ex = makeExecutors(["C:\\ws"], { runPm2 });
+    const ex = makeExecutors([root], { runPm2 });
     await ex.proc_logs!({ name: "asahi-111", lines: -5 });
     const logs = calls.find((c) => c[0] === "logs")!;
     expect(logs).toContain("1");
@@ -632,7 +930,7 @@ describe("proc_* 실행기 — PM2 위임", () => {
 
   it("proc_logs 는 lines 상한(200)을 넘지 않는다", async () => {
     const { calls, runPm2 } = fakePm2({ logs: { ok: true, stdout: "로그" } });
-    const ex = makeExecutors(["C:\\ws"], { runPm2 });
+    const ex = makeExecutors([root], { runPm2 });
     await ex.proc_logs!({ name: "asahi-111", lines: 9999 });
     const logs = calls.find((c) => c[0] === "logs")!;
     expect(logs).toContain("200");
@@ -645,7 +943,7 @@ describe("proc_* 실행기 — PM2 위임", () => {
   it("proc_logs 는 asahi-<숫자> 형식이 아닌 이름(봇·워커 자신)을 pm2 를 부르지 않고 거절한다", async () => {
     for (const infraName of ["asahi-worker", "asahi-assistant"]) {
       const { calls, runPm2 } = fakePm2({ logs: { ok: true, stdout: "로그 본문" } });
-      const ex = makeExecutors(["C:\\ws"], { runPm2 });
+      const ex = makeExecutors([root], { runPm2 });
       const r = await ex.proc_logs!({ name: infraName });
       expect(r.ok, `${infraName} 의 로그를 볼 수 있었다`).toBe(false);
       expect(r.content).toContain("회원");
@@ -655,7 +953,7 @@ describe("proc_* 실행기 — PM2 위임", () => {
 
   it("pm2 가 실패하면 stderr 를 사유로 돌려준다", async () => {
     const { runPm2 } = fakePm2({ jlist: { ok: false, stdout: "", stderr: "pm2 를 찾을 수 없습니다" } });
-    const ex = makeExecutors(["C:\\ws"], { runPm2 });
+    const ex = makeExecutors([root], { runPm2 });
     const r = await ex.proc_list!({});
     expect(r.ok).toBe(false);
     expect(r.content).toContain("pm2");
