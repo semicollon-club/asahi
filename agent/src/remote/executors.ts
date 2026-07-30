@@ -256,11 +256,20 @@ export async function writeStartScript(
 // — split("\n") 으로 둘째 줄만 집으면 명령 자체에 줄바꿈이 섞였을 때 뒷부분을 잃으므로, 첫
 // 줄바꿈의 위치만 찾아 그 뒤 전체를 취한다. 형식이 예상과 다르면(줄바꿈 자체가 없는 등, 사람이
 // 파일을 직접 건드린 경우) undefined 를 돌려주고 판단은 호출측(recoverCommands)에 맡긴다.
+//
+// Finding 6(Minor, 후속 리뷰): 위에서 "명령 자체에 줄바꿈이 섞여도 잃지 않는다"고 했는데, 그
+// 값을 그대로 돌려주면 그 줄바꿈이 되찾은 값에도 그대로 남는다 — renderProcList(proc.ts)는
+// "프로세스 하나 = 줄 하나"를 전제하므로, 줄바꿈 하나가 표에 유령 행을 만들어 모델이 실제보다
+// 프로세스가 더 많다고 읽을 수 있다(중복 거절 메시지도 한 줄짜리 문장을 전제하므로 마찬가지로
+// 영향을 받는다). 값을 통째로 버리면(undefined) 되찾기 자체가 실패한 것처럼 보여 UX 회귀
+// (Change 4)가 되살아나므로, 정보를 죽이지 않고 줄바꿈만 공백으로 뭉갠다 — 표 구조를 지키는
+// 것과 회원이 실제로 무엇을 실행했는지 알 수 있는 것을 모두 지킨다.
 function commandFromScriptContent(content: string): string | undefined {
   const headerEnd = content.indexOf("\n");
   if (headerEnd === -1) return undefined;
   const rest = content.slice(headerEnd + 1);
-  return rest.endsWith("\n") ? rest.slice(0, -1) : rest;
+  const command = rest.endsWith("\n") ? rest.slice(0, -1) : rest;
+  return command.replace(/\r\n|\r|\n/g, " ");
 }
 
 // UX 회귀 수정(2026-07-30): 회원 명령을 pm2 명령줄에 절대 넘기지 않기로 한 결정(위 "실제 사고
@@ -287,13 +296,30 @@ function commandFromScriptContent(content: string): string | undefined {
 // 건드리지 않는다 — writeStartScript 를 거치지 않으므로 대응하는 스크립트 파일 자체가 없고,
 // 있어서도 안 된다. 이 함수는 순수 로직만 담는 proc.ts 가 아니라 여기(파일시스템에 닿는
 // executors.ts)에 둔다 — proc.ts 는 fs·CLI 를 모르는 채로 남아야 한다(파일 상단 주석 참고).
+//
+// Finding 2(Important, 후속 리뷰): "이름이 같은 스크립트 파일이 있다"와 "이 프로세스가 실제로
+// 그 파일에서 시작됐다"는 서로 다른 사실이다 — proc_stop 은 스크립트 파일을 지우지 않으므로
+// (proc_stop 선언부 참고) 파일이 프로세스보다 오래 살아남는다. 회원이 asahi-111 로 A 를
+// 띄웠다가 멈추면(파일은 남는다), 같은 pm2 이름으로 sh_exec + pm2 start 를 통해 완전히 다른
+// 명령 B 를 직접 띄울 수 있다(능력 모델이 명시적으로 허용하는 경로 — capability-model.md
+// "손님·공유 기계" 참고). 그 순간 파일 "이름"만 보고 되찾으면, 죽은 A 의 명령을 지금 도는 B 인
+// 것처럼 proc_list·중복 거절 메시지에 "사실"이라고 보여주게 된다 — 워커가 확인한 사실을
+// 답한다는 이 되찾기의 존재 이유 자체를 배반한다. 그래서 파일을 열기 전에 먼저 pm2 가 실제로
+// 보고한 값(p.command, commandOf 의 결과)이 이 스크립트 경로를 실제로 가리키는지부터 확인한다
+// — 그 경로를 언급하지 않으면(다른 명령으로 재시작됐다는 증거) 파일을 아예 열어 보지 않고 pm2
+// 가 보고한 값을 그대로 둔다. p.command 가 정확히 그 경로와 같지 않고 "포함"만 해도 통과시키는
+// 이유는, 정상 경로(writeStartScript 로 띄운 프로세스)에서 commandOf 가 셸 래퍼를 걷어내면 그
+// 경로 문자열 자체가 고스란히 남기 때문이다(includes 는 이 경우를 정확히 포함하는 가장 단순한
+// 조건이다).
 export async function recoverCommands(procs: ProcInfo[], scriptDir: string, flavor: ShellFlavor): Promise<ProcInfo[]> {
   return Promise.all(
     procs.map(async (p) => {
       if (p.userId === null) return p;
+      const scriptPath = scriptPathFor(scriptDir, p.name, flavor);
+      if (!p.command.includes(scriptPath)) return p;
       let content: string;
       try {
-        content = await fs.readFile(scriptPathFor(scriptDir, p.name, flavor), "utf8");
+        content = await fs.readFile(scriptPath, "utf8");
       } catch {
         return p;
       }

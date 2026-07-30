@@ -560,20 +560,21 @@ describe("proc_* 실행기 — PM2 위임", () => {
   // UX 회귀(2026-07-30, 스크립트 파일 우회의 부작용): pm2 jlist 는 이제 회원 명령이 아니라
   // writeStartScript 가 쓴 스크립트 "경로"만 알고 있다(commandOf, proc.ts 참고) — 고치기 전에는
   // 이 거절 메시지가 dup.command 를 그대로 보여줘 "C:\...\asahi-proc-scripts\asahi-111.bat"
-  // 류가 회원에게 노출됐다. jlist 가 돌려주는 값을 일부러 알아볼 수 없는 자리표시자로 채워
-  // "메시지에 보이는 명령이 pm2 raw 값이 아니라 스크립트 파일에서 되찾은 값"이라는 것을 직접
-  // 증명한다.
+  // 류가 회원에게 노출됐다. jlist 가 실제로 보고할 형태(cmd.exe 셸 래퍼 뒤에 스크립트 경로 —
+  // Finding 2 이후 recoverCommands 가 이 경로를 신뢰하려면 실제로 필요한 형태이기도 하다)를
+  // 그대로 흉내내, "메시지에 보이는 명령이 그 raw 경로가 아니라 스크립트 파일에서 되찾은 값"
+  // 이라는 것을 직접 증명한다.
   it("중복 거절 메시지는 스크립트 경로가 아니라 되찾은 원래 명령을 보여준다(UX 회귀)", async () => {
     const trapCommand = 'npm run dev -- --title="hi there"';
-    const placeholder = "이건-pm2-raw-값-이면-안된다";
-    const runningWithPlaceholder = JSON.stringify([
+    const scriptPath = path.join(scriptDir, "asahi-111.bat");
+    const runningWithScriptPath = JSON.stringify([
       {
         name: "asahi-111",
-        pm2_env: { status: "online", pm_uptime: Date.now(), restart_time: 0, args: ["/c", placeholder], pm_exec_path: "C:\\Windows\\System32\\cmd.exe" },
+        pm2_env: { status: "online", pm_uptime: Date.now(), restart_time: 0, args: ["/c", scriptPath], pm_exec_path: "C:\\Windows\\System32\\cmd.exe" },
         monit: { memory: 1 },
       },
     ]);
-    const { runPm2 } = fakePm2({ jlist: [{ ok: true, stdout: "[]" }, { ok: true, stdout: runningWithPlaceholder }] });
+    const { runPm2 } = fakePm2({ jlist: [{ ok: true, stdout: "[]" }, { ok: true, stdout: runningWithScriptPath }] });
     const ex = makeExecutors([root], { runPm2, scriptDir });
     const first = await ex.proc_start!({ command: trapCommand, name: "asahi-111", cwd: projectDir });
     expect(first.ok).toBe(true);
@@ -581,7 +582,6 @@ describe("proc_* 실행기 — PM2 위임", () => {
     const second = await ex.proc_start!({ command: "npm run build", name: "asahi-111", cwd: projectDir });
     expect(second.ok).toBe(false);
     expect(second.content).toContain(trapCommand);
-    expect(second.content).not.toContain(placeholder);
     expect(second.content).not.toContain(scriptDir);
   });
 
@@ -826,19 +826,20 @@ describe("proc_* 실행기 — PM2 위임", () => {
 
   // UX 회귀(2026-07-30): proc_list 가 존재하는 이유는 "뭐 돌고 있어?"에 모델의 기억이 아니라
   // 사실을 답하기 위해서다 — pm2 raw 값(스크립트 경로)을 그대로 보여주면 그 목적이 무색해진다.
-  // 위 중복 거절 메시지 테스트와 같은 이유로, jlist 의 command 자리를 알아볼 수 없는 자리표시자로
-  // 채워 "표에 보이는 값이 스크립트 파일에서 되찾은 원래 명령"이라는 것을 직접 증명한다.
+  // 위 중복 거절 메시지 테스트와 같은 이유로, jlist 가 실제로 보고할 형태(cmd.exe 셸 래퍼 뒤에
+  // 스크립트 경로)를 그대로 흉내내 "표에 보이는 값이 그 raw 경로가 아니라 스크립트 파일에서
+  // 되찾은 원래 명령"이라는 것을 직접 증명한다.
   it("proc_list 는 스크립트 경로가 아니라 되찾은 원래 명령을 보여준다(UX 회귀)", async () => {
     const trapCommand = 'npm run dev -- --title="hi there"';
-    const placeholder = "이건-pm2-raw-값-이면-안된다";
-    const runningWithPlaceholder = JSON.stringify([
+    const scriptPath = path.join(scriptDir, "asahi-111.bat");
+    const runningWithScriptPath = JSON.stringify([
       {
         name: "asahi-111",
-        pm2_env: { status: "online", pm_uptime: Date.now(), restart_time: 0, args: ["/c", placeholder], pm_exec_path: "C:\\Windows\\System32\\cmd.exe" },
+        pm2_env: { status: "online", pm_uptime: Date.now(), restart_time: 0, args: ["/c", scriptPath], pm_exec_path: "C:\\Windows\\System32\\cmd.exe" },
         monit: { memory: 1 },
       },
     ]);
-    const { runPm2 } = fakePm2({ jlist: [{ ok: true, stdout: "[]" }, { ok: true, stdout: runningWithPlaceholder }] });
+    const { runPm2 } = fakePm2({ jlist: [{ ok: true, stdout: "[]" }, { ok: true, stdout: runningWithScriptPath }] });
     const ex = makeExecutors([root], { runPm2, scriptDir });
     const started = await ex.proc_start!({ command: trapCommand, name: "asahi-111", cwd: projectDir });
     expect(started.ok).toBe(true);
@@ -846,8 +847,30 @@ describe("proc_* 실행기 — PM2 위임", () => {
     const r = await ex.proc_list!({});
     expect(r.ok).toBe(true);
     expect(r.content).toContain(trapCommand);
-    expect(r.content).not.toContain(placeholder);
     expect(r.content).not.toContain(scriptDir);
+  });
+
+  // Finding 2(Important, 후속 리뷰) 통합 검증: asahi-111 로 npm run dev(A)를 띄웠다가 멈추면
+  // 스크립트 파일은 남는다(proc_stop 은 지우지 않는다). 같은 pm2 이름으로 sh_exec + pm2 start 를
+  // 통해 완전히 다른 명령(B)을 직접 띄우는 것은 능력 모델이 명시적으로 허용하는 경로다 — 이때
+  // proc_list 는 파일에 남은 죽은 A 의 명령이 아니라 pm2 가 지금 실제로 보고하는 B 를 보여줘야
+  // 한다("워커가 확인한 사실을 답한다"는 proc_list 의 존재 이유 자체가 걸린 문제다).
+  it("proc_list 는 같은 이름 아래 다른 명령이 돌면(재시작) 오래된 스크립트 파일 내용을 보여주지 않는다(Finding 2)", async () => {
+    const { runPm2: firstRunPm2 } = fakePm2({ jlist: [{ ok: true, stdout: "[]" }, { ok: true, stdout: onlineJlist("asahi-111") }] });
+    const first = makeExecutors([root], { runPm2: firstRunPm2, scriptDir });
+    await first.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: projectDir }); // 파일을 남긴다
+
+    // 같은 이름으로 sh_exec + pm2 start 를 통해 완전히 다른 명령이 직접 떠 있는 상황을 재현한다 —
+    // pm2 는 셸 래퍼 없이 그 명령을 곧바로 보고한다(isShellWrapper 가 아닌 형태, commandOf 참고).
+    const differentCommandStdout = JSON.stringify([
+      { name: "asahi-111", pm2_env: { status: "online", pm_uptime: Date.now(), restart_time: 0, args: ["other_app.py"], pm_exec_path: "python" }, monit: { memory: 1 } },
+    ]);
+    const { runPm2 } = fakePm2({ jlist: { ok: true, stdout: differentCommandStdout } });
+    const second = makeExecutors([root], { runPm2, scriptDir }); // 같은 scriptDir(A 의 파일이 그대로 남아 있다)
+    const r = await second.proc_list!({});
+    expect(r.ok).toBe(true);
+    expect(r.content).toContain("python other_app.py"); // pm2 가 지금 실제로 보고한 값(B)
+    expect(r.content).not.toContain("npm run dev"); // 죽은 A 의 흔적(스크립트 파일 내용)이 아니다
   });
 
   // 되찾기가 실패해도(파일이 없거나 못 읽음) proc_list 전체가 죽어서는 안 된다 — pm2 가 보고한
@@ -1018,16 +1041,23 @@ describe("recoverCommands — pm2 jlist 의 command(스크립트 경로)를 원�
     ...over,
   });
 
+  // Finding 2(Important, 후속 리뷰) 이후: recoverCommands 는 pm2 가 실제로 보고한 값이 그 스크립트
+  // 경로를 가리킬 때만 파일을 신뢰한다(아래 recoverCommands 선언부 참고) — 그래서 되찾기가
+  // "성공해야 하는" 테스트들은 command 를 "pm2 가 실제로 이 스크립트를 통해 그 프로세스를
+  // 실행했다"고 보고했을 형태(스크립트 경로 자체 — commandOf 가 셸 래퍼를 걷어내면 결국 경로
+  // 하나만 남는다)로 명시한다. "되찾기가 실패해야 하는" 테스트만 command 를 다른 값으로 둔다.
+  const scriptPathOf = (name: string) => path.join(dir, `${name}.bat`);
+
   it("회원 프로세스는 스크립트 파일에서 읽은 원래 명령으로 command 를 덮어쓴다", async () => {
     await writeStartScript(dir, "asahi-111", "npm run dev", "win32");
-    const [r] = await recoverCommands([proc()], dir, "win32");
+    const [r] = await recoverCommands([proc({ command: scriptPathOf("asahi-111") })], dir, "win32");
     expect(r!.command).toBe("npm run dev");
   });
 
   it("임베디드 따옴표가 든 명령도 이스케이프 없이 그대로 되찾는다", async () => {
     const trapCommand = 'npm run dev -- --title="hi there"';
     await writeStartScript(dir, "asahi-111", trapCommand, "win32");
-    const [r] = await recoverCommands([proc()], dir, "win32");
+    const [r] = await recoverCommands([proc({ command: scriptPathOf("asahi-111") })], dir, "win32");
     expect(r!.command).toBe(trapCommand);
   });
 
@@ -1054,12 +1084,62 @@ describe("recoverCommands — pm2 jlist 의 command(스크립트 경로)를 원�
     await writeStartScript(dir, "asahi-111", "npm run dev", "win32");
     await writeStartScript(dir, "asahi-222", "npm run build", "win32");
     const [r1, r2] = await recoverCommands(
-      [proc({ name: "asahi-111", userId: "111" }), proc({ name: "asahi-222", userId: "222" })],
+      [
+        proc({ name: "asahi-111", userId: "111", command: scriptPathOf("asahi-111") }),
+        proc({ name: "asahi-222", userId: "222", command: scriptPathOf("asahi-222") }),
+      ],
       dir,
       "win32",
     );
     expect(r1!.command).toBe("npm run dev");
     expect(r2!.command).toBe("npm run build");
+  });
+
+  // Finding 2(Important, 후속 리뷰): "이름이 같은 파일이 있다"와 "이 프로세스가 실제로 그 파일에서
+  // 시작됐다"는 서로 다른 사실이다. proc_stop 은 스크립트 파일을 지우지 않으므로(writeStartScript
+  // 선언부 참고) 파일이 프로세스보다 오래 산다 — 회원이 asahi-111 로 A(npm run old-dev)를 띄웠다가
+  // 멈추고(파일은 남는다), 같은 pm2 이름으로 sh_exec + pm2 start 를 통해 완전히 다른 명령 B 를
+  // 직접 띄우면(능력 모델이 명시적으로 허용하는 경로), pm2 는 이제 B 를 보고한다 — 그런데도 파일
+  // "이름"만 보고 되찾으면 죽은 A 의 명령(파일 내용)을 지금 도는 B 인 것처럼 보여주게 된다. 그
+  // 프로세스가 실제로 그 스크립트에서 시작됐다는 증거(pm2 가 보고한 값이 그 경로를 가리킴)가 없는
+  // 한 파일을 신뢰하지 않는다.
+  it("파일은 있어도 pm2 가 보고한 값이 그 스크립트 경로를 가리키지 않으면 파일 내용으로 덮어쓰지 않는다(Finding 2)", async () => {
+    await writeStartScript(dir, "asahi-111", "npm run old-dev", "win32"); // 죽은 프로세스의 흔적(파일은 남는다)
+    const [r] = await recoverCommands(
+      [proc({ command: "python other_app.py" })], // pm2 가 실제로 보고한 값 — 스크립트 경로를 전혀 언급하지 않는다
+      dir,
+      "win32",
+    );
+    // 파일이 존재하고 이름도 일치하지만, pm2 가 보고한 값은 그 파일을 가리키지 않는다 — 파일
+    // 내용이 아니라 pm2 가 보고한 값(지금 실제로 도는 프로세스)을 그대로 남겨야 한다.
+    expect(r!.command).toBe("python other_app.py");
+  });
+
+  // Finding 5(Minor, 후속 리뷰): writeStartScript 는 항상 "헤더\n명령\n" 두 줄 형식으로만 쓰므로,
+  // 이 형식이 깨진 파일은 사람이 스크립트를 직접 열어 고친 경우에만 생긴다(줄바꿈 자체가 없는
+  // 등). commandFromScriptContent 의 헤더 가드(headerEnd===-1 이면 undefined)를 지우면 이 경우
+  // 헤더(@echo off)까지 포함한 파일 전체가 통째로 "명령"인 것처럼 노출된다 — 그 회귀를 잡는
+  // 테스트가 없었다.
+  it("스크립트 파일이 예상 형식과 다르면(줄바꿈이 없음 — 사람이 직접 고친 경우) 헤더까지 노출하지 않고 pm2 가 보고한 값을 그대로 둔다(Finding 5)", async () => {
+    const scriptPath = scriptPathOf("asahi-111");
+    fs.writeFileSync(scriptPath, "@echo off npm run dev"); // 줄바꿈 없이 한 줄로 뭉개짐 — writeStartScript 는 이런 형식을 만들지 않는다
+    const [r] = await recoverCommands([proc({ command: scriptPath })], dir, "win32");
+    expect(r!.command).not.toContain("@echo off");
+    expect(r!.command).toBe(scriptPath); // 되찾기 실패 — pm2 가 보고한 원래 값(스크립트 경로)을 그대로 둔다
+  });
+
+  // Finding 6(Minor, 후속 리뷰): commandFromScriptContent 는 명령 자체에 섞인 줄바꿈을 잃지 않고
+  // 그대로 되돌리는데, renderProcList(proc.ts)는 "프로세스 하나 = 줄 하나"를 전제한다 — 줄바꿈이
+  // 그대로 되찾아지면 표에 유령 행을 만들어 모델이 실제보다 프로세스가 더 많다고 읽을 수 있다.
+  it("명령에 줄바꿈이 섞여 있으면 한 줄로 뭉개 되찾는다(Finding 6 — renderProcList 의 '한 줄 = 프로세스 하나' 전제를 지킨다)", async () => {
+    const multilineCommand = "npm run dev\n--title=여러줄";
+    await writeStartScript(dir, "asahi-111", multilineCommand, "win32");
+    const [r] = await recoverCommands([proc({ command: scriptPathOf("asahi-111") })], dir, "win32");
+    expect(r!.command).not.toContain("\n");
+    expect(r!.command).not.toContain("\r");
+    // 뭉개졌을 뿐 정보 자체는 잃지 않는다 — 회원이 실제로 무엇을 실행했는지는 여전히 알 수 있다.
+    expect(r!.command).toContain("npm run dev");
+    expect(r!.command).toContain("--title=여러줄");
   });
 });
 
