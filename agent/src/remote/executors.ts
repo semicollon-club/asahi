@@ -645,7 +645,7 @@ export function makeExecutors(roots: string[], opts: { runPm2?: RunPm2; killTree
       // 여기서 바로 "띄웠어요"라고 알리면 그 실패도 성공으로 들린다. 재조회 한 번으로 실제 상태를
       // 확인해 보고한다(재시도·대기 루프는 두지 않는다 — 그 순간의 스냅샷만 정직하게 전달하면
       // 충분하고, pm2 가 안정화되길 기다리는 건 별개의 더 큰 설계다). 위에서 --no-autorestart 를
-      // 켠 뒤로는(후속 리뷰 Finding 4) 이 재조회가 잡아내는 것이 "크래시 루프 중간의 스냅샷"이
+      // 켠 뒤로는(이 브랜치 후속 리뷰 Finding 4) 이 재조회가 잡아내는 것이 "크래시 루프 중간의 스냅샷"이
       // 아니라 "한 번 죽고 멈춘, 흔들리지 않는 결과"라 이 확인이 오히려 더 믿을 만해졌다.
       const after = await listProcs();
       const status = after.ok ? after.procs.find((p) => p.name === name)?.status : undefined;
