@@ -53,12 +53,18 @@ const num = (v: unknown): number | null => (typeof v === "number" && Number.isFi
 // 한 줄을 잡아먹으므로 마지막 조각만 쓴다(사람이 알아보는 데는 그것으로 충분하다).
 //
 // 리뷰 지적(Minor): proc_start(executors.ts)는 pm2 의 "스크립트" 자리에 cmd.exe/sh 를 넣고 실제
-// 명령은 "-- <flag> <command>" 로 넘긴다(shellFor() 참고) — pm2 는 그 셸을 pm_exec_path 로,
-// [flag, command] 를 그대로 args 로 돌려준다. 아무 가공 없이 이어붙이면 "cmd.exe /c npm run dev"
-// 처럼 셸 껍데기가 그대로 드러나 "npm run dev" 로 읽히도록 설계한 의도가 깨진다. 맨 앞 인자가 그
-// 두 플래그(/c 또는 -c) 중 하나면 셸 호출로 보고, exec(셸 이름)는 버리고 플래그를 뗀 나머지(실제
-// 명령)만 보여준다 — 이 파일은 executors.ts 를 모르므로(파일 상단 주석) shellFor() 의 flag 값을
-// 문자열 리터럴로 직접 안다.
+// 실행 대상은 "-- <flag> <그 뒤>" 로 넘긴다(shellFor() 참고) — pm2 는 그 셸을 pm_exec_path 로,
+// [flag, ...] 를 그대로 args 로 돌려준다. 아무 가공 없이 이어붙이면 "cmd.exe /c ..." 처럼 셸
+// 껍데기가 그대로 드러난다. 맨 앞 인자가 그 두 플래그(/c 또는 -c) 중 하나면 셸 호출로 보고,
+// exec(셸 이름)는 버리고 플래그를 뗀 나머지만 보여준다 — 이 파일은 executors.ts 를 모르므로
+// (파일 상단 주석) shellFor() 의 flag 값을 문자열 리터럴로 직접 안다.
+//
+// 스크립트 파일 우회 이후(executors.ts 의 buildPm2CommandLine 뒤 "실제 사고 원인과 고침" 참고):
+// 실제 proc_start 가 그 뒷부분에 넣는 값은 이제 사람이 읽는 명령("npm run dev")이 아니라
+// writeStartScript 가 만든 스크립트 파일 경로다 — 회원 명령을 pm2 명령줄에 아예 올리지 않기
+// 위해서다. 그래서 proc_list 등에 보이는 값도 이제 그 경로이지 원래 명령이 아니다(알려진, 받아
+// 들인 겉모습 변화 — commandOf 자신은 뒷부분이 사람이 읽는 명령이든 경로든 신경 쓰지 않고 셸
+// 껍데기만 걷어낸다).
 function commandOf(env: RawEnv | undefined): string {
   const exec = typeof env?.pm_exec_path === "string" ? env.pm_exec_path.split(/[\\/]/).pop() ?? "" : "";
   const args = Array.isArray(env?.args) ? env.args.filter((a): a is string => typeof a === "string") : [];

@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { glob } from "tinyglobby";
@@ -91,10 +92,14 @@ function quotePosix(arg: string): string {
 // 그러면 그 백슬래시가 우리가 붙이는 닫는 큰따옴표를 이스케이프해버려 따옴표가 안 닫힌 것처럼
 // 파싱된다.
 //
-// 이 인용이 다루는 건 "표준 윈도우 argv 파싱"이라는 한 겹뿐이다. proc_start 가 pm2 에 넘기는
-// command 인자(예: npm run dev -- --title="hi there")처럼 모델·사용자가 자유롭게 채우는 값이
-// 실제로 큰따옴표를 담을 수 있는 바로 그 필드이고, quoteWin32 가 존재하는 이유이기도 하다 — cwd
-// 는 애초에 큰따옴표를 쓸 수 없는 윈도우 경로라 이 계층에서는 참고 사례일 뿐이다. 다만 cmd.exe
+// 이 인용이 다루는 건 "표준 윈도우 argv 파싱"이라는 한 겹뿐이다. quoteWin32 가 이 \" 이스케이프
+// 로직을 갖춘 것은 원래 proc_start 의 command 인자(예: npm run dev -- --title="hi there")처럼
+// 모델·사용자가 자유롭게 채워 큰따옴표를 담을 수 있는 값을 겨냥해서였다 — 그런데 바로 그 경로가
+// spawn(commandLine, {shell:true}) 가 띄우는 cmd.exe 자신의 재파싱과 부딪혀 실제 사고로
+// 이어졌다(아래 buildPm2CommandLine 뒤의 "실제 사고 원인과 고침" 참고 — cmd.exe 는 \" 를 모른다).
+// 그래서 지금 command 는 이 함수에 아예 넘어오지 않는다(스크립트 파일로 우회). quoteWin32 자신은
+// 여전히 옳고 필요하다 — --cwd·스크립트 경로처럼 공백은 있어도 큰따옴표는 없는 단순 인자에
+// 계속 쓰인다. 다만 cmd.exe
 // 는 이 표준 argv 파싱 위에 자기만의 인용·특수문자 해석 계층을 하나 더 얹는다: 여기서 만든 큰
 // 따옴표 쌍 안이든 밖이든 &·|·^·% 같은 cmd.exe 메타문자는 cmd.exe 가 명령 구분자·파이프·이스케이프
 // 문자로 재해석할 수 있다. 그 계층까지 모든 경우에 안전한 인용은 셸마다 규칙이 다르고 표준이
@@ -129,6 +134,68 @@ export function buildPm2CommandLine(args: string[], flavor: ShellFlavor): string
   return ["pm2", ...args].map((a) => (needsQuoting(a, flavor) ? quote(a) : a)).join(" ");
 }
 
+// 실제 사고 원인과 고침(2026-07-30, 미니PC 실측으로 확정 — 재추론하지 말 것): 위 buildPm2CommandLine
+// 은 MSVCRT/CommandLineToArgvW 규칙으로 인용한다 — 임베디드 큰따옴표는 \" 로, 그 앞 백슬래시는
+// 두 배로 늘린다. 그런데 그렇게 만든 문자열을 처음 파싱하는 것은 이 규칙을 따르는 프로그램이
+// 아니라 spawn(commandLine, {shell:true}) 가 띄우는 **cmd.exe 자신**이다 — cmd.exe 는 \" 를 모른다.
+// 백슬래시를 리터럴 문자로 그대로 두고 큰따옴표 개수만 세어 인용 모드를 토글하므로, 첫 임베디드
+// 큰따옴표(예: command = npm run dev -- --title="hi there")부터 토큰 경계가 전부 어긋난다.
+//
+// 미니PC 에서 직접 재현·확정한 사실:
+//   - 공백 없는 단순 명령(인용 자체가 필요 없음): 어떤 cwd 에서도 online 으로 성공.
+//   - 한글+공백 폴더("…\테스트 1")에서 큰따옴표가 든 명령: stopped, 로그 0바이트.
+//   - **ASCII 만 쓴** 공백 폴더("…\test dir")에서 같은 명령: 역시 stopped, 로그 0바이트 — 이
+//     한 줄이 핵심이다. 한글이 원인이었다면 이 경우는 성공했어야 한다. 바뀐 변수는 "인용이
+//     필요한 큰따옴표의 유무"뿐이었다.
+//   - 명령을 .bat 스크립트 파일에 적어 pm2 start ... -- /c <스크립트경로> 로 띄운 형태는 두
+//     경우(한글+공백 cwd, ASCII+공백 cwd) 모두 online 으로 성공했다.
+// 파일 "내용"은 어떤 셸도 명령줄로 파싱하지 않고 줄 단위로 그대로 읽으므로, 명령을 파일에 적어
+// 넘기면 인용 자체가 필요 없어진다 — cmd.exe 가 이해하지 못하는 인용 규칙과 다시 마주칠 일이
+// 없다. 그래서 proc_start(아래)는 회원의 명령을 pm2 명령줄 인자로 절대 넘기지 않고, 이 스크립트
+// 파일에 적은 뒤 그 "경로"만 인자로 준다 — --cwd·스크립트 경로처럼 임베디드 큰따옴표가 없는
+// 단순 인자는 지금도 buildPm2CommandLine 을 그대로 거친다(깨지는 건 \" 뿐이므로 이 좁은 인용은
+// 그 인자들에는 여전히 정확하고 충분하다). 이 우회를 걷어내고 명령을 다시 명령줄 인자로 합치면,
+// 위 재현이 그대로 재발한다 — "간단해 보인다"는 이유로 되돌리지 말 것.
+export function scriptContentFor(command: string, flavor: ShellFlavor): string {
+  const header = flavor === "win32" ? "@echo off" : "#!/bin/sh";
+  return `${header}\n${command}\n`;
+}
+
+// name 은 오늘 remoteTools.ts 가 항상 procNameFor(디스코드 userId, "asahi-<숫자>")로 주입한다(이
+// 실행기에 직접 닿는 다른 프로덕션 경로가 없다). 그래도 이 값을 그대로 파일 경로 조각으로 쓰므로,
+// paths.ts 의 joinUnderRoot(SEGMENT_PATTERN)와 같은 이유로 영숫자·밑줄·하이픈 밖의 문자는 전부
+// 밑줄로 바꿔 경로 구분자·'..' 가 섞여도 스크립트 폴더를 벗어나는 경로를 만들 수 없게 한 번 더
+// 방어적으로 막는다.
+function safeFileStem(name: string): string {
+  return name.replace(/[^A-Za-z0-9_-]/g, "_");
+}
+
+// proc_start 의 스크립트 파일 기본 위치. 회원 폴더(roots) 밖에 둔다 — 그 폴더는 회원 것이라
+// 낯선 생성 파일이 섞이면 혼란스럽고, 회원이 그 내용을 직접 고쳐 다음 실행에 영향을 줄 수도
+// 있다. os.tmpdir() 은 워커 프로세스를 몇 번을 다시 띄워도 같은 값이라, "이름별로 항상 같은
+// 경로"가 자연히 보장된다(opts.scriptDir 로 테스트가 격리된 위치를 주입할 수 있다 — 아래
+// makeExecutors 참고).
+const DEFAULT_SCRIPT_DIR = path.join(os.tmpdir(), "asahi-proc-scripts");
+
+// 회원 명령을 스크립트 파일에 적고 그 경로를 돌려준다(위 "실제 사고 원인과 고침" 참고). 이름당
+// 파일 하나이고 재시작마다 덮어쓴다 — proc_start 는 같은 이름이 이미 떠 있으면 이 함수를 부르기
+// 전에 이미 거절하므로(조용한 교체 금지, 아래 proc_start 참고), 이 시점에 도달했다는 것 자체가
+// "이 이름으로 새로 써도 안전하다"는 뜻이다. 예전 스크립트 파일을 지우는 절차는 따로 두지 않는다
+// — 최신 파일이 그 자리를 그대로 덮어쓰므로 쌓일 게 없다(proc_stop 에서의 정리 여부는 그 실행기
+// 선언부에서 따로 설명한다).
+export async function writeStartScript(
+  scriptDir: string,
+  name: string,
+  command: string,
+  flavor: ShellFlavor,
+): Promise<string> {
+  const ext = flavor === "win32" ? "bat" : "sh";
+  const scriptPath = path.join(scriptDir, `${safeFileStem(name)}.${ext}`);
+  await fs.mkdir(scriptDir, { recursive: true });
+  await fs.writeFile(scriptPath, scriptContentFor(command, flavor), "utf8");
+  return scriptPath;
+}
+
 // shellFor()·기본 runPm2 가 공유하는 플레이버 판정 — 두 곳이 각자 계산하면 언젠가 갈릴 수 있어
 // 한 곳으로 모은다.
 function shellFlavorOf(roots: string[]): ShellFlavor {
@@ -156,7 +223,12 @@ function truncate(s: string): string {
 const str = (v: unknown): string | undefined => (typeof v === "string" && v.length > 0 ? v : undefined);
 const num = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
 
-export function makeExecutors(roots: string[], opts: { runPm2?: RunPm2 } = {}): Executors {
+export function makeExecutors(roots: string[], opts: { runPm2?: RunPm2; scriptDir?: string } = {}): Executors {
+  // proc_start 가 회원 명령을 적을 스크립트 파일 위치(DEFAULT_SCRIPT_DIR·writeStartScript 선언부
+  // 참고) — 테스트가 실제 OS 임시폴더를 더럽히지 않고 파일 내용을 직접 들여다볼 수 있도록 주입
+  // 지점을 열어 둔다. 프로덕션(worker.ts)은 opts 를 생략하므로 항상 기본값을 쓴다.
+  const scriptDir = opts.scriptDir ?? DEFAULT_SCRIPT_DIR;
+
   const runPm2: RunPm2 =
     opts.runPm2 ??
     ((args) =>
@@ -183,12 +255,18 @@ export function makeExecutors(roots: string[], opts: { runPm2?: RunPm2 } = {}): 
     return c.ok ? { ok: true, path: c.path } : { ok: false, res: { ok: false, content: c.message } };
   };
 
-  // pm2 에 임의 명령을 넘기는 안전한 형태. pm2 는 "스크립트 파일"을 기대하므로, 셸 명령은
-  // 인터프리터를 명시해 넘겨야 한다. 어느 셸인지는 워커 루트의 플레이버로 정한다 — 봇은
-  // 리눅스, 워커는 윈도우일 수 있어 호스트 플랫폼으로 정하면 어긋난다(paths.ts 와 같은 이유).
-  // 이 판정은 기본 runPm2(위)의 명령줄 인용과 같은 기준을 써야 하므로 shellFlavorOf 로 뺐다.
-  const shellFor = (): { bin: string; flag: string } =>
-    shellFlavorOf(roots) === "win32" ? { bin: "cmd.exe", flag: "/c" } : { bin: "sh", flag: "-c" };
+  // proc_start(아래)가 스크립트 파일(writeStartScript 가 만든 .bat/.sh)을 열 셸을 고른다. 어느
+  // 셸인지는 워커 루트의 플레이버로 정한다 — 봇은 리눅스, 워커는 윈도우일 수 있어 호스트
+  // 플랫폼으로 정하면 어긋난다(paths.ts 와 같은 이유). 이 판정은 기본 runPm2(위)의 명령줄 인용과
+  // 같은 기준을 써야 하므로 shellFlavorOf 로 뺐다.
+  //
+  // flag 는 윈도우에만 있다 — cmd.exe 는 /c 뒤에 배치파일 경로를 그대로 줘도 그 파일을 실행하지만,
+  // POSIX sh 는 다르다: -c 는 "다음 인자를 명령 '문자열'로 실행하라"는 뜻이라 파일 경로에는 맞지
+  // 않는다(sh -c '/path/to/a.sh' 는 그 경로를 명령 문자열로 해석해 실행 권한이 없으면 그냥
+  // 실패한다). 플래그 없이 경로를 그대로 첫 인자로 주면 sh 가 그 파일을 스크립트로 직접 열어
+  // 실행 권한 여부와 무관하게 동작한다 — 그래서 POSIX 쪽은 flag 가 없다.
+  const shellFor = (): { bin: string; flag?: string } =>
+    shellFlavorOf(roots) === "win32" ? { bin: "cmd.exe", flag: "/c" } : { bin: "sh" };
 
   const procGate = (): { ok: true } | { ok: false; res: ExecResult } =>
     roots.length === 0
@@ -552,9 +630,20 @@ export function makeExecutors(roots: string[], opts: { runPm2?: RunPm2 } = {}): 
       // 조용히 교체하지 않는다 — 부원이 자기도 모르게 돌던 서버를 잃는다. 바꾸려면 멈추고 다시 띄운다.
       if (dup) return { ok: false, content: `이미 돌고 있는 게 있어요: ${dup.command} (${dup.status}). 먼저 멈춰야 새로 띄울 수 있어요.` };
 
+      const flavor = shellFlavorOf(roots);
       const sh = shellFor();
+      // 실제 사고 원인 수정: command 를 pm2 명령줄 인자로 직접 넘기지 않는다(buildPm2CommandLine
+      // 선언부의 "실제 사고 원인과 고침" 참고) — 스크립트 파일에 적고 그 경로만 넘긴다.
+      let scriptPath: string;
+      try {
+        scriptPath = await writeStartScript(scriptDir, name, command, flavor);
+      } catch (err) {
+        return { ok: false, content: `실행 스크립트를 만들지 못했어요: ${err instanceof Error ? err.message : String(err)}` };
+      }
       // cwd 가 아니라 cwdCheck.path 를 쓴다 — fs_* 의 gate() 가 g.path(검사에서 나온 실경로)로 실제
-      // 파일시스템 작업을 하는 것과 같은 이유다(심볼릭 링크 등을 해석한 정규화된 값).
+      // 파일시스템 작업을 하는 것과 같은 이유다(심볼릭 링크 등을 해석한 정규화된 값). scriptPath 도
+      // --cwd 와 마찬가지로 임베디드 큰따옴표가 없는 단순 경로라 buildPm2CommandLine 을 그대로
+      // 거쳐도 안전하다(공백이 있어도 인용만 되고 깨지지 않는다 — 위 buildPm2CommandLine 주석 참고).
       //
       // --no-autorestart 로 띄운다(컨트롤러 결정, Finding 5) — 오타 난 개발서버가 크래시를
       // 반복해도 회원 눈에 안 보이게 재시작을 계속하면, 아래 재조회가 그 순간 크래시 루프의
@@ -563,7 +652,10 @@ export function makeExecutors(roots: string[], opts: { runPm2?: RunPm2 } = {}): 
       // 재시작 사이의 경쟁을 막는다는 이유도 적혀 있었지만, 그 트리 kill 자체가 오진단에 기반한
       // 조치였다 — pm2 delete 는 실측으로 이미 트리 전체를 정리하는 것이 확인돼 되돌렸다. 이
       // 플래그의 근거는 이제 Finding 5 하나뿐이다.)
-      const r = await runPm2(["start", sh.bin, "--name", name, "--cwd", cwdCheck.path, "--no-autorestart", "--", sh.flag, command]);
+      const r = await runPm2([
+        "start", sh.bin, "--name", name, "--cwd", cwdCheck.path, "--no-autorestart",
+        "--", ...(sh.flag !== undefined ? [sh.flag] : []), scriptPath,
+      ]);
       if (!r.ok) return { ok: false, content: `띄우지 못했어요: ${r.stderr.trim() || r.stdout.trim() || "알 수 없는 오류"}` };
 
       // 리뷰 지적(Minor, Finding 5 — 원래 M2 리뷰): pm2 의 start 호출이 ok:true 여도 "pm2 가 프로세스
@@ -594,6 +686,13 @@ export function makeExecutors(roots: string[], opts: { runPm2?: RunPm2 } = {}): 
       // delete 를 되돌리는 게 아니라 애초에 나가지 않게 막는다.
       if (parseProcName(name) === null) return { ok: false, content: NOT_MEMBER_PROC_MSG };
 
+      // 결정: writeStartScript(위)가 만든 스크립트 파일은 여기서 지우지 않는다. 이름당 파일 하나
+      // 라 proc_start 가 재시작마다 덮어쓰므로, 지우지 않아도 회원 한 명이 몇 번을 다시 띄우든
+      // 파일이 늘어나지 않는다(쌓이는 건 "한 번도 안 지운 게" 아니라 "멈춘 뒤 다시는 안 띄운"
+      // 회원 수만큼뿐이고, 동아리 규모에서는 무시할 만하다). 지우면 오히려 잃는 게 있다 — 방금
+      // 멈춘 프로세스가 정확히 무엇을 실행했는지 미니PC 에서 파일 하나로 바로 확인할 수 있는
+      // 진단 자료가 사라진다. 지우지 않기로 한다.
+      //
       // 되돌림(2026-07-30): 한때 이 자리에 pm2 delete 전에 jlist 로 pid 를 찾아 taskkill /T 등으로
       // 프로세스 트리를 먼저 끝내는 코드가 있었다("pm2 delete 는 자기 자식만 죽이고 손자 프로세스는
       // 고아로 남는다"는 운영 관찰에 대한 대응이었다). 그 진단이 틀렸다 — 실제로 포트를 붙든 채

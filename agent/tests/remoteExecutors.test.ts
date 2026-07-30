@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { makeExecutors, OUTPUT_MAX, buildPm2CommandLine } from "../src/remote/executors.js";
+import { makeExecutors, OUTPUT_MAX, buildPm2CommandLine, scriptContentFor, writeStartScript } from "../src/remote/executors.js";
 import { TREE_MAX_ENTRIES } from "../src/remote/tree.js";
 
 describe("워커 실행기", () => {
@@ -438,18 +438,26 @@ describe("proc_* 실행기 — PM2 위임", () => {
   // WORKER_ROOTS, projectDir 는 그 안의(회원 "111"의) 프로젝트 폴더 역할이다.
   let root: string;
   let projectDir: string;
+  // proc_start 가 회원 명령을 적는 스크립트 파일 위치(아래 "명령을 pm2 명령줄에 올리지 않는다"
+  // 참고) — 실제 OS 임시폴더를 더럽히지 않도록, 그리고 다른 테스트 파일과 이름이 겹칠 걱정 없이
+  // 이 스위트 전용 폴더를 주입한다. proc_start 를 부르지 않는 테스트에는 영향이 없다.
+  let scriptDir: string;
   beforeEach(() => {
     root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "asahi-proc-")));
     projectDir = path.join(root, "111");
     fs.mkdirSync(projectDir, { recursive: true });
+    scriptDir = fs.mkdtempSync(path.join(os.tmpdir(), "asahi-proc-scripts-"));
   });
-  afterEach(() => fs.rmSync(root, { recursive: true, force: true }));
+  afterEach(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(scriptDir, { recursive: true, force: true });
+  });
 
   it("proc_start 는 주입된 이름과 cwd 로 pm2 start 를 부른다", async () => {
     // 첫 jlist(사전 중복 확인)는 비어 있고, start 이후 재조회(Finding 5)는 online 을 돌려준다 —
     // 실제 성공 경로를 그대로 흉내낸다.
     const { calls, runPm2 } = fakePm2({ jlist: [{ ok: true, stdout: "[]" }, { ok: true, stdout: onlineJlist("asahi-111") }] });
-    const ex = makeExecutors([root], { runPm2 });
+    const ex = makeExecutors([root], { runPm2, scriptDir });
     const r = await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: projectDir });
     expect(r.ok).toBe(true);
     const start = calls.find((c) => c[0] === "start")!;
@@ -457,7 +465,37 @@ describe("proc_* 실행기 — PM2 위임", () => {
     expect(start).toContain("asahi-111");
     expect(start).toContain("--cwd");
     expect(start).toContain(projectDir);
-    expect(start.join(" ")).toContain("npm run dev");
+    // 실제 사고 원인 수정: 명령 문자열 자체는 pm2 인자 배열 어디에도 나타나지 않는다 — cmd.exe 가
+    // 그 명령줄을 다시 파싱하며 buildPm2CommandLine 의 MSVCRT \" 이스케이프를 이해하지 못해
+    // 토큰 경계가 깨지는 사고를 원천적으로 없애려고, 명령은 스크립트 파일에만 적는다(아래
+    // "scriptContentFor"·"writeStartScript" 참고).
+    expect(start.some((tok) => tok.includes("npm run dev"))).toBe(false);
+    const scriptPath = start[start.length - 1]!;
+    expect(fs.readFileSync(scriptPath, "utf8")).toContain("npm run dev");
+  });
+
+  // 실제 사고 원인 수정의 핵심 회귀 가드. buildPm2CommandLine 은 MSVCRT 규칙(임베디드 따옴표를
+  // \" 로)으로 인용하지만, 그 결과 문자열을 spawn(commandLine, {shell:true}) 가 먼저 cmd.exe 로
+  // 실행한다 — cmd.exe 는 \" 를 모른다. 백슬래시를 리터럴로 두고 따옴표 개수만 세므로 첫 임베디드
+  // 따옴표 뒤로 토큰 경계가 전부 어긋난다. 미니PC 실측(한글 경로뿐 아니라 ASCII 만 쓴 공백 경로로도
+  // 같은 증상을 재현해, 원인이 한글이 아니라 인용 자체임을 확인)으로 확정된 사고다 — 명령을 pm2
+  // 명령줄에 다시는 올리지 않는 것이 유일하고 근본적인 고침이다.
+  it("proc_start 는 임베디드 따옴표가 든 명령도 pm2 인자 배열에 올리지 않는다(실제 사고 재현)", async () => {
+    const trapCommand = 'npm run dev -- --title="hi there"';
+    const { calls, runPm2 } = fakePm2({ jlist: [{ ok: true, stdout: "[]" }, { ok: true, stdout: onlineJlist("asahi-111") }] });
+    const ex = makeExecutors([root], { runPm2, scriptDir });
+    const r = await ex.proc_start!({ command: trapCommand, name: "asahi-111", cwd: projectDir });
+    expect(r.ok).toBe(true);
+    const start = calls.find((c) => c[0] === "start")!;
+    // buildPm2CommandLine 이 다시 망가뜨릴 여지 자체가 없다 — 이 문자열도, \" 이스케이프 흔적도
+    // 인자 배열 어디에도 없다.
+    expect(start.some((tok) => tok.includes(trapCommand))).toBe(false);
+    expect(start.some((tok) => tok.includes('\\"'))).toBe(false);
+    // "--" 뒤 마지막 인자는 스크립트 파일 경로 하나뿐이고, 명령은 그 파일 안에 이스케이프 없이
+    // 그대로 있다.
+    const scriptPath = start[start.length - 1]!;
+    expect(fs.existsSync(scriptPath)).toBe(true);
+    expect(fs.readFileSync(scriptPath, "utf8")).toContain(trapCommand);
   });
 
   // --no-autorestart 로 띄우는 이유(Finding 5): 오타 난 개발서버가 크래시를 반복해도 회원 눈에
@@ -468,7 +506,7 @@ describe("proc_* 실행기 — PM2 위임", () => {
   // 실측으로 이미 트리 전체를 정리한다는 것이 확인돼 되돌렸다.)
   it("proc_start 는 --no-autorestart 로 띄운다", async () => {
     const { calls, runPm2 } = fakePm2({ jlist: [{ ok: true, stdout: "[]" }, { ok: true, stdout: onlineJlist("asahi-111") }] });
-    const ex = makeExecutors([root], { runPm2 });
+    const ex = makeExecutors([root], { runPm2, scriptDir });
     await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: projectDir });
     const start = calls.find((c) => c[0] === "start")!;
     expect(start).toContain("--no-autorestart");
@@ -487,20 +525,23 @@ describe("proc_* 실행기 — PM2 위임", () => {
   it("proc_start 는 같은 이름이 이미 있으면 pm2 를 부르지 않고 거절한다(조용한 교체 금지)", async () => {
     const existing = JSON.stringify([{ name: "asahi-111", pm2_env: { status: "online", pm_uptime: 0, restart_time: 0, args: ["run", "dev"], pm_exec_path: "npm" }, monit: { memory: 1 } }]);
     const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: existing } });
-    const ex = makeExecutors([root], { runPm2 });
+    const ex = makeExecutors([root], { runPm2, scriptDir });
     const r = await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: projectDir });
     expect(r.ok).toBe(false);
     expect(r.content).toContain("이미");
     expect(calls.some((c) => c[0] === "start")).toBe(false);
   });
 
-  // 리뷰 지적(Minor): 위 중복 거절 메시지는 dup.command 를 그대로 보여준다 — proc_start 가 실제로
-  // 만드는 셸 래퍼 모양(cmd.exe/sh 를 스크립트 자리에 넣는다, 위 commandOf 관련 테스트 참고)으로
-  // 이미 떠 있는 프로세스를 시뮬레이션해, 이 메시지에도 셸 껍데기가 새지 않는지 확인한다.
-  it("이름 충돌 거절 메시지는 실제 proc_start 모양(셸 래퍼)에서도 셸 껍데기 없이 명령만 보여준다", async () => {
+  // 리뷰 지적(Minor): 위 중복 거절 메시지는 dup.command 를 그대로 보여준다 — proc_start 가 pm2 의
+  // "스크립트" 자리에 cmd.exe/sh 를 넣는 셸 래퍼 모양(commandOf 가 걷어내는 모양, proc.test.ts
+  // 참고)으로 이미 떠 있는 프로세스를 시뮬레이션해, 이 메시지에도 셸 껍데기가 새지 않는지
+  // 확인한다. (참고: 스크립트 파일 우회 이후 실제 proc_start 는 이 자리에 "npm run dev" 가 아니라
+  // 스크립트 경로를 남긴다 — 이 테스트는 그 구체적인 뒷부분과 무관하게 commandOf 의 셸 래퍼
+  // 스트리핑 자체를 겨냥한다.)
+  it("이름 충돌 거절 메시지는 셸 래퍼 모양에서도 셸 껍데기 없이 뒷부분만 보여준다", async () => {
     const existing = JSON.stringify([{ name: "asahi-111", pm2_env: { status: "online", pm_uptime: 0, restart_time: 0, args: ["/c", "npm run dev"], pm_exec_path: "C:\\Windows\\System32\\cmd.exe" }, monit: { memory: 1 } }]);
     const { runPm2 } = fakePm2({ jlist: { ok: true, stdout: existing } });
-    const ex = makeExecutors([root], { runPm2 });
+    const ex = makeExecutors([root], { runPm2, scriptDir });
     const r = await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: projectDir });
     expect(r.ok).toBe(false);
     expect(r.content).toContain("npm run dev");
@@ -510,7 +551,7 @@ describe("proc_* 실행기 — PM2 위임", () => {
 
   it("proc_start 성공 응답은 멈추는 법을 그 자리에서 알려준다", async () => {
     const { runPm2 } = fakePm2({ jlist: [{ ok: true, stdout: "[]" }, { ok: true, stdout: onlineJlist("asahi-111") }] });
-    const ex = makeExecutors([root], { runPm2 });
+    const ex = makeExecutors([root], { runPm2, scriptDir });
     const r = await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: projectDir });
     expect(r.content).toContain("멈추");
   });
@@ -523,7 +564,7 @@ describe("proc_* 실행기 — PM2 위임", () => {
   it("proc_start 는 시작 직후 재조회에서 online 이 아니면(크래시 루프 등) 성공을 주장하지 않는다", async () => {
     const crashLooping = onlineJlist("asahi-111", { status: "errored", restart_time: 3 });
     const { runPm2 } = fakePm2({ jlist: [{ ok: true, stdout: "[]" }, { ok: true, stdout: crashLooping }] });
-    const ex = makeExecutors([root], { runPm2 });
+    const ex = makeExecutors([root], { runPm2, scriptDir });
     const r = await ex.proc_start!({ command: "오타난명령", name: "asahi-111", cwd: projectDir });
     expect(r.ok).toBe(false);
     expect(r.content).toContain("errored");
@@ -531,7 +572,7 @@ describe("proc_* 실행기 — PM2 위임", () => {
 
   it("proc_start 는 시작 직후 재조회 자체가 실패해도(연결 끊김 등) 성공을 주장하지 않는다", async () => {
     const { runPm2 } = fakePm2({ jlist: [{ ok: true, stdout: "[]" }, { ok: false, stdout: "", stderr: "연결 끊김" }] });
-    const ex = makeExecutors([root], { runPm2 });
+    const ex = makeExecutors([root], { runPm2, scriptDir });
     const r = await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: projectDir });
     expect(r.ok).toBe(false);
   });
@@ -542,7 +583,7 @@ describe("proc_* 실행기 — PM2 위임", () => {
   // 확인해야 "아무 것도 시작하지 않는다"는 보장이 선다.
   it("proc_start 는 name·cwd 가 없으면 pm2 를 전혀 부르지 않고 거절한다(배선 오류 방어)", async () => {
     const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: "[]" } });
-    const ex = makeExecutors([root], { runPm2 });
+    const ex = makeExecutors([root], { runPm2, scriptDir });
     expect((await ex.proc_start!({ command: "npm run dev", cwd: projectDir })).ok).toBe(false); // name 없음
     expect((await ex.proc_start!({ command: "npm run dev", name: "asahi-111" })).ok).toBe(false); // cwd 없음
     expect((await ex.proc_start!({ command: "npm run dev" })).ok).toBe(false); // 둘 다 없음
@@ -566,7 +607,7 @@ describe("proc_* 실행기 — PM2 위임", () => {
     "proc_start 는 윈도우 루트에서 cmd.exe·/c 로 pm2 를 부른다",
     async () => {
       const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: "[]" } });
-      const ex = makeExecutors([root], { runPm2 });
+      const ex = makeExecutors([root], { runPm2, scriptDir });
       await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: projectDir });
       const start = calls.find((c) => c[0] === "start")!;
       expect(start).toContain("cmd.exe");
@@ -576,15 +617,19 @@ describe("proc_* 실행기 — PM2 위임", () => {
     },
   );
 
+  // 실제 사고 원인 수정 이후 POSIX 쪽은 더 이상 "-c" 를 쓰지 않는다 — -c 는 "다음 인자를 명령
+  // 문자열로 실행하라"는 뜻이라 스크립트 파일 경로에는 맞지 않는다(윈도우의 cmd.exe 는 /c 뒤에
+  // 배치파일 경로를 그대로 줘도 되지만, sh 는 플래그 없이 경로를 인자로 주면 그 파일을 스크립트로
+  // 직접 연다 — 그래서 이 플레이버에서만 shellFor() 의 flag 가 없다).
   it.skipIf(process.platform === "win32")(
-    "proc_start 는 POSIX 루트에서 sh·-c 로 pm2 를 부른다(호스트 플랫폼이 아니라 워커 루트 기준)",
+    "proc_start 는 POSIX 루트에서 sh 로 스크립트 파일을 직접 연다(호스트 플랫폼이 아니라 워커 루트 기준)",
     async () => {
       const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: "[]" } });
-      const ex = makeExecutors([root], { runPm2 });
+      const ex = makeExecutors([root], { runPm2, scriptDir });
       await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: projectDir });
       const start = calls.find((c) => c[0] === "start")!;
       expect(start).toContain("sh");
-      expect(start).toContain("-c");
+      expect(start).not.toContain("-c");
       expect(start).not.toContain("cmd.exe");
       expect(start).not.toContain("/c");
     },
@@ -601,7 +646,7 @@ describe("proc_* 실행기 — PM2 위임", () => {
       const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "asahi-proc-outside-")));
       try {
         const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: "[]" } });
-        const ex = makeExecutors([root], { runPm2 });
+        const ex = makeExecutors([root], { runPm2, scriptDir });
         const r = await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: outside });
         expect(r.ok).toBe(false);
         expect(r.content).toContain("워커 작업 폴더 밖");
@@ -614,7 +659,7 @@ describe("proc_* 실행기 — PM2 위임", () => {
     it("존재하지 않는 cwd 는 pm2 를 부르지 않고 한국어로 명확히 거절한다(운영 중 실제로 겪은 결함 — 프로젝트가 하위 폴더에 있는데 그 폴더가 없으면 pm2 가 --cwd 에서 바로 실패해 원인을 알 수 없었다)", async () => {
       const noSuchDir = path.join(root, "없는-프로젝트");
       const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: "[]" } });
-      const ex = makeExecutors([root], { runPm2 });
+      const ex = makeExecutors([root], { runPm2, scriptDir });
       const r = await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: noSuchDir });
       expect(r.ok).toBe(false);
       expect(r.content).toContain("폴더가 없어요");
@@ -625,7 +670,7 @@ describe("proc_* 실행기 — PM2 위임", () => {
       const filePath = path.join(root, "이건-파일.txt");
       fs.writeFileSync(filePath, "x");
       const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: "[]" } });
-      const ex = makeExecutors([root], { runPm2 });
+      const ex = makeExecutors([root], { runPm2, scriptDir });
       const r = await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: filePath });
       expect(r.ok).toBe(false);
       expect(r.content).toContain("폴더가 아니에요");
@@ -636,7 +681,7 @@ describe("proc_* 실행기 — PM2 위임", () => {
       const koreanProject = path.join(root, "테스트 1");
       fs.mkdirSync(koreanProject, { recursive: true });
       const { calls, runPm2 } = fakePm2({ jlist: [{ ok: true, stdout: "[]" }, { ok: true, stdout: onlineJlist("asahi-111") }] });
-      const ex = makeExecutors([root], { runPm2 });
+      const ex = makeExecutors([root], { runPm2, scriptDir });
       const r = await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: koreanProject });
       expect(r.ok).toBe(true);
       const start = calls.find((c) => c[0] === "start")!;
@@ -646,7 +691,7 @@ describe("proc_* 실행기 — PM2 위임", () => {
 
   it("proc_stop 은 pm2 delete 를 부른다", async () => {
     const { calls, runPm2 } = fakePm2({ delete: { ok: true, stdout: "" } });
-    const ex = makeExecutors([root], { runPm2 });
+    const ex = makeExecutors([root], { runPm2, scriptDir });
     const r = await ex.proc_stop!({ name: "asahi-111" });
     expect(r.ok).toBe(true);
     expect(calls).toContainEqual(["delete", "asahi-111"]);
@@ -658,7 +703,7 @@ describe("proc_* 실행기 — PM2 위임", () => {
 
   it("proc_stop 은 없는 이름이면 실패로 돌려준다", async () => {
     const { runPm2 } = fakePm2({ delete: { ok: false, stdout: "", stderr: "Process not found" } });
-    const ex = makeExecutors([root], { runPm2 });
+    const ex = makeExecutors([root], { runPm2, scriptDir });
     const r = await ex.proc_stop!({ name: "asahi-111" });
     expect(r.ok).toBe(false);
   });
@@ -672,7 +717,7 @@ describe("proc_* 실행기 — PM2 위임", () => {
   it("proc_stop 은 asahi-<숫자> 형식이 아닌 이름(봇·워커 자신)을 pm2 를 부르지 않고 거절한다", async () => {
     for (const infraName of ["asahi-worker", "asahi-assistant", "something-else"]) {
       const { calls, runPm2 } = fakePm2({ delete: { ok: true, stdout: "" } });
-      const ex = makeExecutors([root], { runPm2 });
+      const ex = makeExecutors([root], { runPm2, scriptDir });
       const r = await ex.proc_stop!({ name: infraName });
       expect(r.ok, `${infraName} 을 멈출 수 있었다`).toBe(false);
       expect(r.content).toContain("회원");
@@ -683,7 +728,7 @@ describe("proc_* 실행기 — PM2 위임", () => {
   it("proc_list 는 jlist 를 파싱해 표로 돌려준다", async () => {
     const stdout = JSON.stringify([{ name: "asahi-111", pm2_env: { status: "online", pm_uptime: 0, restart_time: 2, args: ["run", "dev"], pm_exec_path: "npm" }, monit: { memory: 5 * 1024 * 1024 } }]);
     const { runPm2 } = fakePm2({ jlist: { ok: true, stdout } });
-    const ex = makeExecutors([root], { runPm2 });
+    const ex = makeExecutors([root], { runPm2, scriptDir });
     const r = await ex.proc_list!({});
     expect(r.ok).toBe(true);
     expect(r.content).toContain("asahi-111");
@@ -702,7 +747,7 @@ describe("proc_* 실행기 — PM2 위임", () => {
       { name: "asahi-worker", pm2_env: { status: "online", pm_uptime: 0, restart_time: 0, args: [], pm_exec_path: "node" }, monit: { memory: 1 } },
     ]);
     const { runPm2 } = fakePm2({ jlist: { ok: true, stdout } });
-    const ex = makeExecutors([root], { runPm2 });
+    const ex = makeExecutors([root], { runPm2, scriptDir });
     const r = await ex.proc_list!({ onlyUserId: "111" });
     expect(r.ok).toBe(true);
     expect(r.content).toContain("asahi-111");
@@ -712,7 +757,7 @@ describe("proc_* 실행기 — PM2 위임", () => {
 
   it("proc_logs 는 nostream 으로 부르고 줄 수를 넘긴다", async () => {
     const { calls, runPm2 } = fakePm2({ logs: { ok: true, stdout: "로그 본문" } });
-    const ex = makeExecutors([root], { runPm2 });
+    const ex = makeExecutors([root], { runPm2, scriptDir });
     const r = await ex.proc_logs!({ name: "asahi-111", lines: 30 });
     expect(r.ok).toBe(true);
     expect(r.content).toContain("로그 본문");
@@ -726,7 +771,7 @@ describe("proc_* 실행기 — PM2 위임", () => {
   // 않았다. 세 경우를 모두 채운다 — lines 생략(기본값), 하한 미만(0 이하), 상한 초과(200 초과).
   it("proc_logs 는 lines 를 생략하면 기본값 50줄을 쓴다", async () => {
     const { calls, runPm2 } = fakePm2({ logs: { ok: true, stdout: "로그" } });
-    const ex = makeExecutors([root], { runPm2 });
+    const ex = makeExecutors([root], { runPm2, scriptDir });
     await ex.proc_logs!({ name: "asahi-111" });
     const logs = calls.find((c) => c[0] === "logs")!;
     expect(logs).toContain("50");
@@ -734,7 +779,7 @@ describe("proc_* 실행기 — PM2 위임", () => {
 
   it("proc_logs 는 lines 하한(1) 밑으로 내려가지 않는다", async () => {
     const { calls, runPm2 } = fakePm2({ logs: { ok: true, stdout: "로그" } });
-    const ex = makeExecutors([root], { runPm2 });
+    const ex = makeExecutors([root], { runPm2, scriptDir });
     await ex.proc_logs!({ name: "asahi-111", lines: -5 });
     const logs = calls.find((c) => c[0] === "logs")!;
     expect(logs).toContain("1");
@@ -743,7 +788,7 @@ describe("proc_* 실행기 — PM2 위임", () => {
 
   it("proc_logs 는 lines 상한(200)을 넘지 않는다", async () => {
     const { calls, runPm2 } = fakePm2({ logs: { ok: true, stdout: "로그" } });
-    const ex = makeExecutors([root], { runPm2 });
+    const ex = makeExecutors([root], { runPm2, scriptDir });
     await ex.proc_logs!({ name: "asahi-111", lines: 9999 });
     const logs = calls.find((c) => c[0] === "logs")!;
     expect(logs).toContain("200");
@@ -756,7 +801,7 @@ describe("proc_* 실행기 — PM2 위임", () => {
   it("proc_logs 는 asahi-<숫자> 형식이 아닌 이름(봇·워커 자신)을 pm2 를 부르지 않고 거절한다", async () => {
     for (const infraName of ["asahi-worker", "asahi-assistant"]) {
       const { calls, runPm2 } = fakePm2({ logs: { ok: true, stdout: "로그 본문" } });
-      const ex = makeExecutors([root], { runPm2 });
+      const ex = makeExecutors([root], { runPm2, scriptDir });
       const r = await ex.proc_logs!({ name: infraName });
       expect(r.ok, `${infraName} 의 로그를 볼 수 있었다`).toBe(false);
       expect(r.content).toContain("회원");
@@ -766,7 +811,7 @@ describe("proc_* 실행기 — PM2 위임", () => {
 
   it("pm2 가 실패하면 stderr 를 사유로 돌려준다", async () => {
     const { runPm2 } = fakePm2({ jlist: { ok: false, stdout: "", stderr: "pm2 를 찾을 수 없습니다" } });
-    const ex = makeExecutors([root], { runPm2 });
+    const ex = makeExecutors([root], { runPm2, scriptDir });
     const r = await ex.proc_list!({});
     expect(r.ok).toBe(false);
     expect(r.content).toContain("pm2");
@@ -776,6 +821,67 @@ describe("proc_* 실행기 — PM2 위임", () => {
     const { runPm2 } = fakePm2({});
     const ex = makeExecutors([], { runPm2 });
     expect((await ex.proc_list!({})).ok).toBe(false);
+  });
+});
+
+// 실제 사고 원인 수정 검증(2026-07-30): 명령을 pm2 명령줄 인자로 넘기면 spawn(commandLine,
+// {shell:true}) 가 그 문자열을 먼저 cmd.exe 로 파싱한다 — buildPm2CommandLine 의 MSVCRT \"
+// 이스케이프를 cmd.exe 는 이해하지 못해(백슬래시를 리터럴로 두고 따옴표 개수만 센다) 첫 임베디드
+// 따옴표 뒤 토큰 경계가 전부 어긋난다. 미니PC 실측(한글 경로뿐 아니라 ASCII 만 쓴 공백 경로로도
+// 재현해 원인이 한글이 아니라 인용 자체임을 확인)으로 확정됐다 — 명령을 파일에 적어 넘기면 그
+// 내용은 어떤 셸도 명령줄로 파싱하지 않으므로 인용 자체가 필요 없어진다. 이 파일 내용 형식을
+// scriptContentFor 로 순수 함수로 떼어 직접 단정한다.
+describe("scriptContentFor — 스크립트 파일 내용(명령을 파일에 적으면 셸 인용이 필요 없다)", () => {
+  it("윈도우는 @echo off 다음 줄에 명령을 인용 없이 그대로 적는다(미니PC 실측으로 동작을 확인한 형태)", () => {
+    expect(scriptContentFor("npm run dev", "win32")).toBe("@echo off\nnpm run dev\n");
+  });
+
+  it("POSIX 는 셔뱅 다음 줄에 명령을 그대로 적는다", () => {
+    expect(scriptContentFor("npm run dev", "posix")).toBe("#!/bin/sh\nnpm run dev\n");
+  });
+
+  it("임베디드 따옴표가 든 명령도 이스케이프 없이 한 줄 그대로 적는다(실제 사고 재현 명령)", () => {
+    const cmd = 'npm run dev -- --title="hi there"';
+    expect(scriptContentFor(cmd, "win32")).toBe(`@echo off\n${cmd}\n`);
+  });
+});
+
+describe("writeStartScript — 회원 명령을 스크립트 파일로 남긴다", () => {
+  let dir: string;
+  beforeEach(() => { dir = fs.mkdtempSync(path.join(os.tmpdir(), "asahi-scripts-unit-")); });
+  afterEach(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  it("이름별로 파일 하나를 만들고 내용을 그대로 담는다", async () => {
+    const p = await writeStartScript(dir, "asahi-111", "npm run dev", "win32");
+    expect(p).toBe(path.join(dir, "asahi-111.bat"));
+    expect(fs.readFileSync(p, "utf8")).toBe("@echo off\nnpm run dev\n");
+  });
+
+  // proc_start 는 같은 이름이 이미 떠 있으면 이 단계에 도달하기 전에 거절한다(위 "조용히
+  // 교체하지 않는다" 참고) — 그러니 이 지점에 왔다는 것 자체가 "이 이름으로 새로 써도 안전하다"는
+  // 뜻이다. 재시작 때마다 최신 명령만 남기고 예전 파일이 쌓이지 않는 것이 의도된 동작이다.
+  it("같은 이름으로 다시 부르면 덮어쓴다(재시작마다 최신 명령만 남는다)", async () => {
+    await writeStartScript(dir, "asahi-111", "npm run old", "win32");
+    const p = await writeStartScript(dir, "asahi-111", "npm run new", "win32");
+    const content = fs.readFileSync(p, "utf8");
+    expect(content).toContain("npm run new");
+    expect(content).not.toContain("npm run old");
+  });
+
+  it("스크립트 폴더가 없으면 만들어서 쓴다", async () => {
+    const nested = path.join(dir, "a", "b");
+    const p = await writeStartScript(nested, "asahi-111", "npm run dev", "win32");
+    expect(fs.existsSync(p)).toBe(true);
+  });
+
+  // name 은 오늘 remoteTools.ts 가 항상 procNameFor(디스코드 userId)로 주입해 "asahi-<숫자>"
+  // 형태만 온다(이 실행기에 직접 닿는 다른 프로덕션 경로가 없다) — 그래도 이 값을 파일 경로
+  // 조각으로 쓰므로, 경로 구분자·'..' 가 섞여도 스크립트 폴더 밖으로 못 나가는지 방어적으로
+  // 확인한다(paths.ts 의 joinUnderRoot 와 같은 종류의 방어를 이 파일에서도 독립적으로 건다).
+  it("이름에 경로 구분자·'..'가 섞여도 스크립트 폴더 밖으로 못 나간다(방어적 sanitize)", async () => {
+    const p = await writeStartScript(dir, "../../evil", "npm run dev", "win32");
+    expect(path.dirname(p)).toBe(dir);
+    expect(fs.existsSync(p)).toBe(true);
   });
 });
 
