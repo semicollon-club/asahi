@@ -14,7 +14,7 @@ import {
   type TreeTruncReason,
 } from "./tree.js";
 import { pathFlavorOf } from "../core/paths.js";
-import { parsePm2List, renderProcList, procNameFor, parseProcName } from "./proc.js";
+import { parsePm2List, renderProcList, procNameFor, parseProcName, type ProcInfo } from "./proc.js";
 
 export type ExecResult = { ok: boolean; content: string };
 export type Executors = Record<string, (args: Record<string, unknown>) => Promise<ExecResult>>;
@@ -177,6 +177,15 @@ function safeFileStem(name: string): string {
 // makeExecutors 참고).
 const DEFAULT_SCRIPT_DIR = path.join(os.tmpdir(), "asahi-proc-scripts");
 
+// scriptDir·name·flavor 로 writeStartScript 가 쓴(또는 쓸) 스크립트 경로를 결정한다. 이름을 파일
+// 경로 조각으로 바꾸는 규칙(safeFileStem)과 확장자 규칙은 여기 단 한 곳에만 있어야 한다 —
+// writeStartScript(쓰기)와 recoverCommands(아래, 읽기)가 서로 다른 규칙으로 각자 경로를
+// 계산하면, 둘 중 하나만 고쳐졌을 때 조용히 다른 파일을 가리키게 된다.
+function scriptPathFor(scriptDir: string, name: string, flavor: ShellFlavor): string {
+  const ext = flavor === "win32" ? "bat" : "sh";
+  return path.join(scriptDir, `${safeFileStem(name)}.${ext}`);
+}
+
 // 회원 명령을 스크립트 파일에 적고 그 경로를 돌려준다(위 "실제 사고 원인과 고침" 참고). 이름당
 // 파일 하나이고 재시작마다 덮어쓴다 — proc_start 는 같은 이름이 이미 떠 있으면 이 함수를 부르기
 // 전에 이미 거절하므로(조용한 교체 금지, 아래 proc_start 참고), 이 시점에 도달했다는 것 자체가
@@ -189,11 +198,62 @@ export async function writeStartScript(
   command: string,
   flavor: ShellFlavor,
 ): Promise<string> {
-  const ext = flavor === "win32" ? "bat" : "sh";
-  const scriptPath = path.join(scriptDir, `${safeFileStem(name)}.${ext}`);
+  const scriptPath = scriptPathFor(scriptDir, name, flavor);
   await fs.mkdir(scriptDir, { recursive: true });
   await fs.writeFile(scriptPath, scriptContentFor(command, flavor), "utf8");
   return scriptPath;
+}
+
+// scriptContentFor(위)가 쓴 "헤더 한 줄 + 명령 한 줄"에서 명령 부분만 되돌린다. 첫 줄바꿈까지가
+// 헤더(@echo off 또는 #!/bin/sh)이고, 그 뒤부터 파일 끝의 줄바꿈 하나를 뺀 나머지가 원래 명령이다
+// — split("\n") 으로 둘째 줄만 집으면 명령 자체에 줄바꿈이 섞였을 때 뒷부분을 잃으므로, 첫
+// 줄바꿈의 위치만 찾아 그 뒤 전체를 취한다. 형식이 예상과 다르면(줄바꿈 자체가 없는 등, 사람이
+// 파일을 직접 건드린 경우) undefined 를 돌려주고 판단은 호출측(recoverCommands)에 맡긴다.
+function commandFromScriptContent(content: string): string | undefined {
+  const headerEnd = content.indexOf("\n");
+  if (headerEnd === -1) return undefined;
+  const rest = content.slice(headerEnd + 1);
+  return rest.endsWith("\n") ? rest.slice(0, -1) : rest;
+}
+
+// UX 회귀 수정(2026-07-30): 회원 명령을 pm2 명령줄에 절대 넘기지 않기로 한 결정(위 "실제 사고
+// 원인과 고침" 참고) 이후, pm2 jlist 가 돌려주는 명령은 더 이상 회원이 실제로 실행한 "npm run
+// dev" 같은 값이 아니라 writeStartScript 가 만든 스크립트 파일의 "경로"다 — pm2 는 cmd.exe/sh 로
+// 그 경로를 여는 것만 알 뿐, 안에 무엇이 있는지 모른다. pm2 로부터는 원래 명령을 영영 되찾을 수
+// 없다는 뜻이다. 그런데 그 파일을 "쓴" 것은 다름 아닌 이 워커 자신이고, 경로는 scriptPathFor 로
+// 이름만 알면 언제든 같은 규칙으로 다시 계산할 수 있다 — 그래서 pm2 에 원래 명령을 실어 보내는
+// 대신, 우리가 이미 디스크에 적어 둔 값을 다시 읽어 오는 쪽을 택한다.
+//
+// 이 되찾기가 없으면 proc_list·proc_start 의 중복 거절 메시지가 회원에게
+// "C:\...\asahi-proc-scripts\asahi-111.bat" 같은, 아무 의미도 없는 경로를 그대로 보여준다 —
+// proc_list 가 존재하는 이유 자체(부원이 "뭐 돌고 있어?"라고 물었을 때 모델의 기억이 아니라
+// 워커가 확인한 사실을 답하기 위함이고, 서로 다른 회원의 서버를 이름만으로 구분할 수 있어야
+// 한다는 것)가 무색해진다. 나중에 누군가 "그냥 명령을 다시 pm2 명령줄에 실으면 간단하지 않냐"고
+// 되돌리고 싶어질 수 있는데, 그러면 cmd.exe 가 MSVCRT `\"` 인용을 이해하지 못해 토큰 경계가
+// 깨지는 원래 사고(buildPm2CommandLine 뒤 "실제 사고 원인과 고침" 참고)가 그대로 재발한다 —
+// 이 되찾기가 그 유혹에 대한 유일한 정답이다.
+//
+// 스크립트 파일이 없거나(회원이 지웠다·아직 한 번도 안 썼다 등) 못 읽으면 pm2 가 보고한 값을
+// 그대로 둔다 — 파일 하나가 없다고 proc_list 호출 전체를 실패시키면 안 된다(회원이 자기 프로세스
+// 목록 전체를 잃는 것이 파일 하나를 못 읽는 것보다 항상 더 나쁘다). userId 가 null 인 항목
+// (asahi-assistant·asahi-worker 같은 봇·워커 자신의 PM2 앱, deploy/ecosystem.config.cjs)은
+// 건드리지 않는다 — writeStartScript 를 거치지 않으므로 대응하는 스크립트 파일 자체가 없고,
+// 있어서도 안 된다. 이 함수는 순수 로직만 담는 proc.ts 가 아니라 여기(파일시스템에 닿는
+// executors.ts)에 둔다 — proc.ts 는 fs·CLI 를 모르는 채로 남아야 한다(파일 상단 주석 참고).
+export async function recoverCommands(procs: ProcInfo[], scriptDir: string, flavor: ShellFlavor): Promise<ProcInfo[]> {
+  return Promise.all(
+    procs.map(async (p) => {
+      if (p.userId === null) return p;
+      let content: string;
+      try {
+        content = await fs.readFile(scriptPathFor(scriptDir, p.name, flavor), "utf8");
+      } catch {
+        return p;
+      }
+      const command = commandFromScriptContent(content);
+      return command === undefined ? p : { ...p, command };
+    }),
+  );
 }
 
 // shellFor()·기본 runPm2 가 공유하는 플레이버 판정 — 두 곳이 각자 계산하면 언젠가 갈릴 수 있어
@@ -624,13 +684,26 @@ export function makeExecutors(roots: string[], opts: { runPm2?: RunPm2; scriptDi
         return { ok: false, content: `그 경로는 폴더가 아니에요: ${cwdCheck.path}` };
       }
 
+      // flavor 를 dup 판정보다 먼저 뽑아 둔다 — 아래 거절 메시지에서도 recoverCommands 에 같은
+      // 값을 써야 하고(스크립트 파일 확장자가 갈리면 다른 파일을 찾는다), writeStartScript 호출부
+      // (더 아래)에서도 어차피 필요하므로 한 번만 계산해 공유한다.
+      const flavor = shellFlavorOf(roots);
+
       const before = await listProcs();
       if (!before.ok) return { ok: false, content: before.message };
       const dup = before.procs.find((p) => p.name === name);
       // 조용히 교체하지 않는다 — 부원이 자기도 모르게 돌던 서버를 잃는다. 바꾸려면 멈추고 다시 띄운다.
-      if (dup) return { ok: false, content: `이미 돌고 있는 게 있어요: ${dup.command} (${dup.status}). 먼저 멈춰야 새로 띄울 수 있어요.` };
+      if (dup) {
+        // recoverCommands 선언부의 "UX 회귀 수정" 참고 — dup.command 는 pm2 jlist 가 돌려준
+        // 스크립트 경로일 뿐이므로, 그대로 보여주면 회원은 "내가 뭘 이미 띄워놨었지?"에 답을 얻지
+        // 못한다. 스크립트 파일에서 되찾은 원래 명령으로 바꿔 보여준다.
+        const [recovered] = await recoverCommands([dup], scriptDir, flavor);
+        return {
+          ok: false,
+          content: `이미 돌고 있는 게 있어요: ${recovered.command} (${dup.status}). 먼저 멈춰야 새로 띄울 수 있어요.`,
+        };
+      }
 
-      const flavor = shellFlavorOf(roots);
       const sh = shellFor();
       // 실제 사고 원인 수정: command 를 pm2 명령줄 인자로 직접 넘기지 않는다(buildPm2CommandLine
       // 선언부의 "실제 사고 원인과 고침" 참고) — 스크립트 파일에 적고 그 경로만 넘긴다.
@@ -716,11 +789,16 @@ export function makeExecutors(roots: string[], opts: { runPm2?: RunPm2; scriptDi
       // 자기 것만, 소유자면 생략해 전원).
       const only = str(args.onlyUserId);
       const procs = only === undefined ? r.procs : r.procs.filter((p) => p.userId === only);
+      // recoverCommands 선언부의 "UX 회귀 수정" 참고 — pm2 jlist 가 돌려준 command 는 스크립트
+      // 경로일 뿐이므로, 렌더링 직전에 우리가 직접 쓴 스크립트 파일에서 원래 명령을 되찾아
+      // 덮어쓴다. 이게 없으면 "뭐 돌고 있어?"에 "C:\...\asahi-proc-scripts\asahi-111.bat" 같은
+      // 답을 주게 된다.
+      const withCommands = await recoverCommands(procs, scriptDir, shellFlavorOf(roots));
       // labelOf 는 "디스코드 userId → 사람이 알아볼 이름"을 위한 자리지만, 워커는 디스코드를
       // 전혀 모른다(신원 해석은 봇만 할 수 있다 — proc.ts 상단 주석과 동일한 이유). 실제 이름
       // 해석은 이 범위 밖이므로, 최소한 pm2 프로세스 이름(asahi-<id>)으로 되돌려 누구 것인지
       // 알아볼 수 있게 한다 — procNameFor 는 parseProcName 의 역함수라 원래 이름과 정확히 같다.
-      return { ok: true, content: truncate(renderProcList(procs, { labelOf: (id) => procNameFor(id) })) };
+      return { ok: true, content: truncate(renderProcList(withCommands, { labelOf: (id) => procNameFor(id) })) };
     },
 
     async proc_logs(args) {

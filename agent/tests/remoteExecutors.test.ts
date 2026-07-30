@@ -2,8 +2,16 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { makeExecutors, OUTPUT_MAX, buildPm2CommandLine, scriptContentFor, writeStartScript } from "../src/remote/executors.js";
+import {
+  makeExecutors,
+  OUTPUT_MAX,
+  buildPm2CommandLine,
+  scriptContentFor,
+  writeStartScript,
+  recoverCommands,
+} from "../src/remote/executors.js";
 import { TREE_MAX_ENTRIES } from "../src/remote/tree.js";
+import type { ProcInfo } from "../src/remote/proc.js";
 
 describe("워커 실행기", () => {
   let root: string;
@@ -549,6 +557,34 @@ describe("proc_* 실행기 — PM2 위임", () => {
     expect(r.content).not.toContain("/c");
   });
 
+  // UX 회귀(2026-07-30, 스크립트 파일 우회의 부작용): pm2 jlist 는 이제 회원 명령이 아니라
+  // writeStartScript 가 쓴 스크립트 "경로"만 알고 있다(commandOf, proc.ts 참고) — 고치기 전에는
+  // 이 거절 메시지가 dup.command 를 그대로 보여줘 "C:\...\asahi-proc-scripts\asahi-111.bat"
+  // 류가 회원에게 노출됐다. jlist 가 돌려주는 값을 일부러 알아볼 수 없는 자리표시자로 채워
+  // "메시지에 보이는 명령이 pm2 raw 값이 아니라 스크립트 파일에서 되찾은 값"이라는 것을 직접
+  // 증명한다.
+  it("중복 거절 메시지는 스크립트 경로가 아니라 되찾은 원래 명령을 보여준다(UX 회귀)", async () => {
+    const trapCommand = 'npm run dev -- --title="hi there"';
+    const placeholder = "이건-pm2-raw-값-이면-안된다";
+    const runningWithPlaceholder = JSON.stringify([
+      {
+        name: "asahi-111",
+        pm2_env: { status: "online", pm_uptime: Date.now(), restart_time: 0, args: ["/c", placeholder], pm_exec_path: "C:\\Windows\\System32\\cmd.exe" },
+        monit: { memory: 1 },
+      },
+    ]);
+    const { runPm2 } = fakePm2({ jlist: [{ ok: true, stdout: "[]" }, { ok: true, stdout: runningWithPlaceholder }] });
+    const ex = makeExecutors([root], { runPm2, scriptDir });
+    const first = await ex.proc_start!({ command: trapCommand, name: "asahi-111", cwd: projectDir });
+    expect(first.ok).toBe(true);
+
+    const second = await ex.proc_start!({ command: "npm run build", name: "asahi-111", cwd: projectDir });
+    expect(second.ok).toBe(false);
+    expect(second.content).toContain(trapCommand);
+    expect(second.content).not.toContain(placeholder);
+    expect(second.content).not.toContain(scriptDir);
+  });
+
   it("proc_start 성공 응답은 멈추는 법을 그 자리에서 알려준다", async () => {
     const { runPm2 } = fakePm2({ jlist: [{ ok: true, stdout: "[]" }, { ok: true, stdout: onlineJlist("asahi-111") }] });
     const ex = makeExecutors([root], { runPm2, scriptDir });
@@ -755,6 +791,46 @@ describe("proc_* 실행기 — PM2 위임", () => {
     expect(r.content).not.toContain("asahi-worker");
   });
 
+  // UX 회귀(2026-07-30): proc_list 가 존재하는 이유는 "뭐 돌고 있어?"에 모델의 기억이 아니라
+  // 사실을 답하기 위해서다 — pm2 raw 값(스크립트 경로)을 그대로 보여주면 그 목적이 무색해진다.
+  // 위 중복 거절 메시지 테스트와 같은 이유로, jlist 의 command 자리를 알아볼 수 없는 자리표시자로
+  // 채워 "표에 보이는 값이 스크립트 파일에서 되찾은 원래 명령"이라는 것을 직접 증명한다.
+  it("proc_list 는 스크립트 경로가 아니라 되찾은 원래 명령을 보여준다(UX 회귀)", async () => {
+    const trapCommand = 'npm run dev -- --title="hi there"';
+    const placeholder = "이건-pm2-raw-값-이면-안된다";
+    const runningWithPlaceholder = JSON.stringify([
+      {
+        name: "asahi-111",
+        pm2_env: { status: "online", pm_uptime: Date.now(), restart_time: 0, args: ["/c", placeholder], pm_exec_path: "C:\\Windows\\System32\\cmd.exe" },
+        monit: { memory: 1 },
+      },
+    ]);
+    const { runPm2 } = fakePm2({ jlist: [{ ok: true, stdout: "[]" }, { ok: true, stdout: runningWithPlaceholder }] });
+    const ex = makeExecutors([root], { runPm2, scriptDir });
+    const started = await ex.proc_start!({ command: trapCommand, name: "asahi-111", cwd: projectDir });
+    expect(started.ok).toBe(true);
+
+    const r = await ex.proc_list!({});
+    expect(r.ok).toBe(true);
+    expect(r.content).toContain(trapCommand);
+    expect(r.content).not.toContain(placeholder);
+    expect(r.content).not.toContain(scriptDir);
+  });
+
+  // 되찾기가 실패해도(파일이 없거나 못 읽음) proc_list 전체가 죽어서는 안 된다 — pm2 가 보고한
+  // 값(commandOf 의 결과)으로 조용히 대체한다. writeStartScript 를 거치지 않은 이름(asahi-999)
+  // 이라 애초에 대응하는 스크립트 파일이 없는 상황을 그대로 재현한다.
+  it("스크립트 파일이 없으면 proc_list 는 실패하지 않고 pm2 가 보고한 값을 그대로 보여준다(우아한 폴백)", async () => {
+    const stdout = JSON.stringify([
+      { name: "asahi-999", pm2_env: { status: "online", pm_uptime: 0, restart_time: 0, args: ["run", "dev"], pm_exec_path: "npm" }, monit: { memory: 1 } },
+    ]);
+    const { runPm2 } = fakePm2({ jlist: { ok: true, stdout } });
+    const ex = makeExecutors([root], { runPm2, scriptDir });
+    const r = await ex.proc_list!({});
+    expect(r.ok).toBe(true);
+    expect(r.content).toContain("npm run dev");
+  });
+
   it("proc_logs 는 nostream 으로 부르고 줄 수를 넘긴다", async () => {
     const { calls, runPm2 } = fakePm2({ logs: { ok: true, stdout: "로그 본문" } });
     const ex = makeExecutors([root], { runPm2, scriptDir });
@@ -882,6 +958,75 @@ describe("writeStartScript — 회원 명령을 스크립트 파일로 남긴다
     const p = await writeStartScript(dir, "../../evil", "npm run dev", "win32");
     expect(path.dirname(p)).toBe(dir);
     expect(fs.existsSync(p)).toBe(true);
+  });
+});
+
+// UX 회귀 수정 검증(2026-07-30): writeStartScript 가 회원 명령을 pm2 명령줄에서 스크립트 파일로
+// 옮기면서, pm2 jlist 가 돌려주는 command 는 더 이상 사람이 읽는 명령이 아니라 그 스크립트
+// "경로"가 됐다 — proc_list·중복 거절 메시지가 회원에게 그 경로를 그대로 보여주면 "뭐 돌고
+// 있어?"에 사실을 답한다는 이 기능의 존재 이유가 무색해진다. recoverCommands 는 이름(pm2 프로세스
+// 이름)만으로 writeStartScript 가 썼을 경로를 그대로 다시 계산해(scriptPathFor, 두 곳이 규칙을
+// 공유한다) 그 파일을 직접 읽어 원래 명령을 되찾는다 — pm2 가 무엇을 보고했든 무관하게 항상
+// 우리가 디스크에 쓴 값이 진실이다. 아래는 이 되찾기 자체를 직접 단정한다(통합 테스트는 위
+// "proc_* 실행기" describe 안의 proc_list·중복 거절 테스트 참고).
+describe("recoverCommands — pm2 jlist 의 command(스크립트 경로)를 원래 명령으로 되찾는다", () => {
+  let dir: string;
+  beforeEach(() => { dir = fs.mkdtempSync(path.join(os.tmpdir(), "asahi-recover-")); });
+  afterEach(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  const proc = (over: Partial<ProcInfo> = {}): ProcInfo => ({
+    name: "asahi-111",
+    userId: "111",
+    command: "(pm2 가 보고한 원래 값 — 되찾기 성공 시 버려져야 한다)",
+    status: "online",
+    startedAtMs: null,
+    memoryBytes: null,
+    restarts: 0,
+    ...over,
+  });
+
+  it("회원 프로세스는 스크립트 파일에서 읽은 원래 명령으로 command 를 덮어쓴다", async () => {
+    await writeStartScript(dir, "asahi-111", "npm run dev", "win32");
+    const [r] = await recoverCommands([proc()], dir, "win32");
+    expect(r!.command).toBe("npm run dev");
+  });
+
+  it("임베디드 따옴표가 든 명령도 이스케이프 없이 그대로 되찾는다", async () => {
+    const trapCommand = 'npm run dev -- --title="hi there"';
+    await writeStartScript(dir, "asahi-111", trapCommand, "win32");
+    const [r] = await recoverCommands([proc()], dir, "win32");
+    expect(r!.command).toBe(trapCommand);
+  });
+
+  it("스크립트 파일이 없으면(회원이 지웠거나 애초에 없음) pm2 가 보고한 값을 그대로 둔다(우아한 폴백)", async () => {
+    const [r] = await recoverCommands([proc({ name: "asahi-999", userId: "999" })], dir, "win32");
+    expect(r!.command).toBe("(pm2 가 보고한 원래 값 — 되찾기 성공 시 버려져야 한다)");
+  });
+
+  // userId===null 은 봇·워커 자신의 PM2 앱(asahi-assistant·asahi-worker, deploy/ecosystem.config.cjs)
+  // — writeStartScript 를 거치지 않으므로 대응하는 스크립트 파일 자체가 없다. 이름이 우연히
+  // 겹쳐 파일이 실제로 존재해도 손대지 않아야 한다는 것까지 확인한다(읽으면 안 되는 파일이
+  // 실수로 읽히는 회귀를 잡기 위해 일부러 만들어 둔다).
+  it("userId 가 null 인 프로세스(봇·워커 자신)는 파일이 있어도 건드리지 않는다", async () => {
+    await writeStartScript(dir, "asahi-worker", "이 파일은 읽히면 안 된다", "win32");
+    const [r] = await recoverCommands(
+      [proc({ name: "asahi-worker", userId: null, command: "node dist/worker.js" })],
+      dir,
+      "win32",
+    );
+    expect(r!.command).toBe("node dist/worker.js");
+  });
+
+  it("여러 프로세스를 한 번에 처리한다(각자 자기 이름의 파일만 읽는다)", async () => {
+    await writeStartScript(dir, "asahi-111", "npm run dev", "win32");
+    await writeStartScript(dir, "asahi-222", "npm run build", "win32");
+    const [r1, r2] = await recoverCommands(
+      [proc({ name: "asahi-111", userId: "111" }), proc({ name: "asahi-222", userId: "222" })],
+      dir,
+      "win32",
+    );
+    expect(r1!.command).toBe("npm run dev");
+    expect(r2!.command).toBe("npm run build");
   });
 });
 
