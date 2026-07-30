@@ -495,10 +495,17 @@ describe("proc_* 실행기 — PM2 위임", () => {
     const r = await ex.proc_start!({ command: trapCommand, name: "asahi-111", cwd: projectDir });
     expect(r.ok).toBe(true);
     const start = calls.find((c) => c[0] === "start")!;
-    // buildPm2CommandLine 이 다시 망가뜨릴 여지 자체가 없다 — 이 문자열도, \" 이스케이프 흔적도
-    // 인자 배열 어디에도 없다.
+    // buildPm2CommandLine 이 다시 망가뜨릴 여지 자체가 없다 — 이 문자열도 인자 배열 어디에도 없다.
     expect(start.some((tok) => tok.includes(trapCommand))).toBe(false);
-    expect(start.some((tok) => tok.includes('\\"'))).toBe(false);
+    // Finding 4(Minor, 후속 리뷰): 아래 한 줄은 인용 "이전"의 인자 배열(start)을 그대로 검사한다
+    // — \" 는 buildPm2CommandLine(인용 단계)을 실제로 거쳐야만 나타나는 문자열이라, 인용 전
+    // 배열에서 그걸 찾는 단정은 buildPm2CommandLine 이 무엇을 하든(심지어 안 불러도) 항상 참에
+    // 가깝다 — 실제 사고의 두 절반(회원 명령이 pm2 인자에 실리는 것 + buildPm2CommandLine 의 \"
+    // 이스케이프)을 하나로 잇지 못한다. start 를 실제로 buildPm2CommandLine(기본 runPm2 가 실제로
+    // 부르는 바로 그 함수, 위 "buildPm2CommandLine — pm2 명령줄 인용" describe 참고)에 통과시켜,
+    // 그 결과 명령줄 문자열 자체에 \" 가 없는지 확인한다 — 이러면 나중에 어떤 인자(cwd·스크립트
+    // 경로 등)가 큰따옴표를 갖게 되는 회귀가 생겨도 이 단정이 실제로 걸린다.
+    expect(buildPm2CommandLine(start, "win32")).not.toContain('\\"');
     // "--" 뒤 마지막 인자는 스크립트 파일 경로 하나뿐이고, 명령은 그 파일 안에 이스케이프 없이
     // 그대로 있다.
     const scriptPath = start[start.length - 1]!;
