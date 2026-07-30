@@ -292,6 +292,26 @@ PM2 프로세스 이름만으로 동작하므로 걸릴 이유가 없다(`agent/
 못했다면, 지금은 정상적으로 뜬 스크립트가 실행되는 시점에 그 메타문자들이 여전히 cmd.exe 의
 특수문자로 해석된다.
 
+**윈도우에서 회원 명령은 ASCII 만 허용한다(2026-07-30, 후속 리뷰가 잡은 Critical).** 위 스크립트
+파일 우회로도 해결되지 않는 두 번째 인코딩 문제가 미니PC 실측으로 드러났다 — `writeStartScript`
+가 배치 파일을 UTF-8(BOM 없음)로 쓰지만, cmd.exe 는 배치 파일을 파일이 실제로 어떤 인코딩으로
+저장됐는지와 무관하게 **시스템 ANSI 코드페이지**로 읽는다. 미니PC(`chcp` 결과 949)에서 한글
+경로의 스크립트를 실행하는 동일한 명령을 배치 파일 인코딩만 바꿔 세 가지로 실측한 결과: UTF-8
+(BOM 없음)은 `stopped`·로그 0바이트, 파일 첫 줄에 `chcp 65001>nul` 을 추가해도 역시 `stopped`·
+0바이트(cmd.exe 는 그 chcp 줄 자신까지 이미 잘못된 코드페이지로 읽은 뒤라 늦다 — 파일 안
+`chcp` 로는 고칠 수 없다), cp949 로 쓴 배치 파일만 `online`·8.0MB 로 정상 동작했다. Node 에는
+내장 cp949 인코더가 없고 정확한 코드페이지는 기계마다 다르므로(시스템 로캘에 종속), 이를
+일반적으로 구현하는 대신 스크립트를 ASCII 전용으로 제한하고 ASCII 가 아닌 명령을 거부하기로
+결정했다(컨트롤러 결정). `proc_start`(`agent/src/remote/executors.ts`)는 이제 스크립트를 쓰기
+전에 명령 문자열에 ASCII 가 아닌 문자가 있으면 한국어 안내와 함께 거절한다 — 실무 제약은 좁다:
+작업 폴더(`cwd`)는 이 검사와 무관하게 명령줄의 `--cwd` 인자로 넘어가고 `CreateProcessW`
+(UTF-16)를 거치므로 한글·공백을 이미 문제없이 처리한다(위 "한글+공백 폴더" 실측 참고) — 한글이
+문제가 되는 자리는 회원 명령 문자열 자체뿐이다. `npm run dev`·`npm start`·`python app.py` 류는
+전혀 영향받지 않고, `node 서버.js` 처럼 명령 자체에 한글이 섞인 경우만 거절된다. **이 제약은
+윈도우(cmd.exe)에만 적용된다** — POSIX(`sh`)는 스크립트를 "시스템 코드페이지"로 다시 디코드하는
+계층이 없어(셸의 토큰 분리는 ASCII 공백·메타문자 기준이고 UTF-8 연속 바이트는 그 무엇과도 겹치지
+않는다) 같은 문제가 애초에 성립하지 않으므로 POSIX 쪽에는 이 제약을 두지 않았다.
+
 ## character_fact 전역 스코프와 DM→공개 데이터 흐름
 
 `character_fact`(위 능력 계층표)로 저장되는 캐릭터 설정은 `scope='character'` 하나의 전역
@@ -461,7 +481,7 @@ PM2 프로세스 이름만으로 동작하므로 걸릴 이유가 없다(`agent/
 | `agent/src/store/workersRepo.ts` | 토큰은 `sha256` 해시(`hashWorkerToken`)로만 저장한다 — 평문은 DB 에 남지 않는다. `personalWorkerOf`/`sharedWorkerId` 는 동률(같은 `user_id` 또는 같은 `kind='shared'`)이 여럿이어도 `created_ts, id` 정렬로 결정적으로 하나만 고른다(DB 가 임의로 고르게 두지 않는다). `upsert` 로 같은 `id` 를 재등록하면 토큰 해시가 교체되지만(회전), `created_ts` 와 `label`(명시적으로 새로 주지 않는 한)은 보존한다. |
 | `agent/src/core/remoteTools.ts` | `remoteToolHandler` 는 `ctx.remote`(=`resolveTurnWorker` 판정 결과)가 없으면 항상 거부한다 — 예전처럼 `isOwnerDm` 을 독립적으로 다시 확인하지 않는다(Task 7, 이 판정은 이제 `agent.ts` 하나뿐이다). `fs_read`/`fs_write`/`fs_edit`/`fs_glob`/`fs_grep` 의 경로 후보는 그 워커의 `allowed_dirs` 를 `scopeDirs` 로 좁힌 범위 안에 있어야 하며, 빈 경로 문자열·빈 허용 목록·리포 조회 실패는 모두 거부(fail-closed)로 처리한다. `fs_glob`/`fs_grep` 은 `path` 생략 시 검사에 쓴 기본값을 `args` 에 실제로 주입해 워커로 보낸다(최종 리뷰 FIX1). `sh_exec` 는 이 경로 필터의 대상이 아니다(의도된 설계 — 위 "손님·공유 기계" 절 참고). `proc_*` 는 이름(`name`)과 목록 필터(`onlyUserId`)를 모델이 아니라 이 핸들러가 주입한다 — 손님이 준 값은 둘 다 무시되고 각각 `procNameFor(ctx.userId)`(`name`)·`ctx.userId`(`onlyUserId`, 접두어 없는 원래 값)로 덮어써진다(위 "장기 실행 프로세스의 한계" 참고). `proc_start` 의 작업폴더(`cwd`)는 다르다 — 모델이 제안한 `path` 가 `allowed_dirs` 검사(`needsPathCheck`)를 통과하면 그 값을 그대로 쓰고, 생략하면 `allowed[0]` 로 떨어진다(`singlePathArg ?? allowed[0]`, 위 "장기 실행 프로세스의 한계" 참고) — 검사한 값과 실제로 쓰는 값은 항상 같다. `proc_stop`/`proc_list`/`proc_logs` 는 `needsAllowedNonEmpty` 가 `false` 라 허용 폴더가 비어 있어도 통과한다 — `proc_start` 만 여전히 막힌다. |
 | `agent/src/remote/roots.ts` | `checkPath` 는 워커의 최종 경로 관문이다 — `WORKER_ROOTS` 항목이 모호한 절대경로(윈도우에서 드라이브 문자·UNC 없음)면 무조건 거부하고, `resolveRealOrNearestAncestor` 로 realpath 정규화한 뒤 그 워커의 `WORKER_ROOTS` 밖이면 거부한다. **이 검사는 워커의 루트 기준이지 손님 개인의 스코프 기준이 아니다** — 손님 폴더 안 심볼릭 링크가 이 두 기준의 차이를 파고드는 받아들인 위험이다(`docs/security/risk-register.md`). |
-| `agent/src/remote/executors.ts` | 워커 쪽 `proc_*` 실행기다. `procGate()` 는 `roots.length === 0` 이면 넷 전부를 거부한다(`sh_exec` 와 같은 규칙). `proc_start` 는 `pm2 jlist` 에 같은 이름이 이미 있으면 조용히 교체하지 않고 거부한다 — "1인 1개" 충돌은 실제로 여기서 집행된다(봇 쪽 `remoteTools.ts` 는 이름을 주입만 한다). `proc_stop`/`proc_logs` 는 `parseProcName(name)` 이 `null` 인 이름(봇·워커 자신의 PM2 앱)을 pm2 를 부르기 전에 거절한다 — 이름 주입은 `remoteTools.ts` 가 하지만, 그 이름이 회원 형식인지의 최종 판정은 여기(실행기)가 한다(위 "장기 실행 프로세스의 한계"). `proc_start` 는 회원 명령을 pm2 명령줄 인자로 절대 넘기지 않는다 — `writeStartScript` 가 스크립트 파일에 적고 그 경로만 넘긴다(2026-07-30 근본 원인 수정, 위 "장기 실행 프로세스의 한계"). `buildPm2CommandLine` 은 표준 윈도우 argv 인용(`CommandLineToArgvW`)까지만 보장하고 cmd.exe 메타문자(`&`·`|`·`^`·`%`)는 다루지 않는다고 스스로 문서화한다 — 지금은 `--name`·`--cwd`·스크립트 경로 같은 단순 인자에만 쓰이므로 이 좁은 인용으로 충분하다. 기본 `runPm2`(실제 `spawn`)는 테스트가 전부 가짜 `runPm2` 를 주입해 우회하므로, 이 파일을 고칠 때는 그 이음매 자체가 프로덕션 경로를 가린다는 것을 잊지 않는다(2026-07-28 최종 리뷰가 잡은 Critical — 실패 신호 소실이 이 이음매 부재로 다섯 번의 리뷰를 통과했다). `agent/src/remote/proc.ts`(이름 규칙·`pm2 jlist` 파싱·표 렌더링, 순수 함수)를 쓰는 두 프로덕션 파일 중 하나다 — 나머지 하나가 `agent/src/core/remoteTools.ts`(`procNameFor`·`isValidUserId`)이므로, `proc.ts` 의 이름 규칙을 고치면 워커 쪽 표시뿐 아니라 봇 쪽 신원 주입까지 함께 다시 확인해야 한다. |
+| `agent/src/remote/executors.ts` | 워커 쪽 `proc_*` 실행기다. `procGate()` 는 `roots.length === 0` 이면 넷 전부를 거부한다(`sh_exec` 와 같은 규칙). `proc_start` 는 `pm2 jlist` 에 같은 이름이 이미 있으면 조용히 교체하지 않고 거부한다 — "1인 1개" 충돌은 실제로 여기서 집행된다(봇 쪽 `remoteTools.ts` 는 이름을 주입만 한다). `proc_stop`/`proc_logs` 는 `parseProcName(name)` 이 `null` 인 이름(봇·워커 자신의 PM2 앱)을 pm2 를 부르기 전에 거절한다 — 이름 주입은 `remoteTools.ts` 가 하지만, 그 이름이 회원 형식인지의 최종 판정은 여기(실행기)가 한다(위 "장기 실행 프로세스의 한계"). `proc_start` 는 회원 명령을 pm2 명령줄 인자로 절대 넘기지 않는다 — `writeStartScript` 가 스크립트 파일에 적고 그 경로만 넘긴다(2026-07-30 근본 원인 수정, 위 "장기 실행 프로세스의 한계"). `buildPm2CommandLine` 은 표준 윈도우 argv 인용(`CommandLineToArgvW`)까지만 보장하고 cmd.exe 메타문자(`&`·`|`·`^`·`%`)는 다루지 않는다고 스스로 문서화한다 — 지금은 `--name`·`--cwd`·스크립트 경로 같은 단순 인자에만 쓰이므로 이 좁은 인용으로 충분하다. 기본 `runPm2`(실제 `spawn`)는 테스트가 전부 가짜 `runPm2` 를 주입해 우회하므로, 이 파일을 고칠 때는 그 이음매 자체가 프로덕션 경로를 가린다는 것을 잊지 않는다(2026-07-28 최종 리뷰가 잡은 Critical — 실패 신호 소실이 이 이음매 부재로 다섯 번의 리뷰를 통과했다). `agent/src/remote/proc.ts`(이름 규칙·`pm2 jlist` 파싱·표 렌더링, 순수 함수)를 쓰는 두 프로덕션 파일 중 하나다 — 나머지 하나가 `agent/src/core/remoteTools.ts`(`procNameFor`·`isValidUserId`)이므로, `proc.ts` 의 이름 규칙을 고치면 워커 쪽 표시뿐 아니라 봇 쪽 신원 주입까지 함께 다시 확인해야 한다. `proc_start` 는 스크립트를 쓰기 전에 명령에 ASCII 가 아닌 문자가 있으면(윈도우에서만) 거절한다 — cmd.exe 가 배치 파일을 시스템 ANSI 코드페이지로 읽어 UTF-8 로 쓴 한글이 깨지기 때문이다(위 "장기 실행 프로세스의 한계"의 ASCII 단락, `hasNonAsciiChar` 선언부의 미니PC 실측 표 참고 — `chcp` 를 스크립트 안에 넣는 시도는 이미 실측으로 실패가 확인됐으니 다시 시도하지 않는다). |
 | `agent/src/remote/hub.ts` | `WorkerHub.handleConnection` 은 `hello` 의 토큰을 상수 시간(`timingSafeEqual`)으로 비교하고, 빈 토큰은 길이 검사로 먼저 거부하며, 등록되지 않은 `workerId` 와 토큰 불일치를 같은 거부 사유(`DENIED_REASON`)로 응답해 인증 오라클을 막는다(대조값 자체도 프로세스별 랜덤이라 "없는 워커" 경로를 맞출 수 없다). `unauth`/`authenticating` 상태에서는 어떤 프레임도 처리하지 않는다(`hello` 재전송 포함 — 레지스트리 조회가 비동기가 되며 생긴 창을 `authenticating` 상태로 막는다). `rootsOf(workerId)` 는 `agent.ts` 의 `buildRemoteCtx` 가 실제로 호출한다(§능력 계층표 참고). |
 | `agent/src/core/pathPermission.ts` | `extractCandidatePaths`(`remoteTools.ts` 가 재사용)는 Glob 의 `pattern` 과 Grep 의 `glob`(최종 리뷰 FIX1 — 검색 대상 파일 필터도 경로를 담을 수 있다) 리터럴 접두를 후보에서 빠뜨리지 않는다. 그 리터럴을 base 에 결합할 때는 `paths.ts` 의 `pathFlavorOf` 로 대상 문자열의 플레이버(윈도우/POSIX)를 판정한다 — host 프로세스의 `process.platform` 을 따르는 `node:path` 기본 export 를 쓰면, 리눅스에 배포된 봇이 윈도우 워커의 경로(`C:\ws\...`)를 다룰 때 정상 호출을 "허용된 폴더 밖"으로 오거부한다(최종 pre-merge 리뷰 FIX2, 리뷰 재현). `resolveRealOrNearestAncestor`(`roots.ts` 가 재사용)는 존재하지 않는 경로도 가장 가까운 실재 조상까지 realpath 한다. `isPathGatedTool` 은 `extractCandidatePaths` 의 cwd 폴백 조건으로 지금도 쓰인다. `decidePathPermission`(옛 `canUseTool` 전용 최종 allow/deny 판정 함수)은 프로덕션 호출자가 없어 삭제했다(최종 pre-merge 리뷰 FIX6) — 남겨 두면 이 브랜치가 뒤집은 정책("PC 작업은 소유자 DM 에서만")을 그대로 반환하는 죽은 함수가 새 경로 검사 로직의 근거로 오인될 위험이 있었다. |
 | `agent/src/core/sqlGuard.ts` | `assertReadOnlySql` 은 다중 문장과 `SELECT`/`WITH` 이외 시작 키워드를 거부한다(1차 방어). |

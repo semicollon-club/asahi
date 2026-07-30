@@ -158,8 +158,55 @@ export function buildPm2CommandLine(args: string[], flavor: ShellFlavor): string
 // 위 재현이 그대로 재발한다 — "간단해 보인다"는 이유로 되돌리지 말 것.
 export function scriptContentFor(command: string, flavor: ShellFlavor): string {
   const header = flavor === "win32" ? "@echo off" : "#!/bin/sh";
+  // 참고(유지보수 경고): pm2 는 pm2.cmd — 배치 파일이다. 배치 파일 안에서 다른 배치 파일을 call
+  // 없이 부르면 실행 흐름이 그쪽으로 완전히 넘어가 버려(제어가 돌아오지 않는다) 그 뒤에 이어 적은
+  // 어떤 줄도 조용히 실행되지 않는다. 지금 이 함수는 명령 한 줄만 담아 해당 사항이 없지만(더
+  // 실행할 줄 자체가 없다), 언젠가 이 본문 뒤에 로그·종료 코드 처리 등을 이어 붙이게 되면 그 새
+  // 줄이 pm2(.cmd) 든 다른 .cmd/.bat 든 배치 파일을 부를 경우 반드시 call 을 써야 한다.
   return `${header}\n${command}\n`;
 }
+
+// Finding 1(Critical, 후속 리뷰 — 미니PC 실측으로 확정, 재추론하지 말 것): 위에서 명령을 스크립트
+// 파일에 적어 pm2 명령줄 인용 문제(\" 를 cmd.exe 가 이해 못 하는 것)는 피했지만, 그 스크립트 파일
+// 자체를 writeStartScript(아래)가 UTF-8(BOM 없음)로 쓰는 것과 cmd.exe 가 배치 파일을 읽을 때 쓰는
+// 인코딩이 서로 다르다 — cmd.exe 는 배치 파일이 실제로 어떤 인코딩으로 저장됐는지와 무관하게
+// "시스템 ANSI 코드페이지"로 그 파일을 읽는다. 미니PC(`chcp` 결과 949)에서 한글 경로의 loop.js 를
+// 실행하는 동일한 명령(node "<한글 경로>\loop.js")을 배치 파일 인코딩만 바꿔 가며 세 가지로
+// 실측했다:
+//
+//   배치 파일 인코딩                            | pm2 상태
+//   --------------------------------------------|-------------------
+//   UTF-8, BOM 없음(지금 writeStartScript 형태)  | stopped, 0b
+//   UTF-8 + 파일 첫 줄에 `chcp 65001>nul` 추가    | stopped, 0b
+//   cp949                                        | online, 8.0mb
+//
+// 즉 파일 안에 chcp 를 넣어도 소용없다 — cmd.exe 는 파일을 한 줄씩 읽으며 "그 chcp 줄 자신"까지도
+// 이미 시스템 코드페이지로 디코드한 뒤이므로, chcp 명령이 실제로 적용되는 시점은 이미 늦다. 다음에
+// 이걸 보는 사람이 "그럼 파일 맨 앞에 chcp 를 추가하면 되지 않나"로 "고치고" 싶어질 수 있는데, 위
+// 표의 둘째 줄이 정확히 그 시도이고 실패했다 — 다시 시도하지 말 것. 유일하게 동작한 것은 파일을
+// 그 미니PC 의 시스템 코드페이지(cp949)로 직접 쓰는 것뿐인데, Node 에는 내장 cp949 인코더가 없고
+// 정확한 코드페이지는 기계마다 다르다(시스템 로캘 설정에 종속) — 이를 일반적으로 구현하는 것은
+// 작은 변경이 아니다.
+//
+// 결정(사용자 결정, 2026-07-30): 스크립트를 cp949 로 옮겨 쓰는 대신, 스크립트를 ASCII 전용으로
+// 제한하고 ASCII 가 아닌 명령은 거부한다. 실무 제약은 좁다 — 작업 폴더(cwd)는 이 검사와 무관하게
+// 명령줄의 --cwd 인자로 넘어가고, 그 경로는 CreateProcessW(UTF-16)를 거치므로 한글·공백을 이미
+// 문제없이 처리한다(미니PC 실측으로 확인됨 — 위 buildPm2CommandLine 뒤 "실제 사고 원인과 고침"의
+// "한글+공백 폴더" 사례 참고) — 그러니 한글이 문제가 되는 자리는 "회원 명령 문자열 자체"에 한글이
+// 섞였을 때뿐이다. "npm run dev"·"npm start"·"python app.py" 류는 전혀 영향받지 않고, "node
+// 서버.js" 처럼 명령 자체에 한글이 섞인 경우만 거절 대상이다.
+//
+// POSIX(.sh)는 이 제약을 받지 않는다 — sh 는 스크립트 파일을 "시스템 코드페이지"로 다시 디코드하는
+// 계층이 없다. 셸의 토큰 분리는 ASCII 공백·메타문자 기준이고 UTF-8 연속 바이트(0x80 이상)는 그
+// 무엇과도 겹치지 않으므로, 쓸 때와 같은 인코딩(UTF-8)의 로캘에서 읽으면 바이트가 그대로 왕복한다
+// — cmd.exe 처럼 "쓴 인코딩과 읽는 인코딩이 다르다"는 문제 자체가 성립하지 않는다. 그래서 아래
+// 검사는 flavor==="win32" 일 때만 적용한다 — 윈도우의 한계를 POSIX 에 조용히 옮기지 않는다.
+function hasNonAsciiChar(s: string): boolean {
+  return /[^\x00-\x7F]/.test(s);
+}
+
+const NON_ASCII_COMMAND_MSG =
+  "명령에 한글 등 ASCII 가 아닌 문자가 있어 실행할 수 없어요 — 폴더 경로(한글·공백 가능)는 path 인자로 넣고, 명령 자체는 영문·숫자·기호만 쓰세요.";
 
 // name 은 오늘 remoteTools.ts 가 항상 procNameFor(디스코드 userId, "asahi-<숫자>")로 주입한다(이
 // 실행기에 직접 닿는 다른 프로덕션 경로가 없다). 그래도 이 값을 그대로 파일 경로 조각으로 쓰므로,
@@ -688,6 +735,12 @@ export function makeExecutors(roots: string[], opts: { runPm2?: RunPm2; scriptDi
       // 값을 써야 하고(스크립트 파일 확장자가 갈리면 다른 파일을 찾는다), writeStartScript 호출부
       // (더 아래)에서도 어차피 필요하므로 한 번만 계산해 공유한다.
       const flavor = shellFlavorOf(roots);
+
+      // Finding 1(Critical, 후속 리뷰): 스크립트를 쓰기도, pm2 를 부르기도 전에 거절한다 — 위
+      // hasNonAsciiChar 선언부의 실측 표 참고(윈도우에서만 적용, POSIX 는 이 제약이 없다).
+      if (flavor === "win32" && hasNonAsciiChar(command)) {
+        return { ok: false, content: NON_ASCII_COMMAND_MSG };
+      }
 
       const before = await listProcs();
       if (!before.ok) return { ok: false, content: before.message };

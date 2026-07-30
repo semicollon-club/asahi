@@ -601,7 +601,9 @@ describe("proc_* 실행기 — PM2 위임", () => {
     const crashLooping = onlineJlist("asahi-111", { status: "errored", restart_time: 3 });
     const { runPm2 } = fakePm2({ jlist: [{ ok: true, stdout: "[]" }, { ok: true, stdout: crashLooping }] });
     const ex = makeExecutors([root], { runPm2, scriptDir });
-    const r = await ex.proc_start!({ command: "오타난명령", name: "asahi-111", cwd: projectDir });
+    // Finding 1(이번 라운드) 이후 명령은 ASCII 여야 한다 — 이 테스트가 겨냥하는 것(크래시 루프
+    // 감지)과 무관한 이유로 거절되지 않도록 오타 명령도 ASCII 로 적는다("오타난명령" 대신).
+    const r = await ex.proc_start!({ command: "typo-command", name: "asahi-111", cwd: projectDir });
     expect(r.ok).toBe(false);
     expect(r.content).toContain("errored");
   });
@@ -723,6 +725,37 @@ describe("proc_* 실행기 — PM2 위임", () => {
       const start = calls.find((c) => c[0] === "start")!;
       expect(start).toContain(koreanProject);
     });
+  });
+
+  // ── Finding 1(Critical, 후속 리뷰) — 명령은 윈도우에서 ASCII 만 허용한다 ──────────────────────
+  // 미니PC 실측(배경 참고): writeStartScript 가 쓰는 UTF-8(BOM 없음) .bat 파일을 cmd.exe 는 시스템
+  // ANSI 코드페이지로 읽는다 — chcp 를 파일 안에 넣어도 그 줄 자신이 이미 잘못된 코드페이지로
+  // 디코드된 뒤라 소용없다(scriptContentFor 선언부의 실측 표 참고). cwd(--cwd)는 이 검사와 무관하게
+  // CreateProcessW(UTF-16)를 거치므로 한글·공백이 이미 문제없이 동작한다(바로 위 "한글·공백이
+  // 섞인..." 테스트가 그 증거) — 그러니 한글이 문제가 되는 자리는 명령 문자열 자체뿐이다.
+  describe("proc_start — 명령에 ASCII 가 아닌 문자가 있으면 거절한다(Finding 1)", () => {
+    it.skipIf(process.platform !== "win32")(
+      "윈도우에서는 명령에 한글이 섞이면 pm2 를 부르지 않고 거절한다",
+      async () => {
+        const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: "[]" } });
+        const ex = makeExecutors([root], { runPm2, scriptDir });
+        const r = await ex.proc_start!({ command: "node 서버.js", name: "asahi-111", cwd: projectDir });
+        expect(r.ok).toBe(false);
+        expect(r.content).toContain("ASCII");
+        expect(calls).toEqual([]); // pm2 조회조차 없다 — 스크립트를 쓰기 전에, pm2 를 부르기 전에 거절한다
+      },
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "POSIX 에서는 명령에 ASCII 가 아닌 문자가 있어도 거절하지 않는다(윈도우 전용 제약 — sh 는 스크립트를 코드페이지로 디코드하지 않는다)",
+      async () => {
+        const { calls, runPm2 } = fakePm2({ jlist: [{ ok: true, stdout: "[]" }, { ok: true, stdout: onlineJlist("asahi-111") }] });
+        const ex = makeExecutors([root], { runPm2, scriptDir });
+        const r = await ex.proc_start!({ command: "node 서버.js", name: "asahi-111", cwd: projectDir });
+        expect(r.ok).toBe(true);
+        expect(calls.some((c) => c[0] === "start")).toBe(true);
+      },
+    );
   });
 
   it("proc_stop 은 pm2 delete 를 부른다", async () => {
