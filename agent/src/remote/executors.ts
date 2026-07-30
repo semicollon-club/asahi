@@ -645,7 +645,20 @@ export function makeExecutors(roots: string[], opts: { runPm2?: RunPm2; killTree
       // 최소한 그 동작은 그대로 보장한다).
       const before = await listProcs();
       const proc = before.ok ? before.procs.find((p) => p.name === name) : undefined;
-      if (proc && proc.pid !== null) {
+      // 리뷰 지적(Important, Finding 1): pid !== null 만으로는 부족하다 — pm2 는 정지·오류 상태의
+      // 앱에 pid:0 을 돌려준다(회원의 크래시한 개인 서버에 "꺼줘"를 부르는 보통의 경로가 정확히
+      // 이 상태다). pid:0 이 이 검사를 통과하면 POSIX 분기의 process.kill(-pid, "SIGKILL")(위
+      // killTree 선언부 참고)이 process.kill(-0, …) 이 되고, POSIX 표준은 pid 0 을 "신호를 보내는
+      // 프로세스 자신의 그룹"으로 해석한다 — 워커가 도구 요청 하나로 자기 자신을 죽인다. pid 가
+      // 양수인지까지 반드시 확인한다.
+      //
+      // status === "online" 도 함께 요구한다(컨트롤러 결정) — 공유 기계에서는 OS 가 pid 번호를
+      // 재사용하므로, pm2 jlist 가 들고 있는 pid 가 이미 죽은 뒤 갱신되지 않은 값이라면 그 번호가
+      // 지금 이 순간 완전히 다른(어쩌면 다른 회원의) 프로세스를 가리킬 수 있다. "online" 은 pm2
+      // 자신이 "이 pid 가 바로 지금 이 앱의 것"이라고 확인해 주는 유일한 근거이고, 그 밖의
+      // 상태(정지·오류 등)에는 그 근거가 없다 — 회원 하나를 멈추려다 공유 기계의 다른 무언가를
+      // 죽이는 것보다는, 트리 kill을 건너뛰고 그 사실을 정직하게 알리는 쪽(아래 Finding 3)이 안전하다.
+      if (proc && proc.status === "online" && proc.pid !== null && proc.pid > 0) {
         try {
           await killTree(proc.pid);
         } catch {

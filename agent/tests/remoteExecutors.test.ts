@@ -699,6 +699,46 @@ describe("proc_* 실행기 — PM2 위임", () => {
       expect(calls).toContainEqual(["delete", "asahi-111"]);
     });
 
+    // 리뷰 지적(Important, Finding 1): pm2 는 정지·오류 상태의 앱에 pid:0 을 돌려준다 — 회원의
+    // 크래시한 개인 서버에 "꺼줘"를 부르는 보통의 경로가 정확히 이 상태다. proc.pid !== null 만
+    // 보던 예전 검사는 0 도 통과시켜 killTree(0) 을 부르고, POSIX 분기의 process.kill(-0, "SIGKILL")
+    // 은 "호출자 자신의 프로세스 그룹"(워커 자신)에 신호를 보낸다 — 워커가 도구 요청 하나로 자기
+    // 자신을 죽인다. pid 가 양수인지까지 확인해야 이 사고를 막는다.
+    it("jlist 의 pid 가 0 이면(정지·오류 상태에서 pm2 가 흔히 돌려주는 값) killTree 를 부르지 않는다(self-kill 방지)", async () => {
+      const killCalls: number[] = [];
+      const zeroPidJlist = JSON.stringify([
+        { name: "asahi-111", pid: 0, pm2_env: { status: "errored", restart_time: 3, args: ["run", "dev"], pm_exec_path: "npm" }, monit: { memory: 1 } },
+      ]);
+      const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: zeroPidJlist }, delete: { ok: true, stdout: "" } });
+      const killTree = async (pid: number) => { killCalls.push(pid); };
+      const ex = makeExecutors([root], { runPm2, killTree });
+      const r = await ex.proc_stop!({ name: "asahi-111" });
+      expect(r.ok).toBe(true);
+      expect(killCalls).toEqual([]); // killTree(0) 이 불렸다면 POSIX 에서 process.kill(-0, …) 로 워커 자신을 죽였을 것이다
+      expect(calls).toContainEqual(["delete", "asahi-111"]);
+    });
+
+    // 리뷰 지적(Important, Finding 1, 컨트롤러 결정): pid 가 양수여도 status 가 "online" 이 아니면
+    // killTree 를 부르지 않는다 — 공유 기계에서는 OS 가 pid 번호를 재사용한다. pm2 jlist 가 들고
+    // 있는 pid 가 그 프로세스가 이미 죽은 뒤에도 갱신 안 된 오래된 값이라면, 그 번호는 지금 이
+    // 순간 완전히 다른(어쩌면 다른 회원의) 프로세스를 가리킬 수 있다. status:"online" 은 pm2 가
+    // "이 pid 가 바로 지금 이 앱의 것"이라고 스스로 확인해 주는 근거이고, 그 밖의 상태(정지·오류
+    // 등)에는 그 근거가 없다 — 회원 하나를 멈추려다 공유 기계의 다른 무언가를 죽이는 것보다는,
+    // 트리 kill 을 건너뛰고 그 사실을 그대로 알리는 쪽(아래 Finding 3)이 안전하다.
+    it("jlist 의 status 가 online 이 아니면 pid 가 정상이어도 killTree 를 부르지 않는다(공유 기계의 재사용된 pid 방어)", async () => {
+      const killCalls: number[] = [];
+      const staleJlist = JSON.stringify([
+        { name: "asahi-111", pid: 4321, pm2_env: { status: "stopped", restart_time: 0, args: ["run", "dev"], pm_exec_path: "npm" }, monit: { memory: 1 } },
+      ]);
+      const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: staleJlist }, delete: { ok: true, stdout: "" } });
+      const killTree = async (pid: number) => { killCalls.push(pid); };
+      const ex = makeExecutors([root], { runPm2, killTree });
+      const r = await ex.proc_stop!({ name: "asahi-111" });
+      expect(r.ok).toBe(true);
+      expect(killCalls).toEqual([]);
+      expect(calls).toContainEqual(["delete", "asahi-111"]);
+    });
+
     // 리뷰 지적(Important, Finding 2): 이 테스트는 opts.killTree 를 생략해 "기존 호출부(worker.ts)는
     // 손댈 필요가 없다"만 확인하려는 의도였는데, jlistWith("asahi-111", 111)(status:"online", pid:111)
     // 을 같이 주는 바람에 opts.killTree 가 실제로 없을 때 배선되는 진짜 기본 구현(윈도우
