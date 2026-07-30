@@ -194,6 +194,14 @@ export function makeExecutors(roots: string[], opts: { runPm2?: RunPm2; killTree
   // executors.ts 모듈 자체는 실제로 워커 프로세스 위에서 실행되므로 오늘은 결과가 같지만, "무엇을
   // 신뢰의 기준으로 삼는가"를 이미 검증된 WORKER_ROOTS(설정)로 통일해 두면 이 함수가 언제 어디서
   // 불려도(예: 테스트) 근거가 하나뿐이다.
+  //
+  // 정정(이 브랜치 후속 리뷰 Finding 4): 이 트리 kill 은 그 자체만으로 고아 문제를 항상 해결하지
+  // 않는다 — proc_stop 이 이 kill 을 부르는 시점에 앱은 여전히 pm2 에 등록돼 있다. autorestart 가
+  // 켜져 있으면 pm2 는 외부에서 cmd.exe 가 죽은 것을 "크래시"로 보고, 이 kill 과 뒤이은 pm2
+  // delete 사이의 몇백 ms 동안 cmd.exe/npm/vite 를 다시 살릴 수 있다 — 그러면 delete 는 그 "새"
+  // cmd.exe 만 거두고 그 밑의 새 손자는 다시 고아가 된다. 이 경쟁을 실제로 닫는 것은 proc_start 가
+  // --no-autorestart 로 띄우는 것이다(아래 proc_start 의 pm2 start 호출 참고) — 그 전제 위에서만
+  // 이 함수가 "트리 kill 후 delete"로 고아를 남기지 않는다고 말할 수 있다.
   const killTree: KillTree =
     opts.killTree ??
     ((pid) =>
@@ -620,14 +628,25 @@ export function makeExecutors(roots: string[], opts: { runPm2?: RunPm2; killTree
       const sh = shellFor();
       // cwd 가 아니라 cwdCheck.path 를 쓴다 — fs_* 의 gate() 가 g.path(검사에서 나온 실경로)로 실제
       // 파일시스템 작업을 하는 것과 같은 이유다(심볼릭 링크 등을 해석한 정규화된 값).
-      const r = await runPm2(["start", sh.bin, "--name", name, "--cwd", cwdCheck.path, "--", sh.flag, command]);
+      //
+      // 리뷰 지적(Important, 이 브랜치 후속 리뷰 Finding 4, 컨트롤러 결정): --no-autorestart 로
+      // 띄운다. proc_stop 의 트리 kill(위 killTree 선언부 참고)은 앱이 여전히 pm2 에 등록된 채로
+      // 실행되므로, autorestart 가 켜져 있으면 외부에서 cmd.exe 를 죽인 것을 pm2 가 "크래시"로 보고
+      // 트리 kill 과 뒤이은 pm2 delete 사이의 몇백 ms 동안 cmd.exe/npm/vite 를 다시 살릴 수 있다 —
+      // 그 delete 는 그 "새" cmd.exe 만 거두고 그 밑의 새 손자는 다시 고아가 된다. autorestart 를
+      // 꺼서 이 경쟁 자체를 없앤다. 부수적으로도 이 쓰임에 더 맞는 동작이다 — 오타 난 개발서버가
+      // 보이지 않게 재시작을 반복하는 대신 한 번 죽고 그대로 멈춰 있으면, 아래 재조회가 그 실패를
+      // 매번 결정론적으로(재시작 타이밍에 따라 흔들리지 않고) 잡아낸다.
+      const r = await runPm2(["start", sh.bin, "--name", name, "--cwd", cwdCheck.path, "--no-autorestart", "--", sh.flag, command]);
       if (!r.ok) return { ok: false, content: `띄우지 못했어요: ${r.stderr.trim() || r.stdout.trim() || "알 수 없는 오류"}` };
 
-      // 리뷰 지적(Minor, Finding 5): pm2 의 기본 autorestart 때문에 위 start 호출이 ok:true 여도
-      // "pm2 가 프로세스 등록에 성공했다"는 뜻일 뿐, 명령 자체가 오타 등으로 즉시 죽으면 재시작을
-      // 반복한다 — 여기서 바로 "띄웠어요"라고 알리면 크래시 루프도 성공으로 들린다. 재조회 한
-      // 번으로 실제 상태를 확인해 보고한다(재시도·대기 루프는 두지 않는다 — 그 순간의 스냅샷만
-      // 정직하게 전달하면 충분하고, pm2 가 안정화되길 기다리는 건 별개의 더 큰 설계다).
+      // 리뷰 지적(Minor, Finding 5 — 원래 M2 리뷰): pm2 의 start 호출이 ok:true 여도 "pm2 가 프로세스
+      // 등록에 성공했다"는 뜻일 뿐, 명령 자체가 오타 등으로 즉시 죽으면 상태가 곧바로 무너진다 —
+      // 여기서 바로 "띄웠어요"라고 알리면 그 실패도 성공으로 들린다. 재조회 한 번으로 실제 상태를
+      // 확인해 보고한다(재시도·대기 루프는 두지 않는다 — 그 순간의 스냅샷만 정직하게 전달하면
+      // 충분하고, pm2 가 안정화되길 기다리는 건 별개의 더 큰 설계다). 위에서 --no-autorestart 를
+      // 켠 뒤로는(후속 리뷰 Finding 4) 이 재조회가 잡아내는 것이 "크래시 루프 중간의 스냅샷"이
+      // 아니라 "한 번 죽고 멈춘, 흔들리지 않는 결과"라 이 확인이 오히려 더 믿을 만해졌다.
       const after = await listProcs();
       const status = after.ok ? after.procs.find((p) => p.name === name)?.status : undefined;
       if (status !== "online") {

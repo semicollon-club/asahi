@@ -460,6 +460,21 @@ describe("proc_* 실행기 — PM2 위임", () => {
     expect(start.join(" ")).toContain("npm run dev");
   });
 
+  // 리뷰 지적(Important, 이 브랜치 후속 리뷰 Finding 4 — 아래 "재조회" 관련 기존 Finding 5 주석과는
+  // 다른 지적이다): proc_stop 의 트리 kill(위 killTree)은 앱이 여전히 pm2 에 등록된 채로 실행된다
+  // — 외부에서 cmd.exe 를 죽이면 pm2 에게는 그냥 "죽었다"로 보이므로, autorestart 가 켜져 있으면
+  // 트리 kill 과 뒤이은 pm2 delete 사이의 몇백 ms 동안 pm2 가 cmd.exe/npm/vite 를 다시 살릴 수
+  // 있다 — 그 delete 는 그 "새" cmd.exe 만 거두고, 그 밑의 새 손자는 다시 고아가 된다. --no-autorestart
+  // 로 띄우면 이 경쟁 자체가 생기지 않는다 — 죽은 뒤 pm2 가 아무것도 다시 살리지 않으므로 트리
+  // kill 이 마지막으로 본 프로세스 그림이 delete 시점까지 그대로 유지된다.
+  it("proc_start 는 --no-autorestart 로 띄운다(트리 kill 과 pm2 재시작의 경쟁을 막는다)", async () => {
+    const { calls, runPm2 } = fakePm2({ jlist: [{ ok: true, stdout: "[]" }, { ok: true, stdout: onlineJlist("asahi-111") }] });
+    const ex = makeExecutors([root], { runPm2 });
+    await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: projectDir });
+    const start = calls.find((c) => c[0] === "start")!;
+    expect(start).toContain("--no-autorestart");
+  });
+
   it("proc_start 는 같은 이름이 이미 있으면 pm2 를 부르지 않고 거절한다(조용한 교체 금지)", async () => {
     const existing = JSON.stringify([{ name: "asahi-111", pm2_env: { status: "online", pm_uptime: 0, restart_time: 0, args: ["run", "dev"], pm_exec_path: "npm" }, monit: { memory: 1 } }]);
     const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: existing } });
