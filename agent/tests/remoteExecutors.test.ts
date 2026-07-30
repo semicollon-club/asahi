@@ -2,8 +2,16 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { makeExecutors, OUTPUT_MAX, buildPm2CommandLine } from "../src/remote/executors.js";
+import {
+  makeExecutors,
+  OUTPUT_MAX,
+  buildPm2CommandLine,
+  scriptContentFor,
+  writeStartScript,
+  recoverCommands,
+} from "../src/remote/executors.js";
 import { TREE_MAX_ENTRIES } from "../src/remote/tree.js";
+import type { ProcInfo } from "../src/remote/proc.js";
 
 describe("워커 실행기", () => {
   let root: string;
@@ -438,18 +446,26 @@ describe("proc_* 실행기 — PM2 위임", () => {
   // WORKER_ROOTS, projectDir 는 그 안의(회원 "111"의) 프로젝트 폴더 역할이다.
   let root: string;
   let projectDir: string;
+  // proc_start 가 회원 명령을 적는 스크립트 파일 위치(아래 "명령을 pm2 명령줄에 올리지 않는다"
+  // 참고) — 실제 OS 임시폴더를 더럽히지 않도록, 그리고 다른 테스트 파일과 이름이 겹칠 걱정 없이
+  // 이 스위트 전용 폴더를 주입한다. proc_start 를 부르지 않는 테스트에는 영향이 없다.
+  let scriptDir: string;
   beforeEach(() => {
     root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "asahi-proc-")));
     projectDir = path.join(root, "111");
     fs.mkdirSync(projectDir, { recursive: true });
+    scriptDir = fs.mkdtempSync(path.join(os.tmpdir(), "asahi-proc-scripts-"));
   });
-  afterEach(() => fs.rmSync(root, { recursive: true, force: true }));
+  afterEach(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(scriptDir, { recursive: true, force: true });
+  });
 
   it("proc_start 는 주입된 이름과 cwd 로 pm2 start 를 부른다", async () => {
     // 첫 jlist(사전 중복 확인)는 비어 있고, start 이후 재조회(Finding 5)는 online 을 돌려준다 —
     // 실제 성공 경로를 그대로 흉내낸다.
     const { calls, runPm2 } = fakePm2({ jlist: [{ ok: true, stdout: "[]" }, { ok: true, stdout: onlineJlist("asahi-111") }] });
-    const ex = makeExecutors([root], { runPm2 });
+    const ex = makeExecutors([root], { runPm2, scriptDir });
     const r = await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: projectDir });
     expect(r.ok).toBe(true);
     const start = calls.find((c) => c[0] === "start")!;
@@ -457,30 +473,63 @@ describe("proc_* 실행기 — PM2 위임", () => {
     expect(start).toContain("asahi-111");
     expect(start).toContain("--cwd");
     expect(start).toContain(projectDir);
-    expect(start.join(" ")).toContain("npm run dev");
+    // 실제 사고 원인 수정: 명령 문자열 자체는 pm2 인자 배열 어디에도 나타나지 않는다 — cmd.exe 가
+    // 그 명령줄을 다시 파싱하며 buildPm2CommandLine 의 MSVCRT \" 이스케이프를 이해하지 못해
+    // 토큰 경계가 깨지는 사고를 원천적으로 없애려고, 명령은 스크립트 파일에만 적는다(아래
+    // "scriptContentFor"·"writeStartScript" 참고).
+    expect(start.some((tok) => tok.includes("npm run dev"))).toBe(false);
+    const scriptPath = start[start.length - 1]!;
+    expect(fs.readFileSync(scriptPath, "utf8")).toContain("npm run dev");
   });
 
-  // 리뷰 지적(Important, 이 브랜치 후속 리뷰 Finding 4 — 아래 "재조회" 관련 기존 Finding 5 주석과는
-  // 다른 지적이다): proc_stop 의 트리 kill(위 killTree)은 앱이 여전히 pm2 에 등록된 채로 실행된다
-  // — 외부에서 cmd.exe 를 죽이면 pm2 에게는 그냥 "죽었다"로 보이므로, autorestart 가 켜져 있으면
-  // 트리 kill 과 뒤이은 pm2 delete 사이의 몇백 ms 동안 pm2 가 cmd.exe/npm/vite 를 다시 살릴 수
-  // 있다 — 그 delete 는 그 "새" cmd.exe 만 거두고, 그 밑의 새 손자는 다시 고아가 된다. --no-autorestart
-  // 로 띄우면 이 경쟁 자체가 생기지 않는다 — 죽은 뒤 pm2 가 아무것도 다시 살리지 않으므로 트리
-  // kill 이 마지막으로 본 프로세스 그림이 delete 시점까지 그대로 유지된다.
-  it("proc_start 는 --no-autorestart 로 띄운다(트리 kill 과 pm2 재시작의 경쟁을 막는다)", async () => {
+  // 실제 사고 원인 수정의 핵심 회귀 가드. buildPm2CommandLine 은 MSVCRT 규칙(임베디드 따옴표를
+  // \" 로)으로 인용하지만, 그 결과 문자열을 spawn(commandLine, {shell:true}) 가 먼저 cmd.exe 로
+  // 실행한다 — cmd.exe 는 \" 를 모른다. 백슬래시를 리터럴로 두고 따옴표 개수만 세므로 첫 임베디드
+  // 따옴표 뒤로 토큰 경계가 전부 어긋난다. 미니PC 실측(한글 경로뿐 아니라 ASCII 만 쓴 공백 경로로도
+  // 같은 증상을 재현해, 원인이 한글이 아니라 인용 자체임을 확인)으로 확정된 사고다 — 명령을 pm2
+  // 명령줄에 다시는 올리지 않는 것이 유일하고 근본적인 고침이다.
+  it("proc_start 는 임베디드 따옴표가 든 명령도 pm2 인자 배열에 올리지 않는다(실제 사고 재현)", async () => {
+    const trapCommand = 'npm run dev -- --title="hi there"';
     const { calls, runPm2 } = fakePm2({ jlist: [{ ok: true, stdout: "[]" }, { ok: true, stdout: onlineJlist("asahi-111") }] });
-    const ex = makeExecutors([root], { runPm2 });
+    const ex = makeExecutors([root], { runPm2, scriptDir });
+    const r = await ex.proc_start!({ command: trapCommand, name: "asahi-111", cwd: projectDir });
+    expect(r.ok).toBe(true);
+    const start = calls.find((c) => c[0] === "start")!;
+    // buildPm2CommandLine 이 다시 망가뜨릴 여지 자체가 없다 — 이 문자열도 인자 배열 어디에도 없다.
+    expect(start.some((tok) => tok.includes(trapCommand))).toBe(false);
+    // Finding 4(Minor, 후속 리뷰): 아래 한 줄은 인용 "이전"의 인자 배열(start)을 그대로 검사한다
+    // — \" 는 buildPm2CommandLine(인용 단계)을 실제로 거쳐야만 나타나는 문자열이라, 인용 전
+    // 배열에서 그걸 찾는 단정은 buildPm2CommandLine 이 무엇을 하든(심지어 안 불러도) 항상 참에
+    // 가깝다 — 실제 사고의 두 절반(회원 명령이 pm2 인자에 실리는 것 + buildPm2CommandLine 의 \"
+    // 이스케이프)을 하나로 잇지 못한다. start 를 실제로 buildPm2CommandLine(기본 runPm2 가 실제로
+    // 부르는 바로 그 함수, 위 "buildPm2CommandLine — pm2 명령줄 인용" describe 참고)에 통과시켜,
+    // 그 결과 명령줄 문자열 자체에 \" 가 없는지 확인한다 — 이러면 나중에 어떤 인자(cwd·스크립트
+    // 경로 등)가 큰따옴표를 갖게 되는 회귀가 생겨도 이 단정이 실제로 걸린다.
+    expect(buildPm2CommandLine(start, "win32")).not.toContain('\\"');
+    // "--" 뒤 마지막 인자는 스크립트 파일 경로 하나뿐이고, 명령은 그 파일 안에 이스케이프 없이
+    // 그대로 있다.
+    const scriptPath = start[start.length - 1]!;
+    expect(fs.existsSync(scriptPath)).toBe(true);
+    expect(fs.readFileSync(scriptPath, "utf8")).toContain(trapCommand);
+  });
+
+  // --no-autorestart 로 띄우는 이유(Finding 5): 오타 난 개발서버가 크래시를 반복해도 회원 눈에
+  // 안 보이게 재시작을 계속하면, 시작 직후 재조회가 그 순간 크래시 루프의 어느 타이밍을 볼지
+  // 흔들린다 — 꺼두면 한 번 죽고 그대로 멈추므로 재조회가 실패를 매번 결정론적으로 잡는다.
+  // (예전엔 proc_stop 의 트리 kill과 pm2 재시작 사이의 경쟁을 막는다는 이유도 있었지만, 그 트리
+  // kill 자체가 sh_exec 가 띄운 고아를 pm2 관리 프로세스로 착각한 오진단이었다 — pm2 delete 는
+  // 실측으로 이미 트리 전체를 정리한다는 것이 확인돼 되돌렸다.)
+  it("proc_start 는 --no-autorestart 로 띄운다", async () => {
+    const { calls, runPm2 } = fakePm2({ jlist: [{ ok: true, stdout: "[]" }, { ok: true, stdout: onlineJlist("asahi-111") }] });
+    const ex = makeExecutors([root], { runPm2, scriptDir });
     await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: projectDir });
     const start = calls.find((c) => c[0] === "start")!;
     expect(start).toContain("--no-autorestart");
     // 커버리지 공백 보완(Gap 3): 존재 여부(toContain)만으로는 부족하다 — pm2 는 "--" 앞의
-    // 토큰만 자기 옵션으로 해석하고, 그 뒤는 그대로 cmd.exe/sh 스크립트 인자로 흘려보낸다
-    // (바로 뒤 sh.flag·command 가 실행할 명령 그 자체인 이유). --no-autorestart 가 "--" 뒤로
-    // 밀리면 pm2 에게는 안 보이는 문자열 하나가 될 뿐이라 autorestart 는 계속 켜진 채로
-    // 남는다 — 그러면 트리 kill 과 pm2 delete 사이 몇백 ms 동안 pm2 가 cmd.exe/npm/vite 를
-    // 되살려, delete 는 그 "새" cmd.exe 만 거두고 새 손자는 다시 고아가 된다(이 플래그를
-    // 넣은 이유 그 자체인 경쟁 조건). 위 toContain 은 이 회귀를 못 잡는다 — "--" 뒤로 옮겨도
-    // 배열엔 여전히 들어 있기 때문이다. 위치까지 직접 고정한다.
+    // 토큰만 자기 옵션으로 해석하고, 그 뒤는 그대로 cmd.exe/sh 스크립트 인자로 흘려보낸다.
+    // --no-autorestart 가 "--" 뒤로 밀리면 pm2 에게는 안 보이는 문자열 하나가 될 뿐이라
+    // autorestart 는 계속 켜진 채로 남는다. 위 toContain 은 이 회귀를 못 잡는다 — "--" 뒤로
+    // 옮겨도 배열엔 여전히 들어 있기 때문이다. 위치까지 직접 고정한다.
     const flagIndex = start.indexOf("--no-autorestart");
     const sepIndex = start.indexOf("--");
     expect(flagIndex).toBeGreaterThanOrEqual(0);
@@ -491,20 +540,23 @@ describe("proc_* 실행기 — PM2 위임", () => {
   it("proc_start 는 같은 이름이 이미 있으면 pm2 를 부르지 않고 거절한다(조용한 교체 금지)", async () => {
     const existing = JSON.stringify([{ name: "asahi-111", pm2_env: { status: "online", pm_uptime: 0, restart_time: 0, args: ["run", "dev"], pm_exec_path: "npm" }, monit: { memory: 1 } }]);
     const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: existing } });
-    const ex = makeExecutors([root], { runPm2 });
+    const ex = makeExecutors([root], { runPm2, scriptDir });
     const r = await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: projectDir });
     expect(r.ok).toBe(false);
     expect(r.content).toContain("이미");
     expect(calls.some((c) => c[0] === "start")).toBe(false);
   });
 
-  // 리뷰 지적(Minor): 위 중복 거절 메시지는 dup.command 를 그대로 보여준다 — proc_start 가 실제로
-  // 만드는 셸 래퍼 모양(cmd.exe/sh 를 스크립트 자리에 넣는다, 위 commandOf 관련 테스트 참고)으로
-  // 이미 떠 있는 프로세스를 시뮬레이션해, 이 메시지에도 셸 껍데기가 새지 않는지 확인한다.
-  it("이름 충돌 거절 메시지는 실제 proc_start 모양(셸 래퍼)에서도 셸 껍데기 없이 명령만 보여준다", async () => {
+  // 리뷰 지적(Minor): 위 중복 거절 메시지는 dup.command 를 그대로 보여준다 — proc_start 가 pm2 의
+  // "스크립트" 자리에 cmd.exe/sh 를 넣는 셸 래퍼 모양(commandOf 가 걷어내는 모양, proc.test.ts
+  // 참고)으로 이미 떠 있는 프로세스를 시뮬레이션해, 이 메시지에도 셸 껍데기가 새지 않는지
+  // 확인한다. (참고: 스크립트 파일 우회 이후 실제 proc_start 는 이 자리에 "npm run dev" 가 아니라
+  // 스크립트 경로를 남긴다 — 이 테스트는 그 구체적인 뒷부분과 무관하게 commandOf 의 셸 래퍼
+  // 스트리핑 자체를 겨냥한다.)
+  it("이름 충돌 거절 메시지는 셸 래퍼 모양에서도 셸 껍데기 없이 뒷부분만 보여준다", async () => {
     const existing = JSON.stringify([{ name: "asahi-111", pm2_env: { status: "online", pm_uptime: 0, restart_time: 0, args: ["/c", "npm run dev"], pm_exec_path: "C:\\Windows\\System32\\cmd.exe" }, monit: { memory: 1 } }]);
     const { runPm2 } = fakePm2({ jlist: { ok: true, stdout: existing } });
-    const ex = makeExecutors([root], { runPm2 });
+    const ex = makeExecutors([root], { runPm2, scriptDir });
     const r = await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: projectDir });
     expect(r.ok).toBe(false);
     expect(r.content).toContain("npm run dev");
@@ -512,9 +564,37 @@ describe("proc_* 실행기 — PM2 위임", () => {
     expect(r.content).not.toContain("/c");
   });
 
+  // UX 회귀(2026-07-30, 스크립트 파일 우회의 부작용): pm2 jlist 는 이제 회원 명령이 아니라
+  // writeStartScript 가 쓴 스크립트 "경로"만 알고 있다(commandOf, proc.ts 참고) — 고치기 전에는
+  // 이 거절 메시지가 dup.command 를 그대로 보여줘 "C:\...\asahi-proc-scripts\asahi-111.bat"
+  // 류가 회원에게 노출됐다. jlist 가 실제로 보고할 형태(cmd.exe 셸 래퍼 뒤에 스크립트 경로 —
+  // Finding 2 이후 recoverCommands 가 이 경로를 신뢰하려면 실제로 필요한 형태이기도 하다)를
+  // 그대로 흉내내, "메시지에 보이는 명령이 그 raw 경로가 아니라 스크립트 파일에서 되찾은 값"
+  // 이라는 것을 직접 증명한다.
+  it("중복 거절 메시지는 스크립트 경로가 아니라 되찾은 원래 명령을 보여준다(UX 회귀)", async () => {
+    const trapCommand = 'npm run dev -- --title="hi there"';
+    const scriptPath = path.join(scriptDir, "asahi-111.bat");
+    const runningWithScriptPath = JSON.stringify([
+      {
+        name: "asahi-111",
+        pm2_env: { status: "online", pm_uptime: Date.now(), restart_time: 0, args: ["/c", scriptPath], pm_exec_path: "C:\\Windows\\System32\\cmd.exe" },
+        monit: { memory: 1 },
+      },
+    ]);
+    const { runPm2 } = fakePm2({ jlist: [{ ok: true, stdout: "[]" }, { ok: true, stdout: runningWithScriptPath }] });
+    const ex = makeExecutors([root], { runPm2, scriptDir });
+    const first = await ex.proc_start!({ command: trapCommand, name: "asahi-111", cwd: projectDir });
+    expect(first.ok).toBe(true);
+
+    const second = await ex.proc_start!({ command: "npm run build", name: "asahi-111", cwd: projectDir });
+    expect(second.ok).toBe(false);
+    expect(second.content).toContain(trapCommand);
+    expect(second.content).not.toContain(scriptDir);
+  });
+
   it("proc_start 성공 응답은 멈추는 법을 그 자리에서 알려준다", async () => {
     const { runPm2 } = fakePm2({ jlist: [{ ok: true, stdout: "[]" }, { ok: true, stdout: onlineJlist("asahi-111") }] });
-    const ex = makeExecutors([root], { runPm2 });
+    const ex = makeExecutors([root], { runPm2, scriptDir });
     const r = await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: projectDir });
     expect(r.content).toContain("멈추");
   });
@@ -527,15 +607,17 @@ describe("proc_* 실행기 — PM2 위임", () => {
   it("proc_start 는 시작 직후 재조회에서 online 이 아니면(크래시 루프 등) 성공을 주장하지 않는다", async () => {
     const crashLooping = onlineJlist("asahi-111", { status: "errored", restart_time: 3 });
     const { runPm2 } = fakePm2({ jlist: [{ ok: true, stdout: "[]" }, { ok: true, stdout: crashLooping }] });
-    const ex = makeExecutors([root], { runPm2 });
-    const r = await ex.proc_start!({ command: "오타난명령", name: "asahi-111", cwd: projectDir });
+    const ex = makeExecutors([root], { runPm2, scriptDir });
+    // Finding 1(이번 라운드) 이후 명령은 ASCII 여야 한다 — 이 테스트가 겨냥하는 것(크래시 루프
+    // 감지)과 무관한 이유로 거절되지 않도록 오타 명령도 ASCII 로 적는다("오타난명령" 대신).
+    const r = await ex.proc_start!({ command: "typo-command", name: "asahi-111", cwd: projectDir });
     expect(r.ok).toBe(false);
     expect(r.content).toContain("errored");
   });
 
   it("proc_start 는 시작 직후 재조회 자체가 실패해도(연결 끊김 등) 성공을 주장하지 않는다", async () => {
     const { runPm2 } = fakePm2({ jlist: [{ ok: true, stdout: "[]" }, { ok: false, stdout: "", stderr: "연결 끊김" }] });
-    const ex = makeExecutors([root], { runPm2 });
+    const ex = makeExecutors([root], { runPm2, scriptDir });
     const r = await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: projectDir });
     expect(r.ok).toBe(false);
   });
@@ -546,7 +628,7 @@ describe("proc_* 실행기 — PM2 위임", () => {
   // 확인해야 "아무 것도 시작하지 않는다"는 보장이 선다.
   it("proc_start 는 name·cwd 가 없으면 pm2 를 전혀 부르지 않고 거절한다(배선 오류 방어)", async () => {
     const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: "[]" } });
-    const ex = makeExecutors([root], { runPm2 });
+    const ex = makeExecutors([root], { runPm2, scriptDir });
     expect((await ex.proc_start!({ command: "npm run dev", cwd: projectDir })).ok).toBe(false); // name 없음
     expect((await ex.proc_start!({ command: "npm run dev", name: "asahi-111" })).ok).toBe(false); // cwd 없음
     expect((await ex.proc_start!({ command: "npm run dev" })).ok).toBe(false); // 둘 다 없음
@@ -570,7 +652,7 @@ describe("proc_* 실행기 — PM2 위임", () => {
     "proc_start 는 윈도우 루트에서 cmd.exe·/c 로 pm2 를 부른다",
     async () => {
       const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: "[]" } });
-      const ex = makeExecutors([root], { runPm2 });
+      const ex = makeExecutors([root], { runPm2, scriptDir });
       await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: projectDir });
       const start = calls.find((c) => c[0] === "start")!;
       expect(start).toContain("cmd.exe");
@@ -580,15 +662,19 @@ describe("proc_* 실행기 — PM2 위임", () => {
     },
   );
 
+  // 실제 사고 원인 수정 이후 POSIX 쪽은 더 이상 "-c" 를 쓰지 않는다 — -c 는 "다음 인자를 명령
+  // 문자열로 실행하라"는 뜻이라 스크립트 파일 경로에는 맞지 않는다(윈도우의 cmd.exe 는 /c 뒤에
+  // 배치파일 경로를 그대로 줘도 되지만, sh 는 플래그 없이 경로를 인자로 주면 그 파일을 스크립트로
+  // 직접 연다 — 그래서 이 플레이버에서만 shellFor() 의 flag 가 없다).
   it.skipIf(process.platform === "win32")(
-    "proc_start 는 POSIX 루트에서 sh·-c 로 pm2 를 부른다(호스트 플랫폼이 아니라 워커 루트 기준)",
+    "proc_start 는 POSIX 루트에서 sh 로 스크립트 파일을 직접 연다(호스트 플랫폼이 아니라 워커 루트 기준)",
     async () => {
       const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: "[]" } });
-      const ex = makeExecutors([root], { runPm2 });
+      const ex = makeExecutors([root], { runPm2, scriptDir });
       await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: projectDir });
       const start = calls.find((c) => c[0] === "start")!;
       expect(start).toContain("sh");
-      expect(start).toContain("-c");
+      expect(start).not.toContain("-c");
       expect(start).not.toContain("cmd.exe");
       expect(start).not.toContain("/c");
     },
@@ -605,7 +691,7 @@ describe("proc_* 실행기 — PM2 위임", () => {
       const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "asahi-proc-outside-")));
       try {
         const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: "[]" } });
-        const ex = makeExecutors([root], { runPm2 });
+        const ex = makeExecutors([root], { runPm2, scriptDir });
         const r = await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: outside });
         expect(r.ok).toBe(false);
         expect(r.content).toContain("워커 작업 폴더 밖");
@@ -618,7 +704,7 @@ describe("proc_* 실행기 — PM2 위임", () => {
     it("존재하지 않는 cwd 는 pm2 를 부르지 않고 한국어로 명확히 거절한다(운영 중 실제로 겪은 결함 — 프로젝트가 하위 폴더에 있는데 그 폴더가 없으면 pm2 가 --cwd 에서 바로 실패해 원인을 알 수 없었다)", async () => {
       const noSuchDir = path.join(root, "없는-프로젝트");
       const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: "[]" } });
-      const ex = makeExecutors([root], { runPm2 });
+      const ex = makeExecutors([root], { runPm2, scriptDir });
       const r = await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: noSuchDir });
       expect(r.ok).toBe(false);
       expect(r.content).toContain("폴더가 없어요");
@@ -629,7 +715,7 @@ describe("proc_* 실행기 — PM2 위임", () => {
       const filePath = path.join(root, "이건-파일.txt");
       fs.writeFileSync(filePath, "x");
       const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: "[]" } });
-      const ex = makeExecutors([root], { runPm2 });
+      const ex = makeExecutors([root], { runPm2, scriptDir });
       const r = await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: filePath });
       expect(r.ok).toBe(false);
       expect(r.content).toContain("폴더가 아니에요");
@@ -640,7 +726,7 @@ describe("proc_* 실행기 — PM2 위임", () => {
       const koreanProject = path.join(root, "테스트 1");
       fs.mkdirSync(koreanProject, { recursive: true });
       const { calls, runPm2 } = fakePm2({ jlist: [{ ok: true, stdout: "[]" }, { ok: true, stdout: onlineJlist("asahi-111") }] });
-      const ex = makeExecutors([root], { runPm2 });
+      const ex = makeExecutors([root], { runPm2, scriptDir });
       const r = await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: koreanProject });
       expect(r.ok).toBe(true);
       const start = calls.find((c) => c[0] === "start")!;
@@ -648,17 +734,85 @@ describe("proc_* 실행기 — PM2 위임", () => {
     });
   });
 
+  // ── Finding 1(Critical, 후속 리뷰) — 명령은 윈도우에서 ASCII 만 허용한다 ──────────────────────
+  // 미니PC 실측(배경 참고): writeStartScript 가 쓰는 UTF-8(BOM 없음) .bat 파일을 cmd.exe 는 시스템
+  // ANSI 코드페이지로 읽는다 — chcp 를 파일 안에 넣어도 그 줄 자신이 이미 잘못된 코드페이지로
+  // 디코드된 뒤라 소용없다(scriptContentFor 선언부의 실측 표 참고). cwd(--cwd)는 이 검사와 무관하게
+  // CreateProcessW(UTF-16)를 거치므로 한글·공백이 이미 문제없이 동작한다(바로 위 "한글·공백이
+  // 섞인..." 테스트가 그 증거) — 그러니 한글이 문제가 되는 자리는 명령 문자열 자체뿐이다.
+  describe("proc_start — 명령에 ASCII 가 아닌 문자가 있으면 거절한다(Finding 1)", () => {
+    it.skipIf(process.platform !== "win32")(
+      "윈도우에서는 명령에 한글이 섞이면 pm2 를 부르지 않고 거절한다",
+      async () => {
+        const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: "[]" } });
+        const ex = makeExecutors([root], { runPm2, scriptDir });
+        const r = await ex.proc_start!({ command: "node 서버.js", name: "asahi-111", cwd: projectDir });
+        expect(r.ok).toBe(false);
+        expect(r.content).toContain("ASCII");
+        expect(calls).toEqual([]); // pm2 조회조차 없다 — 스크립트를 쓰기 전에, pm2 를 부르기 전에 거절한다
+      },
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "POSIX 에서는 명령에 ASCII 가 아닌 문자가 있어도 거절하지 않는다(윈도우 전용 제약 — sh 는 스크립트를 코드페이지로 디코드하지 않는다)",
+      async () => {
+        const { calls, runPm2 } = fakePm2({ jlist: [{ ok: true, stdout: "[]" }, { ok: true, stdout: onlineJlist("asahi-111") }] });
+        const ex = makeExecutors([root], { runPm2, scriptDir });
+        const r = await ex.proc_start!({ command: "node 서버.js", name: "asahi-111", cwd: projectDir });
+        expect(r.ok).toBe(true);
+        expect(calls.some((c) => c[0] === "start")).toBe(true);
+      },
+    );
+  });
+
+  // ── Finding 3(Minor, 후속 리뷰) — 스크립트 폴더가 회원 폴더 안에 있으면 실행을 거절한다 ─────────
+  // DEFAULT_SCRIPT_DIR 선언부의 "회원 폴더(roots) 밖에 둔다"는 지금까지 강제되지 않는 주석일
+  // 뿐이었다 — roots(WORKER_ROOTS)에 언젠가 사용자 프로필 폴더가 포함되면(개인 워커에서는 충분히
+  // 있을 수 있는 설정) scriptDir 이 roots 안에 들어오고, 그 순간부터 fs_write·fs_edit 로 회원이
+  // 자기 .bat/.sh 파일 내용을 직접 고쳐 proc_start 가 실제로 실행할 내용을 바꿔치기할 수 있다.
+  describe("proc_start — 스크립트 폴더가 회원 작업 폴더 안에 있으면 실행을 거절한다(Finding 3)", () => {
+    it("scriptDir 이 roots 의 하위 폴더면 pm2 를 부르지 않고 명시적으로 거절한다", async () => {
+      const scriptDirInsideRoot = path.join(root, "스크립트-보관");
+      const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: "[]" } });
+      const ex = makeExecutors([root], { runPm2, scriptDir: scriptDirInsideRoot });
+      const r = await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: projectDir });
+      expect(r.ok).toBe(false);
+      expect(r.content).toContain("스크립트");
+      expect(calls).toEqual([]); // pm2 조회조차 없다 — 설정 오류는 다른 무엇보다 먼저 걸러야 한다
+    });
+
+    it("scriptDir 이 roots 와 정확히 같아도 거절한다(경계값)", async () => {
+      const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: "[]" } });
+      const ex = makeExecutors([root], { runPm2, scriptDir: root });
+      const r = await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: projectDir });
+      expect(r.ok).toBe(false);
+      expect(calls).toEqual([]);
+    });
+
+    it("scriptDir 이 roots 밖이면(정상 설정) 평소처럼 진행한다(회귀 방지)", async () => {
+      const { calls, runPm2 } = fakePm2({ jlist: [{ ok: true, stdout: "[]" }, { ok: true, stdout: onlineJlist("asahi-111") }] });
+      const ex = makeExecutors([root], { runPm2, scriptDir }); // beforeEach 의 scriptDir 은 root 의 형제 폴더
+      const r = await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: projectDir });
+      expect(r.ok).toBe(true);
+      expect(calls.some((c) => c[0] === "start")).toBe(true);
+    });
+  });
+
   it("proc_stop 은 pm2 delete 를 부른다", async () => {
     const { calls, runPm2 } = fakePm2({ delete: { ok: true, stdout: "" } });
-    const ex = makeExecutors([root], { runPm2 });
+    const ex = makeExecutors([root], { runPm2, scriptDir });
     const r = await ex.proc_stop!({ name: "asahi-111" });
     expect(r.ok).toBe(true);
     expect(calls).toContainEqual(["delete", "asahi-111"]);
+    // 트리 kill 되돌림(오진단 revert): pm2 delete 하나의 결과를 그대로, 조건부 문구 없이
+    // 담백하게 전달한다 — 실측으로 pm2 delete 가 이미 트리 전체를 정리한다는 것이 확인됐다
+    // (진짜 원인은 sh_exec 가 띄운 고아였다). "확인하지 못했어요" 같은 부가 설명이 붙지 않는다.
+    expect(r.content).toBe("멈췄어요: asahi-111");
   });
 
   it("proc_stop 은 없는 이름이면 실패로 돌려준다", async () => {
     const { runPm2 } = fakePm2({ delete: { ok: false, stdout: "", stderr: "Process not found" } });
-    const ex = makeExecutors([root], { runPm2 });
+    const ex = makeExecutors([root], { runPm2, scriptDir });
     const r = await ex.proc_stop!({ name: "asahi-111" });
     expect(r.ok).toBe(false);
   });
@@ -672,7 +826,7 @@ describe("proc_* 실행기 — PM2 위임", () => {
   it("proc_stop 은 asahi-<숫자> 형식이 아닌 이름(봇·워커 자신)을 pm2 를 부르지 않고 거절한다", async () => {
     for (const infraName of ["asahi-worker", "asahi-assistant", "something-else"]) {
       const { calls, runPm2 } = fakePm2({ delete: { ok: true, stdout: "" } });
-      const ex = makeExecutors([root], { runPm2 });
+      const ex = makeExecutors([root], { runPm2, scriptDir });
       const r = await ex.proc_stop!({ name: infraName });
       expect(r.ok, `${infraName} 을 멈출 수 있었다`).toBe(false);
       expect(r.content).toContain("회원");
@@ -680,197 +834,10 @@ describe("proc_* 실행기 — PM2 위임", () => {
     }
   });
 
-  // ── Defect 2(운영 중 발견): pm2 delete 는 pm2 가 직접 아는 자식(cmd.exe/sh)만 죽이고, 그 밑의
-  // 실제 프로세스 트리(회원의 npm·vite 등, 손자 프로세스)는 그대로 남는다 — 운영 재현: "멈췄어요"
-  // 응답 뒤에도 npm run dev·vite.js 가 포트를 붙든 채 계속 돌았고 proc_list 에는 아예 나타나지
-  // 않는 고아가 됐다. proc_stop 은 pm2 delete 전에 jlist 로 pid 를 찾아 트리 전체를 끝낸다. 실제
-  // 프로세스를 하나도 죽이지 않도록, 이 kill 은 runPm2 와 같은 이유로 이음매(opts.killTree) 뒤에서
-  // 검증한다.
-  describe("proc_stop — pm2 delete 전에 프로세스 트리 전체를 끝낸다(Defect 2)", () => {
-    const jlistWith = (name: string, pid: number) =>
-      JSON.stringify([{ name, pid, pm2_env: { status: "online", pm_uptime: 0, restart_time: 0, args: ["run", "dev"], pm_exec_path: "npm" }, monit: { memory: 1 } }]);
-
-    it("jlist 에서 pid 를 찾아 pm2 delete 보다 먼저 killTree 를 부른다(순서까지 확인)", async () => {
-      const order: string[] = [];
-      const { runPm2 } = fakePm2({ jlist: { ok: true, stdout: jlistWith("asahi-111", 7872) }, delete: { ok: true, stdout: "" } });
-      const wrappedRunPm2 = async (args: string[]) => {
-        order.push(`pm2:${args[0]}`);
-        return runPm2(args);
-      };
-      const killTree = async (pid: number) => { order.push(`kill:${pid}`); };
-      const ex = makeExecutors([root], { runPm2: wrappedRunPm2, killTree });
-      const r = await ex.proc_stop!({ name: "asahi-111" });
-      expect(r.ok).toBe(true);
-      expect(order).toEqual(["pm2:jlist", "kill:7872", "pm2:delete"]);
-      // 리뷰 지적(Important, Finding 3): 트리 kill 이 실제로 성공한 이 경로에서는 메시지가
-      // 무조건 담백해야 한다 — 아래 "확인하지 못했다" 문구가 여기서도 나오면 성공한 케이스까지
-      // 매번 캐비엇을 붙이는 것이라 qualification 이 신호로서 무의미해진다.
-      expect(r.content).toBe("멈췄어요: asahi-111");
-    });
-
-    // 커버리지 공백 보완(Gap 2): proc_stop 자신의 jlist 실패 경로는 지금까지 아무 테스트도
-    // 지나지 않았다 — proc_start(위 "재조회 자체가 실패해도" 테스트)·proc_list(아래 "pm2 가
-    // 실패하면" 테스트)는 각각 jlist 실패를 검증하지만, proc_stop 은 before.ok 가 false 일 때
-    // proc 를 undefined 로 떨어뜨리는 그 자신의 분기(`before.ok ? ... : undefined`)를 아무도
-    // 겨냥하지 않았다. 코드 자체는 옳다 — proc 가 없으니 트리 kill 가드를 자연히 건너뛴다.
-    // 하지만 "jlist 가 실패하면 트리 정리를 확인 못 했다고 알리는 대신, 아예 조기 반환으로
-    // 무조건 '멈췄어요'만 돌려준다" 같은 회귀가 들어와도 이 경로를 지나가는 테스트가 하나도
-    // 없으면 잡아내지 못한다.
-    it("jlist 조회 자체가 실패해도(pm2 응답 없음 등) killTree 를 건너뛰고 pm2 delete 는 그대로 시도하며, 확인 못 했다고 알린다", async () => {
-      const killCalls: number[] = [];
-      const { calls, runPm2 } = fakePm2({ jlist: { ok: false, stdout: "", stderr: "pm2 응답 없음" }, delete: { ok: true, stdout: "" } });
-      const killTree = async (pid: number) => { killCalls.push(pid); };
-      const ex = makeExecutors([root], { runPm2, killTree });
-      const r = await ex.proc_stop!({ name: "asahi-111" });
-      expect(r.ok).toBe(true);
-      expect(killCalls).toEqual([]);
-      expect(calls).toContainEqual(["delete", "asahi-111"]); // jlist 가 실패해도 delete 시도 자체는 예전과 같이 보장돼야 한다
-      expect(r.content).toContain("확인하지 못했");
-    });
-
-    it("jlist 에 그 이름이 없으면(이미 사라졌거나 목록 조회가 비어 있으면) killTree 를 건너뛰고 pm2 delete 는 그대로 시도한다", async () => {
-      const killCalls: number[] = [];
-      const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: "[]" }, delete: { ok: true, stdout: "" } });
-      const killTree = async (pid: number) => { killCalls.push(pid); };
-      const ex = makeExecutors([root], { runPm2, killTree });
-      const r = await ex.proc_stop!({ name: "asahi-111" });
-      expect(r.ok).toBe(true);
-      expect(killCalls).toEqual([]);
-      expect(calls).toContainEqual(["delete", "asahi-111"]);
-      // 리뷰 지적(Important, Finding 3): 트리 kill 이 아예 걸리지 않은 이 경로에서 예전엔 "멈췄어요"만
-      // 그대로 돌려줘, pm2 가 모르는 손자 프로세스(회원의 npm·vite 등)가 남아 있어도 회원은 알
-      // 방법이 없었다 — 이 결함을 처음 만든 바로 그 증상이다. 이제는 확인하지 못했다는 사실 자체를
-      // 그대로 전달한다.
-      expect(r.content).toContain("확인하지 못했");
-    });
-
-    it("pid 필드가 없는 jlist 항목(예: 파싱 실패)이어도 killTree 를 부르지 않고 delete 는 그대로 진행한다", async () => {
-      const killCalls: number[] = [];
-      const noPidJlist = JSON.stringify([{ name: "asahi-111", pm2_env: { status: "online" } }]); // pid 없음
-      const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: noPidJlist }, delete: { ok: true, stdout: "" } });
-      const killTree = async (pid: number) => { killCalls.push(pid); };
-      const ex = makeExecutors([root], { runPm2, killTree });
-      const r = await ex.proc_stop!({ name: "asahi-111" });
-      expect(r.ok).toBe(true);
-      expect(killCalls).toEqual([]);
-      expect(calls).toContainEqual(["delete", "asahi-111"]);
-      expect(r.content).toContain("확인하지 못했"); // Finding 3 — 위 테스트와 같은 이유
-    });
-
-    // 리뷰 지적(Important, Finding 1): pm2 는 정지·오류 상태의 앱에 pid:0 을 돌려준다 — 회원의
-    // 크래시한 개인 서버에 "꺼줘"를 부르는 보통의 경로가 정확히 이 상태다. proc.pid !== null 만
-    // 보던 예전 검사는 0 도 통과시켜 killTree(0) 을 부르고, POSIX 분기의 process.kill(-0, "SIGKILL")
-    // 은 "호출자 자신의 프로세스 그룹"(워커 자신)에 신호를 보낸다 — 워커가 도구 요청 하나로 자기
-    // 자신을 죽인다. pid 가 양수인지까지 확인해야 이 사고를 막는다.
-    it("jlist 의 pid 가 0 이면(정지·오류 상태에서 pm2 가 흔히 돌려주는 값) killTree 를 부르지 않는다(self-kill 방지)", async () => {
-      const killCalls: number[] = [];
-      const zeroPidJlist = JSON.stringify([
-        { name: "asahi-111", pid: 0, pm2_env: { status: "errored", restart_time: 3, args: ["run", "dev"], pm_exec_path: "npm" }, monit: { memory: 1 } },
-      ]);
-      const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: zeroPidJlist }, delete: { ok: true, stdout: "" } });
-      const killTree = async (pid: number) => { killCalls.push(pid); };
-      const ex = makeExecutors([root], { runPm2, killTree });
-      const r = await ex.proc_stop!({ name: "asahi-111" });
-      expect(r.ok).toBe(true);
-      expect(killCalls).toEqual([]); // killTree(0) 이 불렸다면 POSIX 에서 process.kill(-0, …) 로 워커 자신을 죽였을 것이다
-      expect(calls).toContainEqual(["delete", "asahi-111"]);
-      expect(r.content).toContain("확인하지 못했"); // Finding 3 — 트리 kill 을 걸지 않았으니 그 사실을 그대로 알린다
-    });
-
-    // 커버리지 공백 보완(Gap 1): 위 테스트(pid:0)는 status:"errored" 와 함께, 아래 테스트
-    // (pid:4321)는 status:"stopped" 와 함께 온다 — 둘 다 status 조건에서 이미 걸러지므로,
-    // 가드에서 "&& proc.pid > 0" 을 통째로 빼도(= status==="online" 만으로 통과) 이 두
-    // 테스트는 여전히 초록불이다. pid 조건 자신이 실제로 일한 적이 한 번도 없다는 뜻이다.
-    // status:"online" 과 pid:0 을 함께 줘서 pid 조건만 단독으로 겨냥한다 — 이게 통과하면
-    // POSIX 분기에서 killTree(0) → process.kill(-0, "SIGKILL") 로 워커가 자기 자신의 프로세스
-    // 그룹을 죽인다(위 killTree 선언부 주석 참고).
-    it("jlist 의 status 가 online 이어도 pid 가 0 이면 killTree 를 부르지 않는다(self-kill 방지 — pid 조건은 status 와 별개로 검사돼야 한다)", async () => {
-      const killCalls: number[] = [];
-      const onlineButZeroPidJlist = JSON.stringify([
-        { name: "asahi-111", pid: 0, pm2_env: { status: "online", restart_time: 0, args: ["run", "dev"], pm_exec_path: "npm" }, monit: { memory: 1 } },
-      ]);
-      const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: onlineButZeroPidJlist }, delete: { ok: true, stdout: "" } });
-      const killTree = async (pid: number) => { killCalls.push(pid); };
-      const ex = makeExecutors([root], { runPm2, killTree });
-      const r = await ex.proc_stop!({ name: "asahi-111" });
-      expect(r.ok).toBe(true);
-      expect(killCalls).toEqual([]); // killTree(0) 이 불렸다면 POSIX 에서 process.kill(-0, …) 로 워커 자신을 죽였을 것이다
-      expect(calls).toContainEqual(["delete", "asahi-111"]);
-      expect(r.content).toContain("확인하지 못했");
-    });
-
-    // 리뷰 지적(Important, Finding 1, 컨트롤러 결정): pid 가 양수여도 status 가 "online" 이 아니면
-    // killTree 를 부르지 않는다 — 공유 기계에서는 OS 가 pid 번호를 재사용한다. pm2 jlist 가 들고
-    // 있는 pid 가 그 프로세스가 이미 죽은 뒤에도 갱신 안 된 오래된 값이라면, 그 번호는 지금 이
-    // 순간 완전히 다른(어쩌면 다른 회원의) 프로세스를 가리킬 수 있다. status:"online" 은 pm2 가
-    // "이 pid 가 바로 지금 이 앱의 것"이라고 스스로 확인해 주는 근거이고, 그 밖의 상태(정지·오류
-    // 등)에는 그 근거가 없다 — 회원 하나를 멈추려다 공유 기계의 다른 무언가를 죽이는 것보다는,
-    // 트리 kill 을 건너뛰고 그 사실을 그대로 알리는 쪽(아래 Finding 3)이 안전하다.
-    it("jlist 의 status 가 online 이 아니면 pid 가 정상이어도 killTree 를 부르지 않는다(공유 기계의 재사용된 pid 방어)", async () => {
-      const killCalls: number[] = [];
-      const staleJlist = JSON.stringify([
-        { name: "asahi-111", pid: 4321, pm2_env: { status: "stopped", restart_time: 0, args: ["run", "dev"], pm_exec_path: "npm" }, monit: { memory: 1 } },
-      ]);
-      const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: staleJlist }, delete: { ok: true, stdout: "" } });
-      const killTree = async (pid: number) => { killCalls.push(pid); };
-      const ex = makeExecutors([root], { runPm2, killTree });
-      const r = await ex.proc_stop!({ name: "asahi-111" });
-      expect(r.ok).toBe(true);
-      expect(killCalls).toEqual([]);
-      expect(calls).toContainEqual(["delete", "asahi-111"]);
-      expect(r.content).toContain("확인하지 못했"); // Finding 3 — 위 pid:0 테스트와 같은 이유
-    });
-
-    // 리뷰 지적(Important, Finding 2): 이 테스트는 opts.killTree 를 생략해 "기존 호출부(worker.ts)는
-    // 손댈 필요가 없다"만 확인하려는 의도였는데, jlistWith("asahi-111", 111)(status:"online", pid:111)
-    // 을 같이 주는 바람에 opts.killTree 가 실제로 없을 때 배선되는 진짜 기본 구현(윈도우
-    // taskkill /PID 111 /T /F, POSIX process.kill(-111, "SIGKILL"))이 그대로 호출됐다 — 이 스위트를
-    // 돌리는 기계에서 그 순간 pid 111 을 쓰는 프로세스가 있다면(그게 무엇이든) 실제로 죽이는,
-    // "테스트가 실제 프로세스를 하나도 죽이지 않는다"는 이 브랜치 자신의 제약을 어기는 테스트였다.
-    // jlist 에 pid 필드를 아예 주지 않는다(파싱하면 null) — "pid 필드가 없는 jlist 항목" 테스트가
-    // killTree 를 주입해 호출 여부를 직접 단정하는 것과 달리, 여기서는 opts.killTree 생략 자체를
-    // 검증하는 게 목적이므로 기본 구현을 그대로 두되, pid 가 없어 그 기본 구현이 (아래 Finding 1
-    // 수정 이후에는 물론 이 수정만으로도) 절대 호출되지 않게 한다.
-    it("killTree 를 주입하지 않아도(opts 생략) proc_stop 은 그대로 동작한다 — 기존 호출부(worker.ts)는 손댈 필요가 없다", async () => {
-      const noPidJlist = JSON.stringify([
-        { name: "asahi-111", pm2_env: { status: "online", restart_time: 0, args: ["run", "dev"], pm_exec_path: "npm" } },
-      ]); // pid 없음(null) — 기본 killTree 가 절대 불리지 않는다
-      const { runPm2 } = fakePm2({ jlist: { ok: true, stdout: noPidJlist }, delete: { ok: true, stdout: "" } });
-      const ex = makeExecutors([root], { runPm2 }); // killTree 생략 — 기본 구현으로 떨어지지만, pid 가 없어 호출되지는 않는다
-      const r = await ex.proc_stop!({ name: "asahi-111" });
-      expect(r.ok).toBe(true);
-      expect(r.content).toContain("확인하지 못했"); // Finding 3 — 트리 kill 을 걸지 않았으니 그 사실을 그대로 알린다
-    });
-
-    // 리뷰 지적(Important, Finding 3): killTree 가 던지면(이미 죽었거나 권한 문제) 예전엔 그 실패를
-    // catch 에서 삼키고 "멈췄어요"만 그대로 돌려줬다 — 트리 kill 이 실제로 실패했는데도 성공과
-    // 구분 못 하는 메시지였다. 이제는 treeKilled 가 false 로 남아 메시지가 그 사실을 알린다.
-    it("killTree 가 실패해도(이미 죽었거나 권한 문제) pm2 delete 는 계속 진행하고, 트리 정리는 확인 못 했다고 알린다", async () => {
-      const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: jlistWith("asahi-111", 7872) }, delete: { ok: true, stdout: "" } });
-      const killTree = async () => { throw new Error("이미 죽은 프로세스"); };
-      const ex = makeExecutors([root], { runPm2, killTree });
-      const r = await ex.proc_stop!({ name: "asahi-111" });
-      expect(r.ok).toBe(true);
-      expect(calls).toContainEqual(["delete", "asahi-111"]);
-      expect(r.content).toContain("확인하지 못했");
-    });
-
-    it("asahi-<숫자> 형식이 아닌 이름(봇·워커 자신)은 killTree 도, jlist 조회도 없이 그대로 거절한다(기존 방어선 그대로)", async () => {
-      const killCalls: number[] = [];
-      const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: jlistWith("asahi-worker", 999) }, delete: { ok: true, stdout: "" } });
-      const killTree = async (pid: number) => { killCalls.push(pid); };
-      const ex = makeExecutors([root], { runPm2, killTree });
-      const r = await ex.proc_stop!({ name: "asahi-worker" });
-      expect(r.ok).toBe(false);
-      expect(killCalls).toEqual([]);
-      expect(calls).toEqual([]); // jlist 조회조차 없다 — 회원 이름 검증이 가장 먼저다
-    });
-  });
-
   it("proc_list 는 jlist 를 파싱해 표로 돌려준다", async () => {
     const stdout = JSON.stringify([{ name: "asahi-111", pm2_env: { status: "online", pm_uptime: 0, restart_time: 2, args: ["run", "dev"], pm_exec_path: "npm" }, monit: { memory: 5 * 1024 * 1024 } }]);
     const { runPm2 } = fakePm2({ jlist: { ok: true, stdout } });
-    const ex = makeExecutors([root], { runPm2 });
+    const ex = makeExecutors([root], { runPm2, scriptDir });
     const r = await ex.proc_list!({});
     expect(r.ok).toBe(true);
     expect(r.content).toContain("asahi-111");
@@ -889,7 +856,7 @@ describe("proc_* 실행기 — PM2 위임", () => {
       { name: "asahi-worker", pm2_env: { status: "online", pm_uptime: 0, restart_time: 0, args: [], pm_exec_path: "node" }, monit: { memory: 1 } },
     ]);
     const { runPm2 } = fakePm2({ jlist: { ok: true, stdout } });
-    const ex = makeExecutors([root], { runPm2 });
+    const ex = makeExecutors([root], { runPm2, scriptDir });
     const r = await ex.proc_list!({ onlyUserId: "111" });
     expect(r.ok).toBe(true);
     expect(r.content).toContain("asahi-111");
@@ -897,9 +864,72 @@ describe("proc_* 실행기 — PM2 위임", () => {
     expect(r.content).not.toContain("asahi-worker");
   });
 
+  // UX 회귀(2026-07-30): proc_list 가 존재하는 이유는 "뭐 돌고 있어?"에 모델의 기억이 아니라
+  // 사실을 답하기 위해서다 — pm2 raw 값(스크립트 경로)을 그대로 보여주면 그 목적이 무색해진다.
+  // 위 중복 거절 메시지 테스트와 같은 이유로, jlist 가 실제로 보고할 형태(cmd.exe 셸 래퍼 뒤에
+  // 스크립트 경로)를 그대로 흉내내 "표에 보이는 값이 그 raw 경로가 아니라 스크립트 파일에서
+  // 되찾은 원래 명령"이라는 것을 직접 증명한다.
+  it("proc_list 는 스크립트 경로가 아니라 되찾은 원래 명령을 보여준다(UX 회귀)", async () => {
+    const trapCommand = 'npm run dev -- --title="hi there"';
+    const scriptPath = path.join(scriptDir, "asahi-111.bat");
+    const runningWithScriptPath = JSON.stringify([
+      {
+        name: "asahi-111",
+        pm2_env: { status: "online", pm_uptime: Date.now(), restart_time: 0, args: ["/c", scriptPath], pm_exec_path: "C:\\Windows\\System32\\cmd.exe" },
+        monit: { memory: 1 },
+      },
+    ]);
+    const { runPm2 } = fakePm2({ jlist: [{ ok: true, stdout: "[]" }, { ok: true, stdout: runningWithScriptPath }] });
+    const ex = makeExecutors([root], { runPm2, scriptDir });
+    const started = await ex.proc_start!({ command: trapCommand, name: "asahi-111", cwd: projectDir });
+    expect(started.ok).toBe(true);
+
+    const r = await ex.proc_list!({});
+    expect(r.ok).toBe(true);
+    expect(r.content).toContain(trapCommand);
+    expect(r.content).not.toContain(scriptDir);
+  });
+
+  // Finding 2(Important, 후속 리뷰) 통합 검증: asahi-111 로 npm run dev(A)를 띄웠다가 멈추면
+  // 스크립트 파일은 남는다(proc_stop 은 지우지 않는다). 같은 pm2 이름으로 sh_exec + pm2 start 를
+  // 통해 완전히 다른 명령(B)을 직접 띄우는 것은 능력 모델이 명시적으로 허용하는 경로다 — 이때
+  // proc_list 는 파일에 남은 죽은 A 의 명령이 아니라 pm2 가 지금 실제로 보고하는 B 를 보여줘야
+  // 한다("워커가 확인한 사실을 답한다"는 proc_list 의 존재 이유 자체가 걸린 문제다).
+  it("proc_list 는 같은 이름 아래 다른 명령이 돌면(재시작) 오래된 스크립트 파일 내용을 보여주지 않는다(Finding 2)", async () => {
+    const { runPm2: firstRunPm2 } = fakePm2({ jlist: [{ ok: true, stdout: "[]" }, { ok: true, stdout: onlineJlist("asahi-111") }] });
+    const first = makeExecutors([root], { runPm2: firstRunPm2, scriptDir });
+    await first.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: projectDir }); // 파일을 남긴다
+
+    // 같은 이름으로 sh_exec + pm2 start 를 통해 완전히 다른 명령이 직접 떠 있는 상황을 재현한다 —
+    // pm2 는 셸 래퍼 없이 그 명령을 곧바로 보고한다(isShellWrapper 가 아닌 형태, commandOf 참고).
+    const differentCommandStdout = JSON.stringify([
+      { name: "asahi-111", pm2_env: { status: "online", pm_uptime: Date.now(), restart_time: 0, args: ["other_app.py"], pm_exec_path: "python" }, monit: { memory: 1 } },
+    ]);
+    const { runPm2 } = fakePm2({ jlist: { ok: true, stdout: differentCommandStdout } });
+    const second = makeExecutors([root], { runPm2, scriptDir }); // 같은 scriptDir(A 의 파일이 그대로 남아 있다)
+    const r = await second.proc_list!({});
+    expect(r.ok).toBe(true);
+    expect(r.content).toContain("python other_app.py"); // pm2 가 지금 실제로 보고한 값(B)
+    expect(r.content).not.toContain("npm run dev"); // 죽은 A 의 흔적(스크립트 파일 내용)이 아니다
+  });
+
+  // 되찾기가 실패해도(파일이 없거나 못 읽음) proc_list 전체가 죽어서는 안 된다 — pm2 가 보고한
+  // 값(commandOf 의 결과)으로 조용히 대체한다. writeStartScript 를 거치지 않은 이름(asahi-999)
+  // 이라 애초에 대응하는 스크립트 파일이 없는 상황을 그대로 재현한다.
+  it("스크립트 파일이 없으면 proc_list 는 실패하지 않고 pm2 가 보고한 값을 그대로 보여준다(우아한 폴백)", async () => {
+    const stdout = JSON.stringify([
+      { name: "asahi-999", pm2_env: { status: "online", pm_uptime: 0, restart_time: 0, args: ["run", "dev"], pm_exec_path: "npm" }, monit: { memory: 1 } },
+    ]);
+    const { runPm2 } = fakePm2({ jlist: { ok: true, stdout } });
+    const ex = makeExecutors([root], { runPm2, scriptDir });
+    const r = await ex.proc_list!({});
+    expect(r.ok).toBe(true);
+    expect(r.content).toContain("npm run dev");
+  });
+
   it("proc_logs 는 nostream 으로 부르고 줄 수를 넘긴다", async () => {
     const { calls, runPm2 } = fakePm2({ logs: { ok: true, stdout: "로그 본문" } });
-    const ex = makeExecutors([root], { runPm2 });
+    const ex = makeExecutors([root], { runPm2, scriptDir });
     const r = await ex.proc_logs!({ name: "asahi-111", lines: 30 });
     expect(r.ok).toBe(true);
     expect(r.content).toContain("로그 본문");
@@ -913,7 +943,7 @@ describe("proc_* 실행기 — PM2 위임", () => {
   // 않았다. 세 경우를 모두 채운다 — lines 생략(기본값), 하한 미만(0 이하), 상한 초과(200 초과).
   it("proc_logs 는 lines 를 생략하면 기본값 50줄을 쓴다", async () => {
     const { calls, runPm2 } = fakePm2({ logs: { ok: true, stdout: "로그" } });
-    const ex = makeExecutors([root], { runPm2 });
+    const ex = makeExecutors([root], { runPm2, scriptDir });
     await ex.proc_logs!({ name: "asahi-111" });
     const logs = calls.find((c) => c[0] === "logs")!;
     expect(logs).toContain("50");
@@ -921,7 +951,7 @@ describe("proc_* 실행기 — PM2 위임", () => {
 
   it("proc_logs 는 lines 하한(1) 밑으로 내려가지 않는다", async () => {
     const { calls, runPm2 } = fakePm2({ logs: { ok: true, stdout: "로그" } });
-    const ex = makeExecutors([root], { runPm2 });
+    const ex = makeExecutors([root], { runPm2, scriptDir });
     await ex.proc_logs!({ name: "asahi-111", lines: -5 });
     const logs = calls.find((c) => c[0] === "logs")!;
     expect(logs).toContain("1");
@@ -930,7 +960,7 @@ describe("proc_* 실행기 — PM2 위임", () => {
 
   it("proc_logs 는 lines 상한(200)을 넘지 않는다", async () => {
     const { calls, runPm2 } = fakePm2({ logs: { ok: true, stdout: "로그" } });
-    const ex = makeExecutors([root], { runPm2 });
+    const ex = makeExecutors([root], { runPm2, scriptDir });
     await ex.proc_logs!({ name: "asahi-111", lines: 9999 });
     const logs = calls.find((c) => c[0] === "logs")!;
     expect(logs).toContain("200");
@@ -943,7 +973,7 @@ describe("proc_* 실행기 — PM2 위임", () => {
   it("proc_logs 는 asahi-<숫자> 형식이 아닌 이름(봇·워커 자신)을 pm2 를 부르지 않고 거절한다", async () => {
     for (const infraName of ["asahi-worker", "asahi-assistant"]) {
       const { calls, runPm2 } = fakePm2({ logs: { ok: true, stdout: "로그 본문" } });
-      const ex = makeExecutors([root], { runPm2 });
+      const ex = makeExecutors([root], { runPm2, scriptDir });
       const r = await ex.proc_logs!({ name: infraName });
       expect(r.ok, `${infraName} 의 로그를 볼 수 있었다`).toBe(false);
       expect(r.content).toContain("회원");
@@ -953,7 +983,7 @@ describe("proc_* 실행기 — PM2 위임", () => {
 
   it("pm2 가 실패하면 stderr 를 사유로 돌려준다", async () => {
     const { runPm2 } = fakePm2({ jlist: { ok: false, stdout: "", stderr: "pm2 를 찾을 수 없습니다" } });
-    const ex = makeExecutors([root], { runPm2 });
+    const ex = makeExecutors([root], { runPm2, scriptDir });
     const r = await ex.proc_list!({});
     expect(r.ok).toBe(false);
     expect(r.content).toContain("pm2");
@@ -963,6 +993,193 @@ describe("proc_* 실행기 — PM2 위임", () => {
     const { runPm2 } = fakePm2({});
     const ex = makeExecutors([], { runPm2 });
     expect((await ex.proc_list!({})).ok).toBe(false);
+  });
+});
+
+// 실제 사고 원인 수정 검증(2026-07-30): 명령을 pm2 명령줄 인자로 넘기면 spawn(commandLine,
+// {shell:true}) 가 그 문자열을 먼저 cmd.exe 로 파싱한다 — buildPm2CommandLine 의 MSVCRT \"
+// 이스케이프를 cmd.exe 는 이해하지 못해(백슬래시를 리터럴로 두고 따옴표 개수만 센다) 첫 임베디드
+// 따옴표 뒤 토큰 경계가 전부 어긋난다. 미니PC 실측(한글 경로뿐 아니라 ASCII 만 쓴 공백 경로로도
+// 재현해 원인이 한글이 아니라 인용 자체임을 확인)으로 확정됐다 — 명령을 파일에 적어 넘기면 그
+// 내용은 어떤 셸도 명령줄로 파싱하지 않으므로 인용 자체가 필요 없어진다. 이 파일 내용 형식을
+// scriptContentFor 로 순수 함수로 떼어 직접 단정한다.
+describe("scriptContentFor — 스크립트 파일 내용(명령을 파일에 적으면 셸 인용이 필요 없다)", () => {
+  it("윈도우는 @echo off 다음 줄에 명령을 인용 없이 그대로 적는다(미니PC 실측으로 동작을 확인한 형태)", () => {
+    expect(scriptContentFor("npm run dev", "win32")).toBe("@echo off\nnpm run dev\n");
+  });
+
+  it("POSIX 는 셔뱅 다음 줄에 명령을 그대로 적는다", () => {
+    expect(scriptContentFor("npm run dev", "posix")).toBe("#!/bin/sh\nnpm run dev\n");
+  });
+
+  it("임베디드 따옴표가 든 명령도 이스케이프 없이 한 줄 그대로 적는다(실제 사고 재현 명령)", () => {
+    const cmd = 'npm run dev -- --title="hi there"';
+    expect(scriptContentFor(cmd, "win32")).toBe(`@echo off\n${cmd}\n`);
+  });
+});
+
+describe("writeStartScript — 회원 명령을 스크립트 파일로 남긴다", () => {
+  let dir: string;
+  beforeEach(() => { dir = fs.mkdtempSync(path.join(os.tmpdir(), "asahi-scripts-unit-")); });
+  afterEach(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  it("이름별로 파일 하나를 만들고 내용을 그대로 담는다", async () => {
+    const p = await writeStartScript(dir, "asahi-111", "npm run dev", "win32");
+    expect(p).toBe(path.join(dir, "asahi-111.bat"));
+    expect(fs.readFileSync(p, "utf8")).toBe("@echo off\nnpm run dev\n");
+  });
+
+  // proc_start 는 같은 이름이 이미 떠 있으면 이 단계에 도달하기 전에 거절한다(위 "조용히
+  // 교체하지 않는다" 참고) — 그러니 이 지점에 왔다는 것 자체가 "이 이름으로 새로 써도 안전하다"는
+  // 뜻이다. 재시작 때마다 최신 명령만 남기고 예전 파일이 쌓이지 않는 것이 의도된 동작이다.
+  it("같은 이름으로 다시 부르면 덮어쓴다(재시작마다 최신 명령만 남는다)", async () => {
+    await writeStartScript(dir, "asahi-111", "npm run old", "win32");
+    const p = await writeStartScript(dir, "asahi-111", "npm run new", "win32");
+    const content = fs.readFileSync(p, "utf8");
+    expect(content).toContain("npm run new");
+    expect(content).not.toContain("npm run old");
+  });
+
+  it("스크립트 폴더가 없으면 만들어서 쓴다", async () => {
+    const nested = path.join(dir, "a", "b");
+    const p = await writeStartScript(nested, "asahi-111", "npm run dev", "win32");
+    expect(fs.existsSync(p)).toBe(true);
+  });
+
+  // name 은 오늘 remoteTools.ts 가 항상 procNameFor(디스코드 userId)로 주입해 "asahi-<숫자>"
+  // 형태만 온다(이 실행기에 직접 닿는 다른 프로덕션 경로가 없다) — 그래도 이 값을 파일 경로
+  // 조각으로 쓰므로, 경로 구분자·'..' 가 섞여도 스크립트 폴더 밖으로 못 나가는지 방어적으로
+  // 확인한다(paths.ts 의 joinUnderRoot 와 같은 종류의 방어를 이 파일에서도 독립적으로 건다).
+  it("이름에 경로 구분자·'..'가 섞여도 스크립트 폴더 밖으로 못 나간다(방어적 sanitize)", async () => {
+    const p = await writeStartScript(dir, "../../evil", "npm run dev", "win32");
+    expect(path.dirname(p)).toBe(dir);
+    expect(fs.existsSync(p)).toBe(true);
+  });
+});
+
+// UX 회귀 수정 검증(2026-07-30): writeStartScript 가 회원 명령을 pm2 명령줄에서 스크립트 파일로
+// 옮기면서, pm2 jlist 가 돌려주는 command 는 더 이상 사람이 읽는 명령이 아니라 그 스크립트
+// "경로"가 됐다 — proc_list·중복 거절 메시지가 회원에게 그 경로를 그대로 보여주면 "뭐 돌고
+// 있어?"에 사실을 답한다는 이 기능의 존재 이유가 무색해진다. recoverCommands 는 이름(pm2 프로세스
+// 이름)만으로 writeStartScript 가 썼을 경로를 그대로 다시 계산해(scriptPathFor, 두 곳이 규칙을
+// 공유한다) 그 파일을 직접 읽어 원래 명령을 되찾는다 — pm2 가 무엇을 보고했든 무관하게 항상
+// 우리가 디스크에 쓴 값이 진실이다. 아래는 이 되찾기 자체를 직접 단정한다(통합 테스트는 위
+// "proc_* 실행기" describe 안의 proc_list·중복 거절 테스트 참고).
+describe("recoverCommands — pm2 jlist 의 command(스크립트 경로)를 원래 명령으로 되찾는다", () => {
+  let dir: string;
+  beforeEach(() => { dir = fs.mkdtempSync(path.join(os.tmpdir(), "asahi-recover-")); });
+  afterEach(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  const proc = (over: Partial<ProcInfo> = {}): ProcInfo => ({
+    name: "asahi-111",
+    userId: "111",
+    command: "(pm2 가 보고한 원래 값 — 되찾기 성공 시 버려져야 한다)",
+    status: "online",
+    startedAtMs: null,
+    memoryBytes: null,
+    restarts: 0,
+    ...over,
+  });
+
+  // Finding 2(Important, 후속 리뷰) 이후: recoverCommands 는 pm2 가 실제로 보고한 값이 그 스크립트
+  // 경로를 가리킬 때만 파일을 신뢰한다(아래 recoverCommands 선언부 참고) — 그래서 되찾기가
+  // "성공해야 하는" 테스트들은 command 를 "pm2 가 실제로 이 스크립트를 통해 그 프로세스를
+  // 실행했다"고 보고했을 형태(스크립트 경로 자체 — commandOf 가 셸 래퍼를 걷어내면 결국 경로
+  // 하나만 남는다)로 명시한다. "되찾기가 실패해야 하는" 테스트만 command 를 다른 값으로 둔다.
+  const scriptPathOf = (name: string) => path.join(dir, `${name}.bat`);
+
+  it("회원 프로세스는 스크립트 파일에서 읽은 원래 명령으로 command 를 덮어쓴다", async () => {
+    await writeStartScript(dir, "asahi-111", "npm run dev", "win32");
+    const [r] = await recoverCommands([proc({ command: scriptPathOf("asahi-111") })], dir, "win32");
+    expect(r!.command).toBe("npm run dev");
+  });
+
+  it("임베디드 따옴표가 든 명령도 이스케이프 없이 그대로 되찾는다", async () => {
+    const trapCommand = 'npm run dev -- --title="hi there"';
+    await writeStartScript(dir, "asahi-111", trapCommand, "win32");
+    const [r] = await recoverCommands([proc({ command: scriptPathOf("asahi-111") })], dir, "win32");
+    expect(r!.command).toBe(trapCommand);
+  });
+
+  it("스크립트 파일이 없으면(회원이 지웠거나 애초에 없음) pm2 가 보고한 값을 그대로 둔다(우아한 폴백)", async () => {
+    const [r] = await recoverCommands([proc({ name: "asahi-999", userId: "999" })], dir, "win32");
+    expect(r!.command).toBe("(pm2 가 보고한 원래 값 — 되찾기 성공 시 버려져야 한다)");
+  });
+
+  // userId===null 은 봇·워커 자신의 PM2 앱(asahi-assistant·asahi-worker, deploy/ecosystem.config.cjs)
+  // — writeStartScript 를 거치지 않으므로 대응하는 스크립트 파일 자체가 없다. 이름이 우연히
+  // 겹쳐 파일이 실제로 존재해도 손대지 않아야 한다는 것까지 확인한다(읽으면 안 되는 파일이
+  // 실수로 읽히는 회귀를 잡기 위해 일부러 만들어 둔다).
+  it("userId 가 null 인 프로세스(봇·워커 자신)는 파일이 있어도 건드리지 않는다", async () => {
+    await writeStartScript(dir, "asahi-worker", "이 파일은 읽히면 안 된다", "win32");
+    const [r] = await recoverCommands(
+      [proc({ name: "asahi-worker", userId: null, command: "node dist/worker.js" })],
+      dir,
+      "win32",
+    );
+    expect(r!.command).toBe("node dist/worker.js");
+  });
+
+  it("여러 프로세스를 한 번에 처리한다(각자 자기 이름의 파일만 읽는다)", async () => {
+    await writeStartScript(dir, "asahi-111", "npm run dev", "win32");
+    await writeStartScript(dir, "asahi-222", "npm run build", "win32");
+    const [r1, r2] = await recoverCommands(
+      [
+        proc({ name: "asahi-111", userId: "111", command: scriptPathOf("asahi-111") }),
+        proc({ name: "asahi-222", userId: "222", command: scriptPathOf("asahi-222") }),
+      ],
+      dir,
+      "win32",
+    );
+    expect(r1!.command).toBe("npm run dev");
+    expect(r2!.command).toBe("npm run build");
+  });
+
+  // Finding 2(Important, 후속 리뷰): "이름이 같은 파일이 있다"와 "이 프로세스가 실제로 그 파일에서
+  // 시작됐다"는 서로 다른 사실이다. proc_stop 은 스크립트 파일을 지우지 않으므로(writeStartScript
+  // 선언부 참고) 파일이 프로세스보다 오래 산다 — 회원이 asahi-111 로 A(npm run old-dev)를 띄웠다가
+  // 멈추고(파일은 남는다), 같은 pm2 이름으로 sh_exec + pm2 start 를 통해 완전히 다른 명령 B 를
+  // 직접 띄우면(능력 모델이 명시적으로 허용하는 경로), pm2 는 이제 B 를 보고한다 — 그런데도 파일
+  // "이름"만 보고 되찾으면 죽은 A 의 명령(파일 내용)을 지금 도는 B 인 것처럼 보여주게 된다. 그
+  // 프로세스가 실제로 그 스크립트에서 시작됐다는 증거(pm2 가 보고한 값이 그 경로를 가리킴)가 없는
+  // 한 파일을 신뢰하지 않는다.
+  it("파일은 있어도 pm2 가 보고한 값이 그 스크립트 경로를 가리키지 않으면 파일 내용으로 덮어쓰지 않는다(Finding 2)", async () => {
+    await writeStartScript(dir, "asahi-111", "npm run old-dev", "win32"); // 죽은 프로세스의 흔적(파일은 남는다)
+    const [r] = await recoverCommands(
+      [proc({ command: "python other_app.py" })], // pm2 가 실제로 보고한 값 — 스크립트 경로를 전혀 언급하지 않는다
+      dir,
+      "win32",
+    );
+    // 파일이 존재하고 이름도 일치하지만, pm2 가 보고한 값은 그 파일을 가리키지 않는다 — 파일
+    // 내용이 아니라 pm2 가 보고한 값(지금 실제로 도는 프로세스)을 그대로 남겨야 한다.
+    expect(r!.command).toBe("python other_app.py");
+  });
+
+  // Finding 5(Minor, 후속 리뷰): writeStartScript 는 항상 "헤더\n명령\n" 두 줄 형식으로만 쓰므로,
+  // 이 형식이 깨진 파일은 사람이 스크립트를 직접 열어 고친 경우에만 생긴다(줄바꿈 자체가 없는
+  // 등). commandFromScriptContent 의 헤더 가드(headerEnd===-1 이면 undefined)를 지우면 이 경우
+  // 헤더(@echo off)까지 포함한 파일 전체가 통째로 "명령"인 것처럼 노출된다 — 그 회귀를 잡는
+  // 테스트가 없었다.
+  it("스크립트 파일이 예상 형식과 다르면(줄바꿈이 없음 — 사람이 직접 고친 경우) 헤더까지 노출하지 않고 pm2 가 보고한 값을 그대로 둔다(Finding 5)", async () => {
+    const scriptPath = scriptPathOf("asahi-111");
+    fs.writeFileSync(scriptPath, "@echo off npm run dev"); // 줄바꿈 없이 한 줄로 뭉개짐 — writeStartScript 는 이런 형식을 만들지 않는다
+    const [r] = await recoverCommands([proc({ command: scriptPath })], dir, "win32");
+    expect(r!.command).not.toContain("@echo off");
+    expect(r!.command).toBe(scriptPath); // 되찾기 실패 — pm2 가 보고한 원래 값(스크립트 경로)을 그대로 둔다
+  });
+
+  // Finding 6(Minor, 후속 리뷰): commandFromScriptContent 는 명령 자체에 섞인 줄바꿈을 잃지 않고
+  // 그대로 되돌리는데, renderProcList(proc.ts)는 "프로세스 하나 = 줄 하나"를 전제한다 — 줄바꿈이
+  // 그대로 되찾아지면 표에 유령 행을 만들어 모델이 실제보다 프로세스가 더 많다고 읽을 수 있다.
+  it("명령에 줄바꿈이 섞여 있으면 한 줄로 뭉개 되찾는다(Finding 6 — renderProcList 의 '한 줄 = 프로세스 하나' 전제를 지킨다)", async () => {
+    const multilineCommand = "npm run dev\n--title=여러줄";
+    await writeStartScript(dir, "asahi-111", multilineCommand, "win32");
+    const [r] = await recoverCommands([proc({ command: scriptPathOf("asahi-111") })], dir, "win32");
+    expect(r!.command).not.toContain("\n");
+    expect(r!.command).not.toContain("\r");
+    // 뭉개졌을 뿐 정보 자체는 잃지 않는다 — 회원이 실제로 무엇을 실행했는지는 여전히 알 수 있다.
+    expect(r!.command).toContain("npm run dev");
+    expect(r!.command).toContain("--title=여러줄");
   });
 });
 

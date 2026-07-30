@@ -42,20 +42,10 @@ export type ProcInfo = {
   startedAtMs: number | null;
   memoryBytes: number | null;
   restarts: number;
-  // Defect 2(운영 중 발견): pm2 delete 는 pm2 가 직접 아는 자식(cmd.exe/sh)만 죽이고 그 밑의 실제
-  // 프로세스 트리(회원의 npm·vite 등, 손자 프로세스)는 그대로 남는다 — executors.ts 의 proc_stop 이
-  // pm2 delete 전에 taskkill /T 등으로 이 pid 로 트리 전체를 끝낸다. jlist 최상위 필드(pm2_env 밖)를
-  // 그대로 옮겨 온다.
-  //
-  // 정정(이 브랜치 후속 리뷰 Finding 4): 이 pid 로 트리를 끝내는 것만으로 고아가 안 생긴다고
-  // 보장되지는 않는다 — kill 시점에 앱이 여전히 pm2 에 등록돼 있어, autorestart 가 켜져 있으면
-  // kill과 pm2 delete 사이에 pm2 가 새 프로세스 트리를 다시 살릴 수 있다(executors.ts 의 killTree
-  // 선언부 주석 참고). proc_start 가 --no-autorestart 로 띄우는 것이 이 경쟁을 막는 전제 조건이다.
-  pid: number | null;
 };
 
 type RawEnv = { status?: unknown; pm_uptime?: unknown; restart_time?: unknown; args?: unknown; pm_exec_path?: unknown };
-type RawProc = { name?: unknown; pid?: unknown; pm2_env?: RawEnv; monit?: { memory?: unknown } };
+type RawProc = { name?: unknown; pm2_env?: RawEnv; monit?: { memory?: unknown } };
 
 const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
 
@@ -63,12 +53,18 @@ const num = (v: unknown): number | null => (typeof v === "number" && Number.isFi
 // 한 줄을 잡아먹으므로 마지막 조각만 쓴다(사람이 알아보는 데는 그것으로 충분하다).
 //
 // 리뷰 지적(Minor): proc_start(executors.ts)는 pm2 의 "스크립트" 자리에 cmd.exe/sh 를 넣고 실제
-// 명령은 "-- <flag> <command>" 로 넘긴다(shellFor() 참고) — pm2 는 그 셸을 pm_exec_path 로,
-// [flag, command] 를 그대로 args 로 돌려준다. 아무 가공 없이 이어붙이면 "cmd.exe /c npm run dev"
-// 처럼 셸 껍데기가 그대로 드러나 "npm run dev" 로 읽히도록 설계한 의도가 깨진다. 맨 앞 인자가 그
-// 두 플래그(/c 또는 -c) 중 하나면 셸 호출로 보고, exec(셸 이름)는 버리고 플래그를 뗀 나머지(실제
-// 명령)만 보여준다 — 이 파일은 executors.ts 를 모르므로(파일 상단 주석) shellFor() 의 flag 값을
-// 문자열 리터럴로 직접 안다.
+// 실행 대상은 "-- <flag> <그 뒤>" 로 넘긴다(shellFor() 참고) — pm2 는 그 셸을 pm_exec_path 로,
+// [flag, ...] 를 그대로 args 로 돌려준다. 아무 가공 없이 이어붙이면 "cmd.exe /c ..." 처럼 셸
+// 껍데기가 그대로 드러난다. 맨 앞 인자가 그 두 플래그(/c 또는 -c) 중 하나면 셸 호출로 보고,
+// exec(셸 이름)는 버리고 플래그를 뗀 나머지만 보여준다 — 이 파일은 executors.ts 를 모르므로
+// (파일 상단 주석) shellFor() 의 flag 값을 문자열 리터럴로 직접 안다.
+//
+// 스크립트 파일 우회 이후(executors.ts 의 buildPm2CommandLine 뒤 "실제 사고 원인과 고침" 참고):
+// 실제 proc_start 가 그 뒷부분에 넣는 값은 이제 사람이 읽는 명령("npm run dev")이 아니라
+// writeStartScript 가 만든 스크립트 파일 경로다 — 회원 명령을 pm2 명령줄에 아예 올리지 않기
+// 위해서다. 그래서 proc_list 등에 보이는 값도 이제 그 경로이지 원래 명령이 아니다(알려진, 받아
+// 들인 겉모습 변화 — commandOf 자신은 뒷부분이 사람이 읽는 명령이든 경로든 신경 쓰지 않고 셸
+// 껍데기만 걷어낸다).
 function commandOf(env: RawEnv | undefined): string {
   const exec = typeof env?.pm_exec_path === "string" ? env.pm_exec_path.split(/[\\/]/).pop() ?? "" : "";
   const args = Array.isArray(env?.args) ? env.args.filter((a): a is string => typeof a === "string") : [];
@@ -102,7 +98,6 @@ export function parsePm2List(json: string): ProcInfo[] {
       startedAtMs: started,
       memoryBytes: num(p.monit?.memory),
       restarts: num(p.pm2_env?.restart_time) ?? 0,
-      pid: num(p.pid),
     };
   });
 }
