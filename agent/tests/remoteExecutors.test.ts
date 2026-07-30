@@ -699,9 +699,22 @@ describe("proc_* 실행기 — PM2 위임", () => {
       expect(calls).toContainEqual(["delete", "asahi-111"]);
     });
 
+    // 리뷰 지적(Important, Finding 2): 이 테스트는 opts.killTree 를 생략해 "기존 호출부(worker.ts)는
+    // 손댈 필요가 없다"만 확인하려는 의도였는데, jlistWith("asahi-111", 111)(status:"online", pid:111)
+    // 을 같이 주는 바람에 opts.killTree 가 실제로 없을 때 배선되는 진짜 기본 구현(윈도우
+    // taskkill /PID 111 /T /F, POSIX process.kill(-111, "SIGKILL"))이 그대로 호출됐다 — 이 스위트를
+    // 돌리는 기계에서 그 순간 pid 111 을 쓰는 프로세스가 있다면(그게 무엇이든) 실제로 죽이는,
+    // "테스트가 실제 프로세스를 하나도 죽이지 않는다"는 이 브랜치 자신의 제약을 어기는 테스트였다.
+    // jlist 에 pid 필드를 아예 주지 않는다(파싱하면 null) — "pid 필드가 없는 jlist 항목" 테스트가
+    // killTree 를 주입해 호출 여부를 직접 단정하는 것과 달리, 여기서는 opts.killTree 생략 자체를
+    // 검증하는 게 목적이므로 기본 구현을 그대로 두되, pid 가 없어 그 기본 구현이 (아래 Finding 1
+    // 수정 이후에는 물론 이 수정만으로도) 절대 호출되지 않게 한다.
     it("killTree 를 주입하지 않아도(opts 생략) proc_stop 은 그대로 동작한다 — 기존 호출부(worker.ts)는 손댈 필요가 없다", async () => {
-      const { runPm2 } = fakePm2({ jlist: { ok: true, stdout: jlistWith("asahi-111", 111) }, delete: { ok: true, stdout: "" } });
-      const ex = makeExecutors([root], { runPm2 }); // killTree 생략 — 기본 구현으로 떨어진다
+      const noPidJlist = JSON.stringify([
+        { name: "asahi-111", pm2_env: { status: "online", restart_time: 0, args: ["run", "dev"], pm_exec_path: "npm" } },
+      ]); // pid 없음(null) — 기본 killTree 가 절대 불리지 않는다
+      const { runPm2 } = fakePm2({ jlist: { ok: true, stdout: noPidJlist }, delete: { ok: true, stdout: "" } });
+      const ex = makeExecutors([root], { runPm2 }); // killTree 생략 — 기본 구현으로 떨어지지만, pid 가 없어 호출되지는 않는다
       const r = await ex.proc_stop!({ name: "asahi-111" });
       expect(r.ok).toBe(true);
     });
