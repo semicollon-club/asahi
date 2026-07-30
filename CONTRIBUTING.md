@@ -8,6 +8,10 @@ lastReviewed: 2026-07-28
 정리했다. 처음 이 리포를 여는 기여자든, 오랜만에 돌아온 소유자 본인이든 여기서 시작하면
 된다.
 
+> **에이전트가 읽고 있다면** [docs/agent-onboarding.md](docs/agent-onboarding.md)를 먼저 봐라.
+> 이 문서는 셋업 절차이고, 그쪽은 작업 방식과 이 환경의 함정(계정 분리, PowerShell 5.1,
+> 배포 순서, PM2 의 거짓 신호, cmd.exe 인용 경계)을 모은 것이다.
+
 ## 사전 요구사항
 
 - **Node.js 22 이상** (`agent/package.json`의 `engines.node`가 강제한다)
