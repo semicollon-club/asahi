@@ -674,6 +674,10 @@ describe("proc_* 실행기 — PM2 위임", () => {
       const r = await ex.proc_stop!({ name: "asahi-111" });
       expect(r.ok).toBe(true);
       expect(order).toEqual(["pm2:jlist", "kill:7872", "pm2:delete"]);
+      // 리뷰 지적(Important, Finding 3): 트리 kill 이 실제로 성공한 이 경로에서는 메시지가
+      // 무조건 담백해야 한다 — 아래 "확인하지 못했다" 문구가 여기서도 나오면 성공한 케이스까지
+      // 매번 캐비엇을 붙이는 것이라 qualification 이 신호로서 무의미해진다.
+      expect(r.content).toBe("멈췄어요: asahi-111");
     });
 
     it("jlist 에 그 이름이 없으면(이미 사라졌거나 목록 조회가 비어 있으면) killTree 를 건너뛰고 pm2 delete 는 그대로 시도한다", async () => {
@@ -685,6 +689,11 @@ describe("proc_* 실행기 — PM2 위임", () => {
       expect(r.ok).toBe(true);
       expect(killCalls).toEqual([]);
       expect(calls).toContainEqual(["delete", "asahi-111"]);
+      // 리뷰 지적(Important, Finding 3): 트리 kill 이 아예 걸리지 않은 이 경로에서 예전엔 "멈췄어요"만
+      // 그대로 돌려줘, pm2 가 모르는 손자 프로세스(회원의 npm·vite 등)가 남아 있어도 회원은 알
+      // 방법이 없었다 — 이 결함을 처음 만든 바로 그 증상이다. 이제는 확인하지 못했다는 사실 자체를
+      // 그대로 전달한다.
+      expect(r.content).toContain("확인하지 못했");
     });
 
     it("pid 필드가 없는 jlist 항목(예: 파싱 실패)이어도 killTree 를 부르지 않고 delete 는 그대로 진행한다", async () => {
@@ -697,6 +706,7 @@ describe("proc_* 실행기 — PM2 위임", () => {
       expect(r.ok).toBe(true);
       expect(killCalls).toEqual([]);
       expect(calls).toContainEqual(["delete", "asahi-111"]);
+      expect(r.content).toContain("확인하지 못했"); // Finding 3 — 위 테스트와 같은 이유
     });
 
     // 리뷰 지적(Important, Finding 1): pm2 는 정지·오류 상태의 앱에 pid:0 을 돌려준다 — 회원의
@@ -716,6 +726,7 @@ describe("proc_* 실행기 — PM2 위임", () => {
       expect(r.ok).toBe(true);
       expect(killCalls).toEqual([]); // killTree(0) 이 불렸다면 POSIX 에서 process.kill(-0, …) 로 워커 자신을 죽였을 것이다
       expect(calls).toContainEqual(["delete", "asahi-111"]);
+      expect(r.content).toContain("확인하지 못했"); // Finding 3 — 트리 kill 을 걸지 않았으니 그 사실을 그대로 알린다
     });
 
     // 리뷰 지적(Important, Finding 1, 컨트롤러 결정): pid 가 양수여도 status 가 "online" 이 아니면
@@ -737,6 +748,7 @@ describe("proc_* 실행기 — PM2 위임", () => {
       expect(r.ok).toBe(true);
       expect(killCalls).toEqual([]);
       expect(calls).toContainEqual(["delete", "asahi-111"]);
+      expect(r.content).toContain("확인하지 못했"); // Finding 3 — 위 pid:0 테스트와 같은 이유
     });
 
     // 리뷰 지적(Important, Finding 2): 이 테스트는 opts.killTree 를 생략해 "기존 호출부(worker.ts)는
@@ -757,15 +769,20 @@ describe("proc_* 실행기 — PM2 위임", () => {
       const ex = makeExecutors([root], { runPm2 }); // killTree 생략 — 기본 구현으로 떨어지지만, pid 가 없어 호출되지는 않는다
       const r = await ex.proc_stop!({ name: "asahi-111" });
       expect(r.ok).toBe(true);
+      expect(r.content).toContain("확인하지 못했"); // Finding 3 — 트리 kill 을 걸지 않았으니 그 사실을 그대로 알린다
     });
 
-    it("killTree 가 실패해도(이미 죽었거나 권한 문제) pm2 delete 는 계속 진행하고 그 성패로 응답한다", async () => {
+    // 리뷰 지적(Important, Finding 3): killTree 가 던지면(이미 죽었거나 권한 문제) 예전엔 그 실패를
+    // catch 에서 삼키고 "멈췄어요"만 그대로 돌려줬다 — 트리 kill 이 실제로 실패했는데도 성공과
+    // 구분 못 하는 메시지였다. 이제는 treeKilled 가 false 로 남아 메시지가 그 사실을 알린다.
+    it("killTree 가 실패해도(이미 죽었거나 권한 문제) pm2 delete 는 계속 진행하고, 트리 정리는 확인 못 했다고 알린다", async () => {
       const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: jlistWith("asahi-111", 7872) }, delete: { ok: true, stdout: "" } });
       const killTree = async () => { throw new Error("이미 죽은 프로세스"); };
       const ex = makeExecutors([root], { runPm2, killTree });
       const r = await ex.proc_stop!({ name: "asahi-111" });
       expect(r.ok).toBe(true);
       expect(calls).toContainEqual(["delete", "asahi-111"]);
+      expect(r.content).toContain("확인하지 못했");
     });
 
     it("asahi-<숫자> 형식이 아닌 이름(봇·워커 자신)은 killTree 도, jlist 조회도 없이 그대로 거절한다(기존 방어선 그대로)", async () => {

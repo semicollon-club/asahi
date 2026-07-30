@@ -47,6 +47,11 @@ export type RunPm2 = (args: string[]) => Promise<{ ok: boolean; stdout: string; 
 // 이 사고에서는 그 기본값이 실제로 트리를 못 죽였다). RunPm2 와 같은 이유로 이음매 뒤로 뺀다 —
 // 테스트가 실제 프로세스를 하나도 죽이지 않고도 "정확한 pid 로, pm2 delete 보다 먼저 불렸는지"를
 // 확인할 수 있어야 한다.
+//
+// 리뷰 지적(Important, Finding 3): 실패하면 반드시 reject 해야 한다 — 예전 기본 구현은 taskkill의
+// 종료 코드를 보지 않고 항상 resolve 했다(아래 참고). proc_stop 은 이 Promise 가 정상 종료했는지로
+// "트리 정리를 확인했다"는 메시지를 결정하므로(treeKilled), 실패를 삼키고 resolve 하면 회원에게
+// 거짓 확신을 준다 — throw(reject) 가 유일한 실패 신호다.
 export type KillTree = (pid: number) => Promise<void>;
 
 // shellFor()·기본 runPm2(아래)가 함께 쓰는 "워커가 윈도우인지 POSIX 인지" 판정 결과 타입.
@@ -192,7 +197,7 @@ export function makeExecutors(roots: string[], opts: { runPm2?: RunPm2; killTree
   const killTree: KillTree =
     opts.killTree ??
     ((pid) =>
-      new Promise((resolve) => {
+      new Promise<void>((resolve, reject) => {
         if (shellFlavorOf(roots) === "win32") {
           // pm2 는 cmd.exe /c <command> 를 띄우고, 회원의 실제 서버(npm/vite 등)는 그 자식(pm2
           // 입장에서는 손자) 프로세스다 — pm2 delete 는 pm2 가 직접 아는 cmd.exe 만 죽이고 그
@@ -202,10 +207,14 @@ export function makeExecutors(roots: string[], opts: { runPm2?: RunPm2; killTree
           // taskkill /T(트리 전체) /F(강제)를 직접 쓴다.
           try {
             const killer = spawn("taskkill", ["/PID", String(pid), "/T", "/F"]);
-            killer.on("error", () => resolve());
-            killer.on("close", () => resolve());
-          } catch {
-            resolve();
+            killer.on("error", (e) => reject(e));
+            // 리뷰 지적(Important, Finding 3): 예전엔 close 이벤트만 보고 종료 코드를 확인하지
+            // 않아, taskkill 이 실패해도(이미 없는 pid, 권한 부족 등) 항상 "성공"으로 resolve 했다
+            // — proc_stop 이 이 결과를 "트리를 실제로 정리했다"는 신호로 못 쓰는 원인이었다. 0 이
+            // 아니면 reject 해 호출측(proc_stop)의 catch/treeKilled 로 실패가 그대로 전달되게 한다.
+            killer.on("close", (code) => (code === 0 ? resolve() : reject(new Error(`taskkill 종료 코드 ${code}`))));
+          } catch (e) {
+            reject(e);
           }
         } else {
           // POSIX: 이 클럽의 실제 워커는 전부 회원 개인 PC·공유 미니 PC 로, 오늘은 전부 윈도우다
@@ -220,11 +229,14 @@ export function makeExecutors(roots: string[], opts: { runPm2?: RunPm2; killTree
           // 않다 — 이 캐비엇을 인지한 채로, "적어도 표준적이고 틀리지 않은" 선택을 한다.
           try {
             process.kill(-pid, "SIGKILL");
-          } catch {
-            // 이미 죽었거나 권한 문제 — proc_stop 의 최종 판정은 아래 pm2 delete 의 성패로 하므로
-            // 여기서 실패해도 무시해도 안전하다(최선을 다하는 정리일 뿐).
+            resolve();
+          } catch (e) {
+            // 리뷰 지적(Important, Finding 3): 윈도우 분기와 같은 이유로 여기서도 실패를 삼키지
+            // 않는다 — 이미 죽었거나(ESRCH) 권한 문제(EPERM)면 reject 해 proc_stop 이 "확인하지
+            // 못했다"고 정직하게 알리게 한다. 최종 판정은 여전히 pm2 delete 의 성패이므로(proc_stop
+            // 의 catch 참고) 이 reject 자체가 도구 호출을 실패시키지는 않는다.
+            reject(e);
           }
-          resolve();
         }
       }));
 
@@ -658,20 +670,35 @@ export function makeExecutors(roots: string[], opts: { runPm2?: RunPm2; killTree
       // 자신이 "이 pid 가 바로 지금 이 앱의 것"이라고 확인해 주는 유일한 근거이고, 그 밖의
       // 상태(정지·오류 등)에는 그 근거가 없다 — 회원 하나를 멈추려다 공유 기계의 다른 무언가를
       // 죽이는 것보다는, 트리 kill을 건너뛰고 그 사실을 정직하게 알리는 쪽(아래 Finding 3)이 안전하다.
+      // 리뷰 지적(Important, Finding 3): treeKilled 는 "트리 kill을 실제로 걸었고, killTree 가
+      // 실패 신호(reject) 없이 끝났다"는 것만 뜻한다 — jlist 실패·이름 못 찾음·pid 무효(Finding 1)로
+      // 아예 시도하지 않은 경우는 물론, 시도했지만 killTree 가 던진 경우(catch)까지 전부 false 로
+      // 남는다. 아래 최종 메시지가 이 값을 그대로 반영한다.
+      let treeKilled = false;
       if (proc && proc.status === "online" && proc.pid !== null && proc.pid > 0) {
         try {
           await killTree(proc.pid);
+          treeKilled = true;
         } catch {
-          // 트리 kill 은 최선을 다하는 정리일 뿐 이 도구의 성패를 좌우하지 않는다 — 실패해도
-          // (이미 죽었거나 권한 문제) 아래 pm2 delete 로 계속 진행한다. 최종 응답은 언제나
-          // pm2 delete 자신의 성패다.
+          // 트리 kill은 최선을 다하는 정리일 뿐 이 도구의 성패(delete 여부)를 좌우하지 않는다 —
+          // 실패해도(이미 죽었거나 권한 문제) 아래 pm2 delete로 계속 진행한다. 다만 treeKilled는
+          // false로 남겨, 아래 메시지가 "정리를 확인하지 못했다"고 정직하게 알리게 한다.
         }
       }
 
       const r = await runPm2(["delete", name]);
-      return r.ok
+      if (!r.ok) return { ok: false, content: `멈추지 못했어요: ${r.stderr.trim() || "그런 프로세스가 없어요"}` };
+      // 리뷰 지적(Important, Finding 3): pm2 delete 가 성공해도 그건 pm2 가 아는 자식(cmd.exe/sh)
+      // 까지만 보장한다(KillTree 선언부 주석 참고) — treeKilled 가 false 면 그 밑의 진짜 서버
+      // 프로세스가 여전히 돌고 있을 수 있는데, 예전엔 이 경우에도 "멈췄어요"만 그대로 돌려줘 이
+      // 결함을 처음 만든 바로 그 증상(회원은 멈췄다고 믿지만 npm run dev 가 포트를 붙든 채
+      // 남는다)을 되풀이했다. 확인하지 못했다는 사실 자체를 회원에게 그대로 전달한다.
+      return treeKilled
         ? { ok: true, content: `멈췄어요: ${name}` }
-        : { ok: false, content: `멈추지 못했어요: ${r.stderr.trim() || "그런 프로세스가 없어요"}` };
+        : {
+            ok: true,
+            content: `멈췄어요 — 다만 하위 프로세스까지 정리했는지는 확인하지 못했어요. "뭐 돌고 있어?" 로 확인해 주세요.`,
+          };
     },
 
     async proc_list(args) {
