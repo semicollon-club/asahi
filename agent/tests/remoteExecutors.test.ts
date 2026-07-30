@@ -758,6 +758,39 @@ describe("proc_* 실행기 — PM2 위임", () => {
     );
   });
 
+  // ── Finding 3(Minor, 후속 리뷰) — 스크립트 폴더가 회원 폴더 안에 있으면 실행을 거절한다 ─────────
+  // DEFAULT_SCRIPT_DIR 선언부의 "회원 폴더(roots) 밖에 둔다"는 지금까지 강제되지 않는 주석일
+  // 뿐이었다 — roots(WORKER_ROOTS)에 언젠가 사용자 프로필 폴더가 포함되면(개인 워커에서는 충분히
+  // 있을 수 있는 설정) scriptDir 이 roots 안에 들어오고, 그 순간부터 fs_write·fs_edit 로 회원이
+  // 자기 .bat/.sh 파일 내용을 직접 고쳐 proc_start 가 실제로 실행할 내용을 바꿔치기할 수 있다.
+  describe("proc_start — 스크립트 폴더가 회원 작업 폴더 안에 있으면 실행을 거절한다(Finding 3)", () => {
+    it("scriptDir 이 roots 의 하위 폴더면 pm2 를 부르지 않고 명시적으로 거절한다", async () => {
+      const scriptDirInsideRoot = path.join(root, "스크립트-보관");
+      const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: "[]" } });
+      const ex = makeExecutors([root], { runPm2, scriptDir: scriptDirInsideRoot });
+      const r = await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: projectDir });
+      expect(r.ok).toBe(false);
+      expect(r.content).toContain("스크립트");
+      expect(calls).toEqual([]); // pm2 조회조차 없다 — 설정 오류는 다른 무엇보다 먼저 걸러야 한다
+    });
+
+    it("scriptDir 이 roots 와 정확히 같아도 거절한다(경계값)", async () => {
+      const { calls, runPm2 } = fakePm2({ jlist: { ok: true, stdout: "[]" } });
+      const ex = makeExecutors([root], { runPm2, scriptDir: root });
+      const r = await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: projectDir });
+      expect(r.ok).toBe(false);
+      expect(calls).toEqual([]);
+    });
+
+    it("scriptDir 이 roots 밖이면(정상 설정) 평소처럼 진행한다(회귀 방지)", async () => {
+      const { calls, runPm2 } = fakePm2({ jlist: [{ ok: true, stdout: "[]" }, { ok: true, stdout: onlineJlist("asahi-111") }] });
+      const ex = makeExecutors([root], { runPm2, scriptDir }); // beforeEach 의 scriptDir 은 root 의 형제 폴더
+      const r = await ex.proc_start!({ command: "npm run dev", name: "asahi-111", cwd: projectDir });
+      expect(r.ok).toBe(true);
+      expect(calls.some((c) => c[0] === "start")).toBe(true);
+    });
+  });
+
   it("proc_stop 은 pm2 delete 를 부른다", async () => {
     const { calls, runPm2 } = fakePm2({ delete: { ok: true, stdout: "" } });
     const ex = makeExecutors([root], { runPm2, scriptDir });

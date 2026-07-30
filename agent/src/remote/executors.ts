@@ -13,7 +13,7 @@ import {
   type TreeEntry,
   type TreeTruncReason,
 } from "./tree.js";
-import { pathFlavorOf } from "../core/paths.js";
+import { pathFlavorOf, isPathWithinAny } from "../core/paths.js";
 import { parsePm2List, renderProcList, procNameFor, parseProcName, type ProcInfo } from "./proc.js";
 
 export type ExecResult = { ok: boolean; content: string };
@@ -361,6 +361,16 @@ export function makeExecutors(roots: string[], opts: { runPm2?: RunPm2; scriptDi
   // 참고) — 테스트가 실제 OS 임시폴더를 더럽히지 않고 파일 내용을 직접 들여다볼 수 있도록 주입
   // 지점을 열어 둔다. 프로덕션(worker.ts)은 opts 를 생략하므로 항상 기본값을 쓴다.
   const scriptDir = opts.scriptDir ?? DEFAULT_SCRIPT_DIR;
+
+  // Finding 3(Minor, 후속 리뷰): DEFAULT_SCRIPT_DIR 선언부의 "회원 폴더(roots) 밖에 둔다"는
+  // 지금까지 강제되지 않는 주석일 뿐이었다 — roots(WORKER_ROOTS)에 언젠가 사용자 프로필 폴더가
+  // 포함되면(개인 워커에서는 충분히 있을 수 있는 설정) scriptDir 이 roots 안에 들어오고, 그
+  // 순간부터 fs_write·fs_edit 로 회원이 자기 .bat/.sh 파일 내용을 직접 고쳐 proc_start 가 실제로
+  // 실행할 내용을 바꿔치기할 수 있다 — 파일이 "이 회원이 요청한 명령을 기록하는 자리"에서 "이
+  // 회원이 마음대로 다시 쓸 수 있는 자리"로 바뀌는 것이다. roots·scriptDir 은 이 함수 호출 동안
+  // 바뀌지 않으므로 proc_start 호출마다 다시 판정하지 않고 한 번만 계산해 둔다(아래 proc_start
+  // 가 이 값을 참조해 거절한다 — 조용히 넘어가지 않고 명시적으로 실패한다).
+  const scriptDirIsSafe = !isPathWithinAny(scriptDir, roots);
 
   const runPm2: RunPm2 =
     opts.runPm2 ??
@@ -726,6 +736,16 @@ export function makeExecutors(roots: string[], opts: { runPm2?: RunPm2; scriptDi
     async proc_start(args) {
       const g = procGate();
       if (!g.ok) return g.res;
+      // Finding 3(Minor, 후속 리뷰): 위 scriptDirIsSafe 선언부 참고 — 회원의 명령·이름·cwd 를
+      // 보기도 전에, 이 워커 자신의 설정이 안전한 전제를 지키는지부터 확인한다. 이 판정은
+      // 개별 호출의 인자와 무관하므로(roots·scriptDir 은 makeExecutors 호출 동안 고정) 가장
+      // 먼저 걸러도 된다.
+      if (!scriptDirIsSafe) {
+        return {
+          ok: false,
+          content: `워커 설정 오류로 실행할 수 없어요 — 실행 스크립트를 저장하는 폴더(${scriptDir})가 회원 작업 폴더 안에 있어요. 이대로 두면 fs_write·fs_edit 로 그 스크립트 내용을 직접 바꿔 다음 실행에 영향을 줄 수 있으니, 스크립트 폴더 설정을 회원 작업 폴더 밖으로 옮겨야 해요(관리자에게 알려주세요).`,
+        };
+      }
       const command = str(args.command);
       const name = str(args.name);
       const cwd = str(args.cwd);
