@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   makeExecutors,
   OUTPUT_MAX,
@@ -10,9 +11,14 @@ import {
   writeStartScript,
   recoverCommands,
   describeExit,
+  SH_EXEC_TIMEOUT_HINT,
 } from "../src/remote/executors.js";
 import { TREE_MAX_ENTRIES } from "../src/remote/tree.js";
 import type { ProcInfo } from "../src/remote/proc.js";
+
+// 아래 "hardTimer·timedOut 두 타임아웃 메시지" 테스트가 소스를 직접 읽어 상수 참조 개수를
+// 세는 데 쓴다 — executors.ts 선언부 참고(같은 파일을 가리켜야 하므로 여기 한 곳에서만 계산).
+const EXECUTORS_SRC = fileURLToPath(new URL("../src/remote/executors.ts", import.meta.url));
 
 describe("워커 실행기", () => {
   let root: string;
@@ -171,6 +177,30 @@ describe("워커 실행기", () => {
     expect(r.ok).toBe(false);
     expect(r.content).toContain("proc_start");
   }, 10000);
+
+  // 리뷰 지적(Important): 위 테스트는 timedOut 갈래(close 가 정상적으로 온 경우)만 지나간다 —
+  // hardTimer 갈래(강제종료에도 close 가 안 와 최종적으로 포기하는 경우)는 KILL_GRACE_MS+
+  // FORCE_KILL_GRACE_MS(5초) 동안 close 가 끝내 오지 않는 프로세스를 요구하는데, 그런 프로세스를
+  // 짧고 결정론적인 단위테스트로 만들 방법이 없다(만들 수 있어도 매번 5초 이상 걸려 느리고
+  // 불안정해진다). executors.ts 가 SH_EXEC_TIMEOUT_HINT 상수 하나로 두 메시지를 만들게 고친
+  // 이유가 이것이다 — hardTimer 갈래를 실행하지 않고도, (1) 상수 자체의 값과 (2) 두 메시지가
+  // 실제로 이 상수를 참조해 만들어지는지를 소스에서 직접 확인하면 문구가 지워지거나 갈리는
+  // 것을 잡을 수 있다.
+  it("SH_EXEC_TIMEOUT_HINT 문구는 정확히 이 내용이다", () => {
+    expect(SH_EXEC_TIMEOUT_HINT).toBe("계속 도는 프로그램이라면 proc_start 로 띄워야 해요.");
+  });
+
+  it("hardTimer·timedOut 두 타임아웃 메시지 모두 SH_EXEC_TIMEOUT_HINT 하나를 참조해 만든다", () => {
+    const src = fs.readFileSync(EXECUTORS_SRC, "utf8");
+    // hardTimer 갈래·timedOut 갈래 각각 한 번씩, 정확히 2회 참조해야 한다 — 어느 한쪽이 상수
+    // 참조를 잃고 다시 별도 문자열로 되돌아가면(예: 되돌리는 리팩터) 이 개수가 어긋난다.
+    const interpolations = src.match(/\$\{SH_EXEC_TIMEOUT_HINT\}/g) ?? [];
+    expect(interpolations).toHaveLength(2);
+    // 상수 값 자체의 문자열 리터럴은 선언부 한 곳에만 있어야 한다 — 둘 이상이면 어딘가 이
+    // 상수와 몰래 따로 노는 하드코딩 사본이 다시 생겼다는 뜻이다(고치려던 중복의 재발).
+    const literalOccurrences = src.split(`"${SH_EXEC_TIMEOUT_HINT}"`).length - 1;
+    expect(literalOccurrences).toBe(1);
+  });
 
   it("루트가 비면 sh_exec 도 거부한다", async () => {
     const none = makeExecutors([]);

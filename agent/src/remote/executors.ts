@@ -36,6 +36,16 @@ const KILL_GRACE_MS = 3_000;
 //    감안한 버퍼. 이 시간이 지나면 프로세스 생사와 무관하게 무조건 resolve 한다.
 const FORCE_KILL_GRACE_MS = 2_000;
 
+// sh_exec 의 타임아웃 메시지 두 곳(아래 hardTimer 갈래·close 핸들러의 timedOut 갈래)이 이
+// 문구를 그대로 복제해 갖고 있었다. hardTimer 갈래는 KILL_GRACE_MS+FORCE_KILL_GRACE_MS(5초)가
+// 지나도록 close 가 끝내 오지 않아야만 실행되는 경로라, 실제 프로세스로 재현하려면 "강제종료에도
+// 안 죽는 프로세스"를 만들어야 해서 느리고 불안정하다 — 그래서 어떤 테스트도 그 경로를 실행하지
+// 않는다. 문구를 각 갈래에 따로 적어두면, hardTimer 쪽 문구가 지워지거나 오타가 나도 테스트가
+// 실행 없이는 잡을 방법이 없다(둘째, 두 문장이 따로 존재하는 한 나중에 한쪽만 고쳐 말이 갈릴
+// 수도 있다). 상수 하나로 뽑아 두 메시지가 같은 값을 참조하게 하면, 이 상수의 내용만 단정해도
+// (실행 없이) 두 메시지 모두가 같은 문구임을 보장할 수 있다 — 값이 하나뿐이라 갈릴 수가 없다.
+export const SH_EXEC_TIMEOUT_HINT = "계속 도는 프로그램이라면 proc_start 로 띄워야 해요.";
+
 // PM2 CLI 호출을 이음매 뒤로 뺀다. 테스트가 실제 PM2 설치를 요구하면 그 경로는 CI 에서도
 // 개발자 기계에서도 한 번도 지나가지 않는다 — 2026-07-28 최종 리뷰가 잡은 Critical(실패 신호
 // 소실)이 정확히 그렇게 다섯 번의 리뷰를 통과했다.
@@ -706,7 +716,7 @@ export function makeExecutors(roots: string[], opts: { runPm2?: RunPm2; scriptDi
               finish({
                 ok: false,
                 content: truncate(
-                  `${out}\n(${timeoutMs}ms 안에 끝나지 않아 중단했어요 — 강제종료에도 응답이 없어 대기를 포기했어요. 계속 도는 프로그램이라면 proc_start 로 띄워야 해요.)`,
+                  `${out}\n(${timeoutMs}ms 안에 끝나지 않아 중단했어요 — 강제종료에도 응답이 없어 대기를 포기했어요. ${SH_EXEC_TIMEOUT_HINT})`,
                 ),
               });
             }, FORCE_KILL_GRACE_MS);
@@ -721,7 +731,7 @@ export function makeExecutors(roots: string[], opts: { runPm2?: RunPm2; scriptDi
             finish({
               ok: false,
               content: truncate(
-                `${out}\n(${timeoutMs}ms 안에 끝나지 않아 중단했어요. 계속 도는 프로그램이라면 proc_start 로 띄워야 해요.)`,
+                `${out}\n(${timeoutMs}ms 안에 끝나지 않아 중단했어요. ${SH_EXEC_TIMEOUT_HINT})`,
               ),
             });
             return;
