@@ -29,7 +29,7 @@ async function ctx(over: CtxOver = {}): Promise<ToolCtx> {
   return {
     repos: { memories: new MemoriesRepo(db), users: new UsersRepo(db), allowedDirs: new AllowedDirsRepo(db), introspect: new IntrospectRepo(db) },
     role: "allowed", isPrivate: true, isOwner: false, userId: "guest", conversationId: 1,
-    runtime: { model: "claude-opus-4-8", sdkVersion: "0.3.207", deployTarget: "local", maxTurns: 30 },
+    runtime: { model: "claude-opus-4-8", sdkVersion: "0.3.207", deployTarget: "local", maxTurns: 30, workers: [] },
     ...rest,
     ...(remote
       ? {
@@ -48,7 +48,7 @@ async function ownerCtx(over = {}) {
   return {
     repos: { memories: new MemoriesRepo(db), users: new UsersRepo(db), allowedDirs: new AllowedDirsRepo(db), introspect: new IntrospectRepo(db) },
     role: "owner", isPrivate: true, isOwner: true, userId: "owner", conversationId: 1,
-    runtime: { model: "claude-opus-4-8", sdkVersion: "0.3.207", deployTarget: "local", maxTurns: 30 },
+    runtime: { model: "claude-opus-4-8", sdkVersion: "0.3.207", deployTarget: "local", maxTurns: 30, workers: [] },
     ...over,
   } as any;
 }
@@ -264,7 +264,7 @@ describe("allow_dir/revoke_dir/list_dir 도구(§원격개발 A2, FIX2: 워커 r
     // 기준이다 — 그래서 userId 는 두 컨텍스트에서 동일하게 두고 workerId 만 다르게 준다.
     const db = await openTestDb();
     const repos = { memories: new MemoriesRepo(db), users: new UsersRepo(db), allowedDirs: new AllowedDirsRepo(db) };
-    const runtime = { model: "claude-opus-4-8", sdkVersion: "0.3.207", deployTarget: "local" as const, maxTurns: 30 };
+    const runtime = { model: "claude-opus-4-8", sdkVersion: "0.3.207", deployTarget: "local" as const, maxTurns: 30, workers: [] };
     const call = async () => ({ ok: true, content: "" });
     const ownerA: ToolCtx = { repos, role: "owner", isPrivate: true, isOwner: true, userId: "owner", conversationId: 1, runtime, remote: { roots: [os.tmpdir()], call, workerId: "owner-laptop" } } as unknown as ToolCtx;
     const ownerB: ToolCtx = { repos, role: "owner", isPrivate: true, isOwner: true, userId: "owner", conversationId: 1, runtime, remote: { roots: [os.tmpdir()], call, workerId: "semicolon-shared" } } as unknown as ToolCtx;
@@ -485,6 +485,51 @@ describe("runtime_info", () => {
   });
   it("소유자가 아니면 거부한다", async () => {
     expect(await runtimeInfoHandler(await ownerCtx({ isOwner: false }))).toMatch(/소유자/);
+  });
+
+  it("runtime_info 는 워커의 커밋과 일치 여부를 보여준다", async () => {
+    const c = await ctx({
+      isOwner: true,
+      isPrivate: true,
+      runtime: {
+        model: "m", sdkVersion: "s", deployTarget: "cloud", maxTurns: 30,
+        botCommit: "abc1234",
+        workers: [{ workerId: "semicolon-shared", commit: "abc1234", connectedAt: 1 }],
+      },
+    });
+    const out = await runtimeInfoHandler(c);
+    expect(out).toContain("semicolon-shared");
+    expect(out).toContain("abc1234");
+    expect(out).toContain("일치");
+  });
+
+  it("runtime_info 는 워커가 낡았으면 그렇게 말한다", async () => {
+    const c = await ctx({
+      isOwner: true,
+      isPrivate: true,
+      runtime: {
+        model: "m", sdkVersion: "s", deployTarget: "cloud", maxTurns: 30,
+        botCommit: "abc1234",
+        workers: [{ workerId: "semicolon-shared", commit: "999zzzz", connectedAt: 1 }],
+      },
+    });
+    expect(await runtimeInfoHandler(c)).toContain("다름");
+  });
+
+  it("봇 커밋을 모르면 비교하지 않는다(로컬 PM2)", async () => {
+    // 비교할 기준이 없는 것과 불일치는 다른 상태다. 전자를 후자로 보고하면 거짓 경보가 된다.
+    const c = await ctx({
+      isOwner: true,
+      isPrivate: true,
+      runtime: {
+        model: "m", sdkVersion: "s", deployTarget: "local", maxTurns: 30,
+        workers: [{ workerId: "owner-laptop", commit: "abc1234", connectedAt: 1 }],
+      },
+    });
+    const out = await runtimeInfoHandler(c);
+    expect(out).toContain("abc1234");
+    expect(out).not.toContain("다름");
+    expect(out).not.toContain("일치");
   });
 });
 
