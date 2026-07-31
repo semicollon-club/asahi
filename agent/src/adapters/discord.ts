@@ -271,6 +271,27 @@ export class DiscordAdapter {
     if (decision.kind === "ignore") return;
     if (role === "blocked") return; // 타입 좁히기용 방어(decideRoute 가 이미 걸러냄)
 
+    // 표시 이름을 여기서 함께 갱신한다 — proc_list 가 사람 이름을 보여주려면 봇이 먼저 이름을
+    // 알아야 하는데, users.display_name 은 컬럼과 upsert 파라미터가 있는데도 값을 넘기는 코드가
+    // 없어 계속 null 이었다.
+    //
+    // 이 자리(무시 판정 뒤)인 것이 중요하다. 위로 올리면 봇에게 말을 건 아무나 users 에 행으로
+    // 쌓인다 — decideRoute 가 걸러낸 사람은 애초에 우리가 아는 사람이 아니다.
+    //
+    // 서버 별명이 아니라 계정의 전역 표시 이름을 쓴다: 별명은 서버마다 다르고 DM 에는 아예
+    // 없어서, 같은 사람이 어디서 말했느냐에 따라 프로세스 목록의 이름이 달라진다. 프로세스
+    // 목록은 길드에 속한 화면이 아니므로 한 사람에게 이름 하나가 대응하는 편이 옳다.
+    //
+    // 실패를 삼키는 이유: 이름은 표시용 부가 정보다. 이름 갱신이 안 됐다고 메시지 처리를
+    // 멈추면 부가 기능이 본 기능을 인질로 잡는다. upsert 는 COALESCE 라 빈 값으로 기존 이름을
+    // 지우지도 않는다.
+    try {
+      const displayName = message.author.displayName || message.author.username;
+      if (displayName) await this.users.upsert(incoming.userId, { displayName });
+    } catch {
+      /* 위 주석 참고 — 이름 갱신 실패는 메시지 처리를 막지 않는다 */
+    }
+
     // 타이핑 표시(있으면). 스레드 생성 전 원 채널에.
     if ("sendTyping" in message.channel) {
       void message.channel.sendTyping().catch(() => {});
