@@ -991,6 +991,61 @@ describe("proc_* 실행기 — PM2 위임", () => {
     expect(r.content).toContain("npm run dev");
   });
 
+  it("proc_list 는 labels 에 있는 이름으로 표시한다", async () => {
+    const stdout = JSON.stringify([
+      { name: "asahi-111", pm2_env: { status: "online", pm_uptime: 0, restart_time: 0, args: ["run", "dev"], pm_exec_path: "npm" }, monit: { memory: 1 } },
+    ]);
+    const { runPm2 } = fakePm2({ jlist: { ok: true, stdout } });
+    const ex = makeExecutors([root], { runPm2, scriptDir });
+
+    const r = await ex.proc_list!({ labels: { "111": "우성현" } });
+
+    expect(r.ok).toBe(true);
+    expect(r.content).toContain("우성현");
+    expect(r.content).not.toContain("asahi-111");
+  });
+
+  it("proc_list 는 labels 에 없는 사람은 예전처럼 asahi-<id> 로 표시한다", async () => {
+    // 폴백을 지우면 이름을 아직 못 얻은 사용자와, 옛 봇(labels 를 안 보냄) + 새 워커가 섞여
+    // 도는 배포 중간 상태에서 목록이 깨진다.
+    const stdout = JSON.stringify([
+      { name: "asahi-222", pm2_env: { status: "online", pm_uptime: 0, restart_time: 0, args: ["run", "dev"], pm_exec_path: "npm" }, monit: { memory: 1 } },
+    ]);
+    const { runPm2 } = fakePm2({ jlist: { ok: true, stdout } });
+    const ex = makeExecutors([root], { runPm2, scriptDir });
+
+    const r = await ex.proc_list!({ labels: { "111": "우성현" } });
+
+    expect(r.content).toContain("asahi-222");
+  });
+
+  it("proc_list 는 labels 가 아예 없어도 깨지지 않는다(옛 봇 + 새 워커)", async () => {
+    const stdout = JSON.stringify([
+      { name: "asahi-111", pm2_env: { status: "online", pm_uptime: 0, restart_time: 0, args: ["run", "dev"], pm_exec_path: "npm" }, monit: { memory: 1 } },
+    ]);
+    const { runPm2 } = fakePm2({ jlist: { ok: true, stdout } });
+    const ex = makeExecutors([root], { runPm2, scriptDir });
+
+    const r = await ex.proc_list!({});
+
+    expect(r.ok).toBe(true);
+    expect(r.content).toContain("asahi-111");
+  });
+
+  it("proc_list 는 형태가 어긋난 labels 를 무시하고 폴백한다", async () => {
+    // labels 는 네트워크 프레임을 건너온다 — 배열이나 숫자 값이 렌더링까지 흘러들면 안 된다.
+    const stdout = JSON.stringify([
+      { name: "asahi-111", pm2_env: { status: "online", pm_uptime: 0, restart_time: 0, args: ["run", "dev"], pm_exec_path: "npm" }, monit: { memory: 1 } },
+    ]);
+    const { runPm2 } = fakePm2({ jlist: { ok: true, stdout } });
+    const ex = makeExecutors([root], { runPm2, scriptDir });
+
+    const r = await ex.proc_list!({ labels: ["우성현"] });
+
+    expect(r.ok).toBe(true);
+    expect(r.content).toContain("asahi-111");
+  });
+
   it("proc_logs 는 nostream 으로 부르고 줄 수를 넘긴다", async () => {
     const { calls, runPm2 } = fakePm2({ logs: { ok: true, stdout: "로그 본문" } });
     const ex = makeExecutors([root], { runPm2, scriptDir });

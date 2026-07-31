@@ -380,6 +380,18 @@ export function describeExit(out: string, code: number | null): string {
 const str = (v: unknown): string | undefined => (typeof v === "string" && v.length > 0 ? v : undefined);
 const num = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
 
+// args 로 들어온 unknown 을 "문자열 → 문자열" 맵으로 좁힌다. 워커는 봇을 신뢰하지만 이 값은
+// 네트워크 프레임을 건너오므로, 형태가 어긋난 값(배열·null·중첩 객체·숫자 값)이 그대로
+// 렌더링에 흘러들지 않게 여기서 걸러낸다 — str/num 이 있는 것과 같은 이유의 방어다.
+function strMap(v: unknown): Record<string, string> {
+  if (typeof v !== "object" || v === null || Array.isArray(v)) return {};
+  const out: Record<string, string> = {};
+  for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+    if (typeof val === "string" && val.length > 0) out[k] = val;
+  }
+  return out;
+}
+
 export function makeExecutors(roots: string[], opts: { runPm2?: RunPm2; scriptDir?: string } = {}): Executors {
   // proc_start 가 회원 명령을 적을 스크립트 파일 위치(DEFAULT_SCRIPT_DIR·writeStartScript 선언부
   // 참고) — 테스트가 실제 OS 임시폴더를 더럽히지 않고 파일 내용을 직접 들여다볼 수 있도록 주입
@@ -928,11 +940,17 @@ export function makeExecutors(roots: string[], opts: { runPm2?: RunPm2; scriptDi
       // 덮어쓴다. 이게 없으면 "뭐 돌고 있어?"에 "C:\...\asahi-proc-scripts\asahi-111.bat" 같은
       // 답을 주게 된다.
       const withCommands = await recoverCommands(procs, scriptDir, shellFlavorOf(roots));
-      // labelOf 는 "디스코드 userId → 사람이 알아볼 이름"을 위한 자리지만, 워커는 디스코드를
-      // 전혀 모른다(신원 해석은 봇만 할 수 있다 — proc.ts 상단 주석과 동일한 이유). 실제 이름
-      // 해석은 이 범위 밖이므로, 최소한 pm2 프로세스 이름(asahi-<id>)으로 되돌려 누구 것인지
-      // 알아볼 수 있게 한다 — procNameFor 는 parseProcName 의 역함수라 원래 이름과 정확히 같다.
-      return { ok: true, content: truncate(renderProcList(withCommands, { labelOf: (id) => procNameFor(id) })) };
+      // labels 는 봇이 주입한 "디스코드 userId → 사람 이름" 맵이다(core/remoteTools.ts). 워커는
+      // 디스코드를 전혀 모르므로 스스로는 이름을 해석할 수 없다 — 그래서 봇이 실어 보낸다.
+      //
+      // 키가 없으면 예전 그대로 procNameFor(id) 로 폴백한다. 이 폴백은 지우지 않는다: 이름을
+      // 아직 못 얻은 사용자가 있고, 배포 중간에는 옛 봇(labels 를 안 보냄)과 새 워커가 섞여
+      // 돌 수 있다. 그 순간에도 목록은 깨지지 않고 누구 것인지 알아볼 수 있어야 한다.
+      const labels = strMap(args.labels);
+      return {
+        ok: true,
+        content: truncate(renderProcList(withCommands, { labelOf: (id) => labels[id] ?? procNameFor(id) })),
+      };
     },
 
     async proc_logs(args) {
