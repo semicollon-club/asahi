@@ -1,56 +1,124 @@
-# 미니PC 워커 자동 갱신. asahi 계정의 작업 스케줄러 작업이 5분마다 부른다.
+﻿# 미니PC 워커 자동 갱신. asahi 계정의 작업 스케줄러 작업이 5분마다 부른다.
 #
 # Stop/Start-ScheduledTask 를 부르지 않는다 — asahi 는 표준 계정이라 그 권한이 없다. 대신
 # 센티넬 파일을 만들면 워커가 진행 중인 호출을 마치고 0 이 아닌 코드로 스스로 종료하고,
 # 작업 스케줄러의 "실패 시 다시 시작" 정책이 다시 띄운다.
+#
+# 실패는 반드시 로그(기본 C:\asahi-worker-update.log)에 남기고 0 이 아닌 코드로 끝난다 —
+# 작업 스케줄러 기록 탭의 결과 코드가 그대로 성공/실패 신호가 된다. 새 커밋이 없어 아무 일도
+# 안 한 회차는 로그를 남기지 않는다 — 5분마다 한 줄씩 쌓이면 정작 중요한 줄이 묻힌다.
+#
+# 이 파일은 반드시 UTF-8 "BOM 있음"으로 저장한다 — docs/agent-onboarding.md "배치 파일
+# 인코딩" 절 참고. BOM 이 없으면 PowerShell 이 이 안의 한글 문자열을 시스템 코드페이지
+# (cp949)로 잘못 디코딩해 로그와 콘솔 출력이 깨진다("새 커밋 발견..." 이 "??而ㅻ컠 諛쒓껄..."
+# 처럼 나온다). 저장한 뒤에는 파일 첫 3바이트가 EF BB BF 인지 확인할 것.
 param(
   [string]$RepoPath = "C:\asahi-worker",
   [string]$Sentinel = "C:\asahi-worker-update.flag",
-  [int]$WaitSeconds = 300
+  [int]$WaitSeconds = 300,
+  [string]$LogPath = "C:\asahi-worker-update.log",
+  [int]$MaxLogBytes = 1MB
 )
 
-Set-Location $RepoPath
+$ErrorActionPreference = "Stop"
 
-git fetch origin main 2>&1 | Out-Null
-$local = (git rev-parse HEAD).Trim()
-$remote = (git rev-parse origin/main).Trim()
-if ($local -eq $remote) { exit 0 }
-
-Write-Output "새 커밋 발견: $($local.Substring(0,7)) -> $($remote.Substring(0,7))"
-
-# 워커에게 "끝나면 나가라"고 알린다. 언제 나갈지는 워커가 정한다.
-New-Item -ItemType File -Path $Sentinel -Force | Out-Null
-
-# 워커가 사라지기를 기다린다. 강제 종료하지 않는다 — 안 죽는 워커는 그 자체로 조사할 일이고,
-# 자동화가 그것을 덮으면 안 된다. 못 기다리면 이번 회차를 포기하고 다음 5분에 다시 시도한다.
-$deadline = (Get-Date).AddSeconds($WaitSeconds)
-while ((Get-Date) -lt $deadline) {
-  $running = Get-CimInstance Win32_Process -Filter "Name='node.exe'" |
-    Where-Object { $_.CommandLine -like "*$RepoPath*" }
-  if (-not $running) { break }
-  Start-Sleep -Seconds 5
+function Write-Log([string]$Message) {
+  # 로그 기록 자체가 실패해도(디스크 꽉 참, 권한 문제 등) 갱신 로직 — 센티넬 정리와 올바른
+  # 종료 코드 — 은 반드시 계속돼야 한다. 그래서 이 함수 안의 실패는 밖으로 던지지 않는다.
+  try {
+    $line = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') $Message"
+    $dir = Split-Path -Parent $LogPath
+    if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+    if ((Test-Path $LogPath) -and (Get-Item $LogPath).Length -gt $MaxLogBytes) {
+      # 상한을 넘으면 한 번만 갈아치운다 — 여러 세대를 보관할 만큼 중요한 로그는 아니다.
+      Move-Item -Path $LogPath -Destination "$LogPath.old" -Force
+    }
+    Add-Content -Path $LogPath -Value $line -Encoding UTF8
+  } catch {
+  }
 }
 
-$still = Get-CimInstance Win32_Process -Filter "Name='node.exe'" |
-  Where-Object { $_.CommandLine -like "*$RepoPath*" }
-if ($still) {
-  Remove-Item $Sentinel -Force -ErrorAction SilentlyContinue
-  Write-Output "워커가 시간 안에 종료되지 않아 이번 회차를 건너뜁니다."
-  exit 0
+function Exit-Failure([string]$Message) {
+  Write-Log "실패: $Message"
+  # 워커는 돌아와야 한다 — 낡은 코드로라도 도는 편이 안 도는 것보다 낫다. 센티넬을 지우지
+  # 않으면 재시작된 워커가 기동 직후 같은 센티넬을 다시 보고 스스로 또 종료해 무한 재시작에
+  # 빠진다(agent/src/worker.ts 의 센티넬 감시는 파일 존재만 본다).
+  Remove-Item -Path $Sentinel -Force -ErrorAction SilentlyContinue
+  exit 1
 }
 
-$lockBefore = (Get-FileHash "$RepoPath\agent\package-lock.json").Hash
-git pull --ff-only
-$lockAfter = (Get-FileHash "$RepoPath\agent\package-lock.json").Hash
-
-# npm ci 는 잠금 파일이 바뀐 커밋에만 돌린다. 대부분의 커밋은 의존성을 건드리지 않는데,
-# 19초 걸리는 그 명령이 바로 esbuild.exe 잠금 때문에 워커 정지를 강제하는 원인이다.
-if ($lockBefore -ne $lockAfter) {
-  Write-Output "package-lock.json 이 바뀌어 npm ci 를 실행합니다."
-  Set-Location "$RepoPath\agent"
-  npm ci
+try {
   Set-Location $RepoPath
-}
 
-Remove-Item $Sentinel -Force -ErrorAction SilentlyContinue
-Write-Output "갱신 완료: $((git rev-parse HEAD).Substring(0,7)). 작업 스케줄러가 워커를 다시 띄웁니다."
+  git fetch origin main | Out-Null
+  if ($LASTEXITCODE -ne 0) { Exit-Failure "git fetch origin main 실패 (종료 코드 $LASTEXITCODE)" }
+
+  $local = (git rev-parse HEAD).Trim()
+  $remote = (git rev-parse origin/main).Trim()
+  if ($local -eq $remote) { exit 0 }
+
+  $shortLocal = $local.Substring(0, 7)
+  $shortRemote = $remote.Substring(0, 7)
+
+  # 로컬 HEAD 가 origin/main 의 조상이어야 --ff-only 가 성공한다. 이걸 워커를 건드리기(센티넬
+  # 생성) 전에 확인하지 않으면, 분기된 리포에서 워커만 반복해서 내렸다 올리게 된다 — 5분마다,
+  # 영원히, 매번 "갱신 완료"라는 거짓 로그와 함께. 사람이 풀어야 하는 상태이므로 여기서는
+  # 워커를 아직 건드리지 않는다.
+  git merge-base --is-ancestor HEAD origin/main
+  if ($LASTEXITCODE -ne 0) {
+    Write-Log "실패: HEAD($shortLocal) 가 origin/main($shortRemote) 의 조상이 아니라 fast-forward 불가. 로컬 커밋이나 리베이스로 분기했을 수 있다 — 사람이 리포 상태를 봐야 한다. 워커는 건드리지 않았다."
+    exit 1
+  }
+
+  Write-Log "새 커밋 발견: $shortLocal -> $shortRemote"
+
+  # 워커에게 "끝나면 나가라"고 알린다. 언제 나갈지는 워커가 정한다.
+  New-Item -ItemType File -Path $Sentinel -Force | Out-Null
+
+  # 워커가 사라지기를 기다린다. 강제 종료하지 않는다 — 안 죽는 워커는 그 자체로 조사할 일이고,
+  # 자동화가 그것을 덮으면 안 된다. 못 기다리면 이번 회차를 포기하고 다음 5분에 다시 시도한다.
+  $deadline = (Get-Date).AddSeconds($WaitSeconds)
+  while ((Get-Date) -lt $deadline) {
+    $running = @(Get-CimInstance Win32_Process -Filter "Name='node.exe'" |
+      Where-Object { $_.CommandLine -like "*$RepoPath*" })
+    if ($running.Count -eq 0) { break }
+    Start-Sleep -Seconds 5
+  }
+
+  # 이 매칭은 검증되지 않았다 — 같은 PC 의 다른 node.exe(예: 이 폴더를 연 VS Code 의 tsserver)를
+  # 워커로 오인하거나, 반대로 진짜 워커를 놓쳐 아래 npm ci 가 그 워커가 잡고 있는 esbuild.exe 와
+  # 경합할 수 있다(EPERM — docs/agent-onboarding.md "갱신 순서" 절이 이미 기록한 함정). 미니PC
+  # 없이는 이 매칭 로직 자체를 고칠 수 없으니, 첫 실배포에서 사람이 판단할 수 있게 매칭된
+  # 프로세스 수와 커맨드라인을 그대로 로그에 남긴다.
+  $still = @(Get-CimInstance Win32_Process -Filter "Name='node.exe'" |
+    Where-Object { $_.CommandLine -like "*$RepoPath*" })
+  if ($still.Count -gt 0) {
+    Write-Log "워커가 시간 안에 종료되지 않아 이번 회차를 건너뜁니다. node.exe/$RepoPath 매칭 $($still.Count)건:"
+    foreach ($p in $still) { Write-Log "  PID $($p.ProcessId): $($p.CommandLine)" }
+    Remove-Item -Path $Sentinel -Force -ErrorAction SilentlyContinue
+    exit 0
+  }
+  Write-Log "워커 프로세스 종료 확인(node.exe/$RepoPath 매칭 0건)."
+
+  $lockBefore = (Get-FileHash "$RepoPath\agent\package-lock.json").Hash
+  git pull --ff-only
+  if ($LASTEXITCODE -ne 0) { Exit-Failure "git pull --ff-only 실패 (종료 코드 $LASTEXITCODE)" }
+  $lockAfter = (Get-FileHash "$RepoPath\agent\package-lock.json").Hash
+
+  # npm ci 는 잠금 파일이 바뀐 커밋에만 돌린다. 대부분의 커밋은 의존성을 건드리지 않는데,
+  # 19초 걸리는 그 명령이 바로 esbuild.exe 잠금 때문에 워커 정지를 강제하는 원인이다.
+  if ($lockBefore -ne $lockAfter) {
+    Write-Log "package-lock.json 이 바뀌어 npm ci 를 실행합니다."
+    Set-Location "$RepoPath\agent"
+    npm ci
+    $npmExitCode = $LASTEXITCODE
+    Set-Location $RepoPath
+    if ($npmExitCode -ne 0) { Exit-Failure "npm ci 실패 (종료 코드 $npmExitCode)" }
+  }
+
+  Remove-Item -Path $Sentinel -Force -ErrorAction SilentlyContinue
+  Write-Log "갱신 완료: $shortLocal -> $shortRemote. 작업 스케줄러가 워커를 다시 띄웁니다."
+  exit 0
+} catch {
+  Exit-Failure "예외 발생: $($_.Exception.Message)"
+}
