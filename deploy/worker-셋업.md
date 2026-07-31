@@ -173,6 +173,13 @@ pm2 --version
 코드로 나가든 작업 스케줄러에는 항상 성공으로 보여 `EXIT_CODE_UPDATE` 가 닿지 않고,
 재시작 정책이 절대 발동하지 않는다.
 
+**2026-08-01 실측(동아리 미니PC)** — 위 두 주의는 이 기계에서는 확인이 끝났다.
+`asahi-worker` 의 실제 동작은 `.bat` 래퍼가 아니라 작업 인수 안의 리다이렉션이었다:
+`cmd.exe /c npm run worker >> C:\asahi-worker\logs\worker.log 2>&1`(작업 폴더
+`C:\asahi-worker\agent`). 이 사슬(cmd → npm → tsx → node)은 각 단계가 마지막 자식의
+종료 코드를 그대로 돌려주므로 `EXIT_CODE_UPDATE` 가 작업 스케줄러까지 닿는다. 재시작
+정책도 1분 간격 999회로 이미 켜져 있었다.
+
 **2. 워커 `.env` 에 센티넬 경로를 넣고, 워커를 한 번 재시작한다.**
 
 ```
@@ -217,6 +224,22 @@ WORKER_SENTINEL=C:\asahi-worker-update.flag
 | 트리거 | 5분마다 반복 |
 | 실행할 프로그램 | `powershell.exe` |
 | 인수 | `-NoProfile -ExecutionPolicy Bypass -File C:\asahi-worker\deploy\update-worker.ps1` |
+
+작업 스케줄러 화면을 헤매는 것보다 PowerShell 세 줄이 빠르다 — **asahi 창에서** 실행한다
+(관리자 창에서 하면 작업이 관리자 계정으로 등록돼 버린다. 표준 계정도 자기 계정으로 도는
+작업은 관리자 권한 없이 등록할 수 있다):
+
+```powershell
+$action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -File C:\asahi-worker\deploy\update-worker.ps1"
+$trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(2) -RepetitionInterval (New-TimeSpan -Minutes 5)
+Register-ScheduledTask -TaskName "asahi-worker-update" -Action $action -Trigger $trigger -Description "5분마다 origin/main 을 확인해 새 커밋이 있으면 워커를 갱신한다"
+```
+
+`-RepetitionDuration ([TimeSpan]::MaxValue)` 를 덧붙이는 옛 관용구("무기한 반복")는 쓰지
+않는다 — 윈도우 11 은 그 값(`P99999999DT23H59M59S`)을 범위 초과로 거부한다
+(`0x80041318`, 2026-08-01 미니PC 실측). 반복 기간 인자를 아예 주지 않으면 무기한 반복이
+된다. 등록 직후 `Get-ScheduledTaskInfo -TaskName asahi-worker-update` 에서 `LastTaskResult`
+가 `267011`("아직 안 돌았음")이었다가 첫 회차 뒤 `0` 으로 바뀌면 정상이다.
 
 **반드시 별개의 작업이어야 한다.** 업데이터를 워커 프로세스가 띄우는 자식으로 만들면(워커
 안에서 스크립트를 spawn 하는 식으로) 작업 스케줄러의 잡 오브젝트가 워커를 정리할 때
