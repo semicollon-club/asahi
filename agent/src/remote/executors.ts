@@ -353,6 +353,20 @@ function truncate(s: string): string {
   return s.length <= OUTPUT_MAX ? s : `${s.slice(0, OUTPUT_MAX)}\n… (출력이 길어 ${OUTPUT_MAX}자에서 잘랐어요)`;
 }
 
+// sh_exec 의 본문 문구를 만든다. close 핸들러 안에 인라인으로 두면 문자열 조합만 따로 검증할
+// 방법이 없어(자식 프로세스를 실제로 띄워야 한다) 순수 함수로 뺀다.
+//
+// 출력이 비었을 때 그 사실을 명시하는 이유: 빈 문자열만 돌려주면 모델은 "도구가 아무 말도
+// 안 했다"와 "명령이 아무것도 출력하지 않았다"를 구분할 수 없다. 실사용에서 netstat|findstr 이
+// 정확히 이 모양(빈 출력 + exit 1)이었고, 모델이 매번 문맥으로 추측해야 했다.
+export function describeExit(out: string, code: number | null): string {
+  const body = out.length > 0 ? out : "(출력 없음)";
+  if (code === 0) return body;
+  // code 가 null 이면 프로세스가 신호로 끝난 것이다(POSIX 에서 흔하다). "(종료 코드 null)" 은
+  // 아무 정보도 주지 못하므로 무슨 일이 있었는지를 그대로 적는다.
+  return code === null ? `${body}\n(신호로 종료됨)` : `${body}\n(종료 코드 ${code})`;
+}
+
 const str = (v: unknown): string | undefined => (typeof v === "string" && v.length > 0 ? v : undefined);
 const num = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
 
@@ -707,11 +721,17 @@ export function makeExecutors(roots: string[], opts: { runPm2?: RunPm2; scriptDi
             finish({ ok: false, content: truncate(`${out}\n(${timeoutMs}ms 안에 끝나지 않아 중단했어요)`) });
             return;
           }
-          finish(
-            code === 0
-              ? { ok: true, content: truncate(out) }
-              : { ok: false, content: truncate(`${out}\n(종료 코드 ${code})`) },
-          );
+          // 명령이 끝까지 실행됐다면 sh_exec 는 제 일을 한 것이다 — 종료 코드가 0이 아니어도
+          // ok:true 다. 셸에서 non-zero 는 실패 신호가 아니라 통신 수단이라(findstr/grep 의 1 은
+          // "매칭 없음", diff 의 1 은 "차이 있음", test 의 1 은 "거짓"), 이걸 도구 실패로 옮기면
+          // 모델이 <error> 로 받는다 — core/tools.ts 의 remoteResult 가 ok 를 그대로 isError 로
+          // 싣기 때문이다. 실사용 실패 8건 중 5건이 정확히 이 오분류였다.
+          //
+          // ok:false 는 "도구가 명령을 실행하지 못했다"로 좁힌다 — spawn 실패(child.on("error"))와
+          // 타임아웃(위 timedOut 갈래)뿐이다. 종료 코드에 대한 해석("findstr 이라면 매칭 없음")은
+          // 넣지 않는다: 셸 명령은 무한하고 파이프라인이면 마지막 명령의 코드라 어떤 목록도
+          // 정확할 수 없다. 사실만 전달하고 판단은 모델에게 맡긴다.
+          finish({ ok: true, content: truncate(describeExit(out, code)) });
         });
       });
     },

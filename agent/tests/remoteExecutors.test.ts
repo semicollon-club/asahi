@@ -9,6 +9,7 @@ import {
   scriptContentFor,
   writeStartScript,
   recoverCommands,
+  describeExit,
 } from "../src/remote/executors.js";
 import { TREE_MAX_ENTRIES } from "../src/remote/tree.js";
 import type { ProcInfo } from "../src/remote/proc.js";
@@ -119,10 +120,34 @@ describe("워커 실행기", () => {
     expect(r.content).toContain("asahi");
   });
 
-  it("sh_exec 는 실패 종료코드를 ok=false 로 보고한다", async () => {
+  it("sh_exec 는 0이 아닌 종료 코드를 ok=true 로 보고하고 코드를 본문에 싣는다", async () => {
+    // 셸에서 non-zero 는 실패 신호가 아니라 통신 수단이다(findstr/grep 의 1 = 매칭 없음).
+    // 도구는 명령을 실행하는 데 성공했으므로 ok:true 이고, 종료 코드는 사실로만 전달한다.
     const r = await ex.sh_exec({ command: "exit 3" });
-    expect(r.ok).toBe(false);
-    expect(r.content).toContain("3");
+    expect(r.ok).toBe(true);
+    expect(r.content).toContain("종료 코드 3");
+  });
+
+  it("sh_exec 는 출력이 없으면 그 사실을 본문에 적는다", async () => {
+    // 빈 문자열만 돌려주면 모델은 "도구가 아무 말도 안 했다"와 "명령이 아무것도 안 냈다"를
+    // 구분할 수 없다. 실사용에서 findstr 이 정확히 이 모양이었다.
+    const r = await ex.sh_exec({ command: "exit 1" });
+    expect(r.ok).toBe(true);
+    expect(r.content).toContain("출력 없음");
+    expect(r.content).toContain("종료 코드 1");
+  });
+
+  it("sh_exec 는 종료 코드가 0이면 코드를 언급하지 않는다", async () => {
+    const r = await ex.sh_exec({ command: "echo asahi" });
+    expect(r.ok).toBe(true);
+    expect(r.content).toContain("asahi");
+    expect(r.content).not.toContain("종료 코드");
+  });
+
+  it("describeExit 는 신호 종료(code=null)를 코드 대신 사실로 적는다", () => {
+    // "(종료 코드 null)" 은 사람에게도 모델에게도 의미가 없다.
+    expect(describeExit("", null)).toContain("신호로 종료됨");
+    expect(describeExit("", null)).not.toContain("null");
   });
 
   it("sh_exec 는 타임아웃되면 ok=false 로 끝난다", async () => {
