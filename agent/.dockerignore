@@ -14,8 +14,11 @@ dist
 tests
 vitest.config.ts
 
-# 문서 / 잡파일.
+# 문서 / 잡파일 — 단 skills/ 밑의 *.md 는 문서가 아니라 SDK 가 읽는 스킬 정의 그 자체다.
+# 예외 없이 *.md 로 막으면 Dockerfile 의 COPY skills ./skills 를 넣어도 SKILL.md 가 빌드
+# 컨텍스트 단계에서 이미 빠져 스킬이 하나도 로드되지 않는다 — 로그 한 줄 없이 조용히.
 *.md
+!skills/**/*.md
 
 # 기타 흔한 노이즈.
 .git
