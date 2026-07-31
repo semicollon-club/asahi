@@ -169,4 +169,39 @@ describe("proc — 표 렌더링", () => {
     const out = renderProcList([{ ...one, userId: "111" }], { labelOf: () => "[]", now: NOW });
     expect(out).toContain("asahi-111");
   });
+
+  // 실사용 회귀(2026-07-31): 이 자리에 사람 이름이 오면서 pm2 프로세스 이름이 표에서 사라졌다.
+  // 그런데 그 이름은 표시용이 아니라 proc_stop·proc_logs 의 name 인자다 — 소유자가 남의
+  // 프로세스를 지정하는 유일한 수단이고, 목록이 그것을 발견하는 유일한 창구였다. 이름을 가리자
+  // 소유자가 "로그 보여줘"를 하면 모델이 표에 보이는 "우성현"이나 "npm run dev"를 name 으로
+  // 넘겼고, parseProcName 이 걸러 "회원 프로세스가 아니에요"로 거절됐다. 능력이 UI 로 도달
+  // 불가능해진 것이라 닫히는 방향의 실패이지만 회귀는 회귀다.
+  it("소유자 목록에는 도구에 넘길 프로세스 이름이 함께 나온다", () => {
+    const out = renderProcList([one], { labelOf, now: NOW, showProcName: true });
+    expect(out).toContain("우성현"); // 사람 이름은 그대로 앞에 남는다
+    expect(out).toContain("asahi-111"); // 도구가 요구하는 식별자도 함께
+  });
+
+  it("손님 목록에는 프로세스 이름이 나오지 않는다", () => {
+    // 손님은 자기 것만 보고 name 을 지정할 수도 없다(핸들러가 강제 주입한다) — 읽기 좋으라고
+    // 사람 이름으로 바꾼 것이므로 식별자를 도로 붙이면 그 개선이 무의미해진다.
+    const out = renderProcList([one], { labelOf, now: NOW });
+    expect(out).toContain("우성현");
+    expect(out).not.toContain("asahi-111");
+  });
+
+  it("이름을 모르는 회원 행은 같은 문자열을 두 번 보여주지 않는다", () => {
+    // labelOf 가 폴백해 사람 이름 자리에 이미 asahi-<id> 가 온 경우다.
+    const out = renderProcList([one], { labelOf: (id) => procNameFor(id), now: NOW, showProcName: true });
+    const line = out.split("\n").find((l) => l.includes("npm run dev"))!;
+    expect(line.match(/asahi-111/g)).toHaveLength(1);
+  });
+
+  it("인프라 행에는 프로세스 이름을 덧붙이지 않는다", () => {
+    // 인프라는 표식과 함께 이미 p.name 을 그대로 보여주고 있고, 애초에 proc_* 로 지정할 수 없다.
+    const infra: ProcInfo = { name: "asahi-worker", userId: null, command: "node dist/worker.js", status: "online", startedAtMs: 0, memoryBytes: 60 * 1024 * 1024, restarts: 0 };
+    const out = renderProcList([infra], { labelOf, now: NOW, showProcName: true });
+    const line = out.split("\n").find((l) => l.includes("asahi-worker"))!;
+    expect(line.match(/asahi-worker/g)).toHaveLength(1);
+  });
 });

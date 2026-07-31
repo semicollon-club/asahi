@@ -1013,9 +1013,42 @@ describe("proc_* 실행기 — PM2 위임", () => {
     const { runPm2 } = fakePm2({ jlist: { ok: true, stdout } });
     const ex = makeExecutors([root], { runPm2, scriptDir });
 
+    // onlyUserId 를 명시해 손님 호출로 둔다 — 소유자(onlyUserId 없음)는 pm2 이름을 함께 받으므로
+    // 아래 not.toContain 이 성립하지 않는다. 이 테스트가 보는 것은 "이름으로 바뀌는가"이므로,
+    // 식별자가 함께 나오지 않는 쪽을 골라 단정이 흐려지지 않게 한다.
+    const r = await ex.proc_list!({ onlyUserId: "111", labels: { "111": "우성현" } });
+
+    expect(r.ok).toBe(true);
+    expect(r.content).toContain("우성현");
+    expect(r.content).not.toContain("asahi-111");
+  });
+
+  // 실사용 회귀(2026-07-31): 사람 이름이 pm2 이름을 밀어내면서, 소유자가 proc_stop·proc_logs 에
+  // 넘길 name 을 알아낼 창구가 사라졌다. 소유자의 "로그 보여줘"에 모델이 "우성현"을 name 으로
+  // 넘겨 parseProcName 에 걸렸다. 아래 두 테스트가 그 분기를 양쪽에서 고정한다.
+  it("proc_list 는 소유자(onlyUserId 없음)에게 pm2 이름을 함께 보여준다", async () => {
+    const stdout = JSON.stringify([
+      { name: "asahi-111", pm2_env: { status: "online", pm_uptime: 0, restart_time: 0, args: ["run", "dev"], pm_exec_path: "npm" }, monit: { memory: 1 } },
+    ]);
+    const { runPm2 } = fakePm2({ jlist: { ok: true, stdout } });
+    const ex = makeExecutors([root], { runPm2, scriptDir });
+
     const r = await ex.proc_list!({ labels: { "111": "우성현" } });
 
     expect(r.ok).toBe(true);
+    expect(r.content).toContain("우성현"); // 읽기 좋은 이름은 그대로
+    expect(r.content).toContain("asahi-111"); // 도구에 넘길 식별자도 함께
+  });
+
+  it("proc_list 는 손님(onlyUserId 있음)에게는 pm2 이름을 보여주지 않는다", async () => {
+    const stdout = JSON.stringify([
+      { name: "asahi-111", pm2_env: { status: "online", pm_uptime: 0, restart_time: 0, args: ["run", "dev"], pm_exec_path: "npm" }, monit: { memory: 1 } },
+    ]);
+    const { runPm2 } = fakePm2({ jlist: { ok: true, stdout } });
+    const ex = makeExecutors([root], { runPm2, scriptDir });
+
+    const r = await ex.proc_list!({ onlyUserId: "111", labels: { "111": "우성현" } });
+
     expect(r.content).toContain("우성현");
     expect(r.content).not.toContain("asahi-111");
   });

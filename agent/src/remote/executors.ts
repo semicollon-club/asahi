@@ -957,9 +957,17 @@ export function makeExecutors(roots: string[], opts: { runPm2?: RunPm2; scriptDi
       // 아직 못 얻은 사용자가 있고, 배포 중간에는 옛 봇(labels 를 안 보냄)과 새 워커가 섞여
       // 돌 수 있다. 그 순간에도 목록은 깨지지 않고 누구 것인지 알아볼 수 있어야 한다.
       const labels = strMap(args.labels);
+      // onlyUserId 가 없다 = 소유자다(remoteTools.ts 가 손님에게만 넣는다). 소유자에게만 pm2
+      // 이름을 함께 보여준다 — proc_stop·proc_logs 의 name 인자를 지정할 수 있는 사람이 소유자
+      // 뿐이고, 이 표가 그 이름을 알 수 있는 유일한 창구이기 때문이다(renderProcList 주석 참고).
       return {
         ok: true,
-        content: truncate(renderProcList(withCommands, { labelOf: (id) => labels[id] ?? procNameFor(id) })),
+        content: truncate(
+          renderProcList(withCommands, {
+            labelOf: (id) => labels[id] ?? procNameFor(id),
+            showProcName: only === undefined,
+          }),
+        ),
       };
     },
 
