@@ -297,7 +297,17 @@ EOF
   - `export function skillPluginsFor(o: { skillsDir: string; exists: boolean }): Array<{ type: "local"; path: string }>`
   - `TurnRequest` 에 `noSkills?: boolean`
 
-**시작 전 확인:** Task 1 의 판정이 "정상 경로"(A 로드됨 / C 안 보임)가 아니면 그 표의 지시를 따른다. B 경로였다면 아래 Step 5 의 `builtinTools` 조립에 `"Skill"` 을 함께 넣어야 하고, C 가 "로드됨"이었다면 Step 5 의 끄기 방식을 바꿔야 한다.
+**Task 1 의 판정(2026-08-01 실측, 이 태스크는 그 결과를 반영해 이미 고쳐졌다):**
+
+| 조합 | 결과 |
+|---|---|
+| A: `tools: []` + `skills: 'all'` | **스킬 안 보임** |
+| B: `tools: ['Skill']` + `skills: 'all'` | **스킬 로드됨** |
+| C: `tools: []` + `skills: []` | 스킬 안 보임 |
+
+**`tools: []` 가 `Skill` 도구까지 닫는다.** `skills: 'all'` 만으로는 되살릴 수 없고 `tools` 배열에 `"Skill"` 을 명시해야 한다. 그래서 이 태스크의 켜고 끄는 축은 `skills` 옵션이 아니라 **`builtinTools` 멤버십**이다 — WebSearch 와 정확히 같은 방식이라 오히려 단순해졌다.
+
+C 는 `skills: []` 가 끄는지를 **독립적으로 증명하지 못한다**(A 에서 이미 `tools: []` 자체가 막으므로 C 의 "안 보임"이 어느 쪽 때문인지 분리되지 않는다 — Task 1 구현자 지적). 그래서 이 계획은 **증명되지 않은 `skills: []` 에 의존하지 않는다.** `skills` 는 항상 `"all"` 로 두고 `tools` 로만 가른다 — A 와 B 가 각각 그 두 상태를 실측으로 확인했다.
 
 - [ ] **Step 1: 실패하는 테스트를 쓴다**
 
@@ -464,6 +474,21 @@ if (SKILL_PLUGINS.length === 0) console.warn(`[agent] 스킬 폴더가 없어 �
     const skillsEnabled = resolveSkillsEnabled(req);
 ```
 
+`builtinTools` 조립을 바꾼다. **여기가 스킬을 실제로 켜고 끄는 유일한 지점이다** — 2026-08-01 실측: `tools` 에 `"Skill"` 이 없으면 `skills: 'all'` 을 줘도 스킬이 보이지 않는다.
+
+```ts
+    // SDK 내장 도구는 웹 검색과 스킬만 연다. 파일/Bash 는 원격 도구(fs_*·sh_exec)가 대신하므로
+    // 계속 닫아 둔다 — 열면 봇 컨테이너의 파일시스템을 건드리게 된다.
+    //
+    // Skill 을 여기 넣어야 하는 이유(2026-08-01 실측, src/scripts/skillProbe.ts): tools 가 비면
+    // SDK 는 Skill 도구까지 닫으며, skills: 'all' 을 줘도 되살아나지 않는다. 즉 스킬을 켜고 끄는
+    // 실제 스위치는 skills 옵션이 아니라 이 배열이다 — WebSearch 와 같은 방식이다.
+    const builtinTools: string[] = [
+      ...(webToolsEnabled ? ["WebSearch"] : []),
+      ...(skillsEnabled ? ["Skill"] : []),
+    ];
+```
+
 `query()` 의 `options` 에 두 줄을 더한다(`maxTurns: 30` 다음).
 
 ```ts
@@ -471,8 +496,13 @@ if (SKILL_PLUGINS.length === 0) console.warn(`[agent] 스킬 폴더가 없어 �
         // 스킬은 agent/skills/ 에 플러그인 하나로 모여 있다(agent/skills/.claude-plugin).
         // 외부 스킬은 그 폴더에 그대로 복사해 커밋하는 것이 설치 방식이다.
         plugins: SKILL_PLUGINS,
-        skills: skillsEnabled ? ("all" as const) : [],
+        // 항상 'all' 이다. 끄는 일은 위 builtinTools 가 한다 — skills: [] 가 실제로 끄는지는
+        // 실측으로 증명되지 않았고(Task 1 의 C 갈래는 tools: [] 와 겹쳐 분리되지 않았다),
+        // 증명되지 않은 경로에 차단을 걸지 않는다.
+        skills: "all" as const,
 ```
+
+**기존 `builtinTools` 상수 선언(웹 검색만 보던 줄)은 지운다** — 같은 이름의 선언이 둘 남으면 컴파일이 막히거나, 더 나쁘게는 나중 것이 조용히 이긴다.
 
 - [ ] **Step 6: `core.ts` 의 유휴 요약 턴에 플래그를 넘긴다**
 
@@ -499,6 +529,16 @@ cd agent && npm test && npm run typecheck
 1. `resolveSkillsEnabled` 를 `return true;` 로 → "noSkills=true 면 닫힌다" 가 **FAIL**
 2. `skillsDirFrom` 의 `".."` 하나를 지움 → 첫 두 경로 테스트가 **FAIL**
 3. `skillPluginsFor` 를 `return [{ type: "local", path: o.skillsDir }];` 로(존재 확인 무시) → "폴더가 없으면 빈 배열" 이 **FAIL**
+
+- [ ] **Step 8b: `builtinTools` 배선을 눈으로 확인한다**
+
+이 줄은 유닛 테스트가 닿지 않는다(`query()` 옵션 조립부). 대신 직접 읽어 확인한다.
+
+```bash
+cd agent && grep -n -A6 "const builtinTools" src/core/agent.ts
+```
+
+확인할 것: 선언이 **하나뿐**이고, `skillsEnabled` 일 때 `"Skill"` 이 들어가며, 웹 검색 조건과 독립적이다(웹 도구가 닫혀도 스킬은 열릴 수 있어야 한다 — 둘은 별개 축이다).
 
 - [ ] **Step 9: 커밋**
 
