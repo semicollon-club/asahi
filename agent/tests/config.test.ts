@@ -153,6 +153,30 @@ describe("얇은 워커 설정(Task 7 — 워커는 DB·모델·세션을 다루
       } as NodeJS.ProcessEnv)).toThrow(/WORKER_ROOTS/);
     },
   );
+
+  // Task 7(자동 갱신): sentinelPath 는 이 파일의 다른 WorkerConfig 필드와 달리 그동안 전용
+  // 테스트가 없었다 — config.ts 의 `sentinelPath: env.WORKER_SENTINEL || undefined,` 한 줄을
+  // 통째로 지워도 이 파일을 포함한 전체 스위트가 그대로 통과했다(리뷰가 뮤테이션으로 확인).
+  // 자동 갱신 전체가 여기서 조용히 죽는다 — WORKER_SENTINEL 이 없으면 워커는 옵트인이 꺼진
+  // 것으로 보고 감시를 아예 안 하고(정상), 있으면 그 값을 그대로 sentinelPath 로 실어야
+  // update-worker.ps1 이 만드는 센티넬 경로와 워커가 감시하는 경로가 일치한다(비정상이면
+  // 업데이터는 계속 파일을 만드는데 워커는 다른 곳을 보게 된다).
+  it("WORKER_SENTINEL 이 없으면 sentinelPath 는 undefined 다(자동 갱신 감시는 옵트인)", () => {
+    const w = loadWorkerConfig({
+      DISCORD_OWNER_ID: "o", WORKER_ID: "o",
+      HUB_URL: "wss://h/worker", WORKER_TOKEN: "wt", WORKER_ROOTS: ROOT_A,
+    } as NodeJS.ProcessEnv);
+    expect(w.sentinelPath).toBeUndefined();
+  });
+
+  it("WORKER_SENTINEL 을 설정하면 sentinelPath 에 그 값이 그대로 실린다", () => {
+    const w = loadWorkerConfig({
+      DISCORD_OWNER_ID: "o", WORKER_ID: "o",
+      HUB_URL: "wss://h/worker", WORKER_TOKEN: "wt", WORKER_ROOTS: ROOT_A,
+      WORKER_SENTINEL: "C:\\asahi-worker-update.flag",
+    } as NodeJS.ProcessEnv);
+    expect(w.sentinelPath).toBe("C:\\asahi-worker-update.flag");
+  });
 });
 
 describe("model 구성(Opus 4.8 기본, 봇 설정 전용 — 워커는 더 이상 model 을 다루지 않는다)", () => {

@@ -14,12 +14,14 @@ import { planShutdown } from "./remote/workerShutdown.js";
 dotenv.config({ path: path.resolve("..", ".env") });
 dotenv.config();
 
-// FIX8(사소): 실행기 호출 하나하나를 감싸 "지금 몇 개가 진행 중인가"를 센다. shutdown 이
+// FIX8(사소): 실행기 호출 하나하나를 감싸 "지금 몇 개가 진행 중인가"를 센다. finish 가
 // client.stop() 직후 곧바로 process.exit 해버리면, 마침 디스크에 쓰는 중이던 fs_write 가 중간에
 // 잘릴 수 있다 — 예전(DB 폴링) 버전이 pollPromise 를 기다리고서야 끝낸 것과 같은 이유로, 지금은
-// "그 시점에 실행 중이던 실행기 호출들"이 끝나길 기다린다. client.stop() 이 소켓을 곧바로 닫으므로
-// 결과 프레임이 허브까지 돌아가는지는 보장할 수 없지만(workerClient.ts 참고), 적어도 로컬 디스크에
-// 쓰던 내용은 끝까지 쓰고 나서 프로세스를 끝낸다.
+// "그 시점에 실행 중이던 실행기 호출들"이 끝나길 기다린다. signal 경로(사람이 멈춤)는 지금도
+// client.stop() 이 소켓을 먼저 닫으므로 결과 프레임이 허브까지 돌아가는지 보장할 수 없지만
+// (workerClient.ts 참고), update 경로(센티넬)는 planShutdown 이 idle() 을 먼저 기다린 뒤에야
+// 소켓을 닫도록 순서를 뒤집어(workerShutdown.ts) 그 문제가 없다 — 어느 경로든 적어도 로컬
+// 디스크에 쓰던 내용은 끝까지 쓰고 나서 프로세스를 끝낸다.
 function trackInFlight(executors: Executors): { wrapped: Executors; idle: () => Promise<void> } {
   let count = 0;
   let waiters: Array<() => void> = [];

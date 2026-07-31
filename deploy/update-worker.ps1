@@ -53,8 +53,13 @@ try {
   git fetch origin main | Out-Null
   if ($LASTEXITCODE -ne 0) { Exit-Failure "git fetch origin main 실패 (종료 코드 $LASTEXITCODE)" }
 
+  # git rev-parse 는 없는 ref 를 줘도 던지지 않는다 — 인자 문자열을 그대로 stdout 에 찍고
+  # 종료 코드 128 로 끝낼 뿐이다. 확인하지 않으면 $local/$remote 가 "HEAD"·"origin/main" 같은
+  # 문자열 그대로 남고, 그 뒤 비교·조상 검사가 엉뚱하게 실패해 로그가 원인을 오진하게 된다.
   $local = (git rev-parse HEAD).Trim()
+  if ($LASTEXITCODE -ne 0) { Exit-Failure "git rev-parse HEAD 실패 (종료 코드 $LASTEXITCODE, 출력: $local)" }
   $remote = (git rev-parse origin/main).Trim()
+  if ($LASTEXITCODE -ne 0) { Exit-Failure "git rev-parse origin/main 실패 (종료 코드 $LASTEXITCODE, 출력: $remote)" }
   if ($local -eq $remote) { exit 0 }
 
   $shortLocal = $local.Substring(0, 7)
@@ -67,6 +72,26 @@ try {
   git merge-base --is-ancestor HEAD origin/main
   if ($LASTEXITCODE -ne 0) {
     Write-Log "실패: HEAD($shortLocal) 가 origin/main($shortRemote) 의 조상이 아니라 fast-forward 불가. 로컬 커밋이나 리베이스로 분기했을 수 있다 — 사람이 리포 상태를 봐야 한다. 워커는 건드리지 않았다."
+    exit 1
+  }
+
+  # 조상 검사는 커밋 그래프만 본다 — 아래 git pull --ff-only 가 실제로 성공하려면 두 조건이
+  # 더 필요한데, 둘 다 그래프와 무관해서 위 검사를 통과한 뒤에도 따로 깨질 수 있다. 여기서
+  # 걸러내지 않으면 센티넬을 만들고 워커를 내린 "다음"에야 pull 이 실패해, 이 스크립트가
+  # 막으려는 바로 그 증상(5분마다 워커를 헛되이 내렸다 올리는 무한 루프)을 그대로 재현한다.
+  #
+  # (1) HEAD 가 detached 면 git pull 이 어느 브랜치의 upstream 을 따라갈지 알 수 없다.
+  git symbolic-ref -q HEAD | Out-Null
+  if ($LASTEXITCODE -ne 0) {
+    Write-Log "실패: HEAD 가 detached 상태라 fast-forward pull 이 따라갈 브랜치가 없다. 사람이 리포 상태를 봐야 한다. 워커는 건드리지 않았다."
+    exit 1
+  }
+  # (2) 추적 파일에 커밋 안 된 변경이 있으면, 그 변경이 들어오는 커밋의 변경분과 겹칠 때
+  # 커밋 그래프는 fast-forward 가 맞아도 작업 트리에 적용하는 단계(체크아웃)가 "로컬 변경을
+  # 덮어쓰게 된다"며 거부한다.
+  git diff --quiet HEAD
+  if ($LASTEXITCODE -ne 0) {
+    Write-Log "실패: 추적 파일에 커밋 안 된 변경이 있어 fast-forward pull 이 덮어쓸 수 있다. 사람이 리포 상태를 봐야 한다. 워커는 건드리지 않았다."
     exit 1
   }
 

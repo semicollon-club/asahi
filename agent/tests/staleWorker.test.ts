@@ -44,9 +44,20 @@ describe("decideStaleAlerts", () => {
     expect(state.size).toBe(0);
   });
 
-  it("워커 커밋을 모르면 판정하지 않는다(옛 워커)", () => {
+  // 첫 호출만 부르면 이 테스트는 가드가 없어도 통과한다 — decideStaleAlerts 는 어떤 조합이든
+  // 처음 관측할 때는 기록만 하고 [] 를 돌려주기 때문이다(위 "임계를 넘기면 한 번 알린다" 참고).
+  // 가드(`if (w.commit === undefined) continue`)가 실제로 하는 일은 "시간이 아무리 지나도
+  // 커밋 모르는 워커는 알리지 않는다"이므로, 임계를 넘긴 두 번째 호출까지 이어서 확인해야
+  // 가드를 지켰다고 말할 수 있다. 가드를 지우면 이 두 번째 호출이 "낡았다" 분기를 타 알림
+  // 문구를 만들려다 `w.commit.slice(0, 7)` 에서 TypeError 로 죽는다(undefined 에는 slice 가
+  // 없다) — 잘못된 알림이 아니라 예외로 죽는다는 것이 이 가드가 막는 실제 실패 모드다.
+  it("워커 커밋을 모르면 판정하지 않는다(옛 워커) — 시간이 지나도 알리지 않는다", () => {
     const state: StaleState = new Map();
-    const out = decideStaleAlerts({ workers: [{ workerId: "w", commit: undefined }], botCommit: "new", now: 99 * MIN, state, thresholdMs: T });
-    expect(out).toEqual([]);
+    const args = { workers: [{ workerId: "w", commit: undefined }], botCommit: "new", state, thresholdMs: T };
+    const first = decideStaleAlerts({ ...args, now: 99 * MIN });
+    expect(first).toEqual([]);
+    const second = decideStaleAlerts({ ...args, now: 99 * MIN + T + MIN });
+    expect(second).toEqual([]);
+    expect(state.size).toBe(0);
   });
 });
