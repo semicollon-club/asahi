@@ -290,7 +290,27 @@ export async function remoteToolHandler(
       // 범위는 onlyUserId 가 이미 긋고 있던 경계를 그대로 따른다: 손님은 자기 프로세스만 보므로
       // 자기 이름 하나만, 소유자는 전원을 보므로 전체 맵을 보낸다. 새 프라이버시 경계가 생기지
       // 않는다는 것이 중요하다 — 손님에게 남의 이름이 가지 않는 것은 지금과 똑같다.
-      const names = await ctx.repos.users.displayNames();
+      //
+      // 리뷰 Finding 3(사소함, 주석 보강): 이름을 모르는 키를 { [ctx.userId]: undefined } 로
+      // 채우지 않고 아예 {} 로 비우는 것은 사소한 형식이 아니라 계약이다 — "키가 없음" 자체가
+      // "생성 이름으로 폴백하라"는 신호이고(usersRepo.ts displayNames 주석), 값이 undefined 인
+      // 키를 넣으면 키는 있는데 신호는 사라지는 어긋난 상태가 된다.
+      let names: Record<string, string>;
+      try {
+        names = await ctx.repos.users.displayNames();
+      } catch {
+        // 리뷰 Finding 1(중요): 이 함수는 스스로 "절대 던지지 않는다"고 이미 두 번 선언했다(맨
+        // 위 함수 설명, 그리고 아래 remote.call 의 catch 주석) — displayNames() 도 위
+        // allowedDirs.list 와 똑같이 실제 DB 왕복이라 reject 할 수 있는데, 여태 감싸지 않아 그
+        // reject 가 이 함수 밖으로(나아가 remoteResult — tools.ts, 거기도 catch 가 없다) 그대로
+        // 새어나가 턴 전체를 죽일 수 있었다. 다만 처리 방식은 allowedDirs.list 와 다르게 간다 —
+        // 그쪽은 "이 경로를 건드려도 되는가"라는 권한 판정이라 판정 불가 시 거부(fail closed)가
+        // 맞지만, names 는 권한이 아니라 화면에 보일 장식일 뿐이고 키가 없는 사용자는 이미
+        // 워커가 생성 이름으로 폴백하도록 설계돼 있다(바로 위 주석). 그러니 거부 대신 빈 맵으로
+        // 내려 proc_list 자체는 계속 진행한다 — 이름을 못 구했다고 목록 조회까지 막을 이유는
+        // 없다.
+        names = {};
+      }
       const mineName = names[ctx.userId];
       const labels = ctx.isOwner ? names : mineName === undefined ? {} : { [ctx.userId]: mineName };
       args = ctx.isOwner
