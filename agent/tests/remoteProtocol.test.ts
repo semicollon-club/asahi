@@ -61,3 +61,24 @@ describe("hello — 신원이 userId 에서 workerId 로 바뀐다", () => {
     expect(parseFrame(encodeFrame(f))).toEqual(f);
   });
 });
+
+describe("hello — commit 은 선택 필드다(옛 워커 호환)", () => {
+  it("hello 는 commit 이 없어도 정상 파싱된다(옛 워커 호환)", () => {
+    // 이 단정이 옛 워커 호환의 유일한 방어선이다. commit 을 필수로 만들면 옛 워커가 붙지 못하고
+    // 거부 사유도 못 받아 3초마다 영원히 재연결한다.
+    const f = parseFrame(JSON.stringify({ type: "hello", token: "t", workerId: "w", roots: ["/r"] }));
+    expect(f).toEqual({ type: "hello", token: "t", workerId: "w", roots: ["/r"] });
+  });
+
+  it("hello 의 commit 이 문자열이면 싣는다", () => {
+    const f = parseFrame(JSON.stringify({ type: "hello", token: "t", workerId: "w", roots: ["/r"], commit: "abc123" }));
+    expect(f).toEqual({ type: "hello", token: "t", workerId: "w", roots: ["/r"], commit: "abc123" });
+  });
+
+  it("hello 의 commit 이 문자열이 아니면 그 필드만 버리고 연결은 살린다", () => {
+    // 형태가 어긋난 부가 정보 때문에 인증 자체가 실패하면 안 된다 — 버전은 몰라도 되지만
+    // 연결은 되어야 한다.
+    const f = parseFrame(JSON.stringify({ type: "hello", token: "t", workerId: "w", roots: ["/r"], commit: 42 }));
+    expect(f).toEqual({ type: "hello", token: "t", workerId: "w", roots: ["/r"] });
+  });
+});
