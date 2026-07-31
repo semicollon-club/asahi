@@ -284,7 +284,18 @@ export async function remoteToolHandler(
     // 소유자에게도 키를 undefined 로 실어 보낸다(키 자체를 지우지 않는다) — 실행기(executors.ts)는
     // str(args.onlyUserId) 가 undefined 면 필터를 걸지 않으므로 결과는 "전원"이다.
     if (tool === "proc_list") {
-      args = ctx.isOwner ? { ...args, onlyUserId: undefined } : { ...args, onlyUserId: ctx.userId };
+      // labels 는 name·cwd·onlyUserId 와 같은 부류다 — 모델이 정하지 않고 여기서 주입한다.
+      // 워커는 디스코드를 모르므로 userId 를 사람 이름으로 풀 수 없다(신원 해석은 봇만 한다).
+      //
+      // 범위는 onlyUserId 가 이미 긋고 있던 경계를 그대로 따른다: 손님은 자기 프로세스만 보므로
+      // 자기 이름 하나만, 소유자는 전원을 보므로 전체 맵을 보낸다. 새 프라이버시 경계가 생기지
+      // 않는다는 것이 중요하다 — 손님에게 남의 이름이 가지 않는 것은 지금과 똑같다.
+      const names = await ctx.repos.users.displayNames();
+      const mineName = names[ctx.userId];
+      const labels = ctx.isOwner ? names : mineName === undefined ? {} : { [ctx.userId]: mineName };
+      args = ctx.isOwner
+        ? { ...args, onlyUserId: undefined, labels }
+        : { ...args, onlyUserId: ctx.userId, labels };
     }
   }
 
