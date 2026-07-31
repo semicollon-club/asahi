@@ -51,6 +51,18 @@ export class ConversationsRepo {
     return row ? toConversation(row) : null;
   }
 
+  // 소유자에게 능동적으로 알리려면 보낼 채널이 필요한데, 지금까지 이 리포에는 "이 사람의 DM
+  // 대화"를 찾는 경로가 없었다(전부 채널 id 나 대화 id 로 찾는다). 한 사용자가 DM 대화를
+  // 여럿 가질 일은 없지만, 혹시라도 있다면 가장 최근에 활동한 것을 고른다.
+  async findDmFor(userId: string): Promise<Conversation | null> {
+    const r = await this.db.query(
+      "SELECT * FROM conversations WHERE kind = 'dm' AND primary_user_id = $1 ORDER BY last_active_ts DESC LIMIT 1",
+      [userId],
+    );
+    const row = r.rows[0] as Row | undefined;
+    return row ? toConversation(row) : null;
+  }
+
   // 유휴 정리 대상: 활성 상태 + 열린 세션 + last_active 가 컷오프 이전. 오래된 것부터.
   async listActiveIdle(cutoffTs: number, limit = 100): Promise<Conversation[]> {
     const r = await this.db.query(

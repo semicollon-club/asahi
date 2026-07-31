@@ -23,6 +23,7 @@ import { CharacterImagesRepo } from "./store/characterImagesRepo.js";
 import { AgentCore } from "./core/core.js";
 import { makeRunAgentTurn } from "./core/agent.js";
 import { DigestRunner, DIGEST_TOPICS, type DigestTopic } from "./core/digest.js";
+import { decideStaleAlerts, type StaleState } from "./core/staleWorker.js";
 import { DiscordAdapter } from "./adapters/discord.js";
 
 // 비밀값(.env)은 리포 루트(agent/ 바깥, data/ 와 같은 위치)에서 읽는다.
@@ -177,9 +178,35 @@ async function main() {
     void digest.checkAndRun().catch((err) => console.error("[digest] 스케줄 확인 오류:", err));
   }, 60 * 1000);
 
+  // 워커가 낡은 채로 오래 있으면 소유자에게 알린다. 주기는 조각 B 의 자동 갱신 폴링(5분)과
+  // 맞춘다 — 그보다 자주 봐야 할 이유가 없다.
+  const staleState: StaleState = new Map();
+  const staleTimer = setInterval(() => {
+    const alerts = decideStaleAlerts({
+      workers: hub.workersInfo(),
+      botCommit: process.env.RAILWAY_GIT_COMMIT_SHA,
+      now: Date.now(),
+      state: staleState,
+      thresholdMs: 15 * 60_000,
+    });
+    if (alerts.length === 0) return;
+    // findDmFor 자체의 실패(DB 오류 등)가 setInterval 콜백 밖에서 unhandled rejection 으로
+    // 튀어 봇 전체를 죽이지 않도록 catch 한다 — 이 파일의 다른 타이머 콜백과 같은 방어.
+    void conversations
+      .findDmFor(config.ownerId)
+      .then((conv) => {
+        for (const text of alerts) {
+          if (conv === null) { console.error("[stale]", text); continue; }
+          bus.publish({ type: "system_notice", channel: "discord", channelRef: conv.discordChannelId, text, ts: Date.now() });
+        }
+      })
+      .catch((err) => console.error("[stale] 알림 발송 오류:", err));
+  }, 5 * 60_000);
+
   const shutdown = async () => {
     console.log("종료 중...");
     clearInterval(idleTimer);
+    clearInterval(staleTimer);
     await core.drain();     // 처리 중인 메시지를 마저 끝내고
     await discord.stop();   // 체인에 남은 전송을 흘려보낸 뒤 클라이언트 종료
     // FIX3(중요): 인증 전(hello 대기 중) 소켓은 hub.conns 에 없어 hub.closeAll() 이 원래 놓쳤다 —

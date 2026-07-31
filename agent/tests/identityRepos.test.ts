@@ -96,6 +96,15 @@ describe("ConversationsRepo", () => {
     await repo.setStatus(b, "closed");    // 닫힘 → 제외
     expect((await repo.listActiveIdle(150)).map((c) => c.id)).toEqual([]);
   });
+
+  it("findDmFor 는 그 사용자의 DM 대화를 찾는다", async () => {
+    await repo.create({ kind: "dm", discordChannelId: "dm-1", primaryUserId: "owner", isPrivate: true, lastActiveTs: 10 });
+    await repo.create({ kind: "thread", discordChannelId: "th-1", primaryUserId: "owner", isPrivate: false, lastActiveTs: 20 });
+
+    const found = await repo.findDmFor("owner");
+    expect(found?.discordChannelId).toBe("dm-1"); // 스레드가 더 최근이어도 DM 을 고른다
+    expect(await repo.findDmFor("nobody")).toBeNull();
+  });
 });
 
 describe("ParticipantsRepo", () => {
