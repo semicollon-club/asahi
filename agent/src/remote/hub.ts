@@ -12,7 +12,7 @@ export type HubSocket = {
 };
 
 type Pending = { resolve: (r: { ok: boolean; content: string }) => void; timer: ReturnType<typeof setTimeout> };
-type Conn = { socket: HubSocket; roots: string[]; pending: Map<string, Pending>; pingTimer: ReturnType<typeof setInterval> };
+type Conn = { socket: HubSocket; roots: string[]; pending: Map<string, Pending>; pingTimer: ReturnType<typeof setInterval>; commit?: string; connectedAt: number };
 
 const DEFAULT_CALL_TIMEOUT_MS = 120_000;
 
@@ -204,7 +204,7 @@ export class WorkerHub {
 
             this.clearHelloTimer(socket);
             this.dropExisting(id);
-            this.conns.set(id, { socket, roots, pending: new Map(), pingTimer: this.startPing(socket) });
+            this.conns.set(id, { socket, roots, pending: new Map(), pingTimer: this.startPing(socket), commit: frame.commit, connectedAt: this.now() });
             state = "authed";
             workerId = id;
             socket.send(encodeFrame({ type: "ready" }));
@@ -258,6 +258,13 @@ export class WorkerHub {
 
   rootsOf(workerId: string): string[] {
     return this.conns.get(workerId)?.roots ?? [];
+  }
+
+  // 연결된 워커들의 버전 정보. DB 를 쓰지 않는 이유는 이것을 읽는 쪽(runtime_info)과 알림을
+  // 내는 쪽이 모두 이 프로세스 안에 있기 때문이다. 봇이 재배포되면 초기화되지만 그때는
+  // 어차피 새로운 비교가 시작되므로 무해하다.
+  workersInfo(): Array<{ workerId: string; commit?: string; connectedAt: number }> {
+    return [...this.conns.entries()].map(([workerId, c]) => ({ workerId, commit: c.commit, connectedAt: c.connectedAt }));
   }
 
   // 도구 호출 하나를 워커로 보내고 결과를 기다린다. 어떤 경우에도 reject 하지 않는다 —
