@@ -4,7 +4,7 @@
 # 센티넬 파일을 만들면 워커가 진행 중인 호출을 마치고 0 이 아닌 코드로 스스로 종료하고,
 # 작업 스케줄러의 "실패 시 다시 시작" 정책이 다시 띄운다.
 #
-# 실패는 반드시 로그(기본 C:\asahi-worker-update.log)에 남기고 0 이 아닌 코드로 끝난다 —
+# 실패는 반드시 로그(기본 <리포>\update-worker.log)에 남기고 0 이 아닌 코드로 끝난다 —
 # 작업 스케줄러 기록 탭의 결과 코드가 그대로 성공/실패 신호가 된다. 새 커밋이 없어 아무 일도
 # 안 한 회차는 로그를 남기지 않는다 — 5분마다 한 줄씩 쌓이면 정작 중요한 줄이 묻힌다.
 #
@@ -14,9 +14,14 @@
 # 처럼 나온다). 저장한 뒤에는 파일 첫 3바이트가 EF BB BF 인지 확인할 것.
 param(
   [string]$RepoPath = "C:\asahi-worker",
-  [string]$Sentinel = "C:\asahi-worker-update.flag",
+  # 센티넬과 로그를 리포 안에 두는 이유: 윈도우 기본 ACL 에서 표준 계정은 C:\ 루트에 폴더는
+  # 만들 수 있어도 "파일"은 만들 수 없다. 2026-08-01 첫 실전 갱신이 정확히 이걸로 막혔다 —
+  # 센티넬 생성이 ACCESS DENIED 로 죽었고, 로그조차 같은 이유로 못 남아 작업 스케줄러 결과
+  # 코드 말고는 흔적이 없었다. 리포는 이 스크립트를 돌리는 계정(asahi)의 소유라 항상 쓸 수
+  # 있고, 두 파일 다 .gitignore 대상이라 git 작업과 충돌하지 않는다.
+  [string]$Sentinel = "$RepoPath\update.flag",
   [int]$WaitSeconds = 300,
-  [string]$LogPath = "C:\asahi-worker-update.log",
+  [string]$LogPath = "$RepoPath\update-worker.log",
   [int]$MaxLogBytes = 1MB
 )
 
@@ -35,6 +40,9 @@ function Write-Log([string]$Message) {
     }
     Add-Content -Path $LogPath -Value $line -Encoding UTF8
   } catch {
+    # 로그 파일조차 못 쓰는 상황(2026-08-01 의 C:\ 루트 권한이 그랬다)에서도 손으로 실행할
+    # 때는 원인이 보이게 stdout 에라도 남긴다. 예약 실행에서는 버려지지만 없는 것보다 낫다.
+    try { Write-Output $Message } catch {}
   }
 }
 

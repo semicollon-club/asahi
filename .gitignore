@@ -11,5 +11,9 @@ data/
 # 로그
 *.log
 
+# 미니PC 자동 갱신 센티넬 — 업데이터(deploy/update-worker.ps1)가 리포 루트에 만들었다
+# 지우는 신호 파일. C:\ 루트에 못 두는 이유는 worker-셋업.md "자동 갱신" 절 참고.
+update.flag
+
 # 런타임 stdout 스냅샷·임시 메모(server.txt, localworker.txt 등) — 실수 커밋 방지
 *.txt

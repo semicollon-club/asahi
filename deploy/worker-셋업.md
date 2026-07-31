@@ -183,7 +183,7 @@ pm2 --version
 **2. 워커 `.env` 에 센티넬 경로를 넣고, 워커를 한 번 재시작한다.**
 
 ```
-WORKER_SENTINEL=C:\asahi-worker-update.flag
+WORKER_SENTINEL=C:\asahi-worker\update.flag
 ```
 
 이 값이 없으면 워커는 센티넬 파일을 아예 감시하지 않는다 — **옵트인**이다. 자동 갱신을
@@ -214,6 +214,15 @@ WORKER_SENTINEL=C:\asahi-worker-update.flag
 절) 회원은 셸로 어디든 파일을 만들 수 있고, 애초에 워커 프로세스를 직접 죽일 수도 있다 —
 센티넬은 **새 능력을 열지 않는다.** `WORKER_ROOTS` 밖에 두는 것은 실수 방지선이지, 의도된
 공격을 막는 경계가 아니다.
+
+**그리고 `C:\` 루트에는 절대 두지 않는다.** 윈도우 기본 ACL 에서 표준 계정은 `C:\` 루트에
+폴더는 만들 수 있어도 **파일은 만들 수 없다.** 첫 설계가 센티넬(`C:\asahi-worker-update.flag`)과
+로그를 둘 다 `C:\` 루트 파일로 잡았다가 2026-08-01 첫 실전 갱신이 정확히 이걸로 막혔다 —
+센티넬 생성이 ACCESS DENIED 로 죽고, 로그조차 같은 이유로 못 남아, 작업 스케줄러 결과
+코드와 15분 알림 말고는 흔적이 없었다(그 알림이 첫 실전 발화로 이 사고를 잡았다). 그래서
+기본 경로가 리포 안(`C:\asahi-worker\update.flag`)이다 — `WORKER_ROOTS` 밖이면서, 이
+스크립트를 돌리는 계정이 확실히 쓸 수 있는 곳. 두 파일 다 `.gitignore` 대상이라 git 작업과
+충돌하지 않는다.
 
 **3. `asahi-worker-update` 작업을 새로 등록한다** — `asahi-worker` 와는 별개의 작업으로.
 위 "2." 를 먼저 끝낸 뒤에 한다.
@@ -249,7 +258,7 @@ Register-ScheduledTask -TaskName "asahi-worker-update" -Action $action -Trigger 
 거기서도 "누가 먼저 그 프로세스를 띄우느냐"가 그 프로세스가 어느 작업 스케줄러 잡 안에서
 태어나는지를 정했고, 워커가 먼저 띄우면 워커와 함께 죽었다.
 
-**4. 로그를 확인한다.** 업데이터는 `C:\asahi-worker-update.log` 에 시각을 붙여 한 줄씩
+**4. 로그를 확인한다.** 업데이터는 `C:\asahi-worker\update-worker.log` 에 시각을 붙여 한 줄씩
 덧붙여 쓴다(기본 경로 — 스크립트의 `-LogPath` 로 바꿀 수 있다). **아무 일도 없었던
 회차(새 커밋 없음)는 로그를 남기지 않는다** — 5분마다 한 줄씩 쌓이면 정작 중요한 줄이
 묻히기 때문이다. 그래서 마지막 확인 이후 새 줄이 없다는 것 자체가 "조용히 정상"이라는
@@ -257,7 +266,7 @@ Register-ScheduledTask -TaskName "asahi-worker-update" -Action $action -Trigger 
 `실패: ...` 로 시작하는 줄을 남기고, 그 회차의 작업 스케줄러 결과 코드도 0 이 아니게
 된다 — **작업 스케줄러 기록 탭(작업 스케줄러 → `asahi-worker-update` → 기록)의 결과
 코드만으로 그 회차가 실패했는지 먼저 알 수 있고, 원인은 로그에서 찾는다.** 로그가
-커지면(기본 상한 1MB) 다음 회차가 `C:\asahi-worker-update.log.old` 로 한 번 갈아치우고
+커지면(기본 상한 1MB) 다음 회차가 `C:\asahi-worker\update-worker.log.old` 로 한 번 갈아치우고
 새로 쓴다 — 여러 세대를 보관하지는 않는다.
 
 등록이 끝나면 확인은 `deploy/smoke-test.md` 의 "새 커밋이 10분 안에 워커에 들어가는가" 이하

@@ -173,9 +173,9 @@ describe("얇은 워커 설정(Task 7 — 워커는 DB·모델·세션을 다루
     const w = loadWorkerConfig({
       DISCORD_OWNER_ID: "o", WORKER_ID: "o",
       HUB_URL: "wss://h/worker", WORKER_TOKEN: "wt", WORKER_ROOTS: ROOT_A,
-      WORKER_SENTINEL: "C:\\asahi-worker-update.flag",
+      WORKER_SENTINEL: "C:\\asahi-worker\\update.flag",
     } as NodeJS.ProcessEnv);
-    expect(w.sentinelPath).toBe("C:\\asahi-worker-update.flag");
+    expect(w.sentinelPath).toBe("C:\\asahi-worker\\update.flag");
   });
 });
 
