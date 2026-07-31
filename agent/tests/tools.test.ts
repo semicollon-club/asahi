@@ -531,6 +531,28 @@ describe("runtime_info", () => {
     expect(out).not.toContain("다름");
     expect(out).not.toContain("일치");
   });
+
+  it("워커 커밋을 모르면 비교하지 않는다(옛 워커·git 읽기 실패)", async () => {
+    // 위 테스트와 대칭인 반대쪽 갈래: 이번엔 봇 커밋은 있고 워커 커밋만 없다. verdict() 는
+    // botCommit===undefined 와 workerCommit===undefined 를 OR 로 묶는데, 후자 쪽은 이 테스트가
+    // 생기기 전까지 아무 테스트도 지키지 않았다 — 그 갈래만 지워도 기존 테스트는 그대로 통과했다.
+    // Task 2 이전 코드로 도는 옛 워커나 git 읽기에 실패한 워커가 commit 을 안 실으면 이 경로를
+    // 타는데, 여기서 "모른다"를 "다르다"로 오판하면 거짓 경보가 되고 반복되면 진짜 불일치도
+    // 무시하게 된다(리뷰 지적).
+    const c = await ctx({
+      isOwner: true,
+      isPrivate: true,
+      runtime: {
+        model: "m", sdkVersion: "s", deployTarget: "cloud", maxTurns: 30,
+        botCommit: "abc1234",
+        workers: [{ workerId: "old-worker", connectedAt: 1 }],
+      },
+    });
+    const out = await runtimeInfoHandler(c);
+    expect(out).toContain("알 수 없음");
+    expect(out).not.toContain("다름");
+    expect(out).not.toContain("일치");
+  });
 });
 
 describe("allowedToolsFor — db 도구 노출", () => {
