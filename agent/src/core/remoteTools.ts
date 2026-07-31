@@ -298,7 +298,11 @@ export async function remoteToolHandler(
       let names: Record<string, string>;
       try {
         names = await ctx.repos.users.displayNames();
-      } catch {
+      } catch (err) {
+        // 최종 리뷰 Fix 2(중요): 조용히 내려가면 안 된다. 이 저하의 유일한 증상은 목록에
+        // 사람 이름 대신 생성 이름이 뜨는 것뿐이라, 일시적 장애가 아니라 스키마 변경처럼
+        // 지속되는 원인이어도 아무도 알아채지 못한 채 영원히 저하된 상태로 돈다.
+        console.error("[remoteTools] proc_list 이름 조회 실패 — 생성 이름으로 폴백:", err);
         // 리뷰 Finding 1(중요): 이 함수는 스스로 "절대 던지지 않는다"고 이미 두 번 선언했다(맨
         // 위 함수 설명, 그리고 아래 remote.call 의 catch 주석) — displayNames() 도 위
         // allowedDirs.list 와 똑같이 실제 DB 왕복이라 reject 할 수 있는데, 여태 감싸지 않아 그

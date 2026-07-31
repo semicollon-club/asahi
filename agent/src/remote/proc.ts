@@ -114,6 +114,27 @@ function humanMem(bytes: number | null): string {
   return bytes === null ? "-" : `${Math.round(bytes / (1024 * 1024))}MB`;
 }
 
+// 최종 리뷰 Fix 4(사소함, 이 브랜치가 연 경로): labelOf 가 돌려주는 값은 회원이 디스코드에서
+// 스스로 정하는 표시 이름이다(adapters/discord.ts 가 users.display_name 에 넣고, core/
+// remoteTools.ts 가 labels 로 실어 보낸다). 이 브랜치 전에는 봇이 만든 asahi-<id> 만 이 자리에
+// 왔으므로 회원이 표에 넣을 수 있는 문자열이 아예 없었다.
+//
+// 그대로 꽂으면 아래 [인프라] 표식이 무력해진다 — 표시 이름을 "[인프라] asahi-worker" 로 바꾸면
+// 자기 행이 인프라처럼 보여, 표식을 근거로 "건드리지 않는" 모델이 그 회원의 프로세스를 그냥
+// 지나친다(다른 회원 이름을 그대로 쓰면 소유자 목록에서 남을 사칭할 수도 있다). 표식을 만드는
+// 대괄호를 회원 이름에서 없애면 그 위조 자체가 성립하지 않는다 — 표식은 이 파일만 붙일 수 있다.
+// 줄바꿈도 같이 없앤다: 이 렌더러는 "한 줄 = 프로세스 하나"를 전제하므로(recoverCommands 의
+// 같은 처리 참고) 줄바꿈 하나면 없는 행을 통째로 지어낼 수 있다. 길이 상한은 이름 하나가 표
+// 전체를 밀어내 다른 행을 못 읽게 만드는 것을 막는다.
+const LABEL_MAX = 40;
+
+function memberLabel(raw: string, userId: string): string {
+  const scrubbed = raw.replace(/[[\]\r\n]/g, " ").slice(0, LABEL_MAX).trim();
+  // 지우고 나니 아무것도 안 남는 이름(예: "[]")은 빈 칸으로 두지 않고 생성 이름으로 떨어뜨린다 —
+  // 이름을 모르는 경우와 같은 폴백이라 새 표시 규칙이 늘지 않는다.
+  return scrubbed.length > 0 ? scrubbed : procNameFor(userId);
+}
+
 // labelOf: 디스코드 userId → 사람이 알아볼 이름. 봇 쪽에서만 알 수 있으므로 주입받는다.
 // now: 업타임 계산 기준. 테스트가 고정할 수 있게 인자로 둔다.
 export function renderProcList(
@@ -128,7 +149,7 @@ export function renderProcList(
     // 같은 자리에 그냥 p.name 을 꽂으면(예: "asahi-worker") 회원 행("asahi-111" 또는 그 사람
     // 이름)과 형식이 똑같아 보여, "돌고 있는 거 다 정리해줘" 를 받은 모델이 인프라 행까지 회원
     // 것으로 착각해 지울 수 있다 — 표식을 붙여 한눈에 다르게 보이게 한다.
-    const who = p.userId === null ? `[인프라] ${p.name}` : o.labelOf(p.userId);
+    const who = p.userId === null ? `[인프라] ${p.name}` : memberLabel(o.labelOf(p.userId), p.userId);
     return `${who}  ${p.command}  ${p.status}  ${humanUptime(p.startedAtMs, now)}  ${humanMem(p.memoryBytes)}  재시작 ${p.restarts}`;
   });
   return [`지금 도는 것 (${procs.length}개)`, "", ...lines].join("\n");

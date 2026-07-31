@@ -369,8 +369,16 @@ function truncate(s: string): string {
 // 출력이 비었을 때 그 사실을 명시하는 이유: 빈 문자열만 돌려주면 모델은 "도구가 아무 말도
 // 안 했다"와 "명령이 아무것도 출력하지 않았다"를 구분할 수 없다. 실사용에서 netstat|findstr 이
 // 정확히 이 모양(빈 출력 + exit 1)이었고, 모델이 매번 문맥으로 추측해야 했다.
+//
+// 최종 리뷰 Fix 1(중요, 이 브랜치가 낸 회귀): 자르기를 이 함수 "안"에서, 코드를 붙이기 "전"에
+// 한다. 예전엔 호출측이 truncate(describeExit(...)) 로 감쌌는데, 그러면 코드는 본문 끝에 붙고
+// truncate 는 앞에서 자르므로 출력이 상한을 넘기는 순간 종료 코드가 통째로 잘려 나갔다. 이
+// 브랜치가 0이 아닌 종료 코드를 ok:false 에서 본문으로 옮겼기 때문에(아래 close 핸들러 참고)
+// 그 코드가 지금은 유일한 실패 신호다 — 오류가 쏟아지는 npm run build 처럼 "본문이 길고 코드가
+// 0이 아닌" 조합에서 신호가 전부 사라졌다. 그래서 호출측이 다시 감싸지 않도록 자르기를 여기로
+// 들여온다(감싸도 결과는 같지만, 두 번 자를 이유가 없다).
 export function describeExit(out: string, code: number | null): string {
-  const body = out.length > 0 ? out : "(출력 없음)";
+  const body = truncate(out.length > 0 ? out : "(출력 없음)");
   if (code === 0) return body;
   // code 가 null 이면 프로세스가 신호로 끝난 것이다(POSIX 에서 흔하다). "(종료 코드 null)" 은
   // 아무 정보도 주지 못하므로 무슨 일이 있었는지를 그대로 적는다.
@@ -758,7 +766,9 @@ export function makeExecutors(roots: string[], opts: { runPm2?: RunPm2; scriptDi
           // 타임아웃(위 timedOut 갈래)뿐이다. 종료 코드에 대한 해석("findstr 이라면 매칭 없음")은
           // 넣지 않는다: 셸 명령은 무한하고 파이프라인이면 마지막 명령의 코드라 어떤 목록도
           // 정확할 수 없다. 사실만 전달하고 판단은 모델에게 맡긴다.
-          finish({ ok: true, content: truncate(describeExit(out, code)) });
+          // truncate 로 감싸지 않는다 — describeExit 가 본문을 먼저 자르고 그 뒤에 종료 코드를
+          // 붙이므로(선언부 Fix 1 주석), 여기서 다시 감싸면 그 코드를 도로 잘라내게 된다.
+          finish({ ok: true, content: describeExit(out, code) });
         });
       });
     },

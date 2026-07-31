@@ -134,6 +134,21 @@ describe("워커 실행기", () => {
     expect(r.content).toContain("종료 코드 3");
   });
 
+  // 최종 리뷰 Fix 1(중요, 이 브랜치가 낸 회귀): ok:false 가 사라진 뒤로 실패를 알리는 신호는
+  // 본문 끝의 종료 코드 하나뿐인데, truncate 는 앞에서 자르므로 출력이 상한을 넘기면 그 유일한
+  // 신호까지 통째로 사라졌다 — 오류가 쏟아지는 npm run build 가 정확히 이 모양이라(본문은 길고
+  // 코드는 0이 아니다) 모델은 "잘린 본문 + ok:true" 만 받아 성공으로 읽는다.
+  it("sh_exec 는 출력이 상한을 넘겨 잘려도 종료 코드를 남긴다(회귀)", async () => {
+    fs.writeFileSync(path.join(root, "big.txt"), "a".repeat(OUTPUT_MAX * 2));
+    // sh_exec 의 cwd 는 roots[0](=root)이므로 파일 이름만으로 닿는다.
+    const command = process.platform === "win32" ? "type big.txt & exit 3" : "cat big.txt; exit 3";
+    const r = await ex.sh_exec({ command });
+    expect(r.ok).toBe(true);
+    // 상한에 실제로 걸린 상황이 맞는지부터 못박는다 — 이게 없으면 출력이 짧아도 통과한다.
+    expect(r.content).toContain("잘랐어요");
+    expect(r.content).toContain("종료 코드 3");
+  }, 20000);
+
   it("sh_exec 는 출력이 없으면 그 사실을 본문에 적는다", async () => {
     // 빈 문자열만 돌려주면 모델은 "도구가 아무 말도 안 했다"와 "명령이 아무것도 안 냈다"를
     // 구분할 수 없다. 실사용에서 findstr 이 정확히 이 모양이었다.
@@ -1034,8 +1049,13 @@ describe("proc_* 실행기 — PM2 위임", () => {
 
   it("proc_list 는 형태가 어긋난 labels 를 무시하고 폴백한다", async () => {
     // labels 는 네트워크 프레임을 건너온다 — 배열이나 숫자 값이 렌더링까지 흘러들면 안 된다.
+    //
+    // 최종 리뷰 Fix 3(사소함, 공허한 테스트): 프로세스 주인을 일부러 userId "0" 으로 둔다.
+    // 예전 픽스처는 "asahi-111" 이었는데, 배열을 Object.entries 로 풀면 키가 "0" 이라 111 과
+    // 절대 부딪히지 않았다 — strMap 의 Array.isArray 가드를 지워도 폴백이 그대로 나와 이
+    // 테스트가 통과했다. 인덱스 키와 실제로 겹치는 id 를 써야 가드가 이 단정을 지탱한다.
     const stdout = JSON.stringify([
-      { name: "asahi-111", pm2_env: { status: "online", pm_uptime: 0, restart_time: 0, args: ["run", "dev"], pm_exec_path: "npm" }, monit: { memory: 1 } },
+      { name: "asahi-0", pm2_env: { status: "online", pm_uptime: 0, restart_time: 0, args: ["run", "dev"], pm_exec_path: "npm" }, monit: { memory: 1 } },
     ]);
     const { runPm2 } = fakePm2({ jlist: { ok: true, stdout } });
     const ex = makeExecutors([root], { runPm2, scriptDir });
@@ -1043,7 +1063,8 @@ describe("proc_* 실행기 — PM2 위임", () => {
     const r = await ex.proc_list!({ labels: ["우성현"] });
 
     expect(r.ok).toBe(true);
-    expect(r.content).toContain("asahi-111");
+    expect(r.content).toContain("asahi-0");
+    expect(r.content).not.toContain("우성현");
   });
 
   it("proc_logs 는 nostream 으로 부르고 줄 수를 넘긴다", async () => {
