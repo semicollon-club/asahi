@@ -163,6 +163,15 @@ describe("워커 실행기", () => {
     expect(r.ok).toBe(false);
   }, 10000);
 
+  // Task 2(셸·프로세스 사용성): 타임아웃으로 끝나는 두 갈래(hardTimer·timedOut) 모두 proc_start 를
+  // 안내해야, 모델이 재시도할 때 sh_exec 를 다시 쓰지 않고 proc_start 로 옮겨간다.
+  it("sh_exec 타임아웃 문구는 proc_start 를 안내한다", async () => {
+    const longRunning = process.platform === "win32" ? "for /L %i in (1,1,2000000000) do @rem" : "sleep 5";
+    const r = await ex.sh_exec({ command: longRunning, timeoutMs: 200 });
+    expect(r.ok).toBe(false);
+    expect(r.content).toContain("proc_start");
+  }, 10000);
+
   it("루트가 비면 sh_exec 도 거부한다", async () => {
     const none = makeExecutors([]);
     expect((await none.sh_exec({ command: "echo x" })).ok).toBe(false);

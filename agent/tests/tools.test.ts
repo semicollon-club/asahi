@@ -12,7 +12,7 @@ import {
   allowDirHandler, revokeDirHandler, listDirsHandler,
   dbSchemaHandler, dbQueryHandler, runtimeInfoHandler,
   characterFactHandler, CHARACTER_FACT_MAX_LEN, CHARACTER_FACT_TITLE_MAX_LEN,
-  allowedToolsFor, type ToolCtx,
+  allowedToolsFor, buildToolDefinitions, type ToolCtx,
 } from "../src/core/tools.js";
 import { CHARACTER_FACT_LIMIT } from "../src/core/turnPrep.js";
 
@@ -690,5 +690,20 @@ describe("allowedToolsFor — 공유 워커로 계층이 넓어진다", () => {
     for (const n of ["db_query", "db_schema", "manage_access", "runtime_info"]) {
       expect(tools.some((t) => t.endsWith(n))).toBe(false);
     }
+  });
+});
+
+// Task 2(셸·프로세스 사용성): sh_exec 설명 전문에 proc_start 이야기가 아예 없어, 모델이
+// npm run dev 처럼 계속 도는 명령을 sh_exec 로 시도하고 15초 타임아웃을 태운 건이 실사용에서
+// 2건 있었다. buildToolDefinitions 가 내보내는 실제 선언(모델이 보는 것과 동일한 값)에서
+// 문구를 직접 확인한다.
+describe("sh_exec 도구 설명 — proc_start 유도", () => {
+  it("sh_exec 설명은 계속 도는 명령을 proc_start 로 넘긴다", async () => {
+    const defs = buildToolDefinitions(await ctx());
+    const shExec = defs.find((d) => d.name === "sh_exec");
+    expect(shExec).toBeDefined();
+    expect(shExec!.description).toContain("proc_start");
+    // 한정어가 있어야 한다 — 없으면 모델이 일회성 명령까지 sh_exec 를 피한다.
+    expect(shExec!.description).toContain("계속 도는");
   });
 });

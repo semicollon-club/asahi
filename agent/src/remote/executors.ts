@@ -706,7 +706,7 @@ export function makeExecutors(roots: string[], opts: { runPm2?: RunPm2; scriptDi
               finish({
                 ok: false,
                 content: truncate(
-                  `${out}\n(${timeoutMs}ms 안에 끝나지 않아 중단했어요 — 강제종료에도 응답이 없어 대기를 포기했어요)`,
+                  `${out}\n(${timeoutMs}ms 안에 끝나지 않아 중단했어요 — 강제종료에도 응답이 없어 대기를 포기했어요. 계속 도는 프로그램이라면 proc_start 로 띄워야 해요.)`,
                 ),
               });
             }, FORCE_KILL_GRACE_MS);
@@ -718,7 +718,12 @@ export function makeExecutors(roots: string[], opts: { runPm2?: RunPm2; scriptDi
         });
         child.on("close", (code) => {
           if (timedOut) {
-            finish({ ok: false, content: truncate(`${out}\n(${timeoutMs}ms 안에 끝나지 않아 중단했어요)`) });
+            finish({
+              ok: false,
+              content: truncate(
+                `${out}\n(${timeoutMs}ms 안에 끝나지 않아 중단했어요. 계속 도는 프로그램이라면 proc_start 로 띄워야 해요.)`,
+              ),
+            });
             return;
           }
           // 명령이 끝까지 실행됐다면 sh_exec 는 제 일을 한 것이다 — 종료 코드가 0이 아니어도
