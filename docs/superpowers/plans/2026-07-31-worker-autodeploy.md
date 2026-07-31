@@ -607,7 +607,28 @@ export async function runtimeInfoHandler(ctx: ToolCtx): Promise<string> {
 
 - [ ] **Step 5: 배선한다**
 
-`agent/src/core/agent.ts` 에서 `RuntimeInfo` 를 만드는 자리를 찾아(`buildToolCtx` 부근) `botCommit` 과 `workers` 를 채운다. 봇 커밋은 `process.env.RAILWAY_GIT_COMMIT_SHA`, 워커 목록은 허브의 `workersInfo()` 다. 허브 참조가 그 자리에 없으면 `agent.ts` 가 이미 `resolveTurnWorker` 에서 허브를 쓰고 있으므로 같은 경로로 얻는다. 워커가 연결돼 있지 않은 턴에서는 빈 배열을 넘긴다.
+`agent/src/core/agent.ts` 의 `makeRunAgentTurn` 이 받는 `hub` 는 **구조적 타입**이라 쓰려는 메서드를 직접 적어야 한다(`agent.ts:264-268`). 거기에 한 줄을 더한다.
+
+```ts
+  hub?: {
+    isConnected(workerId: string): boolean;
+    call(workerId: string, tool: string, args: Record<string, unknown>): Promise<{ ok: boolean; content: string }>;
+    rootsOf(workerId: string): string[];
+    workersInfo(): Array<{ workerId: string; commit?: string; connectedAt: number }>;
+  },
+```
+
+`agent.ts:271` 을 바꾼다.
+
+```ts
+    const runtime: RuntimeInfo = { model, sdkVersion: SDK_VERSION, deployTarget, maxTurns: 30, botCommit: process.env.RAILWAY_GIT_COMMIT_SHA, workers: hub?.workersInfo() ?? [] };
+```
+
+`hub` 는 선택적 인자다 — 허브 없이 도는 경로(테스트, 유휴 요약 턴)에서는 빈 배열이 맞다. 실제 배선은 `index.ts:123` 이 이미 `makeRunAgentTurn(..., repos.workers, hub)` 로 허브를 넘기고 있어 더 손댈 곳이 없다.
+
+- [ ] **Step 5b: 기존 `RuntimeInfo` 리터럴을 고친다**
+
+`workers` 를 **필수** 필드로 두었으므로 기존 리터럴이 전부 타입 오류가 난다. 선택적으로 만들지 않는 이유는, 빠뜨린 자리가 조용히 빈 목록이 되는 대신 컴파일 때 드러나는 편이 낫기 때문이다. `npm run typecheck` 가 짚어주는 곳을 전부 고친다 — `agent/tests/tools.test.ts` 의 `runtime:` 리터럴들(32·51·267행 부근)이 알려진 대상이며, 각각 `workers: []` 를 더하면 된다. typecheck 가 그 밖의 자리를 더 짚으면 같은 방식으로 처리한다.
 
 - [ ] **Step 6: 테스트가 통과하는지 확인**
 
@@ -832,7 +853,7 @@ cd agent && npx vitest run tests/staleWorker.test.ts
 
 - [ ] **Step 7: `index.ts` 에 배선한다**
 
-부팅 후 주기적으로(5분) `decideStaleAlerts` 를 돌리고, 결과가 있으면 소유자 DM 으로 `system_notice` 를 발행한다. 대화가 없으면 `console.error` 로만 남긴다. 타이머는 `unref()` 하지 않는다 — 이 프로세스는 상시 구동이다.
+`index.ts` 에는 필요한 것이 전부 이미 있다: `conversations`(46행), `hub`(67행), `bus`(119행), `config.ownerId`. 기존 `idleTimer`(175행) 옆에 같은 방식으로 타이머를 하나 더 둔다. 결과가 있으면 소유자 DM 으로 `system_notice` 를 발행하고, 대화가 없으면 `console.error` 로만 남긴다.
 
 ```ts
   // 워커가 낡은 채로 오래 있으면 소유자에게 알린다. 주기는 조각 B 의 폴링(5분)과 맞춘다 —
