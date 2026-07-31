@@ -42,6 +42,13 @@ lastReviewed: 2026-07-31
   방지선일 뿐 의도적 접근의 경계는 아니다(의도된 설계). `allowed_dirs`는 마이그레이션 없이
   `worker_id` 키로 바뀌었다 — 워커 등록 후 `allow_dir`로 폴더를 다시 등록해야 한다. 상세
   위협모델은 `docs/security/capability-model.md`, `docs/security/risk-register.md` 참고.
+  셸·프로세스 사용성(2026-07-31): `sh_exec` 는 명령의 종료 코드를 도구 실패로 취급하지 않는다 —
+  `ok:false` 는 **명령을 실행하지 못한 것**만 가리킨다(열린 작업 폴더 없음·`command` 인자 없음·
+  spawn 실패·타임아웃). 0이 아닌 종료 코드는 본문에 사실로만 실린다. `actions.status` 의 `error`
+  도 그에 맞춰 도구가 제 일을 못 한 경우만 가리킨다(워커 미연결·spawn 실패·타임아웃·게이트 거부
+  — `docs/agent-onboarding.md` 8절). 계속 도는 명령은 도구 설명과 타임아웃 문구가 `proc_start` 로
+  유도하고, `proc_list` 는 `asahi-<userId>` 대신 사람 이름을 보여준다(이름을 모르면 예전 형식으로
+  폴백한다).
 - **캐릭터/페르소나** — 코딩 동아리 '세미콜론'의 16세 부원이라는 고정 인격(이름·외형·말투·소유자/손님/서버별
   어조 차등)과 대화 이력 기반의 가벼운 관계 진화. 대화 중 즉흥으로 지어낸 신상 설정은 `memories` 의
   `scope='character'` 로 확정 저장돼 세션·대화방을 넘어 일관되게 유지된다(실제 기억과는 분리).
@@ -79,7 +86,7 @@ lastReviewed: 2026-07-31
 
 ## 테스트
 
-`agent/` 기준 vitest 44개 파일, **902개 통과 + 3개 skip**(905개, 윈도우에서 측정).
+`agent/` 기준 vitest 45개 파일, **927개 통과 + 3개 skip**(930개, 윈도우에서 측정).
 
 skip 3건의 성격은 서로 다르다. 1건은 Postgres READ ONLY 트랜잭션의 실제 쓰기 거부 동작으로,
 테스트용 인메모리 Postgres 구현(pg-mem)의 한계상 유닛 테스트로 재현할 수 없어 실 Supabase

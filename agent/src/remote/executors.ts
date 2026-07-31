@@ -36,6 +36,16 @@ const KILL_GRACE_MS = 3_000;
 //    감안한 버퍼. 이 시간이 지나면 프로세스 생사와 무관하게 무조건 resolve 한다.
 const FORCE_KILL_GRACE_MS = 2_000;
 
+// sh_exec 의 타임아웃 메시지 두 곳(아래 hardTimer 갈래·close 핸들러의 timedOut 갈래)이 이
+// 문구를 그대로 복제해 갖고 있었다. hardTimer 갈래는 KILL_GRACE_MS+FORCE_KILL_GRACE_MS(5초)가
+// 지나도록 close 가 끝내 오지 않아야만 실행되는 경로라, 실제 프로세스로 재현하려면 "강제종료에도
+// 안 죽는 프로세스"를 만들어야 해서 느리고 불안정하다 — 그래서 어떤 테스트도 그 경로를 실행하지
+// 않는다. 문구를 각 갈래에 따로 적어두면, hardTimer 쪽 문구가 지워지거나 오타가 나도 테스트가
+// 실행 없이는 잡을 방법이 없다(둘째, 두 문장이 따로 존재하는 한 나중에 한쪽만 고쳐 말이 갈릴
+// 수도 있다). 상수 하나로 뽑아 두 메시지가 같은 값을 참조하게 하면, 이 상수의 내용만 단정해도
+// (실행 없이) 두 메시지 모두가 같은 문구임을 보장할 수 있다 — 값이 하나뿐이라 갈릴 수가 없다.
+export const SH_EXEC_TIMEOUT_HINT = "계속 도는 프로그램이라면 proc_start 로 띄워야 해요.";
+
 // PM2 CLI 호출을 이음매 뒤로 뺀다. 테스트가 실제 PM2 설치를 요구하면 그 경로는 CI 에서도
 // 개발자 기계에서도 한 번도 지나가지 않는다 — 2026-07-28 최종 리뷰가 잡은 Critical(실패 신호
 // 소실)이 정확히 그렇게 다섯 번의 리뷰를 통과했다.
@@ -353,8 +363,42 @@ function truncate(s: string): string {
   return s.length <= OUTPUT_MAX ? s : `${s.slice(0, OUTPUT_MAX)}\n… (출력이 길어 ${OUTPUT_MAX}자에서 잘랐어요)`;
 }
 
+// sh_exec 의 본문 문구를 만든다. close 핸들러 안에 인라인으로 두면 문자열 조합만 따로 검증할
+// 방법이 없어(자식 프로세스를 실제로 띄워야 한다) 순수 함수로 뺀다.
+//
+// 출력이 비었을 때 그 사실을 명시하는 이유: 빈 문자열만 돌려주면 모델은 "도구가 아무 말도
+// 안 했다"와 "명령이 아무것도 출력하지 않았다"를 구분할 수 없다. 실사용에서 netstat|findstr 이
+// 정확히 이 모양(빈 출력 + exit 1)이었고, 모델이 매번 문맥으로 추측해야 했다.
+//
+// 최종 리뷰 Fix 1(중요, 이 브랜치가 낸 회귀): 자르기를 이 함수 "안"에서, 코드를 붙이기 "전"에
+// 한다. 예전엔 호출측이 truncate(describeExit(...)) 로 감쌌는데, 그러면 코드는 본문 끝에 붙고
+// truncate 는 앞에서 자르므로 출력이 상한을 넘기는 순간 종료 코드가 통째로 잘려 나갔다. 이
+// 브랜치가 0이 아닌 종료 코드를 ok:false 에서 본문으로 옮겼기 때문에(아래 close 핸들러 참고)
+// 그 코드가 지금은 유일한 실패 신호다 — 오류가 쏟아지는 npm run build 처럼 "본문이 길고 코드가
+// 0이 아닌" 조합에서 신호가 전부 사라졌다. 그래서 호출측이 다시 감싸지 않도록 자르기를 여기로
+// 들여온다(감싸도 결과는 같지만, 두 번 자를 이유가 없다).
+export function describeExit(out: string, code: number | null): string {
+  const body = truncate(out.length > 0 ? out : "(출력 없음)");
+  if (code === 0) return body;
+  // code 가 null 이면 프로세스가 신호로 끝난 것이다(POSIX 에서 흔하다). "(종료 코드 null)" 은
+  // 아무 정보도 주지 못하므로 무슨 일이 있었는지를 그대로 적는다.
+  return code === null ? `${body}\n(신호로 종료됨)` : `${body}\n(종료 코드 ${code})`;
+}
+
 const str = (v: unknown): string | undefined => (typeof v === "string" && v.length > 0 ? v : undefined);
 const num = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
+
+// args 로 들어온 unknown 을 "문자열 → 문자열" 맵으로 좁힌다. 워커는 봇을 신뢰하지만 이 값은
+// 네트워크 프레임을 건너오므로, 형태가 어긋난 값(배열·null·중첩 객체·숫자 값)이 그대로
+// 렌더링에 흘러들지 않게 여기서 걸러낸다 — str/num 이 있는 것과 같은 이유의 방어다.
+function strMap(v: unknown): Record<string, string> {
+  if (typeof v !== "object" || v === null || Array.isArray(v)) return {};
+  const out: Record<string, string> = {};
+  for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+    if (typeof val === "string" && val.length > 0) out[k] = val;
+  }
+  return out;
+}
 
 export function makeExecutors(roots: string[], opts: { runPm2?: RunPm2; scriptDir?: string } = {}): Executors {
   // proc_start 가 회원 명령을 적을 스크립트 파일 위치(DEFAULT_SCRIPT_DIR·writeStartScript 선언부
@@ -692,7 +736,7 @@ export function makeExecutors(roots: string[], opts: { runPm2?: RunPm2; scriptDi
               finish({
                 ok: false,
                 content: truncate(
-                  `${out}\n(${timeoutMs}ms 안에 끝나지 않아 중단했어요 — 강제종료에도 응답이 없어 대기를 포기했어요)`,
+                  `${out}\n(${timeoutMs}ms 안에 끝나지 않아 중단했어요 — 강제종료에도 응답이 없어 대기를 포기했어요. ${SH_EXEC_TIMEOUT_HINT})`,
                 ),
               });
             }, FORCE_KILL_GRACE_MS);
@@ -704,14 +748,27 @@ export function makeExecutors(roots: string[], opts: { runPm2?: RunPm2; scriptDi
         });
         child.on("close", (code) => {
           if (timedOut) {
-            finish({ ok: false, content: truncate(`${out}\n(${timeoutMs}ms 안에 끝나지 않아 중단했어요)`) });
+            finish({
+              ok: false,
+              content: truncate(
+                `${out}\n(${timeoutMs}ms 안에 끝나지 않아 중단했어요. ${SH_EXEC_TIMEOUT_HINT})`,
+              ),
+            });
             return;
           }
-          finish(
-            code === 0
-              ? { ok: true, content: truncate(out) }
-              : { ok: false, content: truncate(`${out}\n(종료 코드 ${code})`) },
-          );
+          // 명령이 끝까지 실행됐다면 sh_exec 는 제 일을 한 것이다 — 종료 코드가 0이 아니어도
+          // ok:true 다. 셸에서 non-zero 는 실패 신호가 아니라 통신 수단이라(findstr/grep 의 1 은
+          // "매칭 없음", diff 의 1 은 "차이 있음", test 의 1 은 "거짓"), 이걸 도구 실패로 옮기면
+          // 모델이 <error> 로 받는다 — core/tools.ts 의 remoteResult 가 ok 를 그대로 isError 로
+          // 싣기 때문이다. 실사용 실패 8건 중 5건이 정확히 이 오분류였다.
+          //
+          // ok:false 는 "도구가 명령을 실행하지 못했다"로 좁힌다 — spawn 실패(child.on("error"))와
+          // 타임아웃(위 timedOut 갈래)뿐이다. 종료 코드에 대한 해석("findstr 이라면 매칭 없음")은
+          // 넣지 않는다: 셸 명령은 무한하고 파이프라인이면 마지막 명령의 코드라 어떤 목록도
+          // 정확할 수 없다. 사실만 전달하고 판단은 모델에게 맡긴다.
+          // truncate 로 감싸지 않는다 — describeExit 가 본문을 먼저 자르고 그 뒤에 종료 코드를
+          // 붙이므로(선언부 Fix 1 주석), 여기서 다시 감싸면 그 코드를 도로 잘라내게 된다.
+          finish({ ok: true, content: describeExit(out, code) });
         });
       });
     },
@@ -893,11 +950,17 @@ export function makeExecutors(roots: string[], opts: { runPm2?: RunPm2; scriptDi
       // 덮어쓴다. 이게 없으면 "뭐 돌고 있어?"에 "C:\...\asahi-proc-scripts\asahi-111.bat" 같은
       // 답을 주게 된다.
       const withCommands = await recoverCommands(procs, scriptDir, shellFlavorOf(roots));
-      // labelOf 는 "디스코드 userId → 사람이 알아볼 이름"을 위한 자리지만, 워커는 디스코드를
-      // 전혀 모른다(신원 해석은 봇만 할 수 있다 — proc.ts 상단 주석과 동일한 이유). 실제 이름
-      // 해석은 이 범위 밖이므로, 최소한 pm2 프로세스 이름(asahi-<id>)으로 되돌려 누구 것인지
-      // 알아볼 수 있게 한다 — procNameFor 는 parseProcName 의 역함수라 원래 이름과 정확히 같다.
-      return { ok: true, content: truncate(renderProcList(withCommands, { labelOf: (id) => procNameFor(id) })) };
+      // labels 는 봇이 주입한 "디스코드 userId → 사람 이름" 맵이다(core/remoteTools.ts). 워커는
+      // 디스코드를 전혀 모르므로 스스로는 이름을 해석할 수 없다 — 그래서 봇이 실어 보낸다.
+      //
+      // 키가 없으면 예전 그대로 procNameFor(id) 로 폴백한다. 이 폴백은 지우지 않는다: 이름을
+      // 아직 못 얻은 사용자가 있고, 배포 중간에는 옛 봇(labels 를 안 보냄)과 새 워커가 섞여
+      // 돌 수 있다. 그 순간에도 목록은 깨지지 않고 누구 것인지 알아볼 수 있어야 한다.
+      const labels = strMap(args.labels);
+      return {
+        ok: true,
+        content: truncate(renderProcList(withCommands, { labelOf: (id) => labels[id] ?? procNameFor(id) })),
+      };
     },
 
     async proc_logs(args) {

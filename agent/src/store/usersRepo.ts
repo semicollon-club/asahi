@@ -32,4 +32,15 @@ export class UsersRepo {
     const rows = r.rows as Array<{ id: string; role: Role; display_name: string | null }>;
     return rows.map((row) => ({ id: row.id, role: row.role, displayName: row.display_name }));
   }
+
+  // proc_list 가 사람 이름을 보여주기 위해 "userId → 표시 이름"을 한 번에 읽는다(remoteTools.ts).
+  // 이름이 아직 없는 사용자는 키에 넣지 않는다 — 호출자가 "키가 없으면 procNameFor 로 폴백"
+  // 으로 다루므로, null 이나 빈 문자열을 실어 보내면 그 판단이 흐려진다.
+  async displayNames(): Promise<Record<string, string>> {
+    const r = await this.db.query(
+      "SELECT id, display_name FROM users WHERE display_name IS NOT NULL AND display_name <> ''",
+    );
+    const rows = r.rows as Array<{ id: string; display_name: string }>;
+    return Object.fromEntries(rows.map((row) => [row.id, row.display_name]));
+  }
 }

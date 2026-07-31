@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   makeExecutors,
   OUTPUT_MAX,
@@ -9,9 +10,15 @@ import {
   scriptContentFor,
   writeStartScript,
   recoverCommands,
+  describeExit,
+  SH_EXEC_TIMEOUT_HINT,
 } from "../src/remote/executors.js";
 import { TREE_MAX_ENTRIES } from "../src/remote/tree.js";
 import type { ProcInfo } from "../src/remote/proc.js";
+
+// 아래 "hardTimer·timedOut 두 타임아웃 메시지" 테스트가 소스를 직접 읽어 상수 참조 개수를
+// 세는 데 쓴다 — executors.ts 선언부 참고(같은 파일을 가리켜야 하므로 여기 한 곳에서만 계산).
+const EXECUTORS_SRC = fileURLToPath(new URL("../src/remote/executors.ts", import.meta.url));
 
 describe("워커 실행기", () => {
   let root: string;
@@ -119,10 +126,49 @@ describe("워커 실행기", () => {
     expect(r.content).toContain("asahi");
   });
 
-  it("sh_exec 는 실패 종료코드를 ok=false 로 보고한다", async () => {
+  it("sh_exec 는 0이 아닌 종료 코드를 ok=true 로 보고하고 코드를 본문에 싣는다", async () => {
+    // 셸에서 non-zero 는 실패 신호가 아니라 통신 수단이다(findstr/grep 의 1 = 매칭 없음).
+    // 도구는 명령을 실행하는 데 성공했으므로 ok:true 이고, 종료 코드는 사실로만 전달한다.
     const r = await ex.sh_exec({ command: "exit 3" });
-    expect(r.ok).toBe(false);
-    expect(r.content).toContain("3");
+    expect(r.ok).toBe(true);
+    expect(r.content).toContain("종료 코드 3");
+  });
+
+  // 최종 리뷰 Fix 1(중요, 이 브랜치가 낸 회귀): ok:false 가 사라진 뒤로 실패를 알리는 신호는
+  // 본문 끝의 종료 코드 하나뿐인데, truncate 는 앞에서 자르므로 출력이 상한을 넘기면 그 유일한
+  // 신호까지 통째로 사라졌다 — 오류가 쏟아지는 npm run build 가 정확히 이 모양이라(본문은 길고
+  // 코드는 0이 아니다) 모델은 "잘린 본문 + ok:true" 만 받아 성공으로 읽는다.
+  it("sh_exec 는 출력이 상한을 넘겨 잘려도 종료 코드를 남긴다(회귀)", async () => {
+    fs.writeFileSync(path.join(root, "big.txt"), "a".repeat(OUTPUT_MAX * 2));
+    // sh_exec 의 cwd 는 roots[0](=root)이므로 파일 이름만으로 닿는다.
+    const command = process.platform === "win32" ? "type big.txt & exit 3" : "cat big.txt; exit 3";
+    const r = await ex.sh_exec({ command });
+    expect(r.ok).toBe(true);
+    // 상한에 실제로 걸린 상황이 맞는지부터 못박는다 — 이게 없으면 출력이 짧아도 통과한다.
+    expect(r.content).toContain("잘랐어요");
+    expect(r.content).toContain("종료 코드 3");
+  }, 20000);
+
+  it("sh_exec 는 출력이 없으면 그 사실을 본문에 적는다", async () => {
+    // 빈 문자열만 돌려주면 모델은 "도구가 아무 말도 안 했다"와 "명령이 아무것도 안 냈다"를
+    // 구분할 수 없다. 실사용에서 findstr 이 정확히 이 모양이었다.
+    const r = await ex.sh_exec({ command: "exit 1" });
+    expect(r.ok).toBe(true);
+    expect(r.content).toContain("출력 없음");
+    expect(r.content).toContain("종료 코드 1");
+  });
+
+  it("sh_exec 는 종료 코드가 0이면 코드를 언급하지 않는다", async () => {
+    const r = await ex.sh_exec({ command: "echo asahi" });
+    expect(r.ok).toBe(true);
+    expect(r.content).toContain("asahi");
+    expect(r.content).not.toContain("종료 코드");
+  });
+
+  it("describeExit 는 신호 종료(code=null)를 코드 대신 사실로 적는다", () => {
+    // "(종료 코드 null)" 은 사람에게도 모델에게도 의미가 없다.
+    expect(describeExit("", null)).toContain("신호로 종료됨");
+    expect(describeExit("", null)).not.toContain("null");
   });
 
   it("sh_exec 는 타임아웃되면 ok=false 로 끝난다", async () => {
@@ -137,6 +183,39 @@ describe("워커 실행기", () => {
     const r = await ex.sh_exec({ command: longRunning, timeoutMs: 200 });
     expect(r.ok).toBe(false);
   }, 10000);
+
+  // Task 2(셸·프로세스 사용성): 타임아웃으로 끝나는 두 갈래(hardTimer·timedOut) 모두 proc_start 를
+  // 안내해야, 모델이 재시도할 때 sh_exec 를 다시 쓰지 않고 proc_start 로 옮겨간다.
+  it("sh_exec 타임아웃 문구는 proc_start 를 안내한다", async () => {
+    const longRunning = process.platform === "win32" ? "for /L %i in (1,1,2000000000) do @rem" : "sleep 5";
+    const r = await ex.sh_exec({ command: longRunning, timeoutMs: 200 });
+    expect(r.ok).toBe(false);
+    expect(r.content).toContain("proc_start");
+  }, 10000);
+
+  // 리뷰 지적(Important): 위 테스트는 timedOut 갈래(close 가 정상적으로 온 경우)만 지나간다 —
+  // hardTimer 갈래(강제종료에도 close 가 안 와 최종적으로 포기하는 경우)는 KILL_GRACE_MS+
+  // FORCE_KILL_GRACE_MS(5초) 동안 close 가 끝내 오지 않는 프로세스를 요구하는데, 그런 프로세스를
+  // 짧고 결정론적인 단위테스트로 만들 방법이 없다(만들 수 있어도 매번 5초 이상 걸려 느리고
+  // 불안정해진다). executors.ts 가 SH_EXEC_TIMEOUT_HINT 상수 하나로 두 메시지를 만들게 고친
+  // 이유가 이것이다 — hardTimer 갈래를 실행하지 않고도, (1) 상수 자체의 값과 (2) 두 메시지가
+  // 실제로 이 상수를 참조해 만들어지는지를 소스에서 직접 확인하면 문구가 지워지거나 갈리는
+  // 것을 잡을 수 있다.
+  it("SH_EXEC_TIMEOUT_HINT 문구는 정확히 이 내용이다", () => {
+    expect(SH_EXEC_TIMEOUT_HINT).toBe("계속 도는 프로그램이라면 proc_start 로 띄워야 해요.");
+  });
+
+  it("hardTimer·timedOut 두 타임아웃 메시지 모두 SH_EXEC_TIMEOUT_HINT 하나를 참조해 만든다", () => {
+    const src = fs.readFileSync(EXECUTORS_SRC, "utf8");
+    // hardTimer 갈래·timedOut 갈래 각각 한 번씩, 정확히 2회 참조해야 한다 — 어느 한쪽이 상수
+    // 참조를 잃고 다시 별도 문자열로 되돌아가면(예: 되돌리는 리팩터) 이 개수가 어긋난다.
+    const interpolations = src.match(/\$\{SH_EXEC_TIMEOUT_HINT\}/g) ?? [];
+    expect(interpolations).toHaveLength(2);
+    // 상수 값 자체의 문자열 리터럴은 선언부 한 곳에만 있어야 한다 — 둘 이상이면 어딘가 이
+    // 상수와 몰래 따로 노는 하드코딩 사본이 다시 생겼다는 뜻이다(고치려던 중복의 재발).
+    const literalOccurrences = src.split(`"${SH_EXEC_TIMEOUT_HINT}"`).length - 1;
+    expect(literalOccurrences).toBe(1);
+  });
 
   it("루트가 비면 sh_exec 도 거부한다", async () => {
     const none = makeExecutors([]);
@@ -925,6 +1004,67 @@ describe("proc_* 실행기 — PM2 위임", () => {
     const r = await ex.proc_list!({});
     expect(r.ok).toBe(true);
     expect(r.content).toContain("npm run dev");
+  });
+
+  it("proc_list 는 labels 에 있는 이름으로 표시한다", async () => {
+    const stdout = JSON.stringify([
+      { name: "asahi-111", pm2_env: { status: "online", pm_uptime: 0, restart_time: 0, args: ["run", "dev"], pm_exec_path: "npm" }, monit: { memory: 1 } },
+    ]);
+    const { runPm2 } = fakePm2({ jlist: { ok: true, stdout } });
+    const ex = makeExecutors([root], { runPm2, scriptDir });
+
+    const r = await ex.proc_list!({ labels: { "111": "우성현" } });
+
+    expect(r.ok).toBe(true);
+    expect(r.content).toContain("우성현");
+    expect(r.content).not.toContain("asahi-111");
+  });
+
+  it("proc_list 는 labels 에 없는 사람은 예전처럼 asahi-<id> 로 표시한다", async () => {
+    // 폴백을 지우면 이름을 아직 못 얻은 사용자와, 옛 봇(labels 를 안 보냄) + 새 워커가 섞여
+    // 도는 배포 중간 상태에서 목록이 깨진다.
+    const stdout = JSON.stringify([
+      { name: "asahi-222", pm2_env: { status: "online", pm_uptime: 0, restart_time: 0, args: ["run", "dev"], pm_exec_path: "npm" }, monit: { memory: 1 } },
+    ]);
+    const { runPm2 } = fakePm2({ jlist: { ok: true, stdout } });
+    const ex = makeExecutors([root], { runPm2, scriptDir });
+
+    const r = await ex.proc_list!({ labels: { "111": "우성현" } });
+
+    expect(r.content).toContain("asahi-222");
+  });
+
+  it("proc_list 는 labels 가 아예 없어도 깨지지 않는다(옛 봇 + 새 워커)", async () => {
+    const stdout = JSON.stringify([
+      { name: "asahi-111", pm2_env: { status: "online", pm_uptime: 0, restart_time: 0, args: ["run", "dev"], pm_exec_path: "npm" }, monit: { memory: 1 } },
+    ]);
+    const { runPm2 } = fakePm2({ jlist: { ok: true, stdout } });
+    const ex = makeExecutors([root], { runPm2, scriptDir });
+
+    const r = await ex.proc_list!({});
+
+    expect(r.ok).toBe(true);
+    expect(r.content).toContain("asahi-111");
+  });
+
+  it("proc_list 는 형태가 어긋난 labels 를 무시하고 폴백한다", async () => {
+    // labels 는 네트워크 프레임을 건너온다 — 배열이나 숫자 값이 렌더링까지 흘러들면 안 된다.
+    //
+    // 최종 리뷰 Fix 3(사소함, 공허한 테스트): 프로세스 주인을 일부러 userId "0" 으로 둔다.
+    // 예전 픽스처는 "asahi-111" 이었는데, 배열을 Object.entries 로 풀면 키가 "0" 이라 111 과
+    // 절대 부딪히지 않았다 — strMap 의 Array.isArray 가드를 지워도 폴백이 그대로 나와 이
+    // 테스트가 통과했다. 인덱스 키와 실제로 겹치는 id 를 써야 가드가 이 단정을 지탱한다.
+    const stdout = JSON.stringify([
+      { name: "asahi-0", pm2_env: { status: "online", pm_uptime: 0, restart_time: 0, args: ["run", "dev"], pm_exec_path: "npm" }, monit: { memory: 1 } },
+    ]);
+    const { runPm2 } = fakePm2({ jlist: { ok: true, stdout } });
+    const ex = makeExecutors([root], { runPm2, scriptDir });
+
+    const r = await ex.proc_list!({ labels: ["우성현"] });
+
+    expect(r.ok).toBe(true);
+    expect(r.content).toContain("asahi-0");
+    expect(r.content).not.toContain("우성현");
   });
 
   it("proc_logs 는 nostream 으로 부르고 줄 수를 넘긴다", async () => {

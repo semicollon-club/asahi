@@ -433,7 +433,7 @@ export function buildToolDefinitions(ctx: ToolCtx) {
     ),
     tool(
       "sh_exec",
-      "워커 PC 에서 셸 명령을 실행합니다. 강력한 도구이니 신중히 쓰세요.",
+      "워커 PC 에서 셸 명령을 실행합니다. 명령이 끝날 때까지 기다렸다가 출력을 돌려주므로, 개발서버처럼 계속 도는 명령에는 쓰지 마세요 — 그건 proc_start 입니다. 강력한 도구이니 신중히 쓰세요.",
       { command: z.string().describe("실행할 셸 명령"), timeoutMs: z.number().optional().describe("타임아웃(밀리초)") },
       async (args) => remoteResult(ctx, "sh_exec", args),
     ),

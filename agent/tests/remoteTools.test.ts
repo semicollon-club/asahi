@@ -610,11 +610,16 @@ describe("fs_tree 는 fs_glob 과 동일하게 1차 필터를 탄다", () => {
 });
 
 describe("proc_* — 이름과 작업 폴더는 봇이 주입한다", () => {
+  // Task 5: proc_list 는 onlyUserId 뿐 아니라 labels 도 계산하므로 ctx.repos.users.displayNames
+  // 를 항상 호출한다(proc_start·proc_stop·proc_logs 는 건드리지 않는다) — 이 describe 의 모든
+  // proc_list 테스트는 이름 자체가 아니라 onlyUserId/스코프를 보는 것이 관심사이므로, 기본값은
+  // "아무도 이름이 없다"(빈 맵)로 충분하다. labels 내용 자체의 스코프(소유자 전원·손님 자기 것만)는
+  // 아래 "proc_list — labels 주입(Task 5)" describe 가 따로, 더 자세히 고정한다.
   const withDirs = (dirs: string[], remote: Partial<NonNullable<ToolCtx["remote"]>>, over: Record<string, unknown> = {}): ToolCtx =>
     ({
       remote: { roots: ["/w"], workerId: "shared", workerKind: "shared", ...remote },
       isOwner: false, isPrivate: false, userId: "111",
-      repos: { allowedDirs: { list: async () => dirs } },
+      repos: { allowedDirs: { list: async () => dirs }, users: { displayNames: async () => ({}) } },
       ...over,
     } as unknown as ToolCtx);
 
@@ -826,6 +831,81 @@ describe("proc_* — 이름과 작업 폴더는 봇이 주입한다", () => {
     expect(called).toBe(false);
     expect(out.ok).toBe(false);
     expect(out.content).toContain("사용자 식별자");
+  });
+});
+
+// proc_list 의 labels 는 name·cwd·onlyUserId 와 같은 부류다 — 모델이 아니라 핸들러가 주입한다.
+// 아래 세 테스트는 그 "누구의 이름까지 실리는가"를 고정한다. 진행 원장에 기록된 실패
+// (워커 쪽 onlyUserId 필터에 테스트가 없어 필터를 지워도 전 스위트가 녹색이던 일)와 같은
+// 자리이므로 스코프를 직접 단정한다.
+describe("proc_list — labels 주입(Task 5)", () => {
+  const labelsCtx = (isOwner: boolean, userId: string, names: Record<string, string>, seen: Array<Record<string, unknown>>) =>
+    ctxWith(
+      { call: async (_tool: string, args: Record<string, unknown>) => { seen.push(args); return { ok: true, content: "" }; } },
+      {
+        isOwner,
+        userId,
+        // proc_list 도 isProcTool 이라 needsScope 게이트(remoteTools.ts)를 그대로 탄다 — allowedDirs
+        // 가 없으면 "허용 폴더 목록을 확인할 수 없어요"로 labels 주입 이전에 먼저 거부된다. proc_list
+        // 자신은 allowed 값을 읽지 않으므로(신원만으로 onlyUserId·labels 를 정한다) 빈 배열로 충분하다
+        // — 바로 위 "proc_* — 이름과 작업 폴더는 봇이 주입한다" 의 withDirs 도 같은 이유로 proc_list
+        // 테스트에 항상 allowedDirs 를 채운다.
+        repos: { allowedDirs: { list: async () => [] }, users: { displayNames: async () => names } },
+      },
+    );
+
+  it("소유자의 proc_list 에는 전원의 이름이 실린다", async () => {
+    const seen: Array<Record<string, unknown>> = [];
+    await remoteToolHandler(labelsCtx(true, "111", { "111": "우성현", "222": "부원A" }, seen), "proc_list", {});
+
+    expect(seen[0].labels).toEqual({ "111": "우성현", "222": "부원A" });
+    expect(seen[0].onlyUserId).toBeUndefined();
+  });
+
+  it("손님의 proc_list 에는 자기 이름만 실린다", async () => {
+    // 손님은 onlyUserId 로 이미 자기 것만 본다. 남의 이름을 워커까지 보낼 이유가 없다.
+    const seen: Array<Record<string, unknown>> = [];
+    await remoteToolHandler(labelsCtx(false, "222", { "111": "우성현", "222": "부원A" }, seen), "proc_list", {});
+
+    expect(seen[0].labels).toEqual({ "222": "부원A" });
+    expect(seen[0].onlyUserId).toBe("222");
+  });
+
+  it("이름을 모르는 손님의 proc_list 에는 빈 맵이 실린다", async () => {
+    const seen: Array<Record<string, unknown>> = [];
+    await remoteToolHandler(labelsCtx(false, "333", { "222": "부원A" }, seen), "proc_list", {});
+
+    // 리뷰 Finding 2(사소함): toEqual 은 값이 undefined 인 속성을 무시한다 — 그래서
+    // `mineName === undefined ? {} :` 가드가 통째로 지워져 { "333": undefined } 가 실려도
+    // 이 단정은 그대로 통과했을 것이다(이 코드베이스가 이미 여러 번 겪은 "한 토큰 삭제에도
+    // 안 죽는 테스트"). toStrictEqual 은 undefined 값을 가진 키의 존재 자체를 다르게 보므로
+    // 그 삭제를 실제로 잡는다.
+    expect(seen[0].labels).toStrictEqual({});
+  });
+
+  // 리뷰 Finding 1(중요): displayNames() 는 allowedDirs.list() 와 같은 부류의 실제 DB 왕복이라
+  // reject 할 수 있다 — 위 labelsCtx 는 항상 성공하는 스텁만 써서 이 경로를 덮지 못했다. 이
+  // 테스트는 그 reject 를 직접 만들어, remoteTools.ts 가 (a) 그 reject 를 삼키고 예외 없이
+  // 반환하며 (b) allowedDirs.list 의 실패(거부)와 다르게 labels 를 빈 맵으로 내려 허브 호출
+  // 자체는 그대로 진행한다는 것을 함께 고정한다.
+  it("displayNames() 가 reject 해도(DB 다운 등) proc_list 는 거부되지 않고 labels 를 빈 맵으로 채워 허브까지 진행한다", async () => {
+    const seen: Array<Record<string, unknown>> = [];
+    const ctx = ctxWith(
+      { call: async (_tool: string, args: Record<string, unknown>) => { seen.push(args); return { ok: true, content: "" }; } },
+      {
+        isOwner: true,
+        userId: "111",
+        repos: {
+          allowedDirs: { list: async () => [] },
+          users: { displayNames: async () => { throw new Error("db down"); } },
+        },
+      },
+    );
+
+    const out = await remoteToolHandler(ctx, "proc_list", {});
+
+    expect(seen[0]!.labels).toStrictEqual({});
+    expect(out.ok).toBe(true);
   });
 });
 
