@@ -158,6 +158,33 @@ describe("WorkerHub — 인증", () => {
     // 등록만 유지" 되는 애매한 상태가 없다.
     expect(hub.isConnected("owner")).toBe(false);
   });
+
+  it("인증된 워커의 커밋과 연결 시각을 보관한다", async () => {
+    const s = fakeSocket();
+    hub.handleConnection(s.sock);
+    s.recv({ type: "hello", token: "good", workerId: "owner", roots: ["/w"], commit: "abc123" });
+    await flush();
+    const info = hub.workersInfo();
+    expect(info).toHaveLength(1);
+    expect(info[0]).toMatchObject({ workerId: "owner", commit: "abc123" });
+    expect(typeof info[0].connectedAt).toBe("number");
+  });
+
+  it("커밋 없이 붙은 워커도 목록에 나온다(옛 워커)", async () => {
+    const s = fakeSocket();
+    hub.handleConnection(s.sock);
+    s.recv({ type: "hello", token: "good", workerId: "owner", roots: ["/w"] });
+    await flush();
+    expect(hub.workersInfo()).toEqual([expect.objectContaining({ workerId: "owner", commit: undefined })]);
+  });
+
+  it("거부된 워커는 목록에 없다", async () => {
+    const s = fakeSocket();
+    hub.handleConnection(s.sock);
+    s.recv({ type: "hello", token: "bad", workerId: "owner", roots: ["/w"], commit: "abc123" });
+    await flush();
+    expect(hub.workersInfo()).toEqual([]);
+  });
 });
 
 describe("WorkerHub — 도구 호출", () => {

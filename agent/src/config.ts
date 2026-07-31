@@ -76,6 +76,10 @@ export type WorkerConfig = {
   workerToken: string;   // WORKER_TOKEN — 허브 인증
   hubUrl: string;        // HUB_URL — Railway 허브 WebSocket 주소(wss://.../worker)
   roots: string[];       // WORKER_ROOTS — 이 워커가 노출할 폴더(쉼표 구분). 최종 경로 관문의 기준
+  // WORKER_SENTINEL — 이 경로에 파일이 생기면 워커가 한가해지는 대로 스스로 종료한다(Task 6).
+  // 미설정이면 감시 자체를 하지 않는다(옵트인). 자동 갱신용이라 기본값이 없다 — 부원 PC 모두가
+  // 이 기능을 쓰는 게 아니다.
+  sentinelPath?: string;
 };
 
 // Task 4: 워커는 이제 소유자가 누구인지 알 필요가 없다(신원·권한 판단은 허브 쪽에 있다) —
@@ -104,5 +108,6 @@ export function loadWorkerConfig(env: NodeJS.ProcessEnv = process.env): WorkerCo
     workerToken: env.WORKER_TOKEN as string,
     hubUrl: env.HUB_URL as string,
     roots,
+    sentinelPath: env.WORKER_SENTINEL || undefined,
   };
 }

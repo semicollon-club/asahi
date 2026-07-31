@@ -82,7 +82,7 @@ async function toolCtxWithRealWorker(o: { roots: string[]; allowed: string[] }):
       introspect: new IntrospectRepo(db),
     },
     role: "owner", isPrivate: true, isOwner: true, userId: "owner", conversationId: 1,
-    runtime: { model: "claude-opus-4-8", sdkVersion: "0.3.207", deployTarget: "local", maxTurns: 30 },
+    runtime: { model: "claude-opus-4-8", sdkVersion: "0.3.207", deployTarget: "local", maxTurns: 30, workers: [] },
     remote: {
       workerId: "test-worker", workerKind: "personal", roots: o.roots,
       call: (tool, args) => executors[tool]!(args),

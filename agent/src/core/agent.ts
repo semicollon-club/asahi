@@ -265,10 +265,11 @@ export function makeRunAgentTurn(
     isConnected(workerId: string): boolean;
     call(workerId: string, tool: string, args: Record<string, unknown>): Promise<{ ok: boolean; content: string }>;
     rootsOf(workerId: string): string[];
+    workersInfo(): Array<{ workerId: string; commit?: string; connectedAt: number }>;
   },
 ): TurnRunner {
   return async (req) => {
-    const runtime: RuntimeInfo = { model, sdkVersion: SDK_VERSION, deployTarget, maxTurns: 30 };
+    const runtime: RuntimeInfo = { model, sdkVersion: SDK_VERSION, deployTarget, maxTurns: 30, botCommit: process.env.RAILWAY_GIT_COMMIT_SHA, workers: hub?.workersInfo() ?? [] };
     const ctx: ToolCtx = buildToolCtx(repos, req.context, runtime);
     const server = buildTools(ctx);
 

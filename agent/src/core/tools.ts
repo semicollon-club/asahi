@@ -20,7 +20,15 @@ const t = (name: string): string => `mcp__${TOOL_SERVER}__${name}`;
 const WEB_TOOLS = ["WebSearch"];
 
 // 자기인지(§Task4): 이 봇이 어떤 모델·SDK·배포 설정으로 동작 중인지. runtime_info 도구가 그대로 보고한다.
-export type RuntimeInfo = { model: string; sdkVersion: string; deployTarget: "local" | "cloud"; maxTurns: number };
+export type RuntimeInfo = {
+  model: string;
+  sdkVersion: string;
+  deployTarget: "local" | "cloud";
+  maxTurns: number;
+  // Railway 가 주입하는 git 변수. 로컬 PM2 에는 없으므로 선택적이다 — 없으면 비교를 생략한다.
+  botCommit?: string;
+  workers: Array<{ workerId: string; commit?: string; connectedAt: number }>;
+};
 
 // 현재 턴의 상대·대화 컨텍스트를 클로저로 받는다. 도구 handler 는 이걸로 스코프를 강제한다.
 export type ToolCtx = {
@@ -222,10 +230,23 @@ export async function dbQueryHandler(ctx: ToolCtx, args: { sql: string }): Promi
 export async function runtimeInfoHandler(ctx: ToolCtx): Promise<string> {
   if (!isOwnerDm(ctx)) return OWNER_DM_ONLY;
   const r = ctx.runtime;
+  const short = (sha: string) => sha.slice(0, 7);
+  // botCommit 이 없으면(로컬 PM2) 판정 자체를 내지 않는다. "비교할 수 없음"을 "다름"으로
+  // 보고하면 거짓 경보가 되고, 그 경보를 몇 번 보면 진짜 불일치도 무시하게 된다.
+  const verdict = (workerCommit?: string): string => {
+    if (r.botCommit === undefined || workerCommit === undefined) return "";
+    return r.botCommit === workerCommit ? " (봇과 일치)" : " (봇과 다름 — 워커 갱신 필요)";
+  };
+  const workerLines =
+    r.workers.length === 0
+      ? ["워커: 붙어 있는 워커가 없어요."]
+      : r.workers.map((w) => `워커 ${w.workerId}: 커밋 ${w.commit ? short(w.commit) : "알 수 없음"}${verdict(w.commit)}`);
   return [
     `모델(설정): ${r.model}`,
     `SDK: @anthropic-ai/claude-agent-sdk@${r.sdkVersion}`,
     `배포 대상: ${r.deployTarget}`,
+    `봇 커밋: ${r.botCommit ? short(r.botCommit) : "알 수 없음"}`,
+    ...workerLines,
     `한 응답 내 도구 반복 상한(maxTurns): ${r.maxTurns}`,
     `한도: 소유자는 무제한, 손님은 시간당 제한(유저별/전역).`,
   ].join("\n");

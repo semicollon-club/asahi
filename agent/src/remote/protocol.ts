@@ -14,7 +14,7 @@
 // "거부됨" 로그가 아니라 "연결이 끊겨 재시도합니다"가 반복되는 로그를 봐야 한다. 이상적이지는
 // 않지만 비용은 제한적이다 — 시도당 TCP 연결 하나와 JSON 파싱 한 번뿐이고, 프레임이 아예
 // 파싱되지 않으므로 레지스트리 조회(DB 왕복)까지는 가지도 않는다.
-export type WorkerHello = { type: "hello"; token: string; workerId: string; roots: string[] };
+export type WorkerHello = { type: "hello"; token: string; workerId: string; roots: string[]; commit?: string };
 export type HubReady = { type: "ready" };
 export type HubDenied = { type: "denied"; reason: string };
 export type HubCall = { type: "call"; id: string; tool: string; args: Record<string, unknown> };
@@ -44,8 +44,13 @@ export function parseFrame(raw: string): Frame | null {
   if (!isObj(v)) return null;
   switch (v.type) {
     case "hello":
+      // commit 은 선택 필드다 — 없어도, 형태가 어긋나도 hello 자체는 통과시킨다. 이 프레임이
+      // null 이 되면 허브가 소켓만 끊고 워커는 사유를 못 받아 영원히 재연결한다(파일 상단
+      // FIX6 주석). 버전을 모르는 것이 연결을 못 하는 것보다 낫다.
       return isStr(v.token) && isStr(v.workerId) && isStrArray(v.roots)
-        ? { type: "hello", token: v.token, workerId: v.workerId, roots: v.roots }
+        ? isStr(v.commit)
+          ? { type: "hello", token: v.token, workerId: v.workerId, roots: v.roots, commit: v.commit }
+          : { type: "hello", token: v.token, workerId: v.workerId, roots: v.roots }
         : null;
     case "ready":
       return { type: "ready" };
