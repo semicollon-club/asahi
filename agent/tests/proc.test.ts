@@ -179,7 +179,9 @@ describe("proc — 표 렌더링", () => {
   it("소유자 목록에는 도구에 넘길 프로세스 이름이 함께 나온다", () => {
     const out = renderProcList([one], { labelOf, now: NOW, showProcName: true });
     expect(out).toContain("우성현"); // 사람 이름은 그대로 앞에 남는다
-    expect(out).toContain("asahi-111"); // 도구가 요구하는 식별자도 함께
+    // 구분자까지 고정한다 — toContain 만으로는 앞의 공백이 사라져 "재시작 0(asahi-111)" 로
+    // 붙어 버려도 통과한다(리뷰 지적). 다른 칸과 같은 두 칸 간격이 이 표의 규칙이다.
+    expect(out).toContain("  (asahi-111)");
   });
 
   it("손님 목록에는 프로세스 이름이 나오지 않는다", () => {
