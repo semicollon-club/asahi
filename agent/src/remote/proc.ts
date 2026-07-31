@@ -137,9 +137,21 @@ function memberLabel(raw: string, userId: string): string {
 
 // labelOf: 디스코드 userId → 사람이 알아볼 이름. 봇 쪽에서만 알 수 있으므로 주입받는다.
 // now: 업타임 계산 기준. 테스트가 고정할 수 있게 인자로 둔다.
+//
+// showProcName: pm2 프로세스 이름을 함께 보여줄지. 소유자에게만 켠다.
+//
+// 이 옵션이 있는 이유(2026-07-31 실사용 회귀): 이 표의 첫 칸이 asahi-<id> 에서 사람 이름으로
+// 바뀌면서, 표에서 pm2 이름이 통째로 사라졌다. 그런데 그 이름은 표시용이 아니라 proc_stop·
+// proc_logs 의 name 인자다 — 소유자가 남의 프로세스를 지정하는 유일한 수단이고, 이 표가 그것을
+// 알아낼 수 있는 유일한 창구였다. 가리고 나니 소유자의 "로그 보여줘"에 모델이 표에 보이는
+// "우성현"이나 "npm run dev"를 name 으로 넘겼고, parseProcName 이 걸러 "회원 프로세스가
+// 아니에요"로 거절했다 — 관리자 권한이 UI 로 도달 불가능해진 것이다.
+//
+// 손님에게는 켜지 않는다. 손님은 자기 것만 보고 name 을 지정할 수도 없으므로(핸들러가 강제
+// 주입한다) 식별자가 필요 없고, 도로 붙이면 읽기 쉬우라고 사람 이름으로 바꾼 개선이 무의미해진다.
 export function renderProcList(
   procs: ProcInfo[],
-  o: { labelOf: (userId: string) => string; now?: number },
+  o: { labelOf: (userId: string) => string; now?: number; showProcName?: boolean },
 ): string {
   if (procs.length === 0) return "지금 도는 것이 없어요.";
   const now = o.now ?? Date.now();
@@ -150,7 +162,10 @@ export function renderProcList(
     // 이름)과 형식이 똑같아 보여, "돌고 있는 거 다 정리해줘" 를 받은 모델이 인프라 행까지 회원
     // 것으로 착각해 지울 수 있다 — 표식을 붙여 한눈에 다르게 보이게 한다.
     const who = p.userId === null ? `[인프라] ${p.name}` : memberLabel(o.labelOf(p.userId), p.userId);
-    return `${who}  ${p.command}  ${p.status}  ${humanUptime(p.startedAtMs, now)}  ${humanMem(p.memoryBytes)}  재시작 ${p.restarts}`;
+    // 인프라 행은 who 가 이미 p.name 을 담고 있고, 이름을 못 얻은 회원 행도 폴백으로 같은 값이
+    // 와 있다 — 둘 다 덧붙이면 같은 문자열이 한 줄에 두 번 나온다. 새 정보일 때만 붙인다.
+    const suffix = o.showProcName === true && who !== p.name && p.userId !== null ? `  (${p.name})` : "";
+    return `${who}  ${p.command}  ${p.status}  ${humanUptime(p.startedAtMs, now)}  ${humanMem(p.memoryBytes)}  재시작 ${p.restarts}${suffix}`;
   });
   return [`지금 도는 것 (${procs.length}개)`, "", ...lines].join("\n");
 }
