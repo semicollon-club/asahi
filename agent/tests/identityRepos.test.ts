@@ -29,6 +29,25 @@ describe("UsersRepo", () => {
     // null 이나 빈 문자열을 실어 보내면 그 판단이 흐려진다.
     expect("222" in map).toBe(false);
   });
+
+  it("displayNames 는 빈 문자열 이름도 제외한다(NULL 이 아니므로 별도 조건 필요)", async () => {
+    const db = await openTestDb();
+    const users = new UsersRepo(db, () => 1);
+    await users.upsert("333", { role: "allowed", displayName: "영희" });
+    // upsert 의 `patch.displayName ?? null` 은 ""(빈 문자열)를 그대로 통과시킨다 —
+    // null 이 아니라 SQL 상 빈 문자열이 실제로 저장되는 경우를 재현해야
+    // "IS NOT NULL" 만으로는 걸러지지 않는다는 것을 검증할 수 있다.
+    await users.upsert("444", { role: "allowed", displayName: "" });
+
+    const map = await users.displayNames();
+
+    // 실제 이름이 있는 사용자는 여전히 맵에 존재해야 한다 — 메서드가 통째로
+    // 빈 결과를 돌려주는 방식으로 이 테스트를 통과하는 것을 막는다.
+    expect(map["333"]).toBe("영희");
+    // in 연산자로 "키 부재"와 "키는 있지만 값이 falsy"를 구분한다 — toBeFalsy() 는
+    // 빈 문자열이 값으로 들어 있어도 통과해버려 이 회귀를 잡지 못한다.
+    expect("444" in map).toBe(false);
+  });
 });
 
 describe("ConversationsRepo", () => {
