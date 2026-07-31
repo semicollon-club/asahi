@@ -15,6 +15,20 @@ describe("UsersRepo", () => {
     expect(await users.getRole("u1")).toBe("allowed");
     expect((await users.list("allowed")).map((u) => u.id)).toEqual(["u1"]);
   });
+
+  it("displayNames 는 이름이 있는 사용자만 맵으로 돌려준다", async () => {
+    const db = await openTestDb();
+    const users = new UsersRepo(db, () => 1);
+    await users.upsert("111", { role: "allowed", displayName: "우성현" });
+    await users.upsert("222", { role: "allowed" }); // 이름 없음
+
+    const map = await users.displayNames();
+
+    expect(map["111"]).toBe("우성현");
+    // 이름이 없는 사용자는 키 자체가 없어야 한다 — 호출자가 "키가 없으면 폴백"으로 다루므로
+    // null 이나 빈 문자열을 실어 보내면 그 판단이 흐려진다.
+    expect("222" in map).toBe(false);
+  });
 });
 
 describe("ConversationsRepo", () => {
