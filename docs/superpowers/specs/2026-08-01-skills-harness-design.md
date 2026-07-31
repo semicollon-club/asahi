@@ -48,21 +48,32 @@ frontend-design/unknown/
 (`agent/src/core/agent.ts` — *"열면 봇 컨테이너의 파일시스템을 건드리게 된다"*). 이 결정은
 되돌리지 않는다. 즉 봇에서 스크립트를 실행하는 선택지는 없다.
 
-**스킬을 리포에 두면 이 문제가 대부분 사라진다.** 봇은 배포 때 받고, 미니PC 는
-`deploy/update-worker.ps1` 이 5분마다 당겨온다(2026-08-01 가동). 같은 파일이 양쪽에 있고
-루트 경로만 다르다. 2단계는 경로 규약만 정하면 된다 — 파일을 나르는 일은 이미 돌아간다.
+**스킬을 리포에 두면 이 문제가 대부분 사라진다.** 봇은 배포 때 받고(§3.1 의 `COPY` 한 줄),
+미니PC 는 `deploy/update-worker.ps1` 이 5분마다 당겨온다(2026-08-01 가동). 같은 파일이 양쪽에
+있고 루트 경로만 다르다 — 봇은 `/app/skills`, 미니PC 는 `C:\asahi-worker\agent\skills`.
+2단계는 그 경로 규약만 정하면 된다. 파일을 나르는 일은 이미 돌아간다.
 
 ## 3. 설계
 
 ### 3.1 구조
 
-리포 루트에 `skills/` 를 만들고 **플러그인 하나**로 취급한다.
+`agent/skills/` 를 만들고 **플러그인 하나**로 취급한다.
 
 ```
-skills/
+agent/skills/
   .claude-plugin/plugin.json
   frontend-design/SKILL.md
 ```
+
+**리포 루트가 아니라 `agent/` 밑인 이유**(계획 작성 중 발견, 스펙 개정): `agent/Dockerfile` 의
+빌드 컨텍스트는 리포 루트가 아니라 `agent/` 다(Railway 서비스의 Root Directory 를 `agent` 로
+지정한 전제). 그 Dockerfile 은 `package.json`·`package-lock.json`·`tsconfig.json`·`src` 만
+복사하므로, **리포 루트에 둔 `skills/` 는 봇 컨테이너에 아예 존재하지 않는다.** `agent/` 밑에
+두고 Dockerfile 에 `COPY skills ./skills` 한 줄을 더하면 양쪽이 성립한다.
+
+이 배치는 경로 계산도 단순하게 만든다. `agent/src/core/agent.ts` 에서 두 단계 위가 `agent/`
+이고, 컨테이너의 `/app/dist/core/agent.js` 에서 두 단계 위가 `/app` 이다 — **개발과 컨테이너가
+같은 상대경로**(`../../skills`)로 맞는다.
 
 외부 스킬 설치 = 그 폴더를 `skills/` 밑에 **그대로 복사**하고 커밋한다. 벗겨내기도 변환도
 없다. 이것이 §5 에서 A 안을 고른 이유 그대로다.
@@ -86,9 +97,13 @@ plugins: [{ type: "local", path: skillsDir }],
 skills: skillsEnabled ? "all" : [],
 ```
 
-`skillsDir` 은 봇 프로세스 기준 리포의 `skills/` 절대경로다. `agentCwd` 와 달리 소스 트리
-안이지만, 이것은 에이전트의 **작업 폴더가 아니라 읽기 전용 자원 경로**다 — cwd 정책
-(에이전트가 소스 트리를 훑지 않게 한다)은 그대로 유지된다.
+`skillsDir` 은 `agent/skills/` 의 절대경로다. `agentCwd` 와 달리 소스 트리 안이지만, 이것은
+에이전트의 **작업 폴더가 아니라 읽기 전용 자원 경로**다 — cwd 정책(에이전트가 소스 트리를
+훑지 않게 한다)은 그대로 유지된다.
+
+경로는 실행 위치가 아니라 **모듈 자신의 위치**에서 계산한다(`import.meta.url`). `cwd` 를
+기준으로 잡으면 로컬 PM2(cwd=`agent/`)와 컨테이너(cwd=`/app`)가 우연히 맞을 뿐이고, 다른
+곳에서 띄우는 순간 조용히 빗나간다.
 
 ### 3.3 켜고 끄는 축
 
