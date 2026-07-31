@@ -345,6 +345,12 @@ Node 에는 cp949 인코더가 없어서, 현재 설계는 **스크립트를 ASC
   ```
 
   프로젝트 ref 는 `list_projects` 로 확인해라(이름이 `Asahi` 인 것).
+
+  **2026-07-31 이후 `status` 의 의미가 바뀌었다.** 이제 `error` 는 **도구가 제 일을 못 한 것**만
+  가리킨다(워커 미연결·spawn 실패·타임아웃·게이트 거부). `sh_exec` 가 실행한 명령이 0이 아닌
+  종료 코드로 끝난 것은 `status='ok'` 이고 종료 코드는 `result_summary` 에 들어 있다 — 셸에서
+  non-zero 는 실패가 아니라 통신 수단이기 때문이다(`findstr` 의 1 = 매칭 없음). **그 이전 행과
+  섞어서 집계하지 마라** — 옛 행은 두 가지를 뭉뚱그린 값이다.
 - **워커 로그** — `C:\asahi-worker\logs\worker.log` (`-Encoding UTF8` 로 읽어라)
 - **PM2 로그** — `C:\Users\asahi\.pm2\logs\<name>-out.log` / `-error.log`. 앱이 사라져도
   파일은 남는다. 단 버퍼링 때문에 비어 있을 수 있다(위 4절)

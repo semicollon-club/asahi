@@ -42,6 +42,10 @@ lastReviewed: 2026-07-31
   방지선일 뿐 의도적 접근의 경계는 아니다(의도된 설계). `allowed_dirs`는 마이그레이션 없이
   `worker_id` 키로 바뀌었다 — 워커 등록 후 `allow_dir`로 폴더를 다시 등록해야 한다. 상세
   위협모델은 `docs/security/capability-model.md`, `docs/security/risk-register.md` 참고.
+  셸·프로세스 사용성(2026-07-31): `sh_exec` 는 명령의 종료 코드를 도구 실패로 취급하지 않는다
+  (`ok:false` 는 spawn 실패·타임아웃뿐) — `actions.status` 의 `error` 도 그에 맞춰 도구 실패만
+  가리키게 됐다. 계속 도는 명령은 도구 설명과 타임아웃 문구가 `proc_start` 로 유도하고,
+  `proc_list` 는 `asahi-<userId>` 대신 사람 이름을 보여준다(이름을 모르면 예전 형식으로 폴백한다).
 - **캐릭터/페르소나** — 코딩 동아리 '세미콜론'의 16세 부원이라는 고정 인격(이름·외형·말투·소유자/손님/서버별
   어조 차등)과 대화 이력 기반의 가벼운 관계 진화. 대화 중 즉흥으로 지어낸 신상 설정은 `memories` 의
   `scope='character'` 로 확정 저장돼 세션·대화방을 넘어 일관되게 유지된다(실제 기억과는 분리).
