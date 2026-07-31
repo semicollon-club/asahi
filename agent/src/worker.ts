@@ -1,9 +1,11 @@
+import fs from "node:fs";
 import path from "node:path";
 import dotenv from "dotenv";
 import { loadWorkerConfig } from "./config.js";
 import { makeExecutors, type Executors } from "./remote/executors.js";
 import { startWorkerClient, type ClientSocket } from "./remote/workerClient.js";
 import { readCommit, defaultRunGit } from "./remote/gitCommit.js";
+import { planShutdown } from "./remote/workerShutdown.js";
 
 // 로컬 워커(1단계 얇은 워커): 디스코드에도 DB에도 붙지 않고, Railway 허브로 아웃바운드
 // WebSocket 을 열어 도구 호출만 받아 실행한다. 판단·기억·세션은 전부 허브(봇) 쪽에 있다.
@@ -73,14 +75,31 @@ async function main() {
       onStatus: (s) => console.log(`[worker] ${s}`),
     });
 
-    const shutdown = () => {
-      console.log("워커 종료 중...");
-      client.stop();
-      // FIX8: 진행 중이던 fs_write 등이 끝나길 기다린 뒤에 종료한다(중간에 잘리지 않게).
-      void idle().then(() => process.exit(0));
+    const IDLE_TIMEOUT_MS = 130_000; // sh_exec 기본 상한(120초)보다 조금 길게
+
+    const finish = (reason: "signal" | "update") => {
+      console.log(reason === "update" ? "갱신을 위해 워커를 종료합니다..." : "워커 종료 중...");
+      void planShutdown({
+        reason,
+        stopSocket: () => client.stop(),
+        idle,
+        idleTimeoutMs: IDLE_TIMEOUT_MS,
+      }).then((code) => process.exit(code));
     };
-    process.on("SIGINT", shutdown);
-    process.on("SIGTERM", shutdown);
+    process.on("SIGINT", () => finish("signal"));
+    process.on("SIGTERM", () => finish("signal"));
+
+    // 센티넬 파일이 생기면 갱신 요청이다. fs.watch 대신 주기 확인을 쓰는 이유는 윈도우에서
+    // watch 가 파일 생성에 대해 플랫폼마다 다르게 동작해 왔기 때문이다 — 15초 지연은 5분
+    // 주기의 업데이터에게 아무 문제가 되지 않는다.
+    if (config.sentinelPath !== undefined) {
+      const sentinel = config.sentinelPath;
+      const timer = setInterval(() => {
+        if (!fs.existsSync(sentinel)) return;
+        clearInterval(timer);
+        finish("update");
+      }, 15_000);
+    }
 
     console.log(`로컬 워커가 시작되었습니다 (허브=${config.hubUrl}, 커밋=${commit ?? "알 수 없음"}, 폴더=${config.roots.join(", ")}).`);
   } catch (err) {
