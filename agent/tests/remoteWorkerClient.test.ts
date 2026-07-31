@@ -32,6 +32,24 @@ describe("워커 클라이언트", () => {
     c.stop();
   });
 
+  it("commit 을 주면 hello 에 실어 보낸다", () => {
+    const s = fakeSocket();
+    const c = startWorkerClient({ connect: () => s.sock, token: "t", workerId: "owner", roots: ["/w"], commit: "abc123", executors });
+    s.open();
+    expect(s.sent[0]).toEqual({ type: "hello", token: "t", workerId: "owner", roots: ["/w"], commit: "abc123" });
+    c.stop();
+  });
+
+  it("commit 이 없으면 hello 에 그 키가 실리지 않는다", () => {
+    // commit: undefined 를 그대로 넘겨도 JSON.stringify 가 그 키를 통째로 생략하므로 옛 봇에는
+    // 옛 형태 그대로 도착한다. 이 단정이 그것을 고정한다.
+    const s = fakeSocket();
+    const c = startWorkerClient({ connect: () => s.sock, token: "t", workerId: "owner", roots: ["/w"], executors });
+    s.open();
+    expect(s.sent[0]).toEqual({ type: "hello", token: "t", workerId: "owner", roots: ["/w"] });
+    c.stop();
+  });
+
   it("call 을 받으면 실행기를 돌리고 같은 id 로 result 를 보낸다", async () => {
     const s = fakeSocket();
     const c = startWorkerClient({ connect: () => s.sock, token: "t", workerId: "owner", roots: ["/w"], executors });

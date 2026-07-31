@@ -3,6 +3,7 @@ import dotenv from "dotenv";
 import { loadWorkerConfig } from "./config.js";
 import { makeExecutors, type Executors } from "./remote/executors.js";
 import { startWorkerClient, type ClientSocket } from "./remote/workerClient.js";
+import { readCommit, defaultRunGit } from "./remote/gitCommit.js";
 
 // 로컬 워커(1단계 얇은 워커): 디스코드에도 DB에도 붙지 않고, Railway 허브로 아웃바운드
 // WebSocket 을 열어 도구 호출만 받아 실행한다. 판단·기억·세션은 전부 허브(봇) 쪽에 있다.
@@ -43,10 +44,12 @@ function trackInFlight(executors: Executors): { wrapped: Executors; idle: () => 
   };
 }
 
-function main() {
+async function main() {
   try {
     const config = loadWorkerConfig();
     const { wrapped: executors, idle } = trackInFlight(makeExecutors(config.roots));
+    // 기동 시 한 번만 읽는다 — 워커는 갱신될 때 재시작되므로 도는 동안 커밋이 바뀌지 않는다.
+    const commit = await readCommit(defaultRunGit);
 
     // 전역 WebSocket(Node 22 내장)을 ClientSocket 으로 감싼다 — 클라이언트 로직은 WebSocket 을 모른다.
     const connect = (): ClientSocket => {
@@ -65,6 +68,7 @@ function main() {
       token: config.workerToken,
       workerId: config.workerId,
       roots: config.roots,
+      commit,
       executors,
       onStatus: (s) => console.log(`[worker] ${s}`),
     });
@@ -78,7 +82,7 @@ function main() {
     process.on("SIGINT", shutdown);
     process.on("SIGTERM", shutdown);
 
-    console.log(`로컬 워커가 시작되었습니다 (허브=${config.hubUrl}, 폴더=${config.roots.join(", ")}).`);
+    console.log(`로컬 워커가 시작되었습니다 (허브=${config.hubUrl}, 커밋=${commit ?? "알 수 없음"}, 폴더=${config.roots.join(", ")}).`);
   } catch (err) {
     // FIX8: 이전(DB 폴링) 버전의 main().catch 와 같은 문구로 복원한다 — WORKER_ROOTS 오타 같은
     // 설정 오류가 맨 스택트레이스 대신 사람이 읽을 수 있는 한 줄로 보이게 한다.
@@ -87,4 +91,4 @@ function main() {
   }
 }
 
-main();
+void main();
