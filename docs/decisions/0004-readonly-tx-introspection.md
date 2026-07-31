@@ -35,6 +35,12 @@ lastReviewed: 2026-07-13
 도달하므로(`agent/src/core/tools.ts`), 이 SQL 가드 자체는 소유자 DM 밖에서는 실행되지
 않는다.
 
+> **개정(2026-08-01)** — `runtime_info` 는 이 게이팅에서 빠져 `ctx.isOwner` 하나로 판정한다.
+> 소유자가 공유 미니PC 에 닿는 곳이 서버 채널뿐이라 그 기계의 버전을 물어볼 장소가 없었기
+> 때문이다. 이 문단의 SQL 가드 서술에는 영향이 없다 — `runtime_info` 는 SQL 을 실행하지
+> 않는다. `db_schema`/`db_query` 는 그대로 소유자 DM 전용이다.
+> (`docs/security/capability-model.md` 의 능력 계층표가 현행 기준이다.)
+
 ## 근거
 
 순수 애플리케이션 가드만으로는 SQL 문법의 미묘한 변형(CTE, 서브쿼리 등)을 전부 막는다고

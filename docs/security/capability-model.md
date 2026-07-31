@@ -54,7 +54,7 @@ Asahi 비서는 대화·모델 호출·기억·세션을 전담하는 **봇** �
 | 계층 | 조건 | 워커 | 열리는 도구 |
 | --- | --- | --- | --- |
 | 소유자 DM | `isOwner && isPrivate`(local·cloud 동일) | 그 소유자의 **개인 워커** | `remember`/`recall`(전원) + `character_fact` + `manage_access` + `db_schema`/`db_query`/`runtime_info` + `WebSearch`. **워커 연결 시**(`workerConnected`) `allow_dir`/`revoke_dir`/`list_dirs` 와 `fs_read`/`fs_write`/`fs_edit`/`fs_glob`/`fs_grep`/`fs_tree`/`sh_exec`/`proc_start`/`proc_stop`/`proc_list`/`proc_logs` 가 함께 추가된다(그 개인 워커의 `allowed_dirs` 전체 — 좁혀지지 않는다) — `deployTarget`(local/cloud)은 더 이상 이 계층의 도구 목록에 영향을 주지 않는다(최종 리뷰 FIX2). `proc_*`(장기 실행 프로세스 관리) 의 한계는 아래 "장기 실행 프로세스의 한계" 절 참고 |
-| 소유자 서버/스레드 | `isOwner && !isPrivate` | **공유 워커**(동아리 미니PC), 관리자 스코프 | `recall`(공용) + `WebSearch`. **워커 연결 시** `allow_dir`/`revoke_dir`/`list_dirs` 와 `fs_*`/`sh_exec`/`proc_*`(4개) 가 추가된다 — `scopeDirs` 가 소유자는 좁히지 않으므로 손님 폴더를 포함한 그 기계의 `allowed_dirs` 전체에 접근한다(관리자). `proc_list` 도 필터 없이 전원이 보이고 `proc_stop`/`proc_logs` 는 이름을 지정해 남의 프로세스를 다룰 수 있다(아래 "장기 실행 프로세스의 한계" 참고). DB·접근관리(`db_query`/`manage_access`)는 주지 않는다 — 기계가 아니라 봇 자신에 대한 권한이라 공개 채널에서 열 이유가 없다 |
+| 소유자 서버/스레드 | `isOwner && !isPrivate` | **공유 워커**(동아리 미니PC), 관리자 스코프 | `recall`(공용) + `runtime_info` + `WebSearch`. **워커 연결 시** `allow_dir`/`revoke_dir`/`list_dirs` 와 `fs_*`/`sh_exec`/`proc_*`(4개) 가 추가된다 — `scopeDirs` 가 소유자는 좁히지 않으므로 손님 폴더를 포함한 그 기계의 `allowed_dirs` 전체에 접근한다(관리자). `proc_list` 도 필터 없이 전원이 보이고 `proc_stop`/`proc_logs` 는 이름을 지정해 남의 프로세스를 다룰 수 있다(아래 "장기 실행 프로세스의 한계" 참고). DB·접근관리(`db_query`/`manage_access`)는 주지 않는다 — 기계가 아니라 봇 자신에 대한 권한이라 공개 채널에서 열 이유가 없다 |
 | 손님 DM | `isPrivate && role in {allowed, owner}`, `isOwner` 는 아님 | **공유 워커**, 본인 폴더로 스코프 | `remember`/`recall`(본인 스코프만) + `character_fact` + `WebSearch`. **워커 연결 시** `fs_*`/`sh_exec`/`proc_*`(4개) 가 추가된다 — `fs_*` 는 `scopeDirs` 가 `<루트>/<디스코드 userId>/` 하위로 좁히지만, **`sh_exec` 는 이 스코프의 대상이 아니다**(아래 "경로 게이팅" 참고). `proc_*` 는 경로가 아니라 이름으로 좁혀진다 — `proc_start` 의 이름·작업폴더, `proc_stop`/`proc_logs` 의 대상 이름, `proc_list` 의 필터가 전부 본인 것으로 강제 주입되고 모델이 준 값은 무시된다(아래 "장기 실행 프로세스의 한계" 참고). dir 관리 도구는 절대 받지 않는다 |
 | 손님 서버/스레드 | 그 외(`!isPrivate`, 손님) | **공유 워커**, 본인 폴더로 스코프 | `recall`(공용 스코프만) + `WebSearch`. **워커 연결 시** `fs_*`/`sh_exec`/`proc_*`(4개) 가 추가된다 — 손님 DM 행과 동일하게 `fs_*` 만 자기 폴더로 좁혀지고 `sh_exec` 는 좁혀지지 않으며, `proc_*` 는 이름으로 본인 것에 강제로 좁혀진다 |
 
@@ -385,9 +385,15 @@ pm2 jlist 가 돌려주는 명령은 이제 회원이 실제로 실행한 값이
 
 같은 원칙이 도구 핸들러 내부의 보조 판정 함수에도 반영돼 있다.
 
-- `isOwnerDm(ctx) = ctx.isOwner && ctx.isPrivate` — 자기인지 DB 도구(`db_schema`/`db_query`/
-  `runtime_info`)와 `manage_access`는 이 조건에서만 실행된다 — 이 넷은 기계가 아니라 봇
-  자신에 대한 권한이라 소유자의 사설 DM으로 좁혀 둔다.
+- `isOwnerDm(ctx) = ctx.isOwner && ctx.isPrivate` — 자기인지 DB 도구(`db_schema`/`db_query`)와
+  `manage_access`는 이 조건에서만 실행된다 — 이 셋은 기계가 아니라 봇 자신에 대한 권한이라
+  소유자의 사설 DM으로 좁혀 둔다.
+- **`runtime_info` 는 2026-08-01 이 게이트에서 빠져 `ctx.isOwner` 하나로 판정한다**(핸들러와
+  `allowedToolsFor` 양쪽 동일). 소유자가 공유 미니PC 에 닿는 곳은 서버 채널뿐인데(`isOwner &&
+  isPrivate` 면 개인 워커로 간다 — `workerSelect.ts`), 그 기계의 버전을 확인하려면 DM 으로
+  나가야 했고 DM 의 답은 다른 기계 얘기였다. 같은 기계를 두고 두 도구가 서로 다른 장소를
+  요구해 실제로 오진을 낳았다. 이 도구는 DB 를 읽지 않고 모델명·SDK 버전·커밋·한도만 내므로
+  공개 채널에서 열어도 노출되는 것이 늘지 않는다 — 손님은 여전히 어디서도 받지 못한다.
 - 원격 도구(`fs_*`/`sh_exec`)는 더 이상 `isOwnerDm`으로 판정하지 않는다 — Task 7 이후 이
   도구들은 소유자 DM 전용이 아니다(위 능력 계층표 참고). 도구셋 노출과 핸들러 실행 양쪽 모두
   `resolveTurnWorker`(`agent/src/core/agent.ts`) 하나의 판정 결과를 공유한다: `allowedToolsFor`
@@ -504,8 +510,9 @@ pm2 jlist 가 돌려주는 명령은 이제 회원이 실제로 실행한 값이
    쓰기 시도가 있어도 DB 가 최종적으로 거부하는 게 진짜 보장이다. 결과는 `maxRows` 로 자르고
    `statement_timeout` 을 걸어 무거운 조회로부터도 보호한다.
 
-`db_query`/`db_schema`/`runtime_info` 는 위 신원 게이팅(`isOwnerDm`)까지 통과해야 도달하므로,
-소유자 DM 바깥에서는 이 SQL 가드 자체에 도달하지 않는다.
+`db_query`/`db_schema` 는 위 신원 게이팅(`isOwnerDm`)까지 통과해야 도달하므로, 소유자 DM
+바깥에서는 이 SQL 가드 자체에 도달하지 않는다. (`runtime_info` 는 2026-08-01 부터 `isOwner`
+하나로 판정하지만 SQL 을 실행하지 않으므로 이 가드와 무관하다.)
 
 ## 보안-핵심 파일 목록
 
@@ -514,7 +521,7 @@ pm2 jlist 가 돌려주는 명령은 이제 회원이 실제로 실행한 값이
 
 | 파일 | 지켜야 할 불변식 |
 | --- | --- |
-| `agent/src/core/tools.ts` | `allowedToolsFor` 는 신원·위치·`workerConnected` 조합별로 정확히 문서화된 도구 목록만 반환한다(dir 관리 도구도 `workerConnected` 하나로 결정 — 최종 리뷰 FIX2). 원격 도구(`fs_*`/`sh_exec`)는 이제 소유자 서버·손님 DM·손님 서버 분기에도 나타난다(Task 7, 위 능력 계층표) — 손님 DM·서버 분기가 이 도구를 "절대" 포함하지 않는다는 예전 불변식은 더 이상 성립하지 않는다. `isOwnerDm`(`db_schema`/`db_query`/`runtime_info`/`manage_access` 전용, `isOwner && isPrivate`)와 `canManagePc`(dir 관리 도구 전용, `isOwner` 하나만 — FIX6/Task 7)는 서로 다른 조건이며 각각 도구셋과 독립적으로 핸들러 내부에서 다시 신원을 확인한다. `allowDirHandler` 는 `ctx.remote.roots` 밖 경로를 거부한다(봇 자신의 파일시스템은 보지 않는다). `manage_access` 는 `owner` 역할 부여를 항상 거부한다. |
+| `agent/src/core/tools.ts` | `allowedToolsFor` 는 신원·위치·`workerConnected` 조합별로 정확히 문서화된 도구 목록만 반환한다(dir 관리 도구도 `workerConnected` 하나로 결정 — 최종 리뷰 FIX2). 원격 도구(`fs_*`/`sh_exec`)는 이제 소유자 서버·손님 DM·손님 서버 분기에도 나타난다(Task 7, 위 능력 계층표) — 손님 DM·서버 분기가 이 도구를 "절대" 포함하지 않는다는 예전 불변식은 더 이상 성립하지 않는다. `isOwnerDm`(`db_schema`/`db_query`/`manage_access` 전용, `isOwner && isPrivate`)와 `canManagePc`(dir 관리 도구 전용, `isOwner` 하나만 — FIX6/Task 7), 그리고 `runtime_info`(`isOwner` 하나만 — 2026-08-01)는 서로 다른 조건이며 각각 도구셋과 독립적으로 핸들러 내부에서 다시 신원을 확인한다. `allowDirHandler` 는 `ctx.remote.roots` 밖 경로를 거부한다(봇 자신의 파일시스템은 보지 않는다). `manage_access` 는 `owner` 역할 부여를 항상 거부한다. |
 | `agent/src/core/agent.ts` | `resolveTurnWorker` 는 `resolveWorkerSelector`(개인/공유 선택) → 레지스트리(`personalWorkerOf`/`sharedWorkerId`) → `hub.isConnected(workerId)` 순으로 이 턴이 쓸 워커를 정한다(예전 `shouldConnectWorker`/`resolveWorkerConnected` 를 대체 — Task 7). `req.noRemoteTools===true` 면(유휴 요약 턴) 레지스트리·허브 조회 자체를 건너뛰고 무조건 `null`(=워커 없음)이다(최종 리뷰 FIX4 유지). 이 결과가 `buildRemoteCtx`(`workerId`·`workerKind`·`roots`·`call` 을 채운다)의 입력이자 `allowedToolsFor` 에 넘길 `workerConnected` 이므로, "도구는 보이는데 실행은 거부"(또는 그 반대) 불일치가 생기지 않는다. `resolveWebToolsEnabled` 는 `req.noWebTools===true` 면 무조건 false 를 돌려준다(최종 리뷰 3차 FIX3). `builtinTools` 는 이 값이 참이면 `["WebSearch"]`, 거짓이면 `[]` 다. SDK 내장 파일/Bash 도구(Read/Write/Edit/Glob/Grep/Bash)는 이 배열에 애초에 이름을 올리지 않는다. |
 | `agent/src/core/workerSelect.ts` | `resolveWorkerSelector` 는 "어디서 말하느냐가 어느 기계냐를 정한다" 규칙 하나다 — `isOwner && isPrivate` 만 개인 워커, 그 외(소유자 서버·손님 DM·손님 서버)는 전부 공유 워커. `scopeDirs` 는 공유 워커 + 손님(`!isOwner`)일 때만 각 허용 폴더를 `joinUnderRoot`로 그 사람의 `userId` 하위로 좁힌다 — 개인 워커거나 소유자면 목록을 그대로 돌려준다(빈 목록은 빈 목록 그대로 — fail closed 유지). `joinUnderRoot`(`agent/src/core/paths.ts`)가 `userId` 를 평범한 식별자(영숫자·밑줄·하이픈)로만 제한해, 크래프트한 값으로 상위 폴더를 탈출하는 경로 자체가 만들어지지 않게 한다(회원 격리의 마지막 경계). |
 | `agent/src/store/workersRepo.ts` | 토큰은 `sha256` 해시(`hashWorkerToken`)로만 저장한다 — 평문은 DB 에 남지 않는다. `personalWorkerOf`/`sharedWorkerId` 는 동률(같은 `user_id` 또는 같은 `kind='shared'`)이 여럿이어도 `created_ts, id` 정렬로 결정적으로 하나만 고른다(DB 가 임의로 고르게 두지 않는다). `upsert` 로 같은 `id` 를 재등록하면 토큰 해시가 교체되지만(회전), `created_ts` 와 `label`(명시적으로 새로 주지 않는 한)은 보존한다. |

@@ -207,8 +207,11 @@ export async function listDirsHandler(ctx: ToolCtx): Promise<string> {
   return dirs.map((d) => `- ${d}`).join("\n");
 }
 
-// 자기인지 도구(§Task4): 소유자 DM 전용 — db_schema/db_query/runtime_info.
+// 자기인지 도구(§Task4) 중 db_schema/db_query 전용: 소유자 DM 에서만.
 // 손님·서버는 어느 경우에도 노출·실행 둘 다 거부한다(isOwner && isPrivate 로만 판정).
+//
+// 2026-08-01: runtime_info 가 이 게이트에서 빠졌다(아래 runtimeInfoHandler 참고). 남은 둘은
+// DB 를 직접 읽으므로 공개 채널에서 열 이유가 여전히 없다.
 function isOwnerDm(ctx: ToolCtx): boolean { return ctx.isOwner && ctx.isPrivate; }
 
 export async function dbSchemaHandler(ctx: ToolCtx): Promise<string> {
@@ -227,8 +230,17 @@ export async function dbQueryHandler(ctx: ToolCtx, args: { sql: string }): Promi
   }
 }
 
+// 2026-08-01: 소유자 DM 전용에서 "소유자면 어디서든"으로 풀었다. 이 도구가 보고하는 워커
+// 커밋은 곧 "지금 어느 기계가 어느 코드로 도나"인데, 소유자가 공유 미니PC 에 닿는 곳은 서버
+// 채널뿐이다(workerSelect.ts — 소유자 DM 은 개인 워커로 간다). 그래서 미니PC 에서 파일·셸
+// 작업을 하다 버전을 확인하려면 DM 으로 나가야 했고, 정작 DM 의 답은 다른 기계 얘기였다 —
+// 같은 기계를 두고 두 도구가 서로 다른 장소를 요구해 실제로 사람을 오진으로 몰았다.
+//
+// 함께 묶여 있던 db_schema/db_query 는 그대로 DM 전용이다: 그 둘은 DB 를 직접 읽지만 이
+// 도구는 모델명·SDK 버전·커밋·한도만 낸다. 노출(allowedToolsFor)과 실행(이 게이트)이 같은
+// 기준(isOwner)을 쓰므로 "도구는 보이는데 실행하면 거부"가 생기지 않는다.
 export async function runtimeInfoHandler(ctx: ToolCtx): Promise<string> {
-  if (!isOwnerDm(ctx)) return OWNER_DM_ONLY;
+  if (!ctx.isOwner) return OWNER_ONLY;
   const r = ctx.runtime;
   const short = (sha: string) => sha.slice(0, 7);
   // botCommit 이 없으면(로컬 PM2) 판정 자체를 내지 않는다. "비교할 수 없음"을 "다름"으로
@@ -320,7 +332,9 @@ export function allowedToolsFor(
   }
   // 소유자가 서버에 있으면 공유 기계 + 관리자 권한(폴더 관리 포함). DB·접근관리는 DM 전용을
   // 유지한다 — 그건 기계가 아니라 봇 자신에 대한 권한이라 공개 채널에서 열 이유가 없다.
-  if (isOwner) return [...remote, t("recall"), ...dirTools, ...webTools];
+  // runtime_info 는 예외로 여기서도 연다(2026-08-01): 소유자가 공유 기계에 닿는 곳이 서버
+  // 채널뿐이라, 그 기계의 버전을 물어볼 수 있는 유일한 장소도 여기다.
+  if (isOwner) return [...remote, t("recall"), ...dirTools, t("runtime_info"), ...webTools];
   // 손님: DM 이든 서버든 공유 기계로 간다. 폴더 관리는 주지 않는다.
   if (isPrivate && (role === "owner" || role === "allowed")) {
     return [...remote, t("remember"), t("recall"), t("character_fact"), ...webTools];
@@ -410,7 +424,7 @@ export function buildToolDefinitions(ctx: ToolCtx) {
     ),
     tool(
       "runtime_info",
-      "(소유자 전용) 내가 어떤 모델·SDK·배포 설정으로 동작 중인지 보여줍니다.",
+      "(소유자 전용) 내가 어떤 모델·SDK·배포 설정으로 동작 중인지, 그리고 지금 연결된 워커가 어느 커밋으로 도는지 보여줍니다.",
       {},
       async () => textResult(await runtimeInfoHandler(ctx)),
     ),

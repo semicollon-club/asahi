@@ -383,6 +383,23 @@ describe("allowedToolsFor — 능력 계층(§7.1)", () => {
     expect(allowedToolsFor("allowed", false, false)).toEqual(["mcp__asahi__recall", "WebSearch"]);
   });
 
+  // 2026-08-01: runtime_info 만 DM 전용에서 풀었다. 소유자가 공유 기계에 닿는 곳이 서버 채널
+  // 뿐인데(workerSelect.ts) 그 기계의 버전을 물어보려면 DM 으로 나가야 했고, DM 은 개인 워커를
+  // 보므로 답이 그 기계 얘기가 아니었다. db_schema/db_query/manage_access 는 그대로 DM 전용이다
+  // — 그건 기계가 아니라 봇 자신(DB·접근권한)에 대한 권한이라 공개 채널에서 열 이유가 없다.
+  it("소유자는 서버 채널에서도 runtime_info 를 받는다 — DB·접근관리는 여전히 DM 전용", () => {
+    const server = allowedToolsFor("owner", false, true);
+    expect(server).toContain("mcp__asahi__runtime_info");
+    expect(server).not.toContain("mcp__asahi__db_schema");
+    expect(server).not.toContain("mcp__asahi__db_query");
+    expect(server).not.toContain("mcp__asahi__manage_access");
+  });
+
+  it("손님은 서버에서도 DM 에서도 runtime_info 를 받지 못한다", () => {
+    expect(allowedToolsFor("allowed", false, false)).not.toContain("mcp__asahi__runtime_info");
+    expect(allowedToolsFor("allowed", true, false)).not.toContain("mcp__asahi__runtime_info");
+  });
+
   it("deployTarget 을 생략하거나 'local' 로 주면 기존(로컬) 동작과 완전히 동일하다", () => {
     expect(allowedToolsFor("owner", true, true)).toEqual(allowedToolsFor("owner", true, true, "local"));
     expect(allowedToolsFor("allowed", true, false)).toEqual(allowedToolsFor("allowed", true, false, "local"));
@@ -485,6 +502,17 @@ describe("runtime_info", () => {
   });
   it("소유자가 아니면 거부한다", async () => {
     expect(await runtimeInfoHandler(await ownerCtx({ isOwner: false }))).toMatch(/소유자/);
+  });
+
+  // 2026-08-01: 예전엔 소유자 DM 전용이었다. 그런데 "어디서 말하느냐가 어느 기계냐를 정한다"
+  // (workerSelect.ts)는 규칙 때문에 공유 미니PC 에는 서버 채널에서만 닿는다 — 그 기계에서
+  // 파일·셸 작업을 하다가 "지금 어느 코드로 도나"를 확인하려면 DM 으로 나갔다 와야 했고,
+  // DM 은 개인 워커(다른 기계)를 보므로 답이 그 기계 얘기가 아니다. 같은 미니PC 를 두고 두
+  // 도구가 서로 다른 장소를 요구하던 셈이라 실제로 사람을 오진으로 몰았다.
+  it("소유자면 서버 채널에서도 답한다(공유 기계 작업 중 버전 확인)", async () => {
+    const out = await runtimeInfoHandler(await ownerCtx({ isPrivate: false }));
+    expect(out).toMatch(/claude-opus-4-8/);
+    expect(out).not.toMatch(/할 수 있어요/); // 거부 문구가 아니어야 한다
   });
 
   it("runtime_info 는 워커의 커밋과 일치 여부를 보여준다", async () => {
