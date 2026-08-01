@@ -10,6 +10,7 @@ import { assertReadOnlySql, formatQueryResult } from "./sqlGuard.js";
 import { CHARACTER_FACT_LIMIT } from "./turnPrep.js";
 import { REMOTE_TOOL_NAMES, remoteToolHandler } from "./remoteTools.js";
 import { isPathWithinAny, normalizeDir } from "./paths.js";
+import { memoryScopeFor, SHARED_MEMORY_MAX_LEN } from "./memoryScope.js";
 
 // 도구 서버 이름 → 모델에는 mcp__asahi__<tool> 로 노출된다.
 export const TOOL_SERVER = "asahi";
@@ -75,9 +76,20 @@ function canManagePc(ctx: ToolCtx): boolean {
 
 // ── 순수 핸들러(테스트 대상) ────────────────────────────────────────────────
 export async function rememberHandler(ctx: ToolCtx, args: { title: string; content: string }): Promise<string> {
-  // 항상 현재 상대(userId)·scope='user' 로만 저장한다. 손님은 shared 를 쓸 수 없다.
-  await ctx.repos.memories.insert({ userId: ctx.userId, scope: "user", title: args.title, content: args.content, sourceConversationId: ctx.conversationId });
-  return `기억했어요: "${args.title}"`;
+  // 스코프는 위치가 정한다(memoryScope.ts) — DM 은 개인, 서버 채널은 동아리 공용이다.
+  const scope = memoryScopeFor(ctx);
+  if (scope === "shared") {
+    // 코드포인트로 센다 — length 는 UTF-16 코드유닛이라 이모지가 2로 세어진다(이 파일의
+    // truncateChars 가 같은 이유로 스프레드를 쓴다).
+    const len = [...(args.content ?? "")].length;
+    if (len > SHARED_MEMORY_MAX_LEN) {
+      // 자르지 않고 거절한다. 조용히 잘린 기억은 사실의 일부만 남아, 아사히가 그 반쪽을
+      // 전체인 것처럼 전원에게 말하게 된다.
+      return `공용 기억은 ${SHARED_MEMORY_MAX_LEN}자까지예요. 지금 ${len}자라 저장하지 않았어요 — 주제별로 나눠서 저장해 주세요.`;
+    }
+  }
+  await ctx.repos.memories.insert({ userId: ctx.userId, scope, title: args.title, content: args.content, sourceConversationId: ctx.conversationId });
+  return scope === "shared" ? `동아리 공용으로 기억했어요: "${args.title}"` : `기억했어요: "${args.title}"`;
 }
 
 // 캐릭터 설정 1건의 최대 길이. 신상 한 줄에는 충분하고, 프롬프트 무한 증식을 막는다.
@@ -334,12 +346,16 @@ export function allowedToolsFor(
   // 유지한다 — 그건 기계가 아니라 봇 자신에 대한 권한이라 공개 채널에서 열 이유가 없다.
   // runtime_info 는 예외로 여기서도 연다(2026-08-01): 소유자가 공유 기계에 닿는 곳이 서버
   // 채널뿐이라, 그 기계의 버전을 물어볼 수 있는 유일한 장소도 여기다.
-  if (isOwner) return [...remote, t("recall"), ...dirTools, t("runtime_info"), ...webTools];
+  // remember 도 마찬가지로 연다(2026-08-02): 서버 채널의 저장은 개인 기억이 아니라 동아리
+  // 공용 기억이고(memoryScope.ts), 그것을 만들 수 있는 곳이 여기뿐이다.
+  if (isOwner) return [...remote, t("remember"), t("recall"), ...dirTools, t("runtime_info"), ...webTools];
   // 손님: DM 이든 서버든 공유 기계로 간다. 폴더 관리는 주지 않는다.
   if (isPrivate && (role === "owner" || role === "allowed")) {
     return [...remote, t("remember"), t("recall"), t("character_fact"), ...webTools];
   }
-  return [...remote, t("recall"), ...webTools];
+  // 손님 서버: 동아리 공용 기억은 누구나 쌓을 수 있다(스펙 §2.1). 개인 기억 저장은 DM 에서만
+  // 되므로 여기서 remember 를 부르면 반드시 공용이 된다 — character_fact 는 주지 않는다.
+  return [...remote, t("remember"), t("recall"), ...webTools];
 }
 
 // ── 인프로세스 MCP 서버(SDK) — handler 는 위 순수 함수를 감싼다 ──────────────

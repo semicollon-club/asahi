@@ -15,6 +15,7 @@ import {
   allowedToolsFor, buildToolDefinitions, type ToolCtx,
 } from "../src/core/tools.js";
 import { CHARACTER_FACT_LIMIT } from "../src/core/turnPrep.js";
+import { SHARED_MEMORY_MAX_LEN } from "../src/core/memoryScope.js";
 
 // remote 는 부분만 받아 나머지를 기본값으로 채운다. 이 파일의 테스트가 지정하는 건 roots·call·
 // workerId 정도인데 ToolCtx["remote"] 는 workerKind 까지 요구한다 — 매번 다 적으면 잡음이고,
@@ -60,6 +61,40 @@ describe("remember 도구", () => {
     const all = await c.repos.memories.all();
     expect(all).toHaveLength(1);
     expect(all[0]).toMatchObject({ userId: "guest", scope: "user", title: "선호" });
+  });
+});
+
+describe("remember — 위치가 스코프를 정한다", () => {
+  it("서버 채널에서는 공용 기억으로 저장한다", async () => {
+    const c = await ctx({ userId: "u1", isPrivate: false, isOwner: false });
+    await rememberHandler(c, { title: "회비", content: "학기당 2만원" });
+    const shared = await c.repos.memories.sharedOnly();
+    expect(shared.map((m) => m.title)).toEqual(["회비"]);
+  });
+
+  it("DM 에서는 개인 기억으로 저장한다(회귀 없음)", async () => {
+    const c = await ctx({ userId: "u1", isPrivate: true, isOwner: false });
+    await rememberHandler(c, { title: "내 취향", content: "커피" });
+    expect(await c.repos.memories.sharedOnly()).toEqual([]);
+    expect((await c.repos.memories.forUser("u1")).map((m) => m.title)).toEqual(["내 취향"]);
+  });
+
+  it("공용 기억이 상한을 넘으면 저장하지 않고 길이와 상한을 함께 말한다", async () => {
+    // 자르지 않는다 — 조용히 잘린 기억은 사실의 일부만 남아 더 위험하다.
+    const c = await ctx({ userId: "u1", isPrivate: false, isOwner: false });
+    const long = "가".repeat(SHARED_MEMORY_MAX_LEN + 1);
+    const out = await rememberHandler(c, { title: "회칙", content: long });
+    expect(await c.repos.memories.sharedOnly()).toEqual([]);
+    expect(out).toContain(String(SHARED_MEMORY_MAX_LEN));
+    expect(out).toContain(String(SHARED_MEMORY_MAX_LEN + 1));
+  });
+
+  it("개인 기억에는 그 상한을 걸지 않는다", async () => {
+    // 개인 기억은 본인만 보고 본인이 쓴다. 기존 동작을 이 계획이 바꾸지 않는다.
+    const c = await ctx({ userId: "u1", isPrivate: true, isOwner: false });
+    const long = "가".repeat(SHARED_MEMORY_MAX_LEN + 1);
+    await rememberHandler(c, { title: "긴 메모", content: long });
+    expect((await c.repos.memories.forUser("u1")).map((m) => m.title)).toEqual(["긴 메모"]);
   });
 });
 
@@ -378,9 +413,12 @@ describe("allowedToolsFor — 능력 계층(§7.1)", () => {
     expect(tools).not.toContain("mcp__asahi__allow_dir");
   });
 
-  it("서버 턴은 recall(공용)과 WebSearch 만 — 개인기억 저장·PC 도구·dir 도구 불가", () => {
-    expect(allowedToolsFor("owner", false, false)).toEqual(["mcp__asahi__recall", "WebSearch"]);
-    expect(allowedToolsFor("allowed", false, false)).toEqual(["mcp__asahi__recall", "WebSearch"]);
+  // Task 1(동아리 공용 기억): 서버 채널의 remember 는 개인 기억이 아니라 동아리 공용 기억이다
+  // (memoryScope.ts) — 그래서 이 계층에서도 "저장 자체가 불가능"이 아니라 recall 과 나란히
+  // remember 가 열린다. PC 도구·dir 도구는 여전히 불가.
+  it("서버 턴은 remember(공용)·recall(공용)과 WebSearch 만 — PC 도구·dir 도구 불가(개인 기억 저장은 여전히 DM 전용)", () => {
+    expect(allowedToolsFor("owner", false, false)).toEqual(["mcp__asahi__remember", "mcp__asahi__recall", "WebSearch"]);
+    expect(allowedToolsFor("allowed", false, false)).toEqual(["mcp__asahi__remember", "mcp__asahi__recall", "WebSearch"]);
   });
 
   // 2026-08-01: runtime_info 만 DM 전용에서 풀었다. 소유자가 공유 기계에 닿는 곳이 서버 채널
@@ -454,8 +492,25 @@ describe("allowedToolsFor — 능력 계층(§7.1)", () => {
 
   it("deployTarget='cloud' 라도 손님 DM·서버는 로컬과 동일(영향 없음)", () => {
     expect(allowedToolsFor("allowed", true, false, "cloud")).toEqual(["mcp__asahi__remember", "mcp__asahi__recall", "mcp__asahi__character_fact", "WebSearch"]);
-    expect(allowedToolsFor("owner", false, false, "cloud")).toEqual(["mcp__asahi__recall", "WebSearch"]);
-    expect(allowedToolsFor("allowed", false, false, "cloud")).toEqual(["mcp__asahi__recall", "WebSearch"]);
+    expect(allowedToolsFor("owner", false, false, "cloud")).toEqual(["mcp__asahi__remember", "mcp__asahi__recall", "WebSearch"]);
+    expect(allowedToolsFor("allowed", false, false, "cloud")).toEqual(["mcp__asahi__remember", "mcp__asahi__recall", "WebSearch"]);
+  });
+});
+
+describe("allowedToolsFor — 서버에서도 기억을 저장할 수 있다", () => {
+  it("소유자 서버 채널에 remember 가 열린다", () => {
+    expect(allowedToolsFor("owner", false, true)).toContain("mcp__asahi__remember");
+  });
+
+  it("손님 서버 채널에도 remember 가 열린다", () => {
+    // 동아리 지식이 소유자 한 사람 손으로만 쌓이지 않게 한다(스펙 §2.1).
+    expect(allowedToolsFor("allowed", false, false)).toContain("mcp__asahi__remember");
+  });
+
+  it("character_fact 는 여전히 DM 전용이다", () => {
+    // 지어낸 캐릭터 신상은 이 계획의 대상이 아니다.
+    expect(allowedToolsFor("allowed", false, false)).not.toContain("mcp__asahi__character_fact");
+    expect(allowedToolsFor("owner", false, true)).not.toContain("mcp__asahi__character_fact");
   });
 });
 
@@ -714,9 +769,11 @@ describe("allowedToolsFor — 웹 검색", () => {
     expect(allowedToolsFor("allowed", false, false, "local", false)).toContain(WS);
   });
 
-  it("게시 작업 컨텍스트(공개 채널 계층)는 recall 과 WebSearch 만 받는다", () => {
+  // Task 1(동아리 공용 기억): 이 계층(손님·서버)도 이제 remember 를 받는다 — 서버의 저장은
+  // 항상 공용이므로 게시 작업 컨텍스트라 해도 다른 손님 서버 턴과 다를 이유가 없다.
+  it("게시 작업 컨텍스트(공개 채널 계층)는 remember(공용)·recall 과 WebSearch 를 받는다", () => {
     const tools = allowedToolsFor("allowed", false, false, "cloud", false);
-    expect(tools.sort()).toEqual(["WebSearch", "mcp__asahi__recall"]);
+    expect(tools.sort()).toEqual(["WebSearch", "mcp__asahi__recall", "mcp__asahi__remember"]);
   });
 
   it("WebFetch 는 어느 계층에도 없다", () => {
