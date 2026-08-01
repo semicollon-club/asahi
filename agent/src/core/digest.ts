@@ -105,11 +105,14 @@ export class DigestRunner {
     // 돌리는 것만으로 PC 도구가 구조적으로 열리지 않았다 — 그땐 그 계층 자체에 원격 도구가 없었기
     // 때문이다. 최종 리뷰 FIX2: Task 7 로 그 전제가 깨졌다 — 공개 채널 계층도 공유 워커가
     // 연결되면 fs_*/sh_exec 를 받는다(tools.ts 의 allowedToolsFor 마지막 분기, resolveTurnWorker 는
-    // 위치만으로 이 턴을 공유 워커에 연결한다). 그래서 이제는 계층만으로 안전하지 않고,
-    // noRemoteTools:true 를 명시로 세워야 한다 — 사람이 지켜보지 않는 타이머로 돌면서 신뢰할 수
-    // 없는 웹 검색 결과를 그대로 읽어들이는 이 턴에 공유 기계의 셸 접근까지 열려 있으면 안 된다
-    // (유휴 요약 턴에 적용한 것과 같은 이유 — agent.ts 의 noRemoteTools 계약·core.ts 의
-    // summarizeAndClose 참고). noWebTools 는 세우지 않는다 — 이 턴의 목적 자체가 웹 검색이다.
+    // 위치만으로 이 턴을 공유 워커에 연결한다). 그래서 이제는 계층만으로 안전하지 않고, 아래 세
+    // 축을 turn 요청에 직접 세운다 — noRemoteTools:true(원격 도구 차단): 사람이 지켜보지 않는
+    // 타이머로 돌면서 신뢰할 수 없는 웹 검색 결과를 그대로 읽어들이는 이 턴에 공유 기계의 셸
+    // 접근까지 열려 있으면 안 된다(유휴 요약 턴에 적용한 것과 같은 이유 — agent.ts 의
+    // noRemoteTools 계약·core.ts 의 summarizeAndClose 참고). noWebTools 는 세우지 않는다 — 이
+    // 턴의 목적 자체가 웹 검색이다. noSkills:true(스킬 차단, M-2 후속 리뷰): 원격 도구를 막은
+    // 것과 이유가 같다(사람이 안 보는 타이머 + 신뢰할 수 없는 웹 검색 결과) — 뉴스 조사에
+    // 도움이 되는 스킬이 없으므로 막아도 잃는 기능이 없다.
     const context = { role: "allowed" as const, isPrivate: false, isOwner: false, userId: "digest", conversationId: 0 };
     let text = "";
     let ok = false;
@@ -120,6 +123,7 @@ export class DigestRunner {
         cwd: this.agentCwd,
         context,
         noRemoteTools: true,
+        noSkills: true,
       });
       text = result.text.trim();
       ok = result.ok && text.length > 0;

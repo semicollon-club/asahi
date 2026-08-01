@@ -250,6 +250,29 @@ describe("buildSystemPrompt — 손님 분기도 sh_exec 봉쇄를 과장하지 
   });
 });
 
+// Task 4(스킬 하네스) 후속 — buildCapabilityBlock 위쪽 주석은 "스킬은 신원으로 가르지 않는다"
+// (소유자·손님 모든 분기가 같은 문장을 쓴다)고 설계 의도를 명시하지만, 그 불변식을 지키는
+// 테스트가 이 파일에 하나도 없었다("스킬" 이 0건). 위 "셸이 열리는 네 분기가 모두 같은
+// 주의사항을 갖는다" 테스트와 같은 형태로, 분기가 늘어나거나 한 줄이 실수로 빠져도 이 테스트가
+// 잡도록 고정한다. 스킬 안내는 workerConnected 와 무관하게 항상 실리므로 그 값도 함께 바꿔가며
+// 확인한다(도구 연결 여부가 스킬 노출과 섞여 있지 않다는 것 자체가 이 불변식의 일부다).
+describe("buildSystemPrompt — 모든 능력 분기가 스킬 안내를 갖는다(Task 4)", () => {
+  it("소유자·손님 × DM·서버 × 워커 연결 여부(8가지 조합) 전부 스킬 안내를 포함한다", () => {
+    const identities = [
+      { isOwner: true, isPrivate: true },
+      { isOwner: true, isPrivate: false },
+      { isOwner: false, isPrivate: true },
+      { isOwner: false, isPrivate: false },
+    ];
+    for (const identity of identities) {
+      for (const workerConnected of [true, false]) {
+        const p = buildSystemPrompt({ role: identity.isOwner ? "owner" : "allowed", ...identity, workerConnected });
+        expect(capabilitySection(p)).toMatch(/스킬/);
+      }
+    }
+  });
+});
+
 // 실사용에서 드러난 문제 — 능력 안내가 "네 몫의 폴더"라고만 하고 경로를 주지 않아, 손님이
 // "내 워크스페이스에 폴더 만들어줘"라고 하면 봇이 절대경로를 되물었다. 손님에게는 list_dirs
 // (관리자 전용)도 없어서, 자기 디스코드 숫자 id 를 개발자 모드로 직접 복사해 오지 않는 한

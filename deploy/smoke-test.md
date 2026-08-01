@@ -441,12 +441,21 @@ JS 를 받아 파일을 쓰지 못하고 죽는다. `setInterval` 이 프로세�
 
 - [ ] **스킬이 모델에게 실제로 보이는가** — 서버 채널에서 "쓸 수 있는 스킬 있어?" 라고 묻는다.
   기대 결과: `frontend-design` 을 포함한 목록을 답한다.
-  "없다"고 하면 **컨테이너에 `SKILL.md` 가 들어갔는지부터** 본다. 이 경로에는 조용히 실패하는
-  함정이 둘 있고 어느 쪽도 로그를 남기지 않는다: (1) `agent/Dockerfile` 의
-  `COPY skill-plugin ./skill-plugin` 누락, (2) `agent/.dockerignore` 의 `*.md` 가 `SKILL.md` 를 걸러내는 것
-  — 이 경우 `LICENSE.txt` 는 들어가고 정작 스킬 본문만 빠져 **폴더는 있는데 스킬이 없는** 상태가
-  된다(2026-08-01 Task 2 에서 발견해 `!skill-plugin/**/*.md` 예외로 막았으나, 그 기계에 도커가 없어
-  실제 빌드로는 검증되지 않았다 — 이 스모크가 그 검증이다).
+  "없다"고 하면 봇의 대답만 보지 말고 **컨테이너 안을 직접 확인한다** — "스킬이 하나도 없다"와
+  "스킬은 들어갔는데 꺼져 있다"(`agent/src/core/agent.ts` 의 `builtinTools` 에서 `"Skill"` 이
+  빠진 경우, `docs/security/capability-model.md` 참고)는 봇의 대답만으로는 구분할 수 없다.
+
+  ```bash
+  docker run --rm <이미지> ls /app/skill-plugin/skills/frontend-design
+  ```
+
+  `SKILL.md` 가 보이면 이미지엔 스킬이 정상적으로 들어간 것이므로 원인은 `builtinTools` 축이다.
+  폴더 자체가 없거나 비어 있으면 이미지 빌드를 의심한다 — 흔한 원인은 `agent/Dockerfile` 의
+  `COPY skill-plugin ./skill-plugin` 누락이다. `agent/.dockerignore` 의 `*.md` 는 원인이
+  아니다 — gitignore 와 달리 도커의 `filepath.Match` 규칙은 `*` 가 "/" 를 넘지 않으므로, 이
+  패턴은 컨텍스트 루트의 `agent/*.md` 만 걸러낼 뿐 `skill-plugin/skills/.../SKILL.md` 처럼
+  경로가 깊은 파일은 원래부터 대상이 아니었다(`!skill-plugin/**/*.md` 예외는 방어적으로 남아
+  있지만, 실제로는 아무것도 되살리지 않는다 — `agent/.dockerignore` 참고).
 
 - [ ] **스킬이 실사용에서 호출되는가** — 서버 채널에서 "간단한 랜딩 페이지 하나 만들어줘" 처럼
   UI 를 만들게 시킨다.
