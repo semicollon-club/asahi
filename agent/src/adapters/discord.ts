@@ -6,6 +6,7 @@ import type { Config } from "../config.js";
 import type { UsersRepo, Role } from "../store/usersRepo.js";
 import type { ConversationsRepo } from "../store/conversationsRepo.js";
 import { filterImageAttachments, type ImageRef } from "../core/images.js";
+import { filterFileAttachments, type FileRef } from "../core/attachments.js";
 import { parseExpression } from "../core/expressions.js";
 import { isChannelCommand } from "../core/commands.js";
 import type { CharacterImagesRepo } from "../store/characterImagesRepo.js";
@@ -83,6 +84,7 @@ export type Incoming = {
   userId: string; channelId: string; isDM: boolean; isThread: boolean; mentionsBot: boolean;
   guildId?: string; parentChannelId?: string; content: string; messageId: string;
   images: ImageRef[];
+  files: FileRef[];
 };
 export type RouteDecision =
   | { kind: "ignore" }            // 게이트 탈락 / 관심 없는 메시지
@@ -252,6 +254,9 @@ export class DiscordAdapter {
     const { images } = filterImageAttachments(
       [...message.attachments.values()].map((a) => ({ url: a.url, contentType: a.contentType, name: a.name, size: a.size })),
     );
+    const { files } = filterFileAttachments(
+      [...message.attachments.values()].map((a) => ({ url: a.url, contentType: a.contentType, name: a.name, size: a.size })),
+    );
     const incoming: Incoming = {
       userId: message.author.id,
       channelId: message.channelId,
@@ -263,6 +268,7 @@ export class DiscordAdapter {
       content: message.content,
       messageId: message.id,
       images,
+      files,
     };
 
     const role = await this.users.getRole(incoming.userId);
@@ -310,6 +316,7 @@ export class DiscordAdapter {
       ts: Date.now(),
       hint,
       images: incoming.images.length > 0 ? incoming.images : undefined,
+      files: incoming.files.length > 0 ? incoming.files : undefined,
     });
   }
 

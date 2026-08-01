@@ -1,4 +1,5 @@
 import type { ImageRef } from "../core/images.js";
+import type { FileRef } from "../core/attachments.js";
 
 export type ChannelKind = "discord";
 
@@ -22,7 +23,7 @@ export type ConversationHint = {
   commandOnly?: true;
 };
 
-export type UserMessageEvent = { type: "user_message"; channel: ChannelKind; channelRef: string; text: string; ts: number; hint?: ConversationHint; images?: ImageRef[] };
+export type UserMessageEvent = { type: "user_message"; channel: ChannelKind; channelRef: string; text: string; ts: number; hint?: ConversationHint; images?: ImageRef[]; files?: FileRef[] };
 export type AssistantMessageEvent = { type: "assistant_message"; channel: ChannelKind; channelRef: string; text: string; ts: number };
 export type SystemNoticeEvent = { type: "system_notice"; channel: ChannelKind; channelRef: string; text: string; ts: number };
 // 턴 처리 중 진행 상황(도구 호출/결과/답변 시작 등)을 알리는 이벤트(2B). 실제 표시(전송·편집)는 어댑터 쪽 책임.

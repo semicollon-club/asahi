@@ -26,7 +26,17 @@ const flush = async () => {
 
 async function setup(over: {
   config?: Partial<Config>; mode?: "immediate" | "manual" | "throw" | "resume-fails";
-  imageFetch?: typeof fetch; hub?: { isConnected(workerId: string): boolean };
+  imageFetch?: typeof fetch;
+  // Task 3: AgentCore 의 실제 hub 타입은 이제 isConnected 외에 call·rootsOf 도 요구한다(파일
+  // 첨부를 워커로 내려받는 데 필요). 이 파일의 기존 테스트 대부분은 워커 "연결 여부"만 보고
+  // call/rootsOf 는 전혀 쓰지 않으므로, 그 테스트들이 전부 더미 구현을 채워 넣게 만들지 않도록
+  // 여기서는 둘을 옵셔널로 두고 아래에서 기본값으로 채운다(over.hub 를 그대로 넘기면 그 좁은
+  // 타입이 AgentCore 생성자 타입과 안 맞아 컴파일이 막힌다).
+  hub?: {
+    isConnected(workerId: string): boolean;
+    call?(workerId: string, tool: string, args: Record<string, unknown>): Promise<{ ok: boolean; content: string }>;
+    rootsOf?(workerId: string): string[];
+  };
   registry?: { personalWorkerOf(userId: string): Promise<string | null>; sharedWorkerId(): Promise<string | null> };
   digest?: DigestRunner;
 } = {}) {
@@ -81,9 +91,17 @@ async function setup(over: {
     personalWorkerOf: async (userId: string) => userId,
     sharedWorkerId: async () => "shared-worker",
   };
+  // over.hub 가 call·rootsOf 를 안 줬으면 기본 구현으로 채운다(위 setup 파라미터 주석 참고) —
+  // 이 기본값을 실제로 부르는 테스트가 있다면 그건 그 테스트가 fakeHub 를 직접 만들어야 한다는
+  // 신호이므로, 눈에 띄게 실패하도록 ok:false 로 답한다(조용히 성공한 척하지 않는다).
+  const hub = over.hub === undefined ? undefined : {
+    isConnected: over.hub.isConnected,
+    call: over.hub.call ?? (async () => ({ ok: false, content: "이 테스트의 가짜 허브는 call 을 구현하지 않았어요." })),
+    rootsOf: over.hub.rootsOf ?? (() => []),
+  };
   const core = new AgentCore({
     bus, config, runTurn, now: () => clock, repos, agentCwd: "/data/agent",
-    fetchImpl: over.imageFetch, hub: over.hub, registry, digest: over.digest,
+    fetchImpl: over.imageFetch, hub, registry, digest: over.digest,
   });
   core.start();
   const published: AgentEvent[] = [];
@@ -828,6 +846,121 @@ describe("AgentCore — 이미지 입력", () => {
     const notice = t.published.find((e) => e.type === "system_notice" && e.text.includes("불러오지"));
     expect(notice).toBeDefined();
     expect(notice?.channelRef).toBe("dm-owner");
+  });
+});
+
+// Task 3(배선) — 어댑터가 분류한 첨부 파일(Task 1 의 filterFileAttachments)이 실제로 워커에
+// 저장되고, 그 저장 경로가 이번 턴 prompt 에 실리는지를 확인한다. uploadDirFor·buildFileMarker
+// 자체의 순수 로직은 attachments.test.ts 가 이미 고정했으므로, 여기서는 core 가 그 함수들과
+// hub.call 을 실제로 올바르게 엮는지만 본다.
+describe("AgentCore — 첨부 파일을 워커에 저장한다(Task 3)", () => {
+  const fileRef = { url: "https://cdn.discordapp.com/a.pdf", name: "a.pdf", size: 100 };
+
+  it("워커가 연결돼 있지 않으면 hub.call 을 부르지 않고, 실패 안내가 프롬프트에 붙은 채 턴은 정상 진행된다", async () => {
+    const hubCalls: Array<{ tool: string; args: Record<string, unknown> }> = [];
+    const fakeHub = {
+      isConnected: () => false, // 이 턴에는 워커가 연결돼 있지 않다
+      rootsOf: () => ["C:\\ws"],
+      call: async (_w: string, tool: string, args: Record<string, unknown>) => {
+        hubCalls.push({ tool, args });
+        return { ok: true, content: "불려선 안 됨" };
+      },
+    };
+    const t = await setup({ hub: fakeHub });
+    const hint = dmHint("owner", "owner");
+    t.bus.publish({ type: "user_message", channel: "discord", channelRef: hint.discordChannelId, text: "이 파일 봐줘", ts: 1, hint, files: [fileRef] });
+    await t.core.drain();
+
+    expect(hubCalls).toHaveLength(0); // 워커가 없다고 판정되면 file_fetch 시도 자체를 안 한다
+    expect(t.calls).toHaveLength(1); // 턴 자체는 막히지 않는다
+    expect(t.calls[0].prompt).toContain("a.pdf");
+    expect(t.calls[0].prompt).toContain("워커가 연결돼 있지 않아 저장 못 함");
+    expect(t.published.some((e) => e.type === "assistant_message")).toBe(true);
+  });
+
+  it("워커가 연결돼 있으면 hub.call 이 file_fetch 로 {url,dir,name} 호출되고, 성공한 저장 경로가 runTurn 의 prompt 에 담긴다", async () => {
+    const hubCalls: Array<{ tool: string; args: Record<string, unknown> }> = [];
+    const fakeHub = {
+      isConnected: () => true,
+      rootsOf: () => ["C:\\ws"],
+      call: async (_w: string, tool: string, args: Record<string, unknown>) => {
+        hubCalls.push({ tool, args });
+        return { ok: true, content: "C:\\ws\\111\\a.pdf" };
+      },
+    };
+    const t = await setup({ hub: fakeHub });
+    const hint = dmHint("owner", "owner");
+    t.bus.publish({ type: "user_message", channel: "discord", channelRef: hint.discordChannelId, text: "이 파일 봐줘", ts: 1, hint, files: [fileRef] });
+    await t.core.drain();
+
+    expect(hubCalls).toHaveLength(1);
+    expect(hubCalls[0].tool).toBe("file_fetch");
+    expect(hubCalls[0].args).toEqual({ url: fileRef.url, dir: "C:\\ws", name: "a.pdf" });
+    // 핵심 단정(브리프 Step 5) — 워커가 돌려준 실제 저장 경로가 모델이 받는 prompt 에 있어야
+    // 한다. 없으면 모델은 fs_read 로 그 파일을 열 방법을 모른다.
+    expect(t.calls[0].prompt).toContain("C:\\ws\\111\\a.pdf");
+  });
+
+  it("이미지와 파일을 함께 올려도 본문이 사라지지 않는다 — 파일 경로는 prompt 에, 이미지 마커만 DB 에 남는다(Step 4b)", async () => {
+    const fakeHub = {
+      isConnected: () => true,
+      rootsOf: () => ["C:\\ws"],
+      call: async () => ({ ok: true, content: "C:\\ws\\111\\a.pdf" }),
+    };
+    const fakeFetch = (async () => ({ ok: true, arrayBuffer: async () => new TextEncoder().encode("img").buffer }) as Response) as unknown as typeof fetch;
+    const t = await setup({ hub: fakeHub, imageFetch: fakeFetch });
+    const hint = dmHint("owner", "owner");
+    t.bus.publish({
+      type: "user_message", channel: "discord", channelRef: hint.discordChannelId, text: "이 파일이랑 사진 봐줘", ts: 1, hint,
+      images: [{ url: "u", mediaType: "image/png", name: "b.png", size: 3 }],
+      files: [fileRef],
+    });
+    await t.core.drain();
+
+    // 본문이 마커에 덮이지 않고 그대로 남는다.
+    expect(t.calls[0].prompt).toContain("이 파일이랑 사진 봐줘");
+    expect(t.calls[0].prompt).toContain("C:\\ws\\111\\a.pdf");
+
+    // DB 기록(ingest)에는 이미지 마커만 붙는다 — 파일 저장 경로는 받아오기 전에 기록되므로
+    // core.ts:283 자리에는 관여하지 않는다(브리프 Step 4 의 "DB 기록은 건드리지 않는다" 확인).
+    const conv = await t.repos.conversations.getByChannelId("dm-owner");
+    const recent = await t.repos.messages.recent(conv!.id, 5);
+    const userMsg = recent.find((m) => m.role === "user");
+    expect(userMsg?.content).toContain("[이미지 1장: b.png]");
+    expect(userMsg?.content).not.toContain("C:\\ws\\111\\a.pdf");
+  });
+
+  // 브리프에 없던 발견(Task 3 자체 리뷰) — runConversationTurn 의 resume 실패 재시도 경로는
+  // prompt 변수를 재사용하지 않고 buildContextBlock 으로 retryPrompt 를 처음부터 새로 조립한다.
+  // 브리프의 Step 4 코드는 첫 시도의 prompt 에만 마커를 입혔으므로, 그대로만 옮기면 resume 실패
+  // (클라우드 재배포 등, 바로 위 describe 블록들이 이미 다루는 실제 경로)와 파일 첨부가 겹칠 때
+  // 재시도 쪽에서만 마커가 조용히 사라진다 — 이 테스트가 그 회귀를 고정한다.
+  it("resume 세션을 못 찾아 재시도할 때도 저장된 파일 경로가 재시도 prompt 에 남는다(세션 재시도 경로 회귀 방지)", async () => {
+    const hubCalls: Array<{ tool: string; args: Record<string, unknown> }> = [];
+    const fakeHub = {
+      isConnected: () => true,
+      rootsOf: () => ["C:\\ws"],
+      call: async (_w: string, tool: string, args: Record<string, unknown>) => {
+        hubCalls.push({ tool, args });
+        return { ok: true, content: "C:\\ws\\111\\a.pdf" };
+      },
+    };
+    const t = await setup({ mode: "resume-fails", hub: fakeHub });
+    const hint = dmHint("owner", "owner");
+    // 첫 메시지로 세션(s1)을 먼저 확보한다(resume-fails 모드는 resume 없는 호출만 성공한다).
+    t.bus.publish({ type: "user_message", channel: "discord", channelRef: hint.discordChannelId, text: "안녕", ts: t.now(), hint });
+    await t.core.drain();
+    expect(t.calls).toHaveLength(1);
+
+    // 두 번째 메시지: resume 시도 → "세션 없음" 실패 → 새 세션으로 재시도. 이번엔 파일을 함께 올린다.
+    t.bus.publish({ type: "user_message", channel: "discord", channelRef: hint.discordChannelId, text: "이 파일도 봐줘", ts: t.now(), hint, files: [fileRef] });
+    await t.core.drain();
+
+    expect(t.calls).toHaveLength(3);
+    expect(t.calls[1].resume).toBe("s1"); // 실패한 resume 시도
+    expect(t.calls[2].resume).toBeUndefined(); // 새 세션 재시도
+    expect(hubCalls).toHaveLength(1); // 파일은 한 번만 받아온다(재시도가 다시 받아오지 않는다)
+    expect(t.calls[2].prompt).toContain("C:\\ws\\111\\a.pdf");
   });
 });
 

@@ -21,6 +21,7 @@ import { scopeDirs } from "./workerSelect.js";
 import { pathFlavorOf } from "./paths.js";
 import { buildContextBlock, isSessionNotFound } from "./turnPrep.js";
 import { buildImageMarker, downloadImages, type ImageRef, type ImageInput } from "./images.js";
+import { buildFileMarker, uploadDirFor, type FileRef } from "./attachments.js";
 
 const HOUR_MS = 60 * 60 * 1000;
 
@@ -173,7 +174,14 @@ export class AgentCore {
   // workerId 를 받는다(userId 가 아니다) — 워커가 registry 에 별도 id 로 등록되므로, 아래 registry
   // 로 실제 workerId 를 먼저 찾아야 한다(둘은 항상 짝으로 쓰인다).
   // 선택값(옵셔널)인 이유: 워커 배선이 없는 환경(테스트 등)에서는 늘 워커 미연결로 간주된다.
-  private hub?: { isConnected(workerId: string): boolean };
+  // Task 3: isConnected 하나뿐이던 타입에 call·rootsOf 를 더한다 — 첨부 파일을 실제로 워커에
+  // 내려놓으려면(runConversationTurn 의 file_fetch 호출) 연결 여부 확인을 넘어 호출 자체가
+  // 필요하다. agent.ts 의 makeRunAgentTurn 이 받는 hub 구조적 타입과 같은 모양으로 맞춘다.
+  private hub?: {
+    isConnected(workerId: string): boolean;
+    call(workerId: string, tool: string, args: Record<string, unknown>): Promise<{ ok: boolean; content: string }>;
+    rootsOf(workerId: string): string[];
+  };
   // Task 7: workers 테이블 조회 — resolveTurnWorker 가 "이 턴이 어느 워커를 쓰는가"를 실제
   // id 로 풀 때 쓴다(index.ts 는 repos.workers 를 그대로 넘긴다). hub 와 마찬가지로 배선이 없는
   // 환경(테스트 등)에서는 늘 워커 미연결로 간주된다(resolveTurnWorker 는 registry·hub 둘 중
@@ -192,7 +200,14 @@ export class AgentCore {
 
   constructor(deps: {
     bus: EventBus; config: Config; runTurn: TurnRunner; repos: CoreRepos; agentCwd: string; now?: () => number;
-    fetchImpl?: typeof fetch; hub?: { isConnected(workerId: string): boolean };
+    fetchImpl?: typeof fetch;
+    // 필드 선언(위 private hub)과 반드시 같은 타입이어야 한다 — 두 곳이 갈리면 대입에서
+    // 컴파일이 막힌다.
+    hub?: {
+      isConnected(workerId: string): boolean;
+      call(workerId: string, tool: string, args: Record<string, unknown>): Promise<{ ok: boolean; content: string }>;
+      rootsOf(workerId: string): string[];
+    };
     registry?: { personalWorkerOf(userId: string): Promise<string | null>; sharedWorkerId(): Promise<string | null> };
     emotions?: string[]; digest?: DigestRunner;
   }) {
@@ -228,12 +243,12 @@ export class AgentCore {
     // 메시지부터 직렬화하려면 힌트에서 즉시 알 수 있는 discordChannelId 를 큐 키로 써야 한다 —
     // 그러지 않으면 같은 채널의 두 메시지가 동시에 도착했을 때 resolveConversation 이 서로의
     // 결과를 보지 못하고 대화 행을 중복 생성하거나(멱등 깨짐) 메시지 저장 순서가 뒤바뀔 수 있다.
-    this.enqueue(this.ingestChains, hint.discordChannelId, () => this.ingest(hint, e.ts, e.text, e.images ?? []));
+    this.enqueue(this.ingestChains, hint.discordChannelId, () => this.ingest(hint, e.ts, e.text, e.images ?? [], e.files ?? []));
   }
 
   // durable 저장만 담당(짧다) — 크래시 복구 불변식: 이 함수가 끝나면 메시지는 반드시
   // processed=false 로 DB 에 있다. 뒤이은 LLM 턴은 turnChains 로 넘겨 별도로 직렬화한다.
-  private async ingest(hint: ConversationHint, ts: number, text: string, images: ImageRef[]): Promise<void> {
+  private async ingest(hint: ConversationHint, ts: number, text: string, images: ImageRef[], files: FileRef[]): Promise<void> {
     // 일반 채널에서 멘션 없이 들어온 예약어(어댑터의 channel-command 경로). 대화를 조회하지도
     // 만들지도 않고 그 자리에서 끝낸다 — 여기서 conversations 행을 만들면 그 채널이 봇 대화로
     // 굳어(decideRoute 의 hasConversation) 이후 그 채널의 모든 메시지에 답하기 시작한다.
@@ -282,7 +297,7 @@ export class AgentCore {
       conversationId: conv.id, ts, role: "user", userId: hint.userId,
       discordMessageId: hint.discordMessageId, content: buildImageMarker(text, images), processed: false,
     });
-    this.enqueue(this.turnChains, hint.discordChannelId, () => this.runConversationTurn(conv.id, hint.userId, hint.role as "owner" | "allowed", text, messageId, images));
+    this.enqueue(this.turnChains, hint.discordChannelId, () => this.runConversationTurn(conv.id, hint.userId, hint.role as "owner" | "allowed", text, messageId, images, files));
   }
 
   // 정기 게시 예약어(/대회·/개발뉴스)를 즉시 실행한다. 스케줄의 lastRun 은 건드리지 않는다 —
@@ -416,7 +431,7 @@ export class AgentCore {
     }
   }
 
-  private async runConversationTurn(convId: number, userId: string, role: "owner" | "allowed", text: string, messageId: number, images: ImageRef[] = []): Promise<void> {
+  private async runConversationTurn(convId: number, userId: string, role: "owner" | "allowed", text: string, messageId: number, images: ImageRef[] = [], files: FileRef[] = []): Promise<void> {
     try {
       const conv = await this.repos.conversations.getById(convId);
       if (!conv) return;
@@ -465,6 +480,43 @@ export class AgentCore {
       const worker = await resolveTurnWorker({ context: { isOwner, isPrivate: conv.isPrivate, userId } }, this.registry, this.hub);
       const workerConnected = worker !== null;
       const workspaceDirs = await this.resolveGuestWorkspaceDirs(worker, isOwner, userId);
+
+      // 첨부 파일을 워커에 내려놓는다. 저장 위치는 봇이 정한다 — 모델이 정하면 폴더 격리를
+      // 우회할 수 있다(uploadDirFor: 손님은 이미 좁혀진 폴더, 소유자는 워커 루트).
+      //
+      // 경로 조립은 워커가 한다. 봇은 리눅스 컨테이너고 워커는 윈도우라 여기서 이어붙이면
+      // 구분자가 어긋난다 — 폴더와 이름을 따로 넘긴다.
+      const savedFiles: string[] = [];
+      const failedFiles: string[] = [];
+      if (files.length > 0) {
+        const hub = this.hub;
+        const dir = worker === null || hub === undefined
+          ? null
+          : uploadDirFor({ workspaceDirs, workerRoots: hub.rootsOf(worker.workerId) });
+        if (worker === null || hub === undefined || dir === null) {
+          // 조용히 버리지 않는다 — 이미지가 아닌 첨부를 무시하던 것이 이 기능이 고치려는 문제다.
+          // 같은 침묵을 다른 자리에 다시 만들지 않는다.
+          for (const f of files) failedFiles.push(`${f.name}(워커가 연결돼 있지 않아 저장 못 함)`);
+        } else {
+          for (const f of files) {
+            try {
+              const r = await hub.call(worker.workerId, "file_fetch", { url: f.url, dir, name: f.name });
+              if (r.ok) savedFiles.push(r.content);
+              else failedFiles.push(`${f.name}(${r.content})`);
+            } catch (err) {
+              // 받아오기 실패가 대화를 막지 않는다 — 이미지 다운로드 실패와 같은 원칙이다.
+              failedFiles.push(`${f.name}(${err instanceof Error ? err.message : String(err)})`);
+            }
+          }
+        }
+      }
+
+      // 저장 경로를 이번 턴 프롬프트에 싣는다. 이미지와 달리 파일은 모델에게 실리는 것이 없어,
+      // 여기서 알리지 않으면 모델이 그 파일의 존재도 위치도 모른다. prompt 는 :443/:447 에서
+      // 이미 조립됐지만 그때는 워커를 정하기 전이라 경로가 없었다. DB 기록(ingest, 위 messages.insert)은
+      // 건드리지 않는다 — 그 시점엔 아직 받아오기 전이라 저장 경로가 없고, 파일명만 적으면 사실이
+      // 아닌 것을 기록하게 된다.
+      prompt = buildFileMarker(prompt, savedFiles, failedFiles);
       const systemPrompt = buildSystemPrompt({ role, isPrivate: conv.isPrivate, isOwner, deployTarget: this.config.deployTarget, rapportStage, workerConnected, emotions: this.emotions, workspaceDirs });
       const onProgress = (u: ProgressUpdate) => {
         this.bus.publish({ type: "progress", channel: "discord", channelRef: conv.discordChannelId, text: formatProgress(u, workspaceDirs), ts: this.now() });
@@ -503,7 +555,15 @@ export class AgentCore {
           console.warn("[core] resume 세션 없음 — 새 세션으로 재시도:", conv.id);
           await this.repos.conversations.setSession(conv.id, null, this.now());
           const fresh = (await this.repos.conversations.getById(convId)) ?? conv;
-          const retryPrompt = `${await buildContextBlock(this.repos, fresh, messageId)}\n\n---\n\n사용자 메시지: ${text}`;
+          // Task 3: 이 재시도 prompt 는 위 prompt 변수를 재사용하지 않고 buildContextBlock 으로
+          // 처음부터 새로 조립하므로, 저장 경로 마커도 여기서 다시 입혀야 한다 — 안 그러면 resume
+          // 실패(클라우드 재배포 등, 드물지 않게 이미 일어나는 경로)와 파일 첨부가 겹친 턴에서
+          // 재시도 쪽 prompt 에서만 마커가 조용히 사라진다. savedFiles/failedFiles 는 위에서 이미
+          // 받아오기가 끝난 값이라 재조회 없이 그대로 재사용한다(파일을 다시 받아오지 않는다).
+          const retryPrompt = buildFileMarker(
+            `${await buildContextBlock(this.repos, fresh, messageId)}\n\n---\n\n사용자 메시지: ${text}`,
+            savedFiles, failedFiles,
+          );
           await this.repos.conversations.setFirstMessageId(conv.id, messageId);
           if (conv.isPrivate && conv.primaryUserId === this.ownerId) {
             await this.repos.conversations.setPrivateMemoryLoaded(conv.id, true);
