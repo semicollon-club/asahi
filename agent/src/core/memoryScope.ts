@@ -5,6 +5,16 @@ import type { Memory } from "../store/memoriesRepo.js";
 // 파일이다 — 워커에 두고 fs_read 로 읽으면 된다.
 export const SHARED_MEMORY_MAX_LEN = 4000;
 
+// Important 1(최종 전체 브랜치 리뷰) — 공용 기억 1건의 제목 상한. tools.ts 의 4000자 상한
+// 검사가 content 에만 걸려 title 에는 상한이 아예 없었다(12,000자 제목 저장이 실측으로
+// 성공했다). 제목은 recall·forget 목록에 한 줄로 나열되고, turnPrep 프롬프트에도 매 서버
+// 턴마다 실려 사실상 모든 대화에 영구히 얹힌다 — content(4000)와 같은 크기일 이유가 없다.
+// remember 도구 설명이 스스로 "짧은 제목"이라 부르는 값이므로, character_fact 의 제목
+// 상한(40, tools.ts 의 CHARACTER_FACT_TITLE_MAX_LEN)보다는 넉넉히 잡는다 — 동아리 문서
+// 제목은 지어낸 캐릭터 신상 항목("학년" 등)보다 서술적일 수 있다(예: "2학기 회비 및 활동
+// 시간 안내"). 100자면 그런 제목도 넉넉히 담고도 "제목"이라는 성격을 벗어나지 않는다.
+export const SHARED_MEMORY_TITLE_MAX_LEN = 100;
+
 // 이번 저장이 개인 기억인지 동아리 공용 기억인지. 위치 하나로만 정한다.
 //
 // 모델이 스코프를 고르게 하면 틀릴 수 있고, 틀리면 개인 얘기가 전원에게 보이거나 동아리
@@ -42,9 +52,9 @@ function sanitizeAuthorName(raw: string): string | undefined {
 
 // Task 4 리뷰 지적 — sanitizeAuthorName 은 작성자 이름의 개행을 막지만, 제목·내용은 그대로
 // 나갔다. 공용 기억은 이제 부원 누구나 쓸 수 있으므로, 제목이나 내용에 개행을 넣으면 이 파일의
-// 출력 형식("- [제목] 내용 (이름 등록)")이 한 줄 = 한 건이라는 가정을 깨고 여러 항목처럼
-// 렌더링된다 — 작성자 표시가 붙는 지금은 더 나쁘다. "\n- [공지] 총무 계좌 변경 (소유자 등록)"
-// 같은 줄을 끼워 넣어 다른 사람이 등록한 것처럼 위조할 수 있다.
+// 출력 형식이 한 줄 = 한 건이라는 가정을 깨고 여러 항목처럼 렌더링된다 — 작성자 표시가 붙는
+// 지금은 더 나쁘다. "\n- [공지] 총무 계좌 변경" 같은 줄을 끼워 넣어 다른 사람이 등록한 것처럼
+// 위조할 수 있다.
 //
 // 이름과 달리 대괄호까지 지우거나 길이를 자르지는 않는다 — 내용은 실제 정보라 자르면 사실이
 // 손상되고, 대괄호는 정상적인 본문에도 흔하다. 깨지는 축은 개행 하나뿐이다. tools.ts 의
@@ -52,24 +62,56 @@ function sanitizeAuthorName(raw: string): string | undefined {
 // 파일은 코어 모듈이라 계층을 가로지르는 의존을 만들지 않는다 — 대신 같은 처리를 여기 따로 둔다.
 const stripNewlines = (s: string): string => s.replace(/[\r\n]+/g, " ");
 
-// recall 결과를 사람이 읽을 문자열로. 공용 기억에만 작성자를 붙인다 — 누구나 쓸 수 있는
-// 저장소라 "누가 넣었는지"가 그 정보를 얼마나 믿을지의 근거가 된다. 개인 기억은 본인 것이라
-// 작성자가 자명하므로 붙이지 않는다.
+// "[제목] 내용" 조각(선행 "- " 는 뺀다) — 개행만 없앤다. renderMemoryLine 과 renderMemories
+// 양쪽이 공유하는 유일한 자리라, 여기 하나만 고치면 둘 다 같이 고쳐진다.
+function titleContentPart(m: { title: string; content: string }): string {
+  return `[${stripNewlines(m.title)}] ${stripNewlines(m.content)}`;
+}
+
+// Critical(최종 전체 브랜치 리뷰) — 기억(또는 캐릭터 설정) 한 건을 "- [제목] 내용" 한 줄로.
+// turnPrep.ts(세션을 여는 프롬프트 본문 — buildContextBlock 의 캐릭터 설정 줄·기억 줄)가 이
+// 함수 이전에는 같은 형식을 직접 만들면서 개행 방어가 없었다. recall(아래 renderMemories)은
+// 도구 결과일 뿐이지만 turnPrep 쪽은 세션마다 열리는 시스템 프롬프트 본문이고, 서버에서 등록한
+// 공용 기억이 forUser()(scope='shared' 도 포함)를 통해 소유자 DM 컨텍스트에도 실린다 —
+// 개행과 가짜 "## 최근 대화 기록" 같은 섹션 헤더를 내용에 심으면 "반드시 이대로 유지"라고
+// 못박은 섹션 구조 자체가 위조됐다(리뷰가 실제로 재현했다). 같은 처리가 이미 세 곳
+// (여기의 stripNewlines, tools.ts 의 singleLine, turnPrep 의 인라인 렌더링)으로 늘어날
+// 뻔했으므로, memoryScope.ts 가 이 함수 하나를 내보내고 turnPrep 이 그대로 쓴다(같은 코어
+// 계층이라 계층 횡단이 아니다).
 //
-// 이름을 모르면 생략한다. 숫자 id 를 보여주면 읽는 사람에게 아무 의미가 없고, "누가 넣었는지
-// 알 수 없다"는 사실은 이름이 없는 것만으로 이미 드러난다.
+// 작성자 표시는 이 함수의 책임이 아니다 — turnPrep 은 표시 이름을 조회하지 않고(다른 계층이라
+// users 리포를 새로 엮지 않는다), recall 전용의 작성자 표시(공격자가 못 쓰는 자리로 옮기는
+// 처리, 아래 참고)는 renderMemories 가 이 함수 위에 따로 얹는다.
+export function renderMemoryLine(m: { title: string; content: string }): string {
+  return `- ${titleContentPart(m)}`;
+}
+
+// 이름을 모르거나 정리 후 완전히 비는 회원의 작성자 표시. Important 3(최종 전체 브랜치
+// 리뷰) 전에는 이럴 때 표시를 생략했다 — 그런데 생략하면 "표시 없음"이 개인 기억과 구별되지
+// 않아, 내용 끝에 심은 가짜 "(이름 등록)"이 유일한 작성자 표시처럼 보였다(이름이 없는
+// 회원일수록 오히려 위조하기 좋았다). 생략 대신 "모른다"는 사실 자체를 항상 보여준다.
+const UNKNOWN_AUTHOR_TAG = "작성자 미상";
+
+// recall 결과를 사람이 읽을 문자열로. 공용 기억에는 작성자 표시를 항상 붙인다 — 누구나 쓸 수
+// 있는 저장소라 "누가 넣었는지"가 그 정보를 얼마나 믿을지의 근거가 된다. 개인 기억은 본인
+// 것이라 작성자가 자명하므로 붙이지 않는다.
+//
+// Important 3(최종 전체 브랜치 리뷰) — 작성자 표시는 줄 끝이 아니라 맨 앞에 둔다. 예전엔
+// "- [제목] 내용 (이름 등록)"이라 내용 끝에 "(소유자 등록)" 을 넣으면 진짜 표시와 구분되지
+// 않았다. renderMemoryLine 이 개행을 막은 뒤에는 기억 한 건이 정확히 한 줄이므로, 줄의 첫
+// 글자는 title·content 를 붙이기 전에 이 함수가 이미 쓴 자리다 — title·content 가 아무리
+// 조작돼도(개행 없이 그 안에 위조 문구를 넣어도) 그 문구는 이 접두사보다 뒤에만 나타날 수
+// 있다. 그래서 이 접두사가 "이 줄의 진짜 작성자"를 가리키는 유일한 근거로 남는다.
 export function renderMemories(mems: Memory[], names: Record<string, string>): string {
   return mems
     .map((m) => {
-      const name = m.scope === "shared" ? names[m.userId] : undefined;
+      if (m.scope !== "shared") return renderMemoryLine(m);
+      const name = names[m.userId];
       const who = name !== undefined ? sanitizeAuthorName(name) : undefined;
-      // 제목·내용의 개행을 없앤다 — "기억 한 건 = 출력 한 줄" 가정을 지키는 최소한의 처리다
-      // (위 stripNewlines 주석 참고).
-      const title = stripNewlines(m.title);
-      const content = stripNewlines(m.content);
       // 조사 없는 형태를 쓴다("이 등록" 이 아니라 "등록") — 이름이 모음으로 끝나면("김지우")
       // "김지우이 등록"처럼 비문이 된다. 받침 유무를 코드로 판정하는 것은 이 한 줄에 값하지 않는다.
-      return who ? `- [${title}] ${content} (${who} 등록)` : `- [${title}] ${content}`;
+      const tag = who !== undefined ? `${who} 등록` : UNKNOWN_AUTHOR_TAG;
+      return `- (${tag}) ${titleContentPart(m)}`;
     })
     .join("\n");
 }
