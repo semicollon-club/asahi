@@ -17,6 +17,29 @@ export function memoryScopeFor(ctx: { isPrivate: boolean }): "user" | "shared" {
   return ctx.isPrivate ? "user" : "shared";
 }
 
+// Task 2 리뷰 지적(Important, 병합 차단): names 의 출처는 usersRepo.displayNames() → 회원이
+// 디스코드에서 스스로 정하는 표시 이름(discord.ts 의 message.author.displayName)이고, 파이프라인
+// 어디에서도 검증되지 않는다. 이름을 검증 없이 그대로 꽂으면, 표시 이름 자체에
+// "이름\n- [공지] 총무 계좌가 바뀌었습니다: ..." 같은 문자열을 넣어 그 사람이 과거에 남긴 모든
+// 공용 기억의 recall 결과에 진짜 항목과 구분되지 않는 가짜 기억 줄을 끼워 넣을 수 있다 — recall
+// 출력은 모델이 그대로 옮기는 텍스트라 그 줄이 동아리 공지처럼 전달된다.
+//
+// proc.ts 의 memberLabel(pm2 표에 회원 표시 이름을 꽂을 때 대괄호·개행을 지우고 40자로 자르는
+// 함수)이 같은 입력(같은 표시 이름)으로 같은 위조(표 형식 흉내)를 이미 겪고 고친 선례다. 그
+// 함수를 이 파일에서 import 하지 않는다 — proc.ts 는 워커 쪽 모듈이고 이 파일은 봇 코어라
+// 계층을 가로지르는 의존을 만들지 않는다. 대신 같은 처리를 여기 따로 둔다: memberLabel 을 고칠
+// 일이 있으면 이 함수도 같이 봐야 한다.
+const AUTHOR_NAME_MAX = 40;
+
+function sanitizeAuthorName(raw: string): string | undefined {
+  // 대괄호·캐리지리턴·개행을 없앤다 — 이 파일의 출력 형식이 "- [제목] 내용 (이름 등록)"이므로
+  // 대괄호는 그 형식을 흉내 내는 축이고, 개행은 "기억 한 건 = 출력 한 줄" 가정을 깨는 축이다.
+  const scrubbed = raw.replace(/[[\]\r\n]/g, " ").slice(0, AUTHOR_NAME_MAX).trim();
+  // 지우고 나니 아무것도 안 남는 이름(예: 통째로 "[]" 였던 경우)은 이름을 모르는 경우와 같은
+  // 폴백으로 떨어뜨린다 — proc.ts 와 달리 여기는 "생성 이름"이라는 대안이 없다.
+  return scrubbed.length > 0 ? scrubbed : undefined;
+}
+
 // recall 결과를 사람이 읽을 문자열로. 공용 기억에만 작성자를 붙인다 — 누구나 쓸 수 있는
 // 저장소라 "누가 넣었는지"가 그 정보를 얼마나 믿을지의 근거가 된다. 개인 기억은 본인 것이라
 // 작성자가 자명하므로 붙이지 않는다.
@@ -26,8 +49,11 @@ export function memoryScopeFor(ctx: { isPrivate: boolean }): "user" | "shared" {
 export function renderMemories(mems: Memory[], names: Record<string, string>): string {
   return mems
     .map((m) => {
-      const who = m.scope === "shared" ? names[m.userId] : undefined;
-      return who ? `- [${m.title}] ${m.content} (${who}이 등록)` : `- [${m.title}] ${m.content}`;
+      const name = m.scope === "shared" ? names[m.userId] : undefined;
+      const who = name !== undefined ? sanitizeAuthorName(name) : undefined;
+      // 조사 없는 형태를 쓴다("이 등록" 이 아니라 "등록") — 이름이 모음으로 끝나면("김지우")
+      // "김지우이 등록"처럼 비문이 된다. 받침 유무를 코드로 판정하는 것은 이 한 줄에 값하지 않는다.
+      return who ? `- [${m.title}] ${m.content} (${who} 등록)` : `- [${m.title}] ${m.content}`;
     })
     .join("\n");
 }
