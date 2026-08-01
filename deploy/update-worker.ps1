@@ -22,7 +22,10 @@ param(
   [string]$Sentinel = "$RepoPath\update.flag",
   [int]$WaitSeconds = 300,
   [string]$LogPath = "$RepoPath\update-worker.log",
-  [int]$MaxLogBytes = 1MB
+  [int]$MaxLogBytes = 1MB,
+  # 워커를 띄우는 작업 이름. 이 스크립트가 갱신 후·워커 부재 시 직접 Start-ScheduledTask 로
+  # 부른다 — 2026-08-01 실측으로 그것이 표준 계정 권한으로 된다는 것을 확인했다.
+  [string]$WorkerTask = "asahi-worker"
 )
 
 $ErrorActionPreference = "Stop"
@@ -46,6 +49,22 @@ function Write-Log([string]$Message) {
   }
 }
 
+function Get-WorkerProcess {
+  # 이 매칭은 미니PC 실측으로 확인됐다 — 워커의 커맨드라인에 리포 경로가 들어간다
+  # (npm run worker -> tsx -> node ... src/worker.ts). pm2 데몬은 %APPDATA% 밑이라 안 걸린다.
+  @(Get-CimInstance Win32_Process -Filter "Name='node.exe'" |
+    Where-Object { $_.CommandLine -like "*$RepoPath*" })
+}
+
+function Start-Worker([string]$Why) {
+  # asahi(표준 계정)로 이 명령이 되는 것은 2026-08-01 실측으로 확인했다. 같은 날 확인된 반대편:
+  # Set-ScheduledTask(작업 "수정")는 관리자여도 저장된 자격증명 재입력을 요구해 스크립트로는
+  # 못 한다. 그래서 작업 정의를 건드리는 대신 이 스크립트가 감시자 노릇을 한다.
+  Write-Log "워커를 띄웁니다 ($Why)."
+  Start-ScheduledTask -TaskName $WorkerTask
+  if ($LASTEXITCODE -ne 0 -and $null -ne $LASTEXITCODE) { Write-Log "실패: Start-ScheduledTask 종료 코드 $LASTEXITCODE" }
+}
+
 function Exit-Failure([string]$Message) {
   Write-Log "실패: $Message"
   # 워커는 돌아와야 한다 — 낡은 코드로라도 도는 편이 안 도는 것보다 낫다. 센티넬을 지우지
@@ -57,6 +76,18 @@ function Exit-Failure([string]$Message) {
 
 try {
   Set-Location $RepoPath
+
+  # 감시자 역할(2026-08-01 추가). 갱신보다 먼저 본다 — 새 커밋이 없는 회차에서도 워커가 죽어
+  # 있으면 살려야 하는데, 아래 "$local -eq $remote 면 exit 0" 이 그 전에 끝나기 때문이다.
+  #
+  # 이 역할이 생긴 이유: 원래 설계는 "워커가 0 이 아닌 코드로 나가면 작업 스케줄러의 '실패 시
+  # 다시 시작' 정책이 띄운다"였는데 그 전제가 틀렸다. 그 정책은 작업이 "시작에" 실패했을 때를
+  # 위한 것이고, 프로그램이 실행돼서 어떤 코드로든 끝나면 스케줄러는 완료로 본다. 2026-08-01
+  # 실측: 워커가 코드 10 으로 나간 뒤 재시작 정책(1분·999회)이 켜져 있었는데도 13시간 반 동안
+  # 한 번도 안 띄웠다(LastTaskResult 10, NextRunTime 비어 있음). 그 13시간을 아무도 몰랐다.
+  #
+  # 이제는 이 5분 회차가 갱신·크래시·부팅 실패를 가리지 않고 전부 덮는다.
+  if ((Get-WorkerProcess).Count -eq 0) { Start-Worker "감시 — 워커 프로세스가 없음" }
 
   git fetch origin main | Out-Null
   if ($LASTEXITCODE -ne 0) { Exit-Failure "git fetch origin main 실패 (종료 코드 $LASTEXITCODE)" }
@@ -112,9 +143,7 @@ try {
   # 자동화가 그것을 덮으면 안 된다. 못 기다리면 이번 회차를 포기하고 다음 5분에 다시 시도한다.
   $deadline = (Get-Date).AddSeconds($WaitSeconds)
   while ((Get-Date) -lt $deadline) {
-    $running = @(Get-CimInstance Win32_Process -Filter "Name='node.exe'" |
-      Where-Object { $_.CommandLine -like "*$RepoPath*" })
-    if ($running.Count -eq 0) { break }
+    if ((Get-WorkerProcess).Count -eq 0) { break }
     Start-Sleep -Seconds 5
   }
 
@@ -123,8 +152,7 @@ try {
   # 경합할 수 있다(EPERM — docs/agent-onboarding.md "갱신 순서" 절이 이미 기록한 함정). 미니PC
   # 없이는 이 매칭 로직 자체를 고칠 수 없으니, 첫 실배포에서 사람이 판단할 수 있게 매칭된
   # 프로세스 수와 커맨드라인을 그대로 로그에 남긴다.
-  $still = @(Get-CimInstance Win32_Process -Filter "Name='node.exe'" |
-    Where-Object { $_.CommandLine -like "*$RepoPath*" })
+  $still = Get-WorkerProcess
   if ($still.Count -gt 0) {
     Write-Log "워커가 시간 안에 종료되지 않아 이번 회차를 건너뜁니다. node.exe/$RepoPath 매칭 $($still.Count)건:"
     foreach ($p in $still) { Write-Log "  PID $($p.ProcessId): $($p.CommandLine)" }
@@ -149,8 +177,10 @@ try {
     if ($npmExitCode -ne 0) { Exit-Failure "npm ci 실패 (종료 코드 $npmExitCode)" }
   }
 
+  # 센티넬을 먼저 지운다 — 남아 있으면 방금 띄운 워커가 15초 뒤 그것을 보고 또 스스로 나간다.
   Remove-Item -Path $Sentinel -Force -ErrorAction SilentlyContinue
-  Write-Log "갱신 완료: $shortLocal -> $shortRemote. 작업 스케줄러가 워커를 다시 띄웁니다."
+  Start-Worker "갱신 완료 후"
+  Write-Log "갱신 완료: $shortLocal -> $shortRemote."
   exit 0
 } catch {
   Exit-Failure "예외 발생: $($_.Exception.Message)"
