@@ -136,6 +136,32 @@ export async function recallHandler(ctx: ToolCtx, args: { query: string }): Prom
   return renderMemories(hits, names);
 }
 
+// 개행을 공백으로 바꾼다. forget 목록의 제목은 recall 의 작성자 이름(memoryScope.ts 의
+// sanitizeAuthorName 이 다루는 것)과 같은 종류의 입력이다 — 그 기억을 쓴 회원이 정하는 임의
+// 문자열이다. 이 목록의 안전장치는 "여러 개면 지우지 않고 보여준다"는 것 하나뿐이고, owner 가
+// 그걸 신뢰하려면 줄 수가 곧 건수와 같아야 한다 — 제목에 개행이 섞이면 한 건이 두 줄로 보여
+// 그 전제가 깨진다. recall 처럼 대괄호로 감싸는 형식이 아니므로 대괄호까지 지울 이유는 없다.
+const singleLine = (s: string): string => s.replace(/[\r\n]+/g, " ");
+
+// 공용 기억 삭제. 소유자 전용인 이유: 넣는 것은 보태는 일이고 지우는 것은 다른 사람의 기여를
+// 없애는 일이라 같은 권한이 아니다. 공용 기억만 대상이며 남의 개인 기억은 건드리지 않는다.
+//
+// 여러 개가 걸리면 지우지 않고 목록을 돌려준다 — 무엇을 지웠는지 모르는 삭제가 가장 나쁘다.
+export async function forgetHandler(ctx: ToolCtx, args: { title: string }): Promise<string> {
+  if (!ctx.isOwner) return OWNER_ONLY;
+  const q = (args.title ?? "").trim().toLowerCase();
+  if (q.length === 0) return "지울 기억의 제목을 알려주세요.";
+  const shared = await ctx.repos.memories.sharedOnly();
+  const hits = shared.filter((m) => m.title.toLowerCase().includes(q));
+  if (hits.length === 0) return `"${args.title}" 에 해당하는 공용 기억이 없어요.`;
+  if (hits.length > 1) {
+    const list = hits.map((m) => `- ${singleLine(m.title)}`).join("\n");
+    return `여러 개가 걸려서 지우지 않았어요. 제목을 더 정확히 알려주세요:\n${list}`;
+  }
+  await ctx.repos.memories.delete(hits[0].id);
+  return `공용 기억을 지웠어요: "${singleLine(hits[0].title)}"`;
+}
+
 export async function manageAccessHandler(ctx: ToolCtx, args: { userId: string; role: Role }): Promise<string> {
   // 소유자 DM(진짜 사설 1:1)에서만. 서버·손님 턴에서는 거부.
   if (!(ctx.isOwner && ctx.isPrivate)) return "이 작업은 소유자 DM에서만 할 수 있어요.";
@@ -286,12 +312,13 @@ export async function runtimeInfoHandler(ctx: ToolCtx): Promise<string> {
 // ── 턴별 도구셋(능력 계층, §7.1) ────────────────────────────────────────────
 // Task 7(워커 라우팅) 이후의 계층 요약 — "어디서 말하느냐가 어느 기계냐를 정한다"(workerSelect.ts
 // 의 resolveWorkerSelector). 예전엔 원격 도구 자체가 owner-DM 전용이었지만, 이제는 그렇지 않다:
-// - 소유자 DM: 기억 전체 + 접근관리 + db_schema/db_query/runtime_info(전부 봇 자신에 대한
-//   권한이라 DM 전용을 유지) + 워커(그 소유자의 개인 기계)가 연결돼 있으면 원격 파일/셸
-//   도구(fs_*/sh_exec)와 허용폴더 관리 도구(allow_dir/revoke_dir/list_dirs)까지.
-// - 소유자(서버 채널): 공유 기계(동아리 공용 PC)의 관리자다. recall + 워커가 연결돼 있으면
-//   원격 도구와 dir 관리 도구까지 그대로 받는다. DB·접근관리는 주지 않는다 — 그건 기계가
-//   아니라 봇 자신에 대한 권한이라 공개 채널에서 열 이유가 없다.
+// - 소유자 DM: 기억 전체 + 접근관리 + forget(공용 기억 삭제) + db_schema/db_query/runtime_info
+//   (전부 봇 자신에 대한 권한이라 DM 전용을 유지) + 워커(그 소유자의 개인 기계)가 연결돼 있으면
+//   원격 파일/셸 도구(fs_*/sh_exec)와 허용폴더 관리 도구(allow_dir/revoke_dir/list_dirs)까지.
+// - 소유자(서버 채널): 공유 기계(동아리 공용 PC)의 관리자다. recall + forget(둘 다 소유자만 —
+//   forget 은 §Task3, 다른 사람의 기여를 지우는 일이라 공용 기억을 쓸 수 있는 손님과는 다른
+//   권한이다) + 워커가 연결돼 있으면 원격 도구와 dir 관리 도구까지 그대로 받는다. DB·접근관리는
+//   주지 않는다 — 그건 기계가 아니라 봇 자신에 대한 권한이라 공개 채널에서 열 이유가 없다.
 // - 손님(DM·서버 공통): 항상 공유 기계로 연결된다. DM 이면 기억(본인)까지, 아니면 recall(공용)만.
 //   워커가 연결돼 있으면 원격 도구도 받는다(remoteToolHandler 의 scopeDirs 가 자기 하위 폴더로
 //   좁힌다) — 다만 dir 관리 도구는 절대 받지 않는다. 공유 목록 자체를 바꾸는 건 관리자만 한다.
@@ -343,7 +370,7 @@ export function allowedToolsFor(
   if (isOwner && isPrivate) {
     return [
       ...remote,
-      t("remember"), t("recall"), t("character_fact"), t("manage_access"),
+      t("remember"), t("recall"), t("character_fact"), t("manage_access"), t("forget"),
       ...dirTools,
       t("db_schema"), t("db_query"), t("runtime_info"),
       ...webTools,
@@ -355,7 +382,9 @@ export function allowedToolsFor(
   // 채널뿐이라, 그 기계의 버전을 물어볼 수 있는 유일한 장소도 여기다.
   // remember 도 마찬가지로 연다(2026-08-02): 서버 채널의 저장은 개인 기억이 아니라 동아리
   // 공용 기억이고(memoryScope.ts), 그것을 만들 수 있는 곳이 여기뿐이다.
-  if (isOwner) return [...remote, t("remember"), t("recall"), ...dirTools, t("runtime_info"), ...webTools];
+  // forget 도 같은 이유로 연다(2026-08-02, Task 3): 부원이 쌓는 공용 기억이 틀리거나 낡으면
+  // 정리해야 하는데, 그 정리 대상도 그걸 할 수 있는 소유자도 전부 이 서버 분기에만 있다.
+  if (isOwner) return [...remote, t("remember"), t("recall"), t("forget"), ...dirTools, t("runtime_info"), ...webTools];
   // 손님: DM 이든 서버든 공유 기계로 간다. 폴더 관리는 주지 않는다.
   if (isPrivate && (role === "owner" || role === "allowed")) {
     return [...remote, t("remember"), t("recall"), t("character_fact"), ...webTools];
@@ -402,6 +431,12 @@ export function buildToolDefinitions(ctx: ToolCtx) {
       "저장된 기억에서 관련 내용을 찾습니다.",
       { query: z.string().describe("찾을 키워드") },
       async (args) => textResult(await recallHandler(ctx, args)),
+    ),
+    tool(
+      "forget",
+      "(소유자 전용) 동아리 공용 기억을 제목으로 찾아 지웁니다. 여러 개가 걸리면 지우지 않고 목록을 보여줍니다.",
+      { title: z.string().describe("지울 공용 기억의 제목(일부만 적어도 됩니다)") },
+      async (args) => textResult(await forgetHandler(ctx, args)),
     ),
     tool(
       "character_fact",

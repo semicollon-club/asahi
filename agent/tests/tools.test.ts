@@ -8,7 +8,7 @@ import { MemoriesRepo } from "../src/store/memoriesRepo.js";
 import { UsersRepo } from "../src/store/usersRepo.js";
 import { AllowedDirsRepo } from "../src/store/allowedDirsRepo.js";
 import {
-  rememberHandler, recallHandler, manageAccessHandler,
+  rememberHandler, recallHandler, forgetHandler, manageAccessHandler,
   allowDirHandler, revokeDirHandler, listDirsHandler,
   dbSchemaHandler, dbQueryHandler, runtimeInfoHandler,
   characterFactHandler, CHARACTER_FACT_MAX_LEN, CHARACTER_FACT_TITLE_MAX_LEN,
@@ -146,6 +146,75 @@ describe("recall 도구 — 프라이버시 스코프", () => {
     const out = await recallHandler(c, { query: "메모" });
     expect(out).toContain("공용메모입니다");
     expect(out).not.toContain("소유자메모입니다");
+  });
+});
+
+describe("forget — 공용 기억 삭제(소유자 전용)", () => {
+  it("소유자가 아니면 거부한다", async () => {
+    const c = await ctx({ userId: "u1", isPrivate: false, isOwner: false });
+    await rememberHandler(c, { title: "회비", content: "학기당 2만원" });
+    expect(await forgetHandler(c, { title: "회비" })).toMatch(/소유자/);
+    expect(await c.repos.memories.sharedOnly()).toHaveLength(1);
+  });
+
+  it("하나만 걸리면 지운다", async () => {
+    const c = await ctx({ userId: "owner", isPrivate: false, isOwner: true });
+    await rememberHandler(c, { title: "회비", content: "학기당 2만원" });
+    const out = await forgetHandler(c, { title: "회비" });
+    expect(out).toContain("회비");
+    expect(await c.repos.memories.sharedOnly()).toEqual([]);
+  });
+
+  it("여러 개가 걸리면 지우지 않고 목록을 보여준다", async () => {
+    // 무엇을 지웠는지 모르는 삭제가 가장 나쁘다.
+    const c = await ctx({ userId: "owner", isPrivate: false, isOwner: true });
+    await rememberHandler(c, { title: "회비 납부", content: "매 학기 초" });
+    await rememberHandler(c, { title: "회비 금액", content: "2만원" });
+    const out = await forgetHandler(c, { title: "회비" });
+    expect(out).toContain("회비 납부");
+    expect(out).toContain("회비 금액");
+    expect(await c.repos.memories.sharedOnly()).toHaveLength(2);
+  });
+
+  it("하나도 없으면 그렇게 말한다", async () => {
+    const c = await ctx({ userId: "owner", isPrivate: false, isOwner: true });
+    expect(await forgetHandler(c, { title: "없는것" })).toContain("없");
+  });
+
+  it("개인 기억은 지우지 않는다", async () => {
+    // 남의 개인 기억은 소유자도 이 도구로 건드리지 않는다.
+    //
+    // ctx() 는 호출마다 openTestDb() 로 새 DB 를 연다. 두 번 부르면 서로 다른 DB 가 되어
+    // 이 테스트는 아무것도 검증하지 못한다 — 같은 컨텍스트에서 위치만 바꿔 파생시킨다.
+    const c = await ctx({ userId: "owner", isPrivate: true, isOwner: true });
+    await rememberHandler(c, { title: "내 메모", content: "비밀" });
+    const server: ToolCtx = { ...c, isPrivate: false };
+    await forgetHandler(server, { title: "내 메모" });
+    expect((await c.repos.memories.forUser("owner")).map((m) => m.title)).toContain("내 메모");
+  });
+
+  it("제목에 개행이 있어도 목록에서 한 줄로 남는다", async () => {
+    // 목록에 나열되는 제목은 recall 의 작성자 이름(memoryScope.ts 의 sanitizeAuthorName 이
+    // 다루는 것)과 같은 종류의 입력이다 — 그 기억을 쓴 회원이 정하는 임의 문자열이다. 이
+    // 목록은 "몇 건이 걸렸는지"를 owner 가 줄 수로 정확히 세는 것이 안전장치의 전부이므로,
+    // 제목의 개행을 그대로 두면 한 건이 두 줄처럼 보여 그 전제가 깨진다.
+    const c = await ctx({ userId: "owner", isPrivate: false, isOwner: true });
+    await rememberHandler(c, { title: "회비 납부", content: "매 학기 초" });
+    await rememberHandler(c, { title: "회비\n금액", content: "2만원" });
+    const out = await forgetHandler(c, { title: "회비" });
+    expect(out.split("\n")).toHaveLength(3); // 안내 한 줄 + 목록 두 줄(제목당 정확히 한 줄)
+  });
+});
+
+describe("allowedToolsFor — forget 노출", () => {
+  it("소유자는 DM·서버 양쪽에서 forget 을 받는다", () => {
+    expect(allowedToolsFor("owner", true, true)).toContain("mcp__asahi__forget");
+    expect(allowedToolsFor("owner", false, true)).toContain("mcp__asahi__forget");
+  });
+
+  it("손님은 어디서도 받지 못한다", () => {
+    expect(allowedToolsFor("allowed", true, false)).not.toContain("mcp__asahi__forget");
+    expect(allowedToolsFor("allowed", false, false)).not.toContain("mcp__asahi__forget");
   });
 });
 
@@ -465,13 +534,16 @@ describe("allowedToolsFor — 능력 계층(§7.1)", () => {
   // FIX2 갱신(최종 리뷰): 아래 결과 자체(이 셋이 빠짐)는 그대로지만, 진짜 이유가 바뀌었다 —
   // deployTarget="cloud" 자체가 아니라 workerConnected 가 기본값 false 라서다. 바로 아래 두
   // 테스트가 FIX2 의 핵심(워커만 연결되면 cloud 에서도 dir 관리 도구가 열린다)을 직접 확인한다.
-  it("deployTarget='cloud' + 소유자 DM + 워커 미연결이면 PC 도구(파일·Bash·dir 관리)를 빼고 remember/recall/character_fact/manage_access/db_schema/db_query/runtime_info/WebSearch 만 남는다", () => {
+  // Task 3(공용 기억 삭제): forget 이 이 계층(소유자 DM)에 추가됐다 — manage_access 옆에 둔
+  // 이유는 같다: 이것도 소유자만 하는 관리 작업이다. 정확 배열 단정이라 실제로 갱신해야 했다.
+  it("deployTarget='cloud' + 소유자 DM + 워커 미연결이면 PC 도구(파일·Bash·dir 관리)를 빼고 remember/recall/character_fact/manage_access/forget/db_schema/db_query/runtime_info/WebSearch 만 남는다", () => {
     const tools = allowedToolsFor("owner", true, true, "cloud");
     expect(tools).toEqual([
       "mcp__asahi__remember",
       "mcp__asahi__recall",
       "mcp__asahi__character_fact",
       "mcp__asahi__manage_access",
+      "mcp__asahi__forget",
       "mcp__asahi__db_schema",
       "mcp__asahi__db_query",
       "mcp__asahi__runtime_info",
