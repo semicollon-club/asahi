@@ -15,6 +15,7 @@ import {
 } from "./tree.js";
 import { pathFlavorOf, isPathWithinAny } from "../core/paths.js";
 import { parsePm2List, renderProcList, procNameFor, parseProcName, type ProcInfo } from "./proc.js";
+import { isDiscordCdnUrl } from "../core/attachments.js";
 
 export type ExecResult = { ok: boolean; content: string };
 export type Executors = Record<string, (args: Record<string, unknown>) => Promise<ExecResult>>;
@@ -400,7 +401,10 @@ function strMap(v: unknown): Record<string, string> {
   return out;
 }
 
-export function makeExecutors(roots: string[], opts: { runPm2?: RunPm2; scriptDir?: string } = {}): Executors {
+export function makeExecutors(
+  roots: string[],
+  opts: { runPm2?: RunPm2; scriptDir?: string; fetchImpl?: typeof fetch } = {},
+): Executors {
   // proc_start 가 회원 명령을 적을 스크립트 파일 위치(DEFAULT_SCRIPT_DIR·writeStartScript 선언부
   // 참고) — 테스트가 실제 OS 임시폴더를 더럽히지 않고 파일 내용을 직접 들여다볼 수 있도록 주입
   // 지점을 열어 둔다. 프로덕션(worker.ts)은 opts 를 생략하므로 항상 기본값을 쓴다.
@@ -787,6 +791,39 @@ export function makeExecutors(roots: string[], opts: { runPm2?: RunPm2; scriptDi
         return { ok: true, content: "(완료)" };
       } catch (e) {
         return { ok: false, content: `폴더를 만들지 못했어요: ${e instanceof Error ? e.message : String(e)}` };
+      }
+    },
+
+    // 봇이 직접 부른다 — REMOTE_TOOL_NAMES 에 없으므로 모델에게 도구로 노출되지 않는다.
+    // 모델이 URL 을 정하게 하면 워커가 임의 주소를 받아오는 표면이 열리는데, 그 표면 자체가 없다.
+    async file_fetch(args) {
+      const dir = str(args.dir);
+      const name = str(args.name);
+      if (!dir || !name) return { ok: false, content: "dir·name 인자가 필요해요." };
+      // 조립은 파일이 실제로 놓일 이 기계가 한다 — 봇은 리눅스, 워커는 윈도우라 봇에서
+      // 이어붙이면 구분자가 어긋난다. gate 가 그 결과를 허용 폴더 기준으로 최종 판정하므로
+      // 이름으로 폴더를 벗어나려는 시도도 여기서 막힌다(봇의 safeFileName 과 이중 게이트).
+      const g = gate(path.join(dir, name));
+      if (!g.ok) return g.res;
+      const url = str(args.url);
+      // 봇이 이미 실제 첨부 객체에서 꺼낸 URL 이지만 여기서 다시 판정한다 — 봇 1차 필터와
+      // 워커 최종 판정 두 겹은 이 리포의 원칙이고(remoteTools.ts 주석), 이 경로만 예외로 둘
+      // 이유가 없다.
+      if (!url || !isDiscordCdnUrl(url)) {
+        return { ok: false, content: "디스코드 첨부 주소가 아니라 받아오지 않았어요." };
+      }
+      try {
+        const res = await (opts.fetchImpl ?? fetch)(url);
+        if (!res.ok) return { ok: false, content: `받아오지 못했어요(HTTP ${res.status}).` };
+        const buf = Buffer.from(await res.arrayBuffer());
+        // fs_write 와 달리 인코딩을 주지 않는다 — 여기는 텍스트가 아니라 바이트를 그대로
+        // 옮기는 것이 목적이다. "utf8" 을 주면 PDF·docx 같은 바이너리가 그 인코딩으로
+        // 재해석되며 0x00·0x80 이상 바이트가 깨진다.
+        await fs.mkdir(path.dirname(g.path), { recursive: true });
+        await fs.writeFile(g.path, buf);
+        return { ok: true, content: g.path };
+      } catch (err) {
+        return { ok: false, content: `받아오지 못했어요: ${String(err)}` };
       }
     },
 
