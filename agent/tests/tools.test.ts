@@ -15,7 +15,7 @@ import {
   allowedToolsFor, buildToolDefinitions, type ToolCtx,
 } from "../src/core/tools.js";
 import { CHARACTER_FACT_LIMIT } from "../src/core/turnPrep.js";
-import { SHARED_MEMORY_MAX_LEN } from "../src/core/memoryScope.js";
+import { SHARED_MEMORY_MAX_LEN, SHARED_MEMORY_TITLE_MAX_LEN } from "../src/core/memoryScope.js";
 
 // remote 는 부분만 받아 나머지를 기본값으로 채운다. 이 파일의 테스트가 지정하는 건 roots·call·
 // workerId 정도인데 ToolCtx["remote"] 는 workerKind 까지 요구한다 — 매번 다 적으면 잡음이고,
@@ -95,6 +95,32 @@ describe("remember — 위치가 스코프를 정한다", () => {
     const long = "가".repeat(SHARED_MEMORY_MAX_LEN + 1);
     await rememberHandler(c, { title: "긴 메모", content: long });
     expect((await c.repos.memories.forUser("u1")).map((m) => m.title)).toEqual(["긴 메모"]);
+  });
+
+  // Important 1(최종 전체 브랜치 리뷰) — 4000자 상한 검사가 content 에만 걸려 title 에는
+  // 상한이 아예 없었다. title 은 recall·turnPrep 양쪽에 실리므로 모든 서버 턴 프롬프트에
+  // 영구히 얹힌다 — character_fact(같은 파일)가 title·content 둘 다 자르는 것과 대조된다.
+  it("공용 기억 제목이 상한을 넘으면 저장하지 않고 길이와 상한을 함께 말한다(자르지 않고 거절)", async () => {
+    const c = await ctx({ userId: "u1", isPrivate: false, isOwner: false });
+    const longTitle = "가".repeat(SHARED_MEMORY_TITLE_MAX_LEN + 1);
+    const out = await rememberHandler(c, { title: longTitle, content: "짧은 내용" });
+    expect(await c.repos.memories.sharedOnly()).toEqual([]);
+    expect(out).toContain(String(SHARED_MEMORY_TITLE_MAX_LEN));
+    expect(out).toContain(String(SHARED_MEMORY_TITLE_MAX_LEN + 1));
+  });
+
+  it("12000자 제목은 더 이상 그대로 저장되지 않는다(리뷰가 실측으로 확인한 정확한 회귀)", async () => {
+    const c = await ctx({ userId: "u1", isPrivate: false, isOwner: false });
+    const hugeTitle = "제".repeat(12000);
+    await rememberHandler(c, { title: hugeTitle, content: "내용" });
+    expect(await c.repos.memories.sharedOnly()).toEqual([]);
+  });
+
+  it("개인 기억 제목에는 그 상한을 걸지 않는다", async () => {
+    const c = await ctx({ userId: "u1", isPrivate: true, isOwner: false });
+    const longTitle = "가".repeat(SHARED_MEMORY_TITLE_MAX_LEN + 1);
+    await rememberHandler(c, { title: longTitle, content: "내용" });
+    expect((await c.repos.memories.forUser("u1")).map((m) => m.title)).toEqual([longTitle]);
   });
 });
 
@@ -191,6 +217,46 @@ describe("forget — 공용 기억 삭제(소유자 전용)", () => {
     const server: ToolCtx = { ...c, isPrivate: false };
     await forgetHandler(server, { title: "내 메모" });
     expect((await c.repos.memories.forUser("owner")).map((m) => m.title)).toContain("내 메모");
+  });
+
+  // Important 2(최종 전체 브랜치 리뷰) — 판정이 title.includes(q) 뿐이라, 제목이 완전히 같은
+  // 두 건은 어떤 질의로도 항상 둘 다 걸려 소유자가 영원히 하나도 못 지웠다(회비가 바뀌어
+  // 누가 "회비"를 다시 등록하는 순간이 바로 이 상태다). 다중 일치 목록에 번호(id)를 함께
+  // 보여주고, 그 번호로 하나를 지정할 수 있게 한다.
+  it("제목이 완전히 같은 공용 기억 두 건은 번호(id)로 하나만 지정해 지울 수 있다(리뷰 재현 — 예전엔 영원히 못 지웠다)", async () => {
+    const c = await ctx({ userId: "owner", isPrivate: false, isOwner: true });
+    await rememberHandler(c, { title: "회비", content: "1학기: 2만원" });
+    await rememberHandler(c, { title: "회비", content: "2학기: 3만원" });
+    const before = await c.repos.memories.sharedOnly();
+    expect(before).toHaveLength(2);
+
+    // 제목이 완전히 같으므로 title 질의만으로는 항상 둘 다 걸린다 — 목록에 번호가 있어야
+    // owner 가 하나를 지정할 수 있다.
+    const listing = await forgetHandler(c, { title: "회비" });
+    expect(listing).toContain(String(before[0].id));
+    expect(listing).toContain(String(before[1].id));
+
+    const out = await forgetHandler(c, { id: before[0].id });
+    const after = await c.repos.memories.sharedOnly();
+    expect(after).toHaveLength(1);
+    expect(after[0].id).toBe(before[1].id);
+    expect(out).toContain("지웠어요");
+  });
+
+  it("존재하지 않는 번호(id)는 지우지 않고 그렇게 말한다", async () => {
+    const c = await ctx({ userId: "owner", isPrivate: false, isOwner: true });
+    await rememberHandler(c, { title: "회비", content: "2만원" });
+    const out = await forgetHandler(c, { id: 999999 });
+    expect(out).toContain("없");
+    expect(await c.repos.memories.sharedOnly()).toHaveLength(1);
+  });
+
+  it("소유자가 아니면 번호(id) 지정도 거부한다", async () => {
+    const c = await ctx({ userId: "u1", isPrivate: false, isOwner: false });
+    await rememberHandler(c, { title: "회비", content: "2만원" });
+    const [existing] = await c.repos.memories.sharedOnly();
+    expect(await forgetHandler(c, { id: existing.id })).toMatch(/소유자/);
+    expect(await c.repos.memories.sharedOnly()).toHaveLength(1);
   });
 
   it("제목에 개행이 있어도 목록에서 한 줄로 남는다", async () => {
@@ -462,7 +528,7 @@ describe("allowedToolsFor — 능력 계층(§7.1)", () => {
   // 거부되므로, workerConnected:true 를 명시해야 이 세 도구가 나온다(바로 아래 별도 테스트가
   // workerConnected 생략/false 시 이 셋이 빠지는 것을 확인한다).
   it("소유자 DM + 워커 연결 시 remember/recall/manage_access + dir 관리 도구(SDK 내장 파일·Bash 도구는 없다)", () => {
-    const tools = allowedToolsFor("owner", true, true, "local", true);
+    const tools = allowedToolsFor("owner", true, true, "local", { workerConnected: true });
     expect(tools).toContain("mcp__asahi__remember");
     expect(tools).toContain("mcp__asahi__recall");
     expect(tools).toContain("mcp__asahi__manage_access");
@@ -479,7 +545,7 @@ describe("allowedToolsFor — 능력 계층(§7.1)", () => {
 
   it("FIX2 — 워커가 연결돼 있지 않으면 dir 관리 도구는 local 이라도 노출하지 않는다(워커 roots 가 없어 검증할 수 없으므로)", () => {
     const withoutArg = allowedToolsFor("owner", true, true);
-    const explicitFalse = allowedToolsFor("owner", true, true, "local", false);
+    const explicitFalse = allowedToolsFor("owner", true, true, "local", { workerConnected: false });
     for (const tools of [withoutArg, explicitFalse]) {
       expect(tools).toContain("mcp__asahi__remember");
       expect(tools).toContain("mcp__asahi__manage_access");
@@ -558,7 +624,7 @@ describe("allowedToolsFor — 능력 계층(§7.1)", () => {
   });
 
   it("FIX2(치명 수정) — deployTarget='cloud' 라도 워커가 연결되면 allow_dir/revoke_dir/list_dirs 를 연다(예전엔 cloud 에서 영원히 열리지 않아 allowed_dirs 를 채울 방법이 없었다 — 리뷰 재현)", () => {
-    const tools = allowedToolsFor("owner", true, true, "cloud", true);
+    const tools = allowedToolsFor("owner", true, true, "cloud", { workerConnected: true });
     expect(tools).toContain("mcp__asahi__allow_dir");
     expect(tools).toContain("mcp__asahi__revoke_dir");
     expect(tools).toContain("mcp__asahi__list_dirs");
@@ -570,14 +636,14 @@ describe("allowedToolsFor — 능력 계층(§7.1)", () => {
 
   it("FIX2 — local·cloud 모두 dir 관리 도구는 이제 workerConnected 하나로만 결정된다(더 이상 deployTarget 로 갈리지 않는다)", () => {
     for (const dt of ["local", "cloud"] as const) {
-      const connected = allowedToolsFor("owner", true, true, dt, true);
-      const disconnected = allowedToolsFor("owner", true, true, dt, false);
+      const connected = allowedToolsFor("owner", true, true, dt, { workerConnected: true });
+      const disconnected = allowedToolsFor("owner", true, true, dt, { workerConnected: false });
       expect(connected).toContain("mcp__asahi__allow_dir");
       expect(disconnected).not.toContain("mcp__asahi__allow_dir");
     }
     // local·cloud 는 이제 완전히 동일한 도구 목록을 낸다(같은 workerConnected 값 기준).
-    expect(allowedToolsFor("owner", true, true, "local", true)).toEqual(allowedToolsFor("owner", true, true, "cloud", true));
-    expect(allowedToolsFor("owner", true, true, "local", false)).toEqual(allowedToolsFor("owner", true, true, "cloud", false));
+    expect(allowedToolsFor("owner", true, true, "local", { workerConnected: true })).toEqual(allowedToolsFor("owner", true, true, "cloud", { workerConnected: true }));
+    expect(allowedToolsFor("owner", true, true, "local", { workerConnected: false })).toEqual(allowedToolsFor("owner", true, true, "cloud", { workerConnected: false }));
   });
 
   it("deployTarget='cloud' 라도 손님 DM·서버는 로컬과 동일(영향 없음)", () => {
@@ -601,6 +667,66 @@ describe("allowedToolsFor — 서버에서도 기억을 저장할 수 있다", (
     // 지어낸 캐릭터 신상은 이 계획의 대상이 아니다.
     expect(allowedToolsFor("allowed", false, false)).not.toContain("mcp__asahi__character_fact");
     expect(allowedToolsFor("owner", false, true)).not.toContain("mcp__asahi__character_fact");
+  });
+});
+
+// Important 4(최종 전체 브랜치 리뷰) — 정기 게시(digest.ts) 턴은 isOwner:false, isPrivate:false
+// 로 돈다(손님 서버 계층과 신원이 같다). 이 브랜치가 그 계층에 remember 를 열면서, 사람이 안
+// 보는 타이머로 돌며 신뢰할 수 없는 웹 검색 결과를 읽는 이 턴도 remember 를 그대로 받게
+// 됐다 — noRemoteTools/noSkills 와 같은 자리에 remember 전용 차단 축이 없었다.
+// memoryWriteEnabled(옵션 객체의 한 축)가 그 축이다. recall(읽기)은 공용 기억이 어차피 전
+// 부원에게 열려 있고 digest 출력도 공개 채널로 가므로 막지 않는다 — remember(쓰기)만 막는다.
+describe("allowedToolsFor — memoryWriteEnabled 로 remember 만 막고 recall 은 남긴다(Important 4)", () => {
+  it("생략하면 기본값 true 다 — 회귀 없음", () => {
+    expect(allowedToolsFor("owner", true, true)).toContain("mcp__asahi__remember");
+    expect(allowedToolsFor("allowed", false, false)).toContain("mcp__asahi__remember");
+  });
+
+  it("memoryWriteEnabled:false 면 네 계층 전부 remember 를 받지 않지만 recall 은 그대로 받는다", () => {
+    const layers: Array<[string, boolean, boolean]> = [
+      ["owner", true, true], // 소유자 DM
+      ["owner", false, true], // 소유자 서버
+      ["allowed", true, false], // 손님 DM
+      ["allowed", false, false], // 손님 서버 — 정기 게시가 도는 신원
+    ];
+    for (const [role, isPrivate, isOwner] of layers) {
+      const tools = allowedToolsFor(role as "owner" | "allowed", isPrivate, isOwner, "local", { memoryWriteEnabled: false });
+      expect(tools).not.toContain("mcp__asahi__remember");
+      expect(tools).toContain("mcp__asahi__recall");
+    }
+  });
+
+  it("memoryWriteEnabled:false 여도 다른 도구(recall·WebSearch)는 정확히 그대로 남는다(공개 채널 계층 예시)", () => {
+    const tools = allowedToolsFor("allowed", false, false, "local", { memoryWriteEnabled: false });
+    expect(tools.sort()).toEqual(["WebSearch", "mcp__asahi__recall"]);
+  });
+
+  it("memoryWriteEnabled 는 character_fact 를 건드리지 않는다(remember 와 다른 축)", () => {
+    const tools = allowedToolsFor("owner", true, true, "local", { memoryWriteEnabled: false });
+    expect(tools).toContain("mcp__asahi__character_fact");
+  });
+});
+
+// Minor(최종 전체 브랜치 리뷰) — 마지막 catch-all 분기가 role 을 보지 않아
+// allowedToolsFor("blocked", ...) 도 remember·recall 을 돌려줬다(실측). 손님 DM 분기는
+// role === "owner" || role === "allowed" 를 명시로 확인하는데 이 분기만 안 했다.
+// decideRoute(discord.ts)가 이중으로 걸러 실제 도달은 불가하지만, 이 브랜치 전에는 그
+// 계층에 읽기(recall)만 있어 role 오분류가 위험하지 않았다 — 지금은 쓰기(remember)까지
+// 있으므로 심층 방어가 한 겹 얇아졌다.
+describe("allowedToolsFor — 마지막 catch-all 도 role 을 확인한다(Minor)", () => {
+  it("role='blocked' 는 서버 채널에서 아무 도구도 받지 못한다", () => {
+    expect(allowedToolsFor("blocked", false, false)).toEqual([]);
+  });
+
+  it("role='blocked' 는 DM(비공개)에서도 이 catch-all 로 새지 않는다", () => {
+    // isPrivate 이 true 여도 role 이 owner/allowed 가 아니므로 세 번째 분기(손님 DM)를 못 타고
+    // 이 catch-all 로 떨어진다 — 여기서도 막혀야 한다.
+    expect(allowedToolsFor("blocked", true, false)).toEqual([]);
+  });
+
+  it("role='allowed'/'owner' 는 여전히 정상적으로 도구를 받는다(회귀 없음)", () => {
+    expect(allowedToolsFor("allowed", false, false)).toContain("mcp__asahi__remember");
+    expect(allowedToolsFor("owner", false, false)).toContain("mcp__asahi__remember");
   });
 });
 
@@ -810,7 +936,7 @@ describe("allowedToolsFor — 원격 도구 노출", () => {
 
   it("워커가 연결돼 있으면 소유자 DM 에 원격 도구를 연다(local·cloud 동일)", () => {
     for (const target of ["local", "cloud"] as const) {
-      const tools = allowedToolsFor("owner", true, true, target, true);
+      const tools = allowedToolsFor("owner", true, true, target, { workerConnected: true });
       expect(tools).toContain(RT);
       expect(tools).toContain(SH);
     }
@@ -818,7 +944,7 @@ describe("allowedToolsFor — 원격 도구 노출", () => {
 
   it("워커가 없으면 원격 도구를 노출하지 않는다", () => {
     for (const target of ["local", "cloud"] as const) {
-      const tools = allowedToolsFor("owner", true, true, target, false);
+      const tools = allowedToolsFor("owner", true, true, target, { workerConnected: false });
       expect(tools).not.toContain(RT);
       expect(tools).not.toContain(SH);
     }
@@ -834,13 +960,13 @@ describe("allowedToolsFor — 원격 도구 노출", () => {
   // 맡는다(자기 하위 폴더 밖은 읽지 못한다 — remoteTools.test.ts 의 "공유 기계에서 사용자별
   // 격리" 참고).
   it("손님 DM·서버 채널도 워커가 연결되면 원격 도구를 받는다(공유 기계로 연결 — Task 7 반전)", () => {
-    expect(allowedToolsFor("allowed", true, false, "local", true)).toContain(RT);
-    expect(allowedToolsFor("allowed", false, false, "local", true)).toContain(RT);
+    expect(allowedToolsFor("allowed", true, false, "local", { workerConnected: true })).toContain(RT);
+    expect(allowedToolsFor("allowed", false, false, "local", { workerConnected: true })).toContain(RT);
   });
 
   it("기억·접근관리 도구는 워커 연결 여부와 무관하다", () => {
-    const off = allowedToolsFor("owner", true, true, "cloud", false);
-    const on = allowedToolsFor("owner", true, true, "cloud", true);
+    const off = allowedToolsFor("owner", true, true, "cloud", { workerConnected: false });
+    const on = allowedToolsFor("owner", true, true, "cloud", { workerConnected: true });
     for (const t of ["mcp__asahi__remember", "mcp__asahi__recall", "mcp__asahi__manage_access"]) {
       expect(off).toContain(t);
       expect(on).toContain(t);
@@ -852,25 +978,25 @@ describe("allowedToolsFor — 웹 검색", () => {
   const WS = "WebSearch";
 
   it("모든 계층에 WebSearch 가 포함된다", () => {
-    expect(allowedToolsFor("owner", true, true, "local", true)).toContain(WS);
-    expect(allowedToolsFor("owner", true, true, "cloud", true)).toContain(WS);
-    expect(allowedToolsFor("owner", true, true, "local", false)).toContain(WS);
-    expect(allowedToolsFor("allowed", true, false, "local", false)).toContain(WS);
-    expect(allowedToolsFor("allowed", false, false, "local", false)).toContain(WS);
+    expect(allowedToolsFor("owner", true, true, "local", { workerConnected: true })).toContain(WS);
+    expect(allowedToolsFor("owner", true, true, "cloud", { workerConnected: true })).toContain(WS);
+    expect(allowedToolsFor("owner", true, true, "local", { workerConnected: false })).toContain(WS);
+    expect(allowedToolsFor("allowed", true, false, "local", { workerConnected: false })).toContain(WS);
+    expect(allowedToolsFor("allowed", false, false, "local", { workerConnected: false })).toContain(WS);
   });
 
   // Task 1(동아리 공용 기억): 이 계층(손님·서버)도 이제 remember 를 받는다 — 서버의 저장은
   // 항상 공용이므로 게시 작업 컨텍스트라 해도 다른 손님 서버 턴과 다를 이유가 없다.
   it("게시 작업 컨텍스트(공개 채널 계층)는 remember(공용)·recall 과 WebSearch 를 받는다", () => {
-    const tools = allowedToolsFor("allowed", false, false, "cloud", false);
+    const tools = allowedToolsFor("allowed", false, false, "cloud", { workerConnected: false });
     expect(tools.sort()).toEqual(["WebSearch", "mcp__asahi__recall", "mcp__asahi__remember"]);
   });
 
   it("WebFetch 는 어느 계층에도 없다", () => {
     for (const t of [
-      allowedToolsFor("owner", true, true, "local", true),
-      allowedToolsFor("allowed", true, false, "local", false),
-      allowedToolsFor("allowed", false, false, "local", false),
+      allowedToolsFor("owner", true, true, "local", { workerConnected: true }),
+      allowedToolsFor("allowed", true, false, "local", { workerConnected: false }),
+      allowedToolsFor("allowed", false, false, "local", { workerConnected: false }),
     ]) {
       expect(t).not.toContain("WebFetch");
     }
@@ -879,18 +1005,18 @@ describe("allowedToolsFor — 웹 검색", () => {
   // FIX3(중요, 최종 리뷰 3차) — 유휴 요약 턴은 noWebTools:true 로 이 6번째 인자(webToolsEnabled)를
   // false 로 넘긴다. 일반 대화·정기 게시는 이 인자를 생략하므로(기본값 true) 기존 동작 그대로다.
   it("FIX3 — webToolsEnabled=false 면 WebSearch 가 세 계층 어디에도 없다(유휴 요약 턴 전용)", () => {
-    expect(allowedToolsFor("owner", true, true, "local", true, false)).not.toContain("WebSearch");
-    expect(allowedToolsFor("allowed", true, false, "local", false, false)).not.toContain("WebSearch");
-    expect(allowedToolsFor("allowed", false, false, "local", false, false)).not.toContain("WebSearch");
+    expect(allowedToolsFor("owner", true, true, "local", { workerConnected: true, webToolsEnabled: false })).not.toContain("WebSearch");
+    expect(allowedToolsFor("allowed", true, false, "local", { workerConnected: false, webToolsEnabled: false })).not.toContain("WebSearch");
+    expect(allowedToolsFor("allowed", false, false, "local", { workerConnected: false, webToolsEnabled: false })).not.toContain("WebSearch");
   });
 
   it("FIX3 — webToolsEnabled 를 생략하면 기존처럼 WebSearch 가 열려 있다(기본값 true, 회귀 없음)", () => {
-    expect(allowedToolsFor("owner", true, true, "local", true)).toContain("WebSearch");
+    expect(allowedToolsFor("owner", true, true, "local", { workerConnected: true })).toContain("WebSearch");
     expect(allowedToolsFor("allowed", true, false)).toContain("WebSearch");
   });
 
   it("FIX3 — webToolsEnabled=false 여도 WebSearch 이외의 도구는 그대로 남는다(owner-DM 예시)", () => {
-    const tools = allowedToolsFor("owner", true, true, "local", true, false);
+    const tools = allowedToolsFor("owner", true, true, "local", { workerConnected: true, webToolsEnabled: false });
     expect(tools).toContain("mcp__asahi__remember");
     expect(tools).toContain("mcp__asahi__fs_read");
     expect(tools).toContain("mcp__asahi__manage_access");
@@ -905,30 +1031,30 @@ describe("allowedToolsFor — 공유 워커로 계층이 넓어진다", () => {
   const hasRemote = (tools: string[]) => remoteNames.every((n) => tools.some((t) => t.endsWith(n)));
 
   it("공개 서버 + 워커 연결이면 원격 도구가 열린다(예전엔 무조건 닫혔다)", () => {
-    expect(hasRemote(allowedToolsFor("allowed", false, false, "local", true))).toBe(true);
+    expect(hasRemote(allowedToolsFor("allowed", false, false, "local", { workerConnected: true }))).toBe(true);
   });
 
   it("공개 서버 + 워커 미연결이면 열리지 않는다", () => {
-    expect(hasRemote(allowedToolsFor("allowed", false, false, "local", false))).toBe(false);
+    expect(hasRemote(allowedToolsFor("allowed", false, false, "local", { workerConnected: false }))).toBe(false);
   });
 
   it("손님 DM + 워커 연결이면 열린다(공유 워커로 간다)", () => {
-    expect(hasRemote(allowedToolsFor("allowed", true, false, "local", true))).toBe(true);
+    expect(hasRemote(allowedToolsFor("allowed", true, false, "local", { workerConnected: true }))).toBe(true);
   });
 
   it("손님에게는 폴더 관리 도구를 주지 않는다 — 워커가 연결돼 있어도", () => {
-    const tools = allowedToolsFor("allowed", false, false, "local", true);
+    const tools = allowedToolsFor("allowed", false, false, "local", { workerConnected: true });
     expect(tools.some((t) => t.endsWith("allow_dir"))).toBe(false);
     expect(tools.some((t) => t.endsWith("revoke_dir"))).toBe(false);
   });
 
   it("소유자는 서버에서도 폴더 관리 도구를 갖는다", () => {
-    const tools = allowedToolsFor("owner", false, true, "local", true);
+    const tools = allowedToolsFor("owner", false, true, "local", { workerConnected: true });
     expect(tools.some((t) => t.endsWith("allow_dir"))).toBe(true);
   });
 
   it("손님에게는 DB·접근관리 도구를 여전히 주지 않는다", () => {
-    const tools = allowedToolsFor("allowed", true, false, "local", true);
+    const tools = allowedToolsFor("allowed", true, false, "local", { workerConnected: true });
     for (const n of ["db_query", "db_schema", "manage_access", "runtime_info"]) {
       expect(tools.some((t) => t.endsWith(n))).toBe(false);
     }

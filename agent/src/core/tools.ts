@@ -10,7 +10,7 @@ import { assertReadOnlySql, formatQueryResult } from "./sqlGuard.js";
 import { CHARACTER_FACT_LIMIT } from "./turnPrep.js";
 import { REMOTE_TOOL_NAMES, remoteToolHandler } from "./remoteTools.js";
 import { isPathWithinAny, normalizeDir } from "./paths.js";
-import { memoryScopeFor, SHARED_MEMORY_MAX_LEN, renderMemories } from "./memoryScope.js";
+import { memoryScopeFor, SHARED_MEMORY_MAX_LEN, SHARED_MEMORY_TITLE_MAX_LEN, renderMemories } from "./memoryScope.js";
 
 // 도구 서버 이름 → 모델에는 mcp__asahi__<tool> 로 노출된다.
 export const TOOL_SERVER = "asahi";
@@ -81,6 +81,15 @@ export async function rememberHandler(ctx: ToolCtx, args: { title: string; conte
   if (scope === "shared") {
     // 코드포인트로 센다 — length 는 UTF-16 코드유닛이라 이모지가 2로 세어진다(이 파일의
     // truncateChars 가 같은 이유로 스프레드를 쓴다).
+    // Important 1(최종 전체 브랜치 리뷰) — 예전엔 이 상한 검사가 content 에만 걸려 title 은
+    // 무제한이었다(12,000자 제목 저장이 실측으로 성공했다). title 은 recall 뿐 아니라
+    // turnPrep 프롬프트에도 매 서버 턴마다 실리므로, content 와 같은 이유로(자르면 사실 손상,
+    // 조용히 잘린 제목은 전체인 것처럼 보인다) 자르지 않고 거절한다. title 을 먼저 검사한다 —
+    // 둘 다 상한을 넘으면 사용자가 고쳐야 할 것부터 알려주는 편이 낫다.
+    const titleLen = [...(args.title ?? "")].length;
+    if (titleLen > SHARED_MEMORY_TITLE_MAX_LEN) {
+      return `공용 기억 제목은 ${SHARED_MEMORY_TITLE_MAX_LEN}자까지예요. 지금 ${titleLen}자라 저장하지 않았어요 — 제목을 더 짧게 줄여주세요.`;
+    }
     const len = [...(args.content ?? "")].length;
     if (len > SHARED_MEMORY_MAX_LEN) {
       // 자르지 않고 거절한다. 조용히 잘린 기억은 사실의 일부만 남아, 아사히가 그 반쪽을
@@ -147,16 +156,30 @@ const singleLine = (s: string): string => s.replace(/[\r\n]+/g, " ");
 // 없애는 일이라 같은 권한이 아니다. 공용 기억만 대상이며 남의 개인 기억은 건드리지 않는다.
 //
 // 여러 개가 걸리면 지우지 않고 목록을 돌려준다 — 무엇을 지웠는지 모르는 삭제가 가장 나쁘다.
-export async function forgetHandler(ctx: ToolCtx, args: { title: string }): Promise<string> {
+//
+// Important 2(최종 전체 브랜치 리뷰) — 예전엔 판정이 title.includes(q) 뿐이라, 제목이 완전히
+// 같은 두 건은 어떤 질의로도 항상 둘 다 걸려 소유자가 영원히 하나도 못 지웠다. persona.ts 가
+// 회비·활동 시간처럼 주제별로 저장하라고 안내하므로, 회비가 바뀌어 누가 "회비"를 다시
+// 등록하는 순간이 정확히 이 상태다 — forget 이 존재하는 이유(낡은 공용 기억 정리) 그 자체가
+// 막히는 사고다. id(Memory 가 이미 갖는 고유 번호)를 목록에 함께 보여주고, 그 번호로 하나를
+// 정확히 지정할 수 있게 한다 — title 검색으로 좁힌 뒤 id 로 확정하는 2단계 흐름이다.
+export async function forgetHandler(ctx: ToolCtx, args: { title?: string; id?: number }): Promise<string> {
   if (!ctx.isOwner) return OWNER_ONLY;
+  if (args.id !== undefined) {
+    const shared = await ctx.repos.memories.sharedOnly();
+    const hit = shared.find((m) => m.id === args.id);
+    if (!hit) return `번호 ${args.id} 에 해당하는 공용 기억이 없어요.`;
+    await ctx.repos.memories.delete(hit.id);
+    return `공용 기억을 지웠어요: "${singleLine(hit.title)}"`;
+  }
   const q = (args.title ?? "").trim().toLowerCase();
-  if (q.length === 0) return "지울 기억의 제목을 알려주세요.";
+  if (q.length === 0) return "지울 기억의 제목이나 번호(id)를 알려주세요.";
   const shared = await ctx.repos.memories.sharedOnly();
   const hits = shared.filter((m) => m.title.toLowerCase().includes(q));
   if (hits.length === 0) return `"${args.title}" 에 해당하는 공용 기억이 없어요.`;
   if (hits.length > 1) {
-    const list = hits.map((m) => `- ${singleLine(m.title)}`).join("\n");
-    return `여러 개가 걸려서 지우지 않았어요. 제목을 더 정확히 알려주세요:\n${list}`;
+    const list = hits.map((m) => `- (번호 ${m.id}) ${singleLine(m.title)}`).join("\n");
+    return `여러 개가 걸려서 지우지 않았어요. 번호(id)로 정확히 지정해 주세요:\n${list}`;
   }
   await ctx.repos.memories.delete(hits[0].id);
   return `공용 기억을 지웠어요: "${singleLine(hits[0].title)}"`;
@@ -338,19 +361,41 @@ export async function runtimeInfoHandler(ctx: ToolCtx): Promise<string> {
 // ToolCtx.ownWorkstation/TurnContext.ownWorkstation 필드 자체도 완전히 삭제했다 — 생산자 없는
 // 죽은 필드를 남겨 두면, 훗날 누군가 실수로(혹은 무심코) 그 필드를 다시 채우는 코드를 추가할 때
 // canManagePc 가 경로 강제 없이 손님에게 폴더 관리 도구를 열어주는 잠재적 함정이 있었다.
+// Important 4(최종 전체 브랜치 리뷰) — 뒤쪽 인자 묶음. 예전엔 workerConnected·webToolsEnabled
+// 가 각각 독립된 위치 인자였다. 셋째(memoryWriteEnabled)가 그 자리에 하나 더 붙으면
+// allowedToolsFor("owner", true, true, "local", false, true, false) 처럼 인접한 boolean 이
+// 서로 다른 축을 뜻하는, 조용히 틀리기 좋은 호출부가 된다 — 이름 있는 옵션 객체로 묶으면
+// typecheck 가 모든 호출부를 강제로 짚어 주므로 기계적이고 안전하다. role·isPrivate·isOwner·
+// deployTarget 은 그대로 위치 인자로 둔다 — 이미 안정된 호출 관례이고, deployTarget 은 문자열
+// 리터럴 타입이라 boolean 과 섞여도 타입 수준에서 구분된다.
+export type AllowedToolsOptions = {
+  workerConnected?: boolean;
+  webToolsEnabled?: boolean;
+  // remember(기억 쓰기)를 열지. false 여도 recall(읽기)은 이 값과 무관하게 항상 그대로다 —
+  // 정기 게시(digest.ts)처럼 사람이 안 보는 타이머로 돌며 신뢰할 수 없는 웹 검색 결과를
+  // 읽어들이는 턴이 remember 로 동아리 공용 기억을 오염시키는 것만 막고, 공용 기억은 어차피
+  // 전 부원이 읽을 수 있으므로 recall 까지 막을 이유는 없다.
+  memoryWriteEnabled?: boolean;
+};
+
 export function allowedToolsFor(
   role: Role,
   isPrivate: boolean,
   isOwner: boolean,
   deployTarget: "local" | "cloud" = "local",
-  workerConnected = false,
-  // FIX3(중요, 최종 리뷰 3차): 웹 검색도 워커 원격 도구처럼 턴별로 열고 닫을 수 있어야 한다 —
-  // 유휴 요약 턴(core.ts 의 summarizeAndClose)은 사람이 지켜보지 않는 타이머로 돌고 이전에
-  // 심어졌을 수도 있는 프롬프트 인젝션을 담은 세션을 그대로 이어받는데, 요약은 검색이 필요
-  // 없으므로 WebSearch 를 열어 둘 이유가 없다(agent.ts 의 resolveWebToolsEnabled 가 이 값을
-  // 계산해 넘긴다). 기본값 true — 일반 대화·정기 게시는 이 인자를 생략해 기존 동작 그대로다.
-  webToolsEnabled = true,
+  opts: AllowedToolsOptions = {},
 ): string[] {
+  const {
+    workerConnected = false,
+    // FIX3(중요, 최종 리뷰 3차): 웹 검색도 워커 원격 도구처럼 턴별로 열고 닫을 수 있어야 한다 —
+    // 유휴 요약 턴(core.ts 의 summarizeAndClose)은 사람이 지켜보지 않는 타이머로 돌고 이전에
+    // 심어졌을 수도 있는 프롬프트 인젝션을 담은 세션을 그대로 이어받는데, 요약은 검색이 필요
+    // 없으므로 WebSearch 를 열어 둘 이유가 없다(agent.ts 의 resolveWebToolsEnabled 가 이 값을
+    // 계산해 넘긴다). 기본값 true — 일반 대화·정기 게시는 이 옵션을 생략해 기존 동작 그대로다.
+    webToolsEnabled = true,
+    // 기본값 true — 일반 대화·기존 호출부는 이 옵션을 생략해 remember 가 그대로 열린다.
+    memoryWriteEnabled = true,
+  } = opts;
   // 원격 도구는 워커 연결이 있을 때만 연다. 판정 축이 "어디서 실행 중인가"(deployTarget)가 아니라
   // "워커가 붙어 있는가"로 바뀐 것이 이 단계의 핵심이다 — cloud 에서도 워커만 붙으면 PC 작업이 된다.
   // Task 7: 원격 도구는 더 이상 소유자 전용이 아니다 — 아래 네 분기(owner-DM/owner-서버/
@@ -367,10 +412,14 @@ export function allowedToolsFor(
   // 바꾸는" 권한은 관리자(소유자)만 갖는다는 사실 자체는 그대로다.
   const dirTools = workerConnected ? [t("allow_dir"), t("revoke_dir"), t("list_dirs")] : [];
   const webTools = webToolsEnabled ? WEB_TOOLS : [];
+  // Important 4 — remember 는 네 분기 모두 이 배열 하나로만 열고 닫는다. memoryWriteEnabled
+  // 가 기본값(true)인 한 아래 각 분기의 결과는 예전과 완전히 동일하다(회귀 없음) — false 를
+  // 넘기는 호출부(정기 게시)만 remember 를 잃고 recall 은 그대로 유지한다.
+  const memoryTools = memoryWriteEnabled ? [t("remember")] : [];
   if (isOwner && isPrivate) {
     return [
       ...remote,
-      t("remember"), t("recall"), t("character_fact"), t("manage_access"), t("forget"),
+      ...memoryTools, t("recall"), t("character_fact"), t("manage_access"), t("forget"),
       ...dirTools,
       t("db_schema"), t("db_query"), t("runtime_info"),
       ...webTools,
@@ -384,14 +433,21 @@ export function allowedToolsFor(
   // 공용 기억이고(memoryScope.ts), 그것을 만들 수 있는 곳이 여기뿐이다.
   // forget 도 같은 이유로 연다(2026-08-02, Task 3): 부원이 쌓는 공용 기억이 틀리거나 낡으면
   // 정리해야 하는데, 그 정리 대상도 그걸 할 수 있는 소유자도 전부 이 서버 분기에만 있다.
-  if (isOwner) return [...remote, t("remember"), t("recall"), t("forget"), ...dirTools, t("runtime_info"), ...webTools];
+  if (isOwner) return [...remote, ...memoryTools, t("recall"), t("forget"), ...dirTools, t("runtime_info"), ...webTools];
   // 손님: DM 이든 서버든 공유 기계로 간다. 폴더 관리는 주지 않는다.
   if (isPrivate && (role === "owner" || role === "allowed")) {
-    return [...remote, t("remember"), t("recall"), t("character_fact"), ...webTools];
+    return [...remote, ...memoryTools, t("recall"), t("character_fact"), ...webTools];
   }
+  // Minor(최종 전체 브랜치 리뷰) — 이 마지막 catch-all 은 role 을 보지 않아
+  // allowedToolsFor("blocked", ...) 도 remember·recall 을 돌려줬다(실측). 위 손님 DM 분기는
+  // role === "owner" || role === "allowed" 를 명시로 확인하는데 이 분기만 안 했다.
+  // decideRoute(discord.ts)가 owner/allowed 가 아닌 사용자의 메시지를 이미 걸러내 실제 도달은
+  // 없지만, 이 브랜치 전에는 이 계층에 읽기(recall)만 있어 role 오분류가 위험하지 않았다 —
+  // 지금은 쓰기(remember)까지 있으므로 이 함수 자신도 role 을 봐야 심층 방어가 유지된다.
+  if (!(role === "owner" || role === "allowed")) return [];
   // 손님 서버: 동아리 공용 기억은 누구나 쌓을 수 있다(스펙 §2.1). 개인 기억 저장은 DM 에서만
   // 되므로 여기서 remember 를 부르면 반드시 공용이 된다 — character_fact 는 주지 않는다.
-  return [...remote, t("remember"), t("recall"), ...webTools];
+  return [...remote, ...memoryTools, t("recall"), ...webTools];
 }
 
 // ── 인프로세스 MCP 서버(SDK) — handler 는 위 순수 함수를 감싼다 ──────────────
@@ -434,8 +490,11 @@ export function buildToolDefinitions(ctx: ToolCtx) {
     ),
     tool(
       "forget",
-      "(소유자 전용) 동아리 공용 기억을 제목으로 찾아 지웁니다. 여러 개가 걸리면 지우지 않고 목록을 보여줍니다.",
-      { title: z.string().describe("지울 공용 기억의 제목(일부만 적어도 됩니다)") },
+      "(소유자 전용) 동아리 공용 기억을 제목으로 찾아 지웁니다. 여러 개가 걸리면 지우지 않고 번호(id) 목록을 보여줍니다 — 그 번호를 id 인자로 다시 불러 하나만 정확히 지정해 지울 수 있습니다.",
+      {
+        title: z.string().optional().describe("지울 공용 기억의 제목(일부만 적어도 됩니다)"),
+        id: z.number().optional().describe("여러 개가 걸렸을 때 그 목록에서 본 번호로 하나를 정확히 지정합니다"),
+      },
       async (args) => textResult(await forgetHandler(ctx, args)),
     ),
     tool(
