@@ -1,5 +1,5 @@
 ---
-lastReviewed: 2026-07-30
+lastReviewed: 2026-08-01
 ---
 
 # 능력 계층 모델 (Capability Model)
@@ -29,12 +29,15 @@ Asahi 비서는 대화·모델 호출·기억·세션을 전담하는 **봇** �
    된 것이 예전 `shouldConnectWorker`(워커 1대 = 소유자 1명이던 시절 판정)와의 핵심 차이다.
 2. **런타임 재검증** — SDK 내장 도구 중 파일/Bash(Read/Write/Edit/Glob/Grep/Bash)는 여전히
    아예 열리지 않는다 — 열 대상 자체가 없으니 재검증할 필요도 없다. `builtinTools`
-   (`agent/src/core/agent.ts`)는 기본이 `[]` 가 아니라 `["WebSearch"]` 고, 유휴 대화 요약
-   턴만 `noWebTools:true` 로 `[]` 가 된다(최종 리뷰 3차 FIX3 — 경위는 이 절 뒤쪽 "이 전면
-   개방 전에는" 단락에 적는다). 웹 검색은 로컬 파일시스템이나 워커를 건드리지 않는 SDK 내장
+   (`agent/src/core/agent.ts`)는 기본이 `[]` 가 아니라 `["WebSearch", "Skill"]` 이고, 유휴
+   대화 요약 턴만 `noWebTools:true` 와 `noSkills:true` 를 **둘 다** 세워야 `[]` 가 된다(웹
+   검색 축은 최종 리뷰 3차 FIX3, 스킬 축은 Task 4 — 경위는 이 절 뒤쪽 "이 전면 개방 전에는"
+   단락에 적는다). 웹 검색·스킬 둘 다 로컬 파일시스템이나 워커를 건드리지 않는 SDK 내장
    호출이라 그 외에는 재검증 단계가 따로 없다. `allowedToolsFor` 에도 항상 같은 값
-   (`!noWebTools`)을 6번째 인자로 넘겨 두 목록이 같이 움직인다 — 열지 말지를 가르는 지점은
-   결국 이 하나의 플래그다(아래 능력 계층표). 그 자리를 대신하는 원격 도구(`fs_read`/`fs_write`/`fs_edit`/
+   (`!noWebTools`)을 6번째 인자로 넘겨 `WebSearch` 축은 두 목록이 같이 움직인다 — `Skill`
+   축은 다르다. `allowedToolsFor` 는 애초에 `Skill` 을 모른다(반환값에 이름을 올리지 않는다).
+   `Skill` 을 열지 말지는 `builtinTools` 배열 하나로만 결정된다(아래 능력 계층표). 그 자리를
+   대신하는 원격 도구(`fs_read`/`fs_write`/`fs_edit`/
    `fs_glob`/`fs_grep`/`sh_exec`)는 호출마다 `remoteToolHandler`(`agent/src/core/remoteTools.ts`)가
    `ctx.remote`(도구셋 계산과 동일한 `resolveTurnWorker` 판정의 결과)가 채워져 있는지 확인하고,
    채워져 있으면 그 워커 기준 `allowed_dirs`(손님이면 `scopeDirs` 로 자기 하위 폴더로 좁혀진
@@ -73,6 +76,18 @@ Asahi 비서는 대화·모델 호출·기억·세션을 전담하는 **봇** �
 (`agent/src/core/persona.ts` 의 `IDENTITY`, 최종 리뷰 3차 FIX5 — 이 문구가 웹 검색 결과를
 명시하기 전에는 디스코드 채널 컨텍스트만 들어, 이 브랜치가 모든 턴에 들인 새 입력 종류를
 가리키지 못했다)뿐이다.
+
+`Skill`(SDK 내장 스킬 실행, Task 4)도 위 표의 네 계층 모두에 열려 있다 — `builtinTools`
+(`agent/src/core/agent.ts`)가 조건 없이 네 계층 전부에 얹기 때문에, 위 표의 "열리는 도구"
+칸에는 `WebSearch` 만 적었지만 `Skill` 도 같은 자격으로 딸려 있다고 읽어야 한다. **스킬은
+신원으로 가르지 않는다** — 소유자·손님, DM·서버 어느 조합도 스킬 노출 여부를 바꾸지 않고
+(persona.ts 의 `buildCapabilityBlock` 도 모든 분기에 같은 스킬 안내 문장을 낸다), 표에 없는
+예외도 `WebSearch` 와 정확히 같다(유휴 대화 요약 턴, 그리고 같은 위협 모델을 공유하는 정기
+게시 턴 — 아래 참고). 이 도구의 실질적 경계는 "누가 쓰느냐"가 아니라 "누가 리포에 무엇을
+넣느냐"다 — 어떤 스킬이 존재하는지는 `agent/skill-plugin/skills/` 밑에 그 폴더를 커밋한
+사람이 정하고, 일단 커밋되면 워커 연결 여부와도 무관하게 소유자·손님 누구에게나 SDK 가 그
+존재를 그대로 알려준다. 그래서 이 저장소에서 스킬 하나를 들이는 커밋 자체가 이 능력 계층의
+실질적인 승인 절차다.
 
 ## 손님·공유 기계 — 확장된 위협 표면
 
@@ -142,7 +157,9 @@ Asahi 비서는 대화·모델 호출·기억·세션을 전담하는 **봇** �
 (`agent/src/core/digest.ts`)는 이제 계층만으로는 안전하지 않다는 것을 알고 `noRemoteTools:true`
 를 명시로 세운다 — 사람이 지켜보지 않는 타이머로 돌면서 신뢰할 수 없는 웹 검색 결과를 그대로
 읽어들이는 이 턴에 공유 기계의 셸 접근까지 열려 있으면 안 되기 때문이다(유휴 요약 턴과 같은
-이유). `noWebTools` 는 세우지 않는다 — 이 턴의 목적 자체가 웹 검색이다.
+이유). `noWebTools` 는 세우지 않는다 — 이 턴의 목적 자체가 웹 검색이다. `noSkills:true` 는
+세운다 — `noRemoteTools` 를 세운 것과 같은 이유(사람이 안 보는 타이머 + 신뢰할 수 없는 웹
+검색 결과)이고, 뉴스 조사에 도움이 되는 스킬이 없어 잃는 기능도 없다.
 
 **판정 축이 "어디서 실행 중인가"에서 "워커가 붙어 있는가"로 바뀐 것이 이 구조의 핵심이다.**
 예전에는 `deployTarget="cloud"`(Railway 컨테이너)면 소유자 DM이라도 파일/Bash 를 통째로
@@ -522,7 +539,7 @@ pm2 jlist 가 돌려주는 명령은 이제 회원이 실제로 실행한 값이
 | 파일 | 지켜야 할 불변식 |
 | --- | --- |
 | `agent/src/core/tools.ts` | `allowedToolsFor` 는 신원·위치·`workerConnected` 조합별로 정확히 문서화된 도구 목록만 반환한다(dir 관리 도구도 `workerConnected` 하나로 결정 — 최종 리뷰 FIX2). 원격 도구(`fs_*`/`sh_exec`)는 이제 소유자 서버·손님 DM·손님 서버 분기에도 나타난다(Task 7, 위 능력 계층표) — 손님 DM·서버 분기가 이 도구를 "절대" 포함하지 않는다는 예전 불변식은 더 이상 성립하지 않는다. `isOwnerDm`(`db_schema`/`db_query`/`manage_access` 전용, `isOwner && isPrivate`)와 `canManagePc`(dir 관리 도구 전용, `isOwner` 하나만 — FIX6/Task 7), 그리고 `runtime_info`(`isOwner` 하나만 — 2026-08-01)는 서로 다른 조건이며 각각 도구셋과 독립적으로 핸들러 내부에서 다시 신원을 확인한다. `allowDirHandler` 는 `ctx.remote.roots` 밖 경로를 거부한다(봇 자신의 파일시스템은 보지 않는다). `manage_access` 는 `owner` 역할 부여를 항상 거부한다. |
-| `agent/src/core/agent.ts` | `resolveTurnWorker` 는 `resolveWorkerSelector`(개인/공유 선택) → 레지스트리(`personalWorkerOf`/`sharedWorkerId`) → `hub.isConnected(workerId)` 순으로 이 턴이 쓸 워커를 정한다(예전 `shouldConnectWorker`/`resolveWorkerConnected` 를 대체 — Task 7). `req.noRemoteTools===true` 면(유휴 요약 턴) 레지스트리·허브 조회 자체를 건너뛰고 무조건 `null`(=워커 없음)이다(최종 리뷰 FIX4 유지). 이 결과가 `buildRemoteCtx`(`workerId`·`workerKind`·`roots`·`call` 을 채운다)의 입력이자 `allowedToolsFor` 에 넘길 `workerConnected` 이므로, "도구는 보이는데 실행은 거부"(또는 그 반대) 불일치가 생기지 않는다. `resolveWebToolsEnabled` 는 `req.noWebTools===true` 면 무조건 false 를 돌려준다(최종 리뷰 3차 FIX3). `builtinTools` 는 이 값이 참이면 `["WebSearch"]`, 거짓이면 `[]` 다. SDK 내장 파일/Bash 도구(Read/Write/Edit/Glob/Grep/Bash)는 이 배열에 애초에 이름을 올리지 않는다. |
+| `agent/src/core/agent.ts` | `resolveTurnWorker` 는 `resolveWorkerSelector`(개인/공유 선택) → 레지스트리(`personalWorkerOf`/`sharedWorkerId`) → `hub.isConnected(workerId)` 순으로 이 턴이 쓸 워커를 정한다(예전 `shouldConnectWorker`/`resolveWorkerConnected` 를 대체 — Task 7). `req.noRemoteTools===true` 면(유휴 요약 턴) 레지스트리·허브 조회 자체를 건너뛰고 무조건 `null`(=워커 없음)이다(최종 리뷰 FIX4 유지). 이 결과가 `buildRemoteCtx`(`workerId`·`workerKind`·`roots`·`call` 을 채운다)의 입력이자 `allowedToolsFor` 에 넘길 `workerConnected` 이므로, "도구는 보이는데 실행은 거부"(또는 그 반대) 불일치가 생기지 않는다. `resolveWebToolsEnabled` 는 `req.noWebTools===true` 면 무조건 false 를 돌려주고, `resolveSkillsEnabled`(`agent/src/core/skills.ts`)는 같은 방식으로 `req.noSkills===true` 면 무조건 false 를 돌려준다(최종 리뷰 3차 FIX3·Task 4). `builtinTools` 는 이 두 값을 각각 독립적으로 반영한다 — `webToolsEnabled` 가 참이면 `"WebSearch"` 를, `skillsEnabled` 가 참이면 `"Skill"` 을 넣는다. 기본(둘 다 참)은 `["WebSearch", "Skill"]` 이고, 유휴 요약 턴처럼 `noWebTools`·`noSkills` 를 둘 다 세운 턴만 `[]` 가 된다. SDK 내장 파일/Bash 도구(Read/Write/Edit/Glob/Grep/Bash)는 이 배열에 애초에 이름을 올리지 않는다. |
 | `agent/src/core/workerSelect.ts` | `resolveWorkerSelector` 는 "어디서 말하느냐가 어느 기계냐를 정한다" 규칙 하나다 — `isOwner && isPrivate` 만 개인 워커, 그 외(소유자 서버·손님 DM·손님 서버)는 전부 공유 워커. `scopeDirs` 는 공유 워커 + 손님(`!isOwner`)일 때만 각 허용 폴더를 `joinUnderRoot`로 그 사람의 `userId` 하위로 좁힌다 — 개인 워커거나 소유자면 목록을 그대로 돌려준다(빈 목록은 빈 목록 그대로 — fail closed 유지). `joinUnderRoot`(`agent/src/core/paths.ts`)가 `userId` 를 평범한 식별자(영숫자·밑줄·하이픈)로만 제한해, 크래프트한 값으로 상위 폴더를 탈출하는 경로 자체가 만들어지지 않게 한다(회원 격리의 마지막 경계). |
 | `agent/src/store/workersRepo.ts` | 토큰은 `sha256` 해시(`hashWorkerToken`)로만 저장한다 — 평문은 DB 에 남지 않는다. `personalWorkerOf`/`sharedWorkerId` 는 동률(같은 `user_id` 또는 같은 `kind='shared'`)이 여럿이어도 `created_ts, id` 정렬로 결정적으로 하나만 고른다(DB 가 임의로 고르게 두지 않는다). `upsert` 로 같은 `id` 를 재등록하면 토큰 해시가 교체되지만(회전), `created_ts` 와 `label`(명시적으로 새로 주지 않는 한)은 보존한다. |
 | `agent/src/core/remoteTools.ts` | `remoteToolHandler` 는 `ctx.remote`(=`resolveTurnWorker` 판정 결과)가 없으면 항상 거부한다 — 예전처럼 `isOwnerDm` 을 독립적으로 다시 확인하지 않는다(Task 7, 이 판정은 이제 `agent.ts` 하나뿐이다). `fs_read`/`fs_write`/`fs_edit`/`fs_glob`/`fs_grep` 의 경로 후보는 그 워커의 `allowed_dirs` 를 `scopeDirs` 로 좁힌 범위 안에 있어야 하며, 빈 경로 문자열·빈 허용 목록·리포 조회 실패는 모두 거부(fail-closed)로 처리한다. `fs_glob`/`fs_grep` 은 `path` 생략 시 검사에 쓴 기본값을 `args` 에 실제로 주입해 워커로 보낸다(최종 리뷰 FIX1). `sh_exec` 는 이 경로 필터의 대상이 아니다(의도된 설계 — 위 "손님·공유 기계" 절 참고). `proc_*` 는 이름(`name`)·목록 필터(`onlyUserId`)·표시 이름 맵(`labels`)을 모델이 아니라 이 핸들러가 주입한다 — 손님이 준 값은 셋 다 무시되고 각각 `procNameFor(ctx.userId)`(`name`)·`ctx.userId`(`onlyUserId`, 접두어 없는 원래 값)로 덮어써진다(위 "장기 실행 프로세스의 한계" 참고). `labels`(`proc_list` 전용)는 `onlyUserId` 와 같은 경계를 따른다 — 소유자면 `displayNames()` 전체, 손님이면 자기 이름 하나뿐이고(이름이 없으면 빈 맵) 남의 이름은 워커까지 가지 않는다. 이 조회가 실패하면 거부가 아니라 빈 맵으로 내려 목록 자체는 계속 진행하되(이름은 장식이지 권한이 아니다) `console.error` 로 흔적을 남긴다. `proc_start` 의 작업폴더(`cwd`)는 다르다 — 모델이 제안한 `path` 가 `allowed_dirs` 검사(`needsPathCheck`)를 통과하면 그 값을 그대로 쓰고, 생략하면 `allowed[0]` 로 떨어진다(`singlePathArg ?? allowed[0]`, 위 "장기 실행 프로세스의 한계" 참고) — 검사한 값과 실제로 쓰는 값은 항상 같다. `proc_stop`/`proc_list`/`proc_logs` 는 `needsAllowedNonEmpty` 가 `false` 라 허용 폴더가 비어 있어도 통과한다 — `proc_start` 만 여전히 막힌다. |

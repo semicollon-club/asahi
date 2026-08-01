@@ -1,5 +1,5 @@
 ---
-lastReviewed: 2026-07-29
+lastReviewed: 2026-08-01
 ---
 
 # 아키텍처 개요
@@ -79,10 +79,14 @@ Agent SDK 세션으로 직접 실행한다** — 위임이라는 개념은 이�
 봇의 SDK 세션이 파일/셸 작업이 필요하면, SDK 내장 도구(Read/Write/Edit/Glob/Grep/Bash)
 대신 인프로세스 MCP 도구 11종(`fs_read`/`fs_write`/`fs_edit`/`fs_glob`/`fs_grep`/`fs_tree`/
 `sh_exec`/`proc_start`/`proc_stop`/`proc_list`/`proc_logs`, `agent/src/core/tools.ts`)을
-호출한다 — 내장 도구는 `builtinTools: []`로 아예 닫혀 있다(`agent/src/core/agent.ts`). 이
-도구들의 핸들러(`agent/src/core/remoteTools.ts`의 `remoteToolHandler`)는 이 턴에 워커가
-배선돼 있는지(`ctx.remote`) 확인하고 경로를 1차로 거른 뒤, `WorkerHub.call`(`agent/src/
-remote/hub.ts`)로 그 턴이 쓰는 워커에게 도구 이름과 인자를 실어 보내고 결과를 기다린다.
+호출한다 — 내장 Read/Write/Edit/Glob/Grep/Bash는 `query()`에 넘기는 내장 도구 허용
+배열(코드상 변수명 `builtinTools`)에 한 번도 실리지 않아 항상 닫혀 있다(`agent/src/
+core/agent.ts`). 그 배열이 실제로 여는 것은 웹 검색(`WebSearch`)과 스킬(`Skill`, 아래
+"스킬" 문단)뿐이며, 둘 다 조건부로만 실리고 사람이 지켜보지 않는 유휴 대화 요약 턴에서는
+함께 닫힌다. 파일/셸 도구들의 핸들러(`agent/src/core/remoteTools.ts`의
+`remoteToolHandler`)는 이 턴에 워커가 배선돼 있는지(`ctx.remote`) 확인하고 경로를 1차로
+거른 뒤, `WorkerHub.call`(`agent/src/remote/hub.ts`)로 그 턴이 쓰는 워커에게 도구 이름과
+인자를 실어 보내고 결과를 기다린다.
 
 - **연결 여부가 도구 노출을 결정한다** — `resolveTurnWorker`(`agent/src/core/agent.ts`)가
   매 턴 이 턴이 쓸 워커를 정한다: `resolveWorkerSelector`(`agent/src/core/workerSelect.ts`)의
@@ -112,6 +116,21 @@ remote/hub.ts`)로 그 턴이 쓰는 워커에게 도구 이름과 인자를 실
   개인 워커를 두는 것은 여전히 지원하지 않는다 — 소유자의 구독으로 도는 작업이 소유자가
   보지 못하는 기계에서 벌어지는 것을 피하기 위한 의도된 설계다(§2.1,
   `docs/superpowers/specs/2026-07-27-multi-worker-design.md`).
+- **스킬(2026-08-01)** — 위에서 말한 `Skill`은 원격 도구가 아니라 SDK 가 로컬에서 직접
+  읽는 문서다. `agent/skill-plugin/`가 로컬 플러그인 하나로 모든 스킬을 담고, `query()`의
+  `plugins`(플러그인 경로 목록)와 `skills`(`'all'` 고정) 옵션으로 로드된다. 폴더 안이
+  `skill-plugin/skills/<이름>/SKILL.md`로 한 겹 더 들어간 것은 오타가 아니라 SDK 규약이다
+  — SDK 는 플러그인 루트 바로 밑이 아니라 `<루트>/skills/<이름>/SKILL.md`를 스캔한다(실측
+  확인, 첫 스킬은 `skill-plugin/skills/frontend-design/SKILL.md`). 외부 스킬을 들이는
+  절차는 그 폴더 밑에 통째로 복사해 커밋하는 것뿐이다. **스킬 문서는 봇 컨테이너 안에
+  있고, 파일·셸을 실제로 실행하는 쪽은 워커다** — 이 둘이 서로 다른 프로세스라는 비대칭
+  때문에 지금은 `SKILL.md` 본문을 읽고 지침만 따르는 문서형 스킬만 동작하고, 스크립트
+  실행이 필요한 스킬(예: 빌드 스크립트를 동봉한 스킬)은 봇이 그 스크립트를 워커에게 넘겨
+  실행을 위임하는 다음 단계가 있어야 한다. 그 다음 단계가 파일 배치 자체를 새로 걱정할
+  일은 아니다 — 미니PC 공유 워커는 이미 `update-worker.ps1`(`deploy/update-worker.ps1`)의
+  `git pull --ff-only`로 봇과 같은 `agent/skill-plugin/`를 자동 갱신 받고 있으므로, 남은
+  것은 파일을 나르는 문제가 아니라 워커가 그 파일을 어떤 이름의 도구 호출로 실행할지
+  정하는 경로 규약 문제다.
 
 ## 위임이 사라진 자리
 

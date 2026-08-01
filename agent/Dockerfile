@@ -49,6 +49,14 @@ RUN npm ci --omit=dev
 
 COPY --from=builder /app/dist ./dist
 
+# 스킬은 빌드 산출물이 아니라 읽기 전용 자원이라 소스에서 그대로 옮긴다. 이 줄이 없으면
+# 컨테이너에 skill-plugin/ 이 없어 스킬이 하나도 로드되지 않는다 — 그런데 그 실패는 배포
+# 후에야, 그것도 조용히 드러난다(스킬이 없는 것과 안 켜진 것을 구별할 방법이 없다).
+#
+# 폴더 안의 한 겹 더 들어간 skills/ 는 오타가 아니다 — SDK 는 플러그인 루트 바로 밑이 아니라
+# 루트/skills/<이름>/SKILL.md 를 스캔한다(2026-08-01 실측: 평면 배치는 발견되지 않았다).
+COPY skill-plugin ./skill-plugin
+
 # 런타임 데이터 경로를 절대경로로 고정 — 위 "경로 문제" 설명 참고.
 # /data 자체는 이미지에 없고, 앱이 시작 시 mkdirSync(recursive)로 만든다.
 ENV DATA_DIR=/data/store

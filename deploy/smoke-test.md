@@ -1,5 +1,5 @@
 ---
-lastReviewed: 2026-07-31
+lastReviewed: 2026-08-01
 ---
 
 # 배포 후 스모크 테스트 체크리스트
@@ -438,6 +438,30 @@ JS 를 받아 파일을 쓰지 못하고 죽는다. `setInterval` 이 프로세�
   상태로 배포한다.
   기대 결과: 채널을 설정한 주제만 스케줄대로 올라오고, 미설정 주제는 스케줄에서 조용히
   건너뛴다(예약어로는 여전히 실행되며, 그때는 명령을 친 채널에 답한다).
+
+- [ ] **스킬이 모델에게 실제로 보이는가** — 서버 채널에서 "쓸 수 있는 스킬 있어?" 라고 묻는다.
+  기대 결과: `frontend-design` 을 포함한 목록을 답한다.
+  "없다"고 하면 봇의 대답만 보지 말고 **컨테이너 안을 직접 확인한다** — "스킬이 하나도 없다"와
+  "스킬은 들어갔는데 꺼져 있다"(`agent/src/core/agent.ts` 의 `builtinTools` 에서 `"Skill"` 이
+  빠진 경우, `docs/security/capability-model.md` 참고)는 봇의 대답만으로는 구분할 수 없다.
+
+  ```bash
+  docker run --rm <이미지> ls /app/skill-plugin/skills/frontend-design
+  ```
+
+  `SKILL.md` 가 보이면 이미지엔 스킬이 정상적으로 들어간 것이므로 원인은 `builtinTools` 축이다.
+  폴더 자체가 없거나 비어 있으면 이미지 빌드를 의심한다 — 흔한 원인은 `agent/Dockerfile` 의
+  `COPY skill-plugin ./skill-plugin` 누락이다. `agent/.dockerignore` 의 `*.md` 는 원인이
+  아니다 — gitignore 와 달리 도커의 `filepath.Match` 규칙은 `*` 가 "/" 를 넘지 않으므로, 이
+  패턴은 컨텍스트 루트의 `agent/*.md` 만 걸러낼 뿐 `skill-plugin/skills/.../SKILL.md` 처럼
+  경로가 깊은 파일은 원래부터 대상이 아니었다(`!skill-plugin/**/*.md` 예외는 방어적으로 남아
+  있지만, 실제로는 아무것도 되살리지 않는다 — `agent/.dockerignore` 참고).
+
+- [ ] **스킬이 실사용에서 호출되는가** — 서버 채널에서 "간단한 랜딩 페이지 하나 만들어줘" 처럼
+  UI 를 만들게 시킨다.
+  기대 결과: 진행 표시에 `Skill` 호출이 보이고, 결과물이 기본 템플릿 같지 않은 의도적인 디자인
+  선택(타이포그래피·색·여백)을 담는다. 스킬 없이도 그럴듯한 결과가 나올 수 있으므로 **판정
+  근거는 결과물의 인상이 아니라 `Skill` 호출 여부다.**
 
 ## 미완 항목 추적
 

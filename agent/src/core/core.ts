@@ -655,6 +655,18 @@ export class AgentCore {
           // db_query 로 소유자 DB 전체를 읽을 수 있는 턴에 외부로 내보낼 통로까지 열려 있었던
           // 셈). 요약은 이미 끝난 대화를 요약할 뿐 검색이 필요 없으므로, 별도 플래그로 함께 닫는다.
           noWebTools: true,
+          // 스킬도 같은 이유로 닫는다 — 이 턴은 사람이 지켜보지 않고, 요약에 스킬이 필요없다.
+          // 판단(M-4, 후속 리뷰): 위 workerConnected:false 와 달리, 이 systemPrompt 는 스킬이
+          // 닫혔다는 사실을 반영하지 않는다 — buildCapabilityBlock 의 스킬 안내 문장은
+          // PersonaContext 의 어떤 필드로도 조건화돼 있지 않아 이 턴에도 그대로 실린다. 의도적으로
+          // 고치지 않는다: 그 문장은 "있을 수 있습니다 … 있으면"으로 헤지된 존재-확인 안내일 뿐
+          // fs_*/sh_exec 안내처럼 특정 도구를 쓸 수 있다고 단언하지 않고, 이 턴의 프롬프트
+          // (SUMMARY_PROMPT)는 "요약 텍스트만 출력"을 지시해 모델이 스킬 사용을 시도할 여지 자체가
+          // 없다 — workerConnected 불일치가 막는 위험(모델이 실제로 fs_*/sh_exec 를 시도해 되는
+          // 줄 아는 것)과 같은 종류가 아니다. 고치려면 PersonaContext 에 축을 하나 더 넣어야
+          // 하는데, 이 한 줄의 실익이 그 비용에 못 미친다고 보고 넘어간다 — 다음에 같은 불일치를
+          // 다시 발견하면 이 주석부터 읽을 것.
+          noSkills: true,
         });
         if (result.ok && result.text.trim().length > 0) {
           await this.repos.summaries.insert({
