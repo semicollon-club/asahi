@@ -23,7 +23,7 @@ import { CharacterImagesRepo } from "./store/characterImagesRepo.js";
 import { AgentCore } from "./core/core.js";
 import { makeRunAgentTurn } from "./core/agent.js";
 import { DigestRunner, DIGEST_TOPICS, type DigestTopic } from "./core/digest.js";
-import { decideStaleAlerts, type StaleState } from "./core/staleWorker.js";
+import { decideStaleAlerts, decideMissingAlerts, type StaleState, type SeenState } from "./core/staleWorker.js";
 import { DiscordAdapter } from "./adapters/discord.js";
 
 // 비밀값(.env)은 리포 루트(agent/ 바깥, data/ 와 같은 위치)에서 읽는다.
@@ -181,6 +181,9 @@ async function main() {
   // 워커가 낡은 채로 오래 있으면 소유자에게 알린다. 주기는 조각 B 의 자동 갱신 폴링(5분)과
   // 맞춘다 — 그보다 자주 봐야 할 이유가 없다.
   const staleState: StaleState = new Map();
+  // 붙어 있던 워커가 사라진 것도 같은 타이머에서 본다(2026-08-01). 낡음 판정은 "붙어 있는"
+  // 워커만 훑으므로 워커가 통째로 없어지면 조용한데, 실제로 그 상태로 13시간 반이 지나갔다.
+  const seenState: SeenState = new Map();
   const staleTimer = setInterval(() => {
     // FIX(최종 리뷰): decideStaleAlerts 자체가 던지면(예: workersInfo() 가 이 함수의 전제와
     // 어긋나는 값을 주는 경우) 그 예외는 setInterval 콜백 안이라 동기적으로 튀어 오르고, 아래
@@ -188,13 +191,23 @@ async function main() {
     // 없으면 uncaught exception 으로 24/7 봇 프로세스 전체가 죽는다. 그래서 이 콜백 전체를
     // try/catch 로 감싼다: 어떤 예외든 로그만 남기고 다음 5분 주기를 그대로 이어간다.
     try {
-      const alerts = decideStaleAlerts({
-        workers: hub.workersInfo(),
-        botCommit: process.env.RAILWAY_GIT_COMMIT_SHA,
-        now: Date.now(),
-        state: staleState,
-        thresholdMs: 15 * 60_000,
-      });
+      const now = Date.now();
+      const info = hub.workersInfo();
+      const alerts = [
+        ...decideStaleAlerts({
+          workers: info,
+          botCommit: process.env.RAILWAY_GIT_COMMIT_SHA,
+          now,
+          state: staleState,
+          thresholdMs: 15 * 60_000,
+        }),
+        ...decideMissingAlerts({
+          connected: info.map((w) => w.workerId),
+          now,
+          seen: seenState,
+          thresholdMs: 15 * 60_000,
+        }),
+      ];
       if (alerts.length === 0) return;
       // findDmFor 자체의 실패(DB 오류 등)가 setInterval 콜백 밖에서 unhandled rejection 으로
       // 튀어 봇 전체를 죽이지 않도록 catch 한다 — 이 파일의 다른 타이머 콜백과 같은 방어.
