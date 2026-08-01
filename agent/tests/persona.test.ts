@@ -364,6 +364,54 @@ describe("buildSystemPrompt — 서버 분기는 공용 기억 저장을 안내�
   });
 });
 
+// Important 5(최종 전체 브랜치 리뷰) — persona.ts:189(소유자 서버·워커 미연결 분기)가
+// "공용 기억 조회(recall)만 가능합니다"라고 단정하면서 두 줄 아래에서 "remember 로 저장하면
+// ... 동아리 공용 기억이 되어"라고 말해 자기모순이었다. 새 불릿(remember 안내)을 더하면서
+// 원래 문장의 "만"을 못 지운 것이 원인이다 — 기존 테스트가 toContain("동아리 공용")만 봐서
+// 이 모순을 못 잡았다. :179(연결 분기)도 능력을 열거하면서 remember·forget 을 빠뜨렸다.
+// 그리고 이 파일에 forget 이 한 번도 등장하지 않았다 — 소유자는 DM·서버 양쪽에서 forget 을
+// 받는데 안내가 없으면 "도구가 열려도 배운 상태가 아니면 시도하지 않는다"는 이 태스크
+// 자신의 논리가 그대로 적용된다.
+describe("buildSystemPrompt — 소유자 서버 능력 안내가 remember 가능 여부와 모순되지 않는다(Important 5)", () => {
+  it("워커 미연결이어도 'recall 만 가능하다'고 단정하지 않는다 — remember 도 가능하므로(모순 방지)", () => {
+    // toContain 만으로는 이 모순을 못 잡는다(리뷰 지적) — 정확히 이 낡은 단정 문구가 없는지
+    // 직접 확인한다.
+    const cap = capabilitySection(buildSystemPrompt({ role: "owner", isPrivate: false, isOwner: true, workerConnected: false }));
+    expect(cap).not.toMatch(/recall\)만\s*가능/);
+    expect(cap).toContain("동아리 공용");
+  });
+
+  it("워커 연결 시 능력을 열거하는 첫 문장 자체에 remember 가 포함된다(예전엔 recall·PC 작업만 열거해 remember·forget 을 빠뜨렸다)", () => {
+    const cap = capabilitySection(buildSystemPrompt({ role: "owner", isPrivate: false, isOwner: true, workerConnected: true }));
+    const firstBullet = cap.split("\n").find((l) => l.startsWith("- 공개 채널(서버) 대화입니다"));
+    expect(firstBullet).toBeDefined();
+    expect(firstBullet).toMatch(/remember/);
+  });
+});
+
+describe("buildSystemPrompt — persona 가 forget 을 안내한다(Important 5, 회귀 전엔 한 번도 등장하지 않았다)", () => {
+  it("소유자 DM(워커 연결·미연결) 능력 안내에 forget 이 등장한다", () => {
+    for (const workerConnected of [true, false]) {
+      const p = buildSystemPrompt({ role: "owner", isPrivate: true, isOwner: true, workerConnected });
+      expect(capabilitySection(p)).toMatch(/forget/);
+    }
+  });
+
+  it("소유자 서버(워커 연결·미연결) 능력 안내에 forget 이 등장한다", () => {
+    for (const workerConnected of [true, false]) {
+      const p = buildSystemPrompt({ role: "owner", isPrivate: false, isOwner: true, workerConnected });
+      expect(capabilitySection(p)).toMatch(/forget/);
+    }
+  });
+
+  it("손님(DM·서버)에는 forget 을 언급하지 않는다 — 도구 자체가 없다(allowedToolsFor 와 일치)", () => {
+    for (const isPrivate of [true, false]) {
+      const p = buildSystemPrompt({ role: "allowed", isPrivate, isOwner: false, workerConnected: true });
+      expect(capabilitySection(p)).not.toMatch(/forget/);
+    }
+  });
+});
+
 describe("deriveRapportStage", () => {
   it("10 미만이면 0(서먹)", () => {
     expect(deriveRapportStage(0)).toBe(0);
