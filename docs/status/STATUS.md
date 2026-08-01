@@ -178,6 +178,13 @@ skip 3건의 성격은 서로 다르다. 1건은 Postgres READ ONLY 트랜잭션
 
 ## 알려진 한계
 
+- **정기 게시 턴이 `remember`를 무조건 받는다(2026-08-02, 미해결)**: `DigestRunner.execute`는
+  `noRemoteTools`/`noSkills`로 원격 도구·스킬은 막지만, `remember`/`recall`은 `allowedToolsFor`의
+  손님 서버 행에 조건 없이 포함돼 있어 막을 방법이 없다. 사람이 지켜보지 않는 타이머로 신뢰할
+  수 없는 웹 검색 결과를 읽는 이 턴이 그 안에 심긴 지시로 `remember`를 호출하면 조작된 내용이
+  동아리 공용 기억(`scope='shared'`)에 저장되어 전 부원에게 노출될 수 있다 — 작성자 표시도
+  이 턴의 `userId`(`"digest"`)가 회원과 매치되지 않아 생략된다. 상세는
+  `docs/security/capability-model.md` "정기 게시" 단락 참고.
 - **전송 유실 가능성**: 하드 크래시가 디스코드 응답 전송 도중 발생하면 그 응답 1건은 재전송되지 않는다
   (생성된 텍스트 자체는 이벤트 로그에 보존된다). 정상적인 그레이스풀 종료는 flush로 처리되어 유실이
   없다.

@@ -195,6 +195,19 @@ Asahi 비서는 대화·모델 호출·기억·세션을 전담하는 **봇** �
 세운다 — `noRemoteTools` 를 세운 것과 같은 이유(사람이 안 보는 타이머 + 신뢰할 수 없는 웹
 검색 결과)이고, 뉴스 조사에 도움이 되는 스킬이 없어 잃는 기능도 없다.
 
+**`remember`/`recall`에는 이런 차단 스위치가 아직 없다(2026-08-02, 미해결).**
+`allowedToolsFor`(위 "도구셋 결정" 참고)는 `workerConnected`·`webToolsEnabled` 만 매개변수로
+받고, 손님 서버/스레드 행의 `remember`/`recall`은 그 값과 무관하게 항상 배열에 들어간다 —
+`noRemoteTools`/`noWebTools`/`noSkills` 와 짝을 이루는 `noMemoryTools` 류 스위치가 없다는
+뜻이다. 그 결과 이 턴도 `remember`를 그대로 받는다: 사람이 지켜보지 않는 타이머로 돌면서
+신뢰할 수 없는 웹 검색 결과를 읽어들이다 그 안에 심긴 지시로 `remember`를 호출하면, 조작된
+내용이 `scope='shared'`(동아리 공용 기억)로 저장되어 모든 부원에게 `recall`로 노출될 수
+있다. `renderMemories`의 작성자 표시도 이 턴의 `userId`(`"digest"`)가 어떤 회원의 표시
+이름과도 매치되지 않아 생략되므로, 오히려 출처가 불분명한 "공지"처럼 더 그럴듯하게 보일 수
+있다(`memories.user_id`는 외래키 제약이 없어 이 삽입 자체는 DB 단에서도 막히지 않는다). 이
+문서를 여는 다음 사람이 `noRemoteTools`/`noSkills`와 같은 자리에 이 축도 추가하는 것을
+검토해야 한다.
+
 **판정 축이 "어디서 실행 중인가"에서 "워커가 붙어 있는가"로 바뀐 것이 이 구조의 핵심이다.**
 예전에는 `deployTarget="cloud"`(Railway 컨테이너)면 소유자 DM이라도 파일/Bash 를 통째로
 뺐다 — 클라우드에는 소유자 PC가 없기 때문이다. 지금은 `workerConnected`(그 소유자의 워커가
