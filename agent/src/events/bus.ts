@@ -1,4 +1,5 @@
 import type { ImageRef } from "../core/images.js";
+import type { FileRef } from "../core/attachments.js";
 
 export type ChannelKind = "discord";
 
@@ -22,7 +23,11 @@ export type ConversationHint = {
   commandOnly?: true;
 };
 
-export type UserMessageEvent = { type: "user_message"; channel: ChannelKind; channelRef: string; text: string; ts: number; hint?: ConversationHint; images?: ImageRef[] };
+// rejectedFiles: filterFileAttachments(attachments.ts)가 걸러낸 첨부의 거절 사유 문자열
+// (예: "big.pdf(너무 큼)"). files 와 달리 워커에 내려받을 것이 없으므로 FileRef 가 아니라
+// 사유 텍스트 그대로 나른다 — core.ts 가 이 값을 failedFiles 의 초기값으로 얹어야 거절된
+// 첨부가 조용히 사라지지 않는다(최종 리뷰 Important).
+export type UserMessageEvent = { type: "user_message"; channel: ChannelKind; channelRef: string; text: string; ts: number; hint?: ConversationHint; images?: ImageRef[]; files?: FileRef[]; rejectedFiles?: string[] };
 export type AssistantMessageEvent = { type: "assistant_message"; channel: ChannelKind; channelRef: string; text: string; ts: number };
 export type SystemNoticeEvent = { type: "system_notice"; channel: ChannelKind; channelRef: string; text: string; ts: number };
 // 턴 처리 중 진행 상황(도구 호출/결과/답변 시작 등)을 알리는 이벤트(2B). 실제 표시(전송·편집)는 어댑터 쪽 책임.

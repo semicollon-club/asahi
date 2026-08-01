@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import fs from "node:fs";
+import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -32,14 +33,16 @@ describe("워커 실행기", () => {
   });
   afterEach(() => fs.rmSync(root, { recursive: true, force: true }));
 
-  it("도구 12개를 정확히 노출한다", () => {
+  it("도구 13개를 정확히 노출한다", () => {
     // Task 8: fs_mkdir 추가. 모델이 부르는 도구 목록(REMOTE_TOOL_NAMES)에는 안 들어가지만, 워커
     // 실행기 자체는 다른 fs_* 와 나란히 이 객체에 존재한다.
     // Task 4: fs_tree 추가 — 폴더 구조 전용 조회 도구(모델이 부르는 목록에도 들어간다).
     // M2 Task 2: proc_start·proc_stop·proc_list·proc_logs 추가 — 장기 실행 프로세스를 PM2 에
     // 위임하는 실행기 넷(모델이 부르는 도구 목록에도 들어간다).
+    // Task 2(파일 전달): file_fetch 추가 — fs_mkdir 과 같은 이유로 REMOTE_TOOL_NAMES 밖이다.
+    // 봇이 hub.call 로 직접 부른다(모델이 URL 을 정하게 하지 않는다).
     expect(Object.keys(ex).sort()).toEqual([
-      "fs_edit", "fs_glob", "fs_grep", "fs_mkdir", "fs_read", "fs_tree", "fs_write",
+      "file_fetch", "fs_edit", "fs_glob", "fs_grep", "fs_mkdir", "fs_read", "fs_tree", "fs_write",
       "proc_list", "proc_logs", "proc_start", "proc_stop", "sh_exec",
     ]);
   });
@@ -315,6 +318,75 @@ describe("워커 실행기", () => {
       expect(r.ok).toBe(true);
       expect(r.content).not.toContain(OUTSIDE_MARKER);
       expect(r.content).not.toContain(OUTSIDE_FILE_PREFIX);
+    });
+  });
+
+  // Task 2: 봇이 디스코드 첨부를 미니PC 에 직접 받아 저장하는 실행기. 모델이 부르는 도구가
+  // 아니다 — REMOTE_TOOL_NAMES(core/remoteTools.ts)에 없으므로 mcp__asahi__* 로 노출되지 않고,
+  // 봇이 remoteTools.ts 를 거치지 않고 hub.call(...) 로 직접 부른다(Task 3). 경로가 아니라
+  // dir·name 을 따로 받는 이유: 봇은 리눅스 컨테이너, 워커는 윈도우라 봇에서 path.join 하면
+  // '/' 로 이어붙어 워커 경로와 어긋난다 — 조립은 파일이 실제로 놓일 이 기계(워커)가 한다.
+  describe("file_fetch — 봇이 부르는 첨부 저장(모델 도구가 아니다)", () => {
+    it("허용 폴더 밖은 거부한다", async () => {
+      const ex = makeExecutors([root]);
+      const r = await ex.file_fetch({ url: "https://cdn.discordapp.com/attachments/1/2/a.pdf", dir: path.join(root, ".."), name: "escape.pdf" });
+      expect(r.ok).toBe(false);
+      expect(r.content).toContain("워커 작업 폴더 밖");
+    });
+
+    it("이름으로 폴더를 벗어나려 해도 거부한다", async () => {
+      // 봇이 safeFileName 으로 이미 걸렀지만 워커가 다시 막는다 — 봇을 신뢰하지 않는다.
+      const ex = makeExecutors([root]);
+      const r = await ex.file_fetch({ url: "https://cdn.discordapp.com/attachments/1/2/a.pdf", dir: root, name: "../escape.pdf" });
+      expect(r.ok).toBe(false);
+    });
+
+    it("디스코드 CDN 이 아닌 주소는 거부한다", async () => {
+      // 봇이 이미 실제 첨부에서 URL 을 꺼내지만, 워커는 봇을 신뢰하지 않고 다시 판정한다 —
+      // 이 리포의 이중 게이트 원칙(봇 1차 필터 + 워커 최종 판정) 그대로다.
+      const ex = makeExecutors([root]);
+      const r = await ex.file_fetch({ url: "https://evil.test/a.pdf", dir: root, name: "a.pdf" });
+      expect(r.ok).toBe(false);
+      expect(r.content).toContain("디스코드");
+    });
+
+    it("받아서 바이너리 그대로 파일로 쓴다", async () => {
+      // utf8 로 쓰면 0x00·0x80 이상 바이트가 깨진다 — PDF·docx 는 전부 바이너리다.
+      const bytes = new Uint8Array([0, 1, 2, 255, 128]);
+      const ex = makeExecutors([root], {
+        fetchImpl: (async () => new Response(bytes, { status: 200 })) as unknown as typeof fetch,
+      });
+      const r = await ex.file_fetch({ url: "https://cdn.discordapp.com/attachments/1/2/a.pdf", dir: root, name: "a.pdf" });
+      expect(r.ok).toBe(true);
+      expect(r.content).toBe(path.join(root, "a.pdf"));
+      expect(await fsp.readFile(path.join(root, "a.pdf"))).toEqual(Buffer.from(bytes));
+    });
+
+    it("응답이 실패면 파일을 만들지 않는다", async () => {
+      const ex = makeExecutors([root], {
+        fetchImpl: (async () => new Response("nope", { status: 404 })) as unknown as typeof fetch,
+      });
+      const r = await ex.file_fetch({ url: "https://cdn.discordapp.com/attachments/1/2/a.pdf", dir: root, name: "missing.pdf" });
+      expect(r.ok).toBe(false);
+      expect(r.content).toContain("404");
+      await expect(fsp.access(path.join(root, "missing.pdf"))).rejects.toThrow();
+    });
+
+    // M-3(최종 리뷰, Minor): CDN 이 응답을 멈추면 예전엔 허브의 120초 호출 타임아웃에만 기대야
+    // 했다 — 첨부 최대 3개를 순차로 받으므로 한 턴이 최대 6분 묶일 수 있었다. downloadImages
+    // (core/images.ts)와 같은 AbortController 패턴을 따랐는지, "신호를 받아야만 끝나는" 가짜
+    // fetch 로 확인한다(fileFetchTimeoutMs 를 짧게 주입해 실제로 10초를 기다리지 않는다).
+    it("CDN 이 응답하지 않으면 타임아웃으로 실패하고 파일을 만들지 않는다(무기한 대기하지 않는다)", async () => {
+      const hangingFetch = ((_url: string, init?: { signal?: AbortSignal }) =>
+        new Promise((_resolve, reject) => {
+          // 실제 fetch(undici)가 abort 시 던지는 것과 같은 성격의 오류(AbortError)로 reject 한다.
+          init?.signal?.addEventListener("abort", () => reject(new DOMException("The operation was aborted.", "AbortError")));
+        })) as unknown as typeof fetch;
+      const ex = makeExecutors([root], { fetchImpl: hangingFetch, fileFetchTimeoutMs: 20 });
+      const r = await ex.file_fetch({ url: "https://cdn.discordapp.com/attachments/1/2/a.pdf", dir: root, name: "stuck.pdf" });
+      expect(r.ok).toBe(false);
+      expect(r.content).toContain("받아오지 못했어요");
+      await expect(fsp.access(path.join(root, "stuck.pdf"))).rejects.toThrow();
     });
   });
 });

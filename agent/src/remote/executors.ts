@@ -15,6 +15,7 @@ import {
 } from "./tree.js";
 import { pathFlavorOf, isPathWithinAny } from "../core/paths.js";
 import { parsePm2List, renderProcList, procNameFor, parseProcName, type ProcInfo } from "./proc.js";
+import { isDiscordCdnUrl } from "../core/attachments.js";
 
 export type ExecResult = { ok: boolean; content: string };
 export type Executors = Record<string, (args: Record<string, unknown>) => Promise<ExecResult>>;
@@ -24,6 +25,13 @@ export type Executors = Record<string, (args: Record<string, unknown>) => Promis
 export const OUTPUT_MAX = 30000;
 const READ_DEFAULT_LIMIT = 2000;
 const SH_DEFAULT_TIMEOUT_MS = 120_000;
+// M-3(최종 리뷰, Minor): file_fetch 의 fetch 에 타임아웃이 없으면 CDN 이 멈췄을 때 허브의
+// 120초 호출 타임아웃(hub.ts 의 DEFAULT_CALL_TIMEOUT_MS)에만 기대게 된다. core.ts 는 첨부
+// 최대 3개(attachments.ts 의 FILE_LIMITS.maxCount)를 이 안에서 순차로 받아오므로, CDN 하나가
+// 멈추면 한 턴이 최대 6분(120초×3)까지 묶일 수 있다. downloadImages(core/images.ts)가 이미
+// 같은 문제(디스코드 CDN 다운로드)를 10초 AbortController 로 풀어 뒀으므로 그 방식을 그대로
+// 따른다 — 두 곳이 다른 타임아웃을 쓰면 왜 다른지 설명할 이유가 없다.
+const DEFAULT_FILE_FETCH_TIMEOUT_MS = 10_000;
 // sh_exec 는 "resolve 를 정확히 한 번, 항상, 유한한 시간 안에" 를 보장해야 한다. 그 보장을
 // 3단계로 나눠 각각 유예 시간을 둔다 — close 이벤트가 오면 그 즉시 남은 단계를 모두 건너뛰고
 // resolve 하므로, 정상적으로 죽는 프로세스는 아래 두 상수를 전혀 기다리지 않는다. 이 값들은
@@ -400,11 +408,17 @@ function strMap(v: unknown): Record<string, string> {
   return out;
 }
 
-export function makeExecutors(roots: string[], opts: { runPm2?: RunPm2; scriptDir?: string } = {}): Executors {
+export function makeExecutors(
+  roots: string[],
+  opts: { runPm2?: RunPm2; scriptDir?: string; fetchImpl?: typeof fetch; fileFetchTimeoutMs?: number } = {},
+): Executors {
   // proc_start 가 회원 명령을 적을 스크립트 파일 위치(DEFAULT_SCRIPT_DIR·writeStartScript 선언부
   // 참고) — 테스트가 실제 OS 임시폴더를 더럽히지 않고 파일 내용을 직접 들여다볼 수 있도록 주입
   // 지점을 열어 둔다. 프로덕션(worker.ts)은 opts 를 생략하므로 항상 기본값을 쓴다.
   const scriptDir = opts.scriptDir ?? DEFAULT_SCRIPT_DIR;
+  // file_fetch(아래)의 타임아웃. 테스트가 실제로 10초를 기다리지 않고도 타임아웃 경로를
+  // 재현할 수 있도록 주입 지점을 열어 둔다 — scriptDir 과 같은 이유.
+  const fileFetchTimeoutMs = opts.fileFetchTimeoutMs ?? DEFAULT_FILE_FETCH_TIMEOUT_MS;
 
   // Finding 3(Minor, 후속 리뷰): DEFAULT_SCRIPT_DIR 선언부의 "회원 폴더(roots) 밖에 둔다"는
   // 지금까지 강제되지 않는 주석일 뿐이었다 — roots(WORKER_ROOTS)에 언젠가 사용자 프로필 폴더가
@@ -787,6 +801,47 @@ export function makeExecutors(roots: string[], opts: { runPm2?: RunPm2; scriptDi
         return { ok: true, content: "(완료)" };
       } catch (e) {
         return { ok: false, content: `폴더를 만들지 못했어요: ${e instanceof Error ? e.message : String(e)}` };
+      }
+    },
+
+    // 봇이 직접 부른다 — REMOTE_TOOL_NAMES 에 없으므로 모델에게 도구로 노출되지 않는다.
+    // 모델이 URL 을 정하게 하면 워커가 임의 주소를 받아오는 표면이 열리는데, 그 표면 자체가 없다.
+    async file_fetch(args) {
+      const dir = str(args.dir);
+      const name = str(args.name);
+      if (!dir || !name) return { ok: false, content: "dir·name 인자가 필요해요." };
+      // 조립은 파일이 실제로 놓일 이 기계가 한다 — 봇은 리눅스, 워커는 윈도우라 봇에서
+      // 이어붙이면 구분자가 어긋난다. gate 가 그 결과를 허용 폴더 기준으로 최종 판정하므로
+      // 이름으로 폴더를 벗어나려는 시도도 여기서 막힌다(봇의 safeFileName 과 이중 게이트).
+      const g = gate(path.join(dir, name));
+      if (!g.ok) return g.res;
+      const url = str(args.url);
+      // 봇이 이미 실제 첨부 객체에서 꺼낸 URL 이지만 여기서 다시 판정한다 — 봇 1차 필터와
+      // 워커 최종 판정 두 겹은 이 리포의 원칙이고(remoteTools.ts 주석), 이 경로만 예외로 둘
+      // 이유가 없다.
+      if (!url || !isDiscordCdnUrl(url)) {
+        return { ok: false, content: "디스코드 첨부 주소가 아니라 받아오지 않았어요." };
+      }
+      try {
+        // M-3: downloadImages(core/images.ts)와 같은 AbortController 패턴 — 위 상수 선언부 참고.
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), fileFetchTimeoutMs);
+        let res: Response;
+        try {
+          res = await (opts.fetchImpl ?? fetch)(url, { signal: ctrl.signal });
+        } finally {
+          clearTimeout(timer);
+        }
+        if (!res.ok) return { ok: false, content: `받아오지 못했어요(HTTP ${res.status}).` };
+        const buf = Buffer.from(await res.arrayBuffer());
+        // fs_write 와 달리 인코딩을 주지 않는다 — 여기는 텍스트가 아니라 바이트를 그대로
+        // 옮기는 것이 목적이다. "utf8" 을 주면 PDF·docx 같은 바이너리가 그 인코딩으로
+        // 재해석되며 0x00·0x80 이상 바이트가 깨진다.
+        await fs.mkdir(path.dirname(g.path), { recursive: true });
+        await fs.writeFile(g.path, buf);
+        return { ok: true, content: g.path };
+      } catch (err) {
+        return { ok: false, content: `받아오지 못했어요: ${String(err)}` };
       }
     },
 
