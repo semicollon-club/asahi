@@ -85,6 +85,11 @@ export type Incoming = {
   guildId?: string; parentChannelId?: string; content: string; messageId: string;
   images: ImageRef[];
   files: FileRef[];
+  // filterFileAttachments 가 거절한 첨부의 사유 문자열(예: "big.pdf(너무 큼)"). 최종 리뷰
+  // Important — 예전엔 이 값을 어디서도 읽지 않아 크기 초과·이름 위험·개수 초과로 거절된
+  // 첨부가 마커도 안내도 로그도 없이 사라졌다. images 쪽 skipped(형식 미지원 등)는 이 브랜치
+  // 이전부터 같은 자리에서 버려지던 것이라 손대지 않는다 — 범위를 넓히지 않는다.
+  rejectedFiles: string[];
 };
 export type RouteDecision =
   | { kind: "ignore" }            // 게이트 탈락 / 관심 없는 메시지
@@ -254,7 +259,10 @@ export class DiscordAdapter {
     const { images } = filterImageAttachments(
       [...message.attachments.values()].map((a) => ({ url: a.url, contentType: a.contentType, name: a.name, size: a.size })),
     );
-    const { files } = filterFileAttachments(
+    // skipped(최종 리뷰 Important): 거절 사유를 rejectedFiles 로 나른다 — images 쪽 skipped 는
+    // 이 브랜치 이전부터 버려지던 별개의 자리라 여기서 함께 고치지 않는다(위 Incoming.rejectedFiles
+    // 선언부 참고).
+    const { files, skipped: rejectedFiles } = filterFileAttachments(
       [...message.attachments.values()].map((a) => ({ url: a.url, contentType: a.contentType, name: a.name, size: a.size })),
     );
     const incoming: Incoming = {
@@ -269,6 +277,7 @@ export class DiscordAdapter {
       messageId: message.id,
       images,
       files,
+      rejectedFiles,
     };
 
     const role = await this.users.getRole(incoming.userId);
@@ -317,6 +326,7 @@ export class DiscordAdapter {
       hint,
       images: incoming.images.length > 0 ? incoming.images : undefined,
       files: incoming.files.length > 0 ? incoming.files : undefined,
+      rejectedFiles: incoming.rejectedFiles.length > 0 ? incoming.rejectedFiles : undefined,
     });
   }
 

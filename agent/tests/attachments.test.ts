@@ -96,20 +96,41 @@ describe("isDiscordCdnUrl", () => {
   });
 });
 
-describe("uploadDirFor — 저장 위치는 봇이 정한다", () => {
+describe("uploadDirFor — 저장 위치는 봇이 정한다(isOwner 로 신원을 직접 구분한다)", () => {
   it("손님은 자기 몫으로 좁혀진 폴더에 저장한다", () => {
-    expect(uploadDirFor({ workspaceDirs: ["C:\\ws\\111"], workerRoots: ["C:\\ws"] })).toBe("C:\\ws\\111");
+    expect(uploadDirFor({ isOwner: false, workspaceDirs: ["C:\\ws\\111"], workerRoots: ["C:\\ws"] })).toBe("C:\\ws\\111");
   });
 
   it("소유자는 워커 루트에 저장한다", () => {
     // resolveGuestWorkspaceDirs(core.ts)는 소유자에게 undefined 를 돌려준다 — scopeDirs 가
     // 소유자를 좁히지 않아 "그 사람의 폴더" 하나로 특정되지 않기 때문이다. 그래서 루트를 쓴다.
-    expect(uploadDirFor({ workspaceDirs: undefined, workerRoots: ["C:\\ws"] })).toBe("C:\\ws");
+    expect(uploadDirFor({ isOwner: true, workspaceDirs: undefined, workerRoots: ["C:\\ws"] })).toBe("C:\\ws");
   });
 
-  it("둘 다 비면 null 이다(저장할 곳이 없다)", () => {
-    expect(uploadDirFor({ workspaceDirs: [], workerRoots: [] })).toBeNull();
-    expect(uploadDirFor({ workspaceDirs: undefined, workerRoots: [] })).toBeNull();
+  // 최종 리뷰 Critical(폴더 격리 우회) — 예전 구현(workspaceDirs?.[0] ?? workerRoots[0] ?? null)은
+  // 손님의 workspaceDirs 가 비어도 workerRoots 가 하나라도 있으면 그리로 폴백했다. 워커 루트는
+  // 공유 폴더라 다른 부원 폴더들과 나란히 있으므로, 이건 폴더 격리를 완전히 우회하는 결함이었다.
+  // workerRoots 가 채워진 채로(연결된 워커는 항상 roots 를 보고하므로 실제로는 거의 항상 그렇다)
+  // 손님의 workspaceDirs 만 비는 이 시나리오에서만 결함이 드러난다 — workerRoots 도 함께 비는
+  // 조합으로는 신구 구현이 똑같이 null 을 내놔 결함을 가린다(예전 attachments.test.ts 의 공백
+  // 테스트가 정확히 그 조합만 썼다).
+  it("손님은 workspaceDirs 가 빈 배열(allow_dir 미등록)이어도 워커 루트로 떨어지지 않는다", () => {
+    expect(uploadDirFor({ isOwner: false, workspaceDirs: [], workerRoots: ["C:\\ws"] })).toBeNull();
+  });
+
+  it("손님은 workspaceDirs 조회 자체가 실패해(undefined) 도 워커 루트로 떨어지지 않는다", () => {
+    // resolveGuestWorkspaceDirs 의 catch(allowedDirs.list 가 던짐)가 undefined 를 돌려주는
+    // 경로 — 값의 모양이 소유자(항상 undefined)와 같아지는 지점이라, isOwner 없이 모양만
+    // 보면 구분이 무너진다.
+    expect(uploadDirFor({ isOwner: false, workspaceDirs: undefined, workerRoots: ["C:\\ws"] })).toBeNull();
+  });
+
+  it("소유자는 워커가 작업 폴더를 하나도 보고하지 않으면 null 이다(저장할 곳이 없다)", () => {
+    expect(uploadDirFor({ isOwner: true, workspaceDirs: undefined, workerRoots: [] })).toBeNull();
+  });
+
+  it("손님은 워커 루트도 비어 있으면 당연히 null 이다", () => {
+    expect(uploadDirFor({ isOwner: false, workspaceDirs: [], workerRoots: [] })).toBeNull();
   });
 });
 

@@ -243,12 +243,19 @@ export class AgentCore {
     // 메시지부터 직렬화하려면 힌트에서 즉시 알 수 있는 discordChannelId 를 큐 키로 써야 한다 —
     // 그러지 않으면 같은 채널의 두 메시지가 동시에 도착했을 때 resolveConversation 이 서로의
     // 결과를 보지 못하고 대화 행을 중복 생성하거나(멱등 깨짐) 메시지 저장 순서가 뒤바뀔 수 있다.
-    this.enqueue(this.ingestChains, hint.discordChannelId, () => this.ingest(hint, e.ts, e.text, e.images ?? [], e.files ?? []));
+    this.enqueue(this.ingestChains, hint.discordChannelId, () => this.ingest(hint, e.ts, e.text, e.images ?? [], e.files ?? [], e.rejectedFiles ?? []));
   }
 
   // durable 저장만 담당(짧다) — 크래시 복구 불변식: 이 함수가 끝나면 메시지는 반드시
   // processed=false 로 DB 에 있다. 뒤이은 LLM 턴은 turnChains 로 넘겨 별도로 직렬화한다.
-  private async ingest(hint: ConversationHint, ts: number, text: string, images: ImageRef[], files: FileRef[]): Promise<void> {
+  private async ingest(hint: ConversationHint, ts: number, text: string, images: ImageRef[], files: FileRef[], rejectedFiles: string[]): Promise<void> {
+    // M-2(최종 리뷰, 의도적으로 고치지 않음): 아래의 조기 반환 갈래들(이 if 블록·바로 아래의
+    // /새세션·/help·조사 예약어 — 전부 messages.insert/runConversationTurn 이전에 return 한다)은
+    // images/files/rejectedFiles 를 전혀 참조하지 않고 그대로 버린다. 이 경로들은 예약어 하나만
+    // 처리하고 LLM 턴도 메시지 저장도 열지 않으므로, 그 메시지에 마침 첨부가 함께 왔어도(예약어와
+    // 파일을 같은 메시지로 보내는 드문 경우) 그걸 실을 자리가 없다. 이미지가 이미 겪던 것과 같은
+    // 구조적 성질이고 이 브랜치가 만든 회귀가 아니다 — 다음에 이 gap 을 다시 "발견"하면 재조사
+    // 없이 여기부터 읽을 것.
     // 일반 채널에서 멘션 없이 들어온 예약어(어댑터의 channel-command 경로). 대화를 조회하지도
     // 만들지도 않고 그 자리에서 끝낸다 — 여기서 conversations 행을 만들면 그 채널이 봇 대화로
     // 굳어(decideRoute 의 hasConversation) 이후 그 채널의 모든 메시지에 답하기 시작한다.
@@ -297,7 +304,7 @@ export class AgentCore {
       conversationId: conv.id, ts, role: "user", userId: hint.userId,
       discordMessageId: hint.discordMessageId, content: buildImageMarker(text, images), processed: false,
     });
-    this.enqueue(this.turnChains, hint.discordChannelId, () => this.runConversationTurn(conv.id, hint.userId, hint.role as "owner" | "allowed", text, messageId, images, files));
+    this.enqueue(this.turnChains, hint.discordChannelId, () => this.runConversationTurn(conv.id, hint.userId, hint.role as "owner" | "allowed", text, messageId, images, files, rejectedFiles));
   }
 
   // 정기 게시 예약어(/대회·/개발뉴스)를 즉시 실행한다. 스케줄의 lastRun 은 건드리지 않는다 —
@@ -431,7 +438,7 @@ export class AgentCore {
     }
   }
 
-  private async runConversationTurn(convId: number, userId: string, role: "owner" | "allowed", text: string, messageId: number, images: ImageRef[] = [], files: FileRef[] = []): Promise<void> {
+  private async runConversationTurn(convId: number, userId: string, role: "owner" | "allowed", text: string, messageId: number, images: ImageRef[] = [], files: FileRef[] = [], rejectedFiles: string[] = []): Promise<void> {
     try {
       const conv = await this.repos.conversations.getById(convId);
       if (!conv) return;
@@ -487,7 +494,13 @@ export class AgentCore {
       // 경로 조립은 워커가 한다. 봇은 리눅스 컨테이너고 워커는 윈도우라 여기서 이어붙이면
       // 구분자가 어긋난다 — 폴더와 이름을 따로 넘긴다.
       const savedFiles: string[] = [];
-      const failedFiles: string[] = [];
+      // 최종 리뷰 Important — 워커에 내려놓기도 전에 거절된 첨부(크기 초과·이름 위험·개수 초과 등,
+      // filterFileAttachments 가 이미 사유까지 문자열로 만들어 둔다: "이름(너무 큼)" 등)를
+      // 초기값으로 얹는다. 이걸 빠뜨리면 거절 사유가 discord.ts 의 skipped 배열에서 만들어진 뒤
+      // 아무 데도 읽히지 않고 사라진다 — 조용히 사라지는 첨부를 없애는 것이 이 기능의 존재
+      // 이유이므로, 워커 단계 실패(아래 for 문)와 같은 목록·같은 마커(buildFileMarker)로 합쳐야
+      // 한다.
+      const failedFiles: string[] = [...rejectedFiles];
       if (files.length > 0) {
         const hub = this.hub;
         if (worker === null || hub === undefined) {
@@ -496,11 +509,16 @@ export class AgentCore {
           for (const f of files) failedFiles.push(`${f.name}(워커가 연결돼 있지 않아 저장 못 함)`);
         } else {
           // 워커는 붙어 있는데 저장할 폴더를 못 찾은 경우(uploadDirFor 가 null — 손님은
-          // allowed_dirs 미등록으로 workspaceDirs 가 비고, 소유자는 워커가 작업 폴더를 하나도
-          // 보고하지 않은 경우)는 연결 문제가 아니다. 위와 같은 문구를 쓰면 사람이 워커 연결부터
-          // 확인하러 가서 헛수고한다 — 원인마다 다른 문구를 내야 그 사람이 맞는 곳(허용 폴더
-          // 등록)을 본다.
-          const dir = uploadDirFor({ workspaceDirs, workerRoots: hub.rootsOf(worker.workerId) });
+          // allowed_dirs 미등록/조회실패로 workspaceDirs 가 비고, 소유자는 워커가 작업 폴더를
+          // 하나도 보고하지 않은 경우)는 연결 문제가 아니다. 위와 같은 문구를 쓰면 사람이 워커
+          // 연결부터 확인하러 가서 헛수고한다 — 원인마다 다른 문구를 내야 그 사람이 맞는 곳
+          // (허용 폴더 등록)을 본다.
+          //
+          // 최종 리뷰 Critical: isOwner 를 반드시 함께 넘긴다(attachments.ts 의 uploadDirFor
+          // 선언부 참고) — 신원 없이 workspaceDirs 의 모양만 보면 "손님인데 폴더가 없다"와
+          // "소유자라 안 좁힌다"가 같은 모양이 될 수 있어, 손님이 워커 루트로 조용히 폴백하는
+          // 폴더 격리 우회가 생겼었다.
+          const dir = uploadDirFor({ isOwner, workspaceDirs, workerRoots: hub.rootsOf(worker.workerId) });
           if (dir === null) {
             for (const f of files) failedFiles.push(`${f.name}(허용된 저장 폴더가 없어 저장 못 함)`);
           } else {
@@ -618,6 +636,12 @@ export class AgentCore {
         await this.repos.messages.markProcessed(m.id);
         continue;
       }
+      // M-1(최종 리뷰, 의도적으로 고치지 않음): images/files/rejectedFiles 없이(전부 기본값 [])
+      // 재개한다. DB 에는 마커 텍스트(§6, buildImageMarker/buildFileMarker 가 만든 문자열)만
+      // 남고 원본 첨부 참조(다운로드 URL 등)는 애초에 저장하지 않으므로, 크래시를 넘어 되살릴
+      // 값 자체가 없다 — 이미지가 이미 겪던 것과 같은 구조적 성질이고 이 브랜치가 만든 회귀가
+      // 아니다. 크래시 시점에 거절됐던 첨부의 사유도 같은 이유로 이 경로에서는 다시 나타나지
+      // 않는다.
       this.enqueue(this.turnChains, conv.discordChannelId, () => this.runConversationTurn(conv.id, userId, role, m.content, m.id));
     }
   }

@@ -25,6 +25,13 @@ export type Executors = Record<string, (args: Record<string, unknown>) => Promis
 export const OUTPUT_MAX = 30000;
 const READ_DEFAULT_LIMIT = 2000;
 const SH_DEFAULT_TIMEOUT_MS = 120_000;
+// M-3(최종 리뷰, Minor): file_fetch 의 fetch 에 타임아웃이 없으면 CDN 이 멈췄을 때 허브의
+// 120초 호출 타임아웃(hub.ts 의 DEFAULT_CALL_TIMEOUT_MS)에만 기대게 된다. core.ts 는 첨부
+// 최대 3개(attachments.ts 의 FILE_LIMITS.maxCount)를 이 안에서 순차로 받아오므로, CDN 하나가
+// 멈추면 한 턴이 최대 6분(120초×3)까지 묶일 수 있다. downloadImages(core/images.ts)가 이미
+// 같은 문제(디스코드 CDN 다운로드)를 10초 AbortController 로 풀어 뒀으므로 그 방식을 그대로
+// 따른다 — 두 곳이 다른 타임아웃을 쓰면 왜 다른지 설명할 이유가 없다.
+const DEFAULT_FILE_FETCH_TIMEOUT_MS = 10_000;
 // sh_exec 는 "resolve 를 정확히 한 번, 항상, 유한한 시간 안에" 를 보장해야 한다. 그 보장을
 // 3단계로 나눠 각각 유예 시간을 둔다 — close 이벤트가 오면 그 즉시 남은 단계를 모두 건너뛰고
 // resolve 하므로, 정상적으로 죽는 프로세스는 아래 두 상수를 전혀 기다리지 않는다. 이 값들은
@@ -403,12 +410,15 @@ function strMap(v: unknown): Record<string, string> {
 
 export function makeExecutors(
   roots: string[],
-  opts: { runPm2?: RunPm2; scriptDir?: string; fetchImpl?: typeof fetch } = {},
+  opts: { runPm2?: RunPm2; scriptDir?: string; fetchImpl?: typeof fetch; fileFetchTimeoutMs?: number } = {},
 ): Executors {
   // proc_start 가 회원 명령을 적을 스크립트 파일 위치(DEFAULT_SCRIPT_DIR·writeStartScript 선언부
   // 참고) — 테스트가 실제 OS 임시폴더를 더럽히지 않고 파일 내용을 직접 들여다볼 수 있도록 주입
   // 지점을 열어 둔다. 프로덕션(worker.ts)은 opts 를 생략하므로 항상 기본값을 쓴다.
   const scriptDir = opts.scriptDir ?? DEFAULT_SCRIPT_DIR;
+  // file_fetch(아래)의 타임아웃. 테스트가 실제로 10초를 기다리지 않고도 타임아웃 경로를
+  // 재현할 수 있도록 주입 지점을 열어 둔다 — scriptDir 과 같은 이유.
+  const fileFetchTimeoutMs = opts.fileFetchTimeoutMs ?? DEFAULT_FILE_FETCH_TIMEOUT_MS;
 
   // Finding 3(Minor, 후속 리뷰): DEFAULT_SCRIPT_DIR 선언부의 "회원 폴더(roots) 밖에 둔다"는
   // 지금까지 강제되지 않는 주석일 뿐이었다 — roots(WORKER_ROOTS)에 언젠가 사용자 프로필 폴더가
@@ -813,7 +823,15 @@ export function makeExecutors(
         return { ok: false, content: "디스코드 첨부 주소가 아니라 받아오지 않았어요." };
       }
       try {
-        const res = await (opts.fetchImpl ?? fetch)(url);
+        // M-3: downloadImages(core/images.ts)와 같은 AbortController 패턴 — 위 상수 선언부 참고.
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), fileFetchTimeoutMs);
+        let res: Response;
+        try {
+          res = await (opts.fetchImpl ?? fetch)(url, { signal: ctrl.signal });
+        } finally {
+          clearTimeout(timer);
+        }
         if (!res.ok) return { ok: false, content: `받아오지 못했어요(HTTP ${res.status}).` };
         const buf = Buffer.from(await res.arrayBuffer());
         // fs_write 와 달리 인코딩을 주지 않는다 — 여기는 텍스트가 아니라 바이트를 그대로

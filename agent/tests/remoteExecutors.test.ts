@@ -371,6 +371,23 @@ describe("워커 실행기", () => {
       expect(r.content).toContain("404");
       await expect(fsp.access(path.join(root, "missing.pdf"))).rejects.toThrow();
     });
+
+    // M-3(최종 리뷰, Minor): CDN 이 응답을 멈추면 예전엔 허브의 120초 호출 타임아웃에만 기대야
+    // 했다 — 첨부 최대 3개를 순차로 받으므로 한 턴이 최대 6분 묶일 수 있었다. downloadImages
+    // (core/images.ts)와 같은 AbortController 패턴을 따랐는지, "신호를 받아야만 끝나는" 가짜
+    // fetch 로 확인한다(fileFetchTimeoutMs 를 짧게 주입해 실제로 10초를 기다리지 않는다).
+    it("CDN 이 응답하지 않으면 타임아웃으로 실패하고 파일을 만들지 않는다(무기한 대기하지 않는다)", async () => {
+      const hangingFetch = ((_url: string, init?: { signal?: AbortSignal }) =>
+        new Promise((_resolve, reject) => {
+          // 실제 fetch(undici)가 abort 시 던지는 것과 같은 성격의 오류(AbortError)로 reject 한다.
+          init?.signal?.addEventListener("abort", () => reject(new DOMException("The operation was aborted.", "AbortError")));
+        })) as unknown as typeof fetch;
+      const ex = makeExecutors([root], { fetchImpl: hangingFetch, fileFetchTimeoutMs: 20 });
+      const r = await ex.file_fetch({ url: "https://cdn.discordapp.com/attachments/1/2/a.pdf", dir: root, name: "stuck.pdf" });
+      expect(r.ok).toBe(false);
+      expect(r.content).toContain("받아오지 못했어요");
+      await expect(fsp.access(path.join(root, "stuck.pdf"))).rejects.toThrow();
+    });
   });
 });
 

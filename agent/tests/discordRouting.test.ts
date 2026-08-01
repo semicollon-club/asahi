@@ -4,7 +4,7 @@ import { decideRoute, detectBotMention, type Incoming } from "../src/adapters/di
 function inc(over: Partial<Incoming> = {}): Incoming {
   return {
     userId: "u1", channelId: "c1", isDM: false, isThread: false, mentionsBot: false,
-    guildId: "g1", parentChannelId: undefined, content: "안녕", messageId: "m1", images: [], files: [], ...over,
+    guildId: "g1", parentChannelId: undefined, content: "안녕", messageId: "m1", images: [], files: [], rejectedFiles: [], ...over,
   };
 }
 

@@ -11,6 +11,7 @@ import { TurnsRepo } from "../src/store/turnsRepo.js";
 import { AllowedDirsRepo } from "../src/store/allowedDirsRepo.js";
 import { ActionsRepo } from "../src/store/actionsRepo.js";
 import { AgentCore } from "../src/core/core.js";
+import { filterFileAttachments, FILE_LIMITS } from "../src/core/attachments.js";
 import type { Config } from "../src/config.js";
 import type { TurnRequest, TurnResult } from "../src/core/agent.js";
 import type { DigestRunner } from "../src/core/digest.js";
@@ -923,6 +924,36 @@ describe("AgentCore — 첨부 파일을 워커에 저장한다(Task 3)", () => 
     expect(t.calls[0].prompt).not.toContain("워커가 연결돼 있지 않아");
   });
 
+  // 최종 리뷰 Critical(폴더 격리 우회 회귀 방지) — 바로 위 테스트는 rootsOf: () => [] 를 써서
+  // "워커 루트도 비어 있다"는 조건과 함께만 손님의 빈 workspaceDirs 를 관찰한다. 그런데 연결된
+  // 워커는 hello 프레임으로 항상 roots 를 보고하므로(hub.ts 의 rootsOf), 실제 운영에서
+  // workerRoots 가 비는 일은 거의 없다 — workerRoots 가 채워진 채로 손님의 workspaceDirs 만
+  // 비는(allow_dir 미등록) 이 시나리오에서만 "손님 파일이 워커 루트(다른 부원 폴더들과 나란한
+  // 공유 루트)에 떨어지는" 결함이 드러난다(uploadDirFor 가 isOwner 없이 workspaceDirs?.[0] ??
+  // workerRoots[0] 로 폴백하던 시절의 결함 — attachments.test.ts 가 순수 로직을, 이 테스트가
+  // core 배선을 각각 고정한다). hub.call 이 전혀 불리지 않는 것까지 함께 단정해야 "실패
+  // 안내가 나가지만 사실은 워커 루트에 저장됐다"를 놓치지 않는다.
+  it("손님은 워커 루트가 채워져 있어도(allowed_dirs 미등록) 그 루트로 저장하지 않고 실패 안내를 받는다(Critical 회귀 방지)", async () => {
+    const hubCalls: Array<{ tool: string; args: Record<string, unknown> }> = [];
+    const sharedHub = {
+      isConnected: () => true,
+      rootsOf: () => ["C:\\ws"], // 연결된 워커는 항상 roots 를 보고한다 — 실제 운영과 같은 모양
+      call: async (_w: string, tool: string, args: Record<string, unknown>) => {
+        hubCalls.push({ tool, args });
+        return { ok: true, content: "불려선 안 됨" };
+      },
+    };
+    // allowedDirs.add 를 호출하지 않는다 — 이 손님은 allow_dir 이 미등록이다.
+    const t = await setup({ hub: sharedHub });
+    const hint = dmHint("guest", "allowed");
+    t.bus.publish({ type: "user_message", channel: "discord", channelRef: hint.discordChannelId, text: "이 파일 봐줘", ts: 1, hint, files: [fileRef] });
+    await t.core.drain();
+
+    expect(hubCalls).toHaveLength(0); // 워커 루트로 file_fetch 를 시도해선 안 된다
+    expect(t.calls[0].prompt).toContain("허용된 저장 폴더가 없어 저장 못 함");
+    expect(t.calls[0].prompt).not.toContain("워커가 연결돼 있지 않아");
+  });
+
   it("워커가 연결돼 있으면 hub.call 이 file_fetch 로 {url,dir,name} 호출되고, 성공한 저장 경로가 runTurn 의 prompt 에 담긴다", async () => {
     const hubCalls: Array<{ tool: string; args: Record<string, unknown> }> = [];
     const fakeHub = {
@@ -1006,6 +1037,45 @@ describe("AgentCore — 첨부 파일을 워커에 저장한다(Task 3)", () => 
     expect(t.calls[2].resume).toBeUndefined(); // 새 세션 재시도
     expect(hubCalls).toHaveLength(1); // 파일은 한 번만 받아온다(재시도가 다시 받아오지 않는다)
     expect(t.calls[2].prompt).toContain("C:\\ws\\111\\a.pdf");
+  });
+});
+
+// 최종 리뷰 Important — 거절된 첨부가 조용히 사라지던 결함의 회귀 방지. discord.ts 가
+// filterFileAttachments 의 skipped 를 뽑아 UserMessageEvent.rejectedFiles 로 실어 보내면(discord.ts
+// 자체는 실제 discord.js Client 가 필요해 여기서 재현하지 않는다 — attachments.test.ts 가
+// filterFileAttachments 자체(거절 사유 문자열 생성)를, 이 테스트가 core 쪽 배선(rejectedFiles →
+// failedFiles → buildFileMarker → prompt)을 각각 고정한다), core 가 그 사유를 failedFiles 의
+// 초기값으로 얹어 buildFileMarker 를 거쳐 prompt 에 실어야 한다 — 안 그러면 12MB PDF 를 올리고
+// "요약해줘"라고 물었을 때 봇이 본문만 보고 답하면서도 부원은 봇이 읽었다고 믿게 된다.
+describe("AgentCore — 거절된 첨부(rejectedFiles)를 프롬프트에 실패로 알린다(Important, 최종 리뷰)", () => {
+  it("8MB 초과로 거절된 첨부의 파일명과 사유가 실패 마커로 prompt 에 나타난다", async () => {
+    // 실제 filterFileAttachments 를 그대로 통과시켜 discord.ts 가 만들 값과 같은 문자열을 쓴다
+    // — 여기서 비슷한 문자열을 손으로 지어내면 실제 문구 형식이 바뀌어도 이 테스트가 못 잡는다.
+    const { files, skipped } = filterFileAttachments([
+      { url: "https://cdn.discordapp.com/attachments/1/2/big.pdf", contentType: "application/pdf", name: "big.pdf", size: FILE_LIMITS.maxBytes + 1 },
+    ]);
+    expect(files).toHaveLength(0); // 사전조건: 거절됐다(받아들여지지 않았다)
+    expect(skipped).toHaveLength(1); // 사전조건: filterFileAttachments 가 사유를 만들었다
+
+    const t = await setup();
+    const hint = dmHint("owner", "owner");
+    t.bus.publish({
+      type: "user_message", channel: "discord", channelRef: hint.discordChannelId, text: "이거 요약해줘", ts: 1, hint,
+      rejectedFiles: skipped,
+    });
+    await t.core.drain();
+
+    expect(t.calls).toHaveLength(1); // 첨부가 없어도(거절됐으므로 files 는 비어 있다) 턴은 정상 진행된다
+    expect(t.calls[0].prompt).toContain("big.pdf");
+    expect(t.calls[0].prompt).toContain("너무 큼");
+    expect(t.calls[0].prompt).toContain("이거 요약해줘"); // 본문도 마커에 덮이지 않고 함께 실린다
+  });
+
+  it("거절된 첨부가 없으면(rejectedFiles 미제공) 실패 마커를 붙이지 않는다", async () => {
+    const t = await setup();
+    pub(t.bus, dmHint("owner", "owner"), "안녕", 1);
+    await t.core.drain();
+    expect(t.calls[0].prompt).not.toContain("파일 처리 실패");
   });
 });
 

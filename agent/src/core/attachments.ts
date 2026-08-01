@@ -62,11 +62,22 @@ export function filterFileAttachments(
 // 첨부를 어디에 저장할지. 이 판정을 봇이 하는 것이 중요하다 — 모델이 정하면 폴더 격리를
 // 우회할 수 있다.
 //
-// 손님은 workspaceDirs(이미 scopeDirs 로 그 사람 몫으로 좁혀진 값)의 첫 폴더다. 소유자는
-// core.ts 의 resolveGuestWorkspaceDirs 가 undefined 를 돌려준다 — scopeDirs 가 소유자를 좁히지
-// 않아 "그 사람의 폴더" 하나로 특정되지 않기 때문이다. 그래서 소유자는 워커 루트를 쓴다.
-export function uploadDirFor(o: { workspaceDirs?: string[]; workerRoots: string[] }): string | null {
-  return o.workspaceDirs?.[0] ?? o.workerRoots[0] ?? null;
+// 최종 리뷰 Critical(폴더 격리 우회): isOwner 를 반드시 함께 받는다. 예전엔 workspaceDirs 값의
+// 모양(빈 배열 vs undefined)만으로 "손님인데 좁혀진 폴더가 없다"와 "소유자라 애초에 안
+// 좁힌다"를 구분하려 했는데, 손님이 allow_dir 미등록이거나(workspaceDirs=[]) allowedDirs.list
+// 조회 자체가 던지면(resolveGuestWorkspaceDirs 의 catch, workspaceDirs=undefined) 두 상태가
+// 소유자와 똑같은 모양(workspaceDirs?.[0] === undefined)이 되어 ??체인이 곧장 워커 루트로
+// 폴백했다 — 손님의 파일이 그 사람 몫 폴더가 아니라 워커 루트(다른 부원 폴더들과 나란한 공유
+// 루트)에 떨어지는 결함이었다. 신원(isOwner)을 직접 물으면 그 모호함이 사라진다: 손님은
+// workspaceDirs 가 비어 있으면 workerRoots 가 무엇이든 저장 자체를 포기한다(fail closed) —
+// remoteToolHandler(remoteTools.ts)가 같은 질문(판정 불가 시 무엇을 할까)에 fail closed 를
+// 택한 것과 같은 이유다.
+//
+// 소유자는 scopeDirs 가 좁히지 않아 workspaceDirs 가 "그 사람의 폴더" 하나로 특정되지 않으므로
+// (core.ts 의 resolveGuestWorkspaceDirs 는 소유자에게 항상 undefined 를 준다) 워커 루트를 쓴다.
+export function uploadDirFor(o: { isOwner: boolean; workspaceDirs?: string[]; workerRoots: string[] }): string | null {
+  if (!o.isOwner) return o.workspaceDirs?.[0] ?? null;
+  return o.workerRoots[0] ?? null;
 }
 
 // 모델에게 "무엇이 어디에 저장됐는지"를 알린다. buildImageMarker(images.ts)와 같은 자리·같은
