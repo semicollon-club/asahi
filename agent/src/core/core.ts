@@ -490,22 +490,29 @@ export class AgentCore {
       const failedFiles: string[] = [];
       if (files.length > 0) {
         const hub = this.hub;
-        const dir = worker === null || hub === undefined
-          ? null
-          : uploadDirFor({ workspaceDirs, workerRoots: hub.rootsOf(worker.workerId) });
-        if (worker === null || hub === undefined || dir === null) {
+        if (worker === null || hub === undefined) {
           // 조용히 버리지 않는다 — 이미지가 아닌 첨부를 무시하던 것이 이 기능이 고치려는 문제다.
           // 같은 침묵을 다른 자리에 다시 만들지 않는다.
           for (const f of files) failedFiles.push(`${f.name}(워커가 연결돼 있지 않아 저장 못 함)`);
         } else {
-          for (const f of files) {
-            try {
-              const r = await hub.call(worker.workerId, "file_fetch", { url: f.url, dir, name: f.name });
-              if (r.ok) savedFiles.push(r.content);
-              else failedFiles.push(`${f.name}(${r.content})`);
-            } catch (err) {
-              // 받아오기 실패가 대화를 막지 않는다 — 이미지 다운로드 실패와 같은 원칙이다.
-              failedFiles.push(`${f.name}(${err instanceof Error ? err.message : String(err)})`);
+          // 워커는 붙어 있는데 저장할 폴더를 못 찾은 경우(uploadDirFor 가 null — 손님은
+          // allowed_dirs 미등록으로 workspaceDirs 가 비고, 소유자는 워커가 작업 폴더를 하나도
+          // 보고하지 않은 경우)는 연결 문제가 아니다. 위와 같은 문구를 쓰면 사람이 워커 연결부터
+          // 확인하러 가서 헛수고한다 — 원인마다 다른 문구를 내야 그 사람이 맞는 곳(허용 폴더
+          // 등록)을 본다.
+          const dir = uploadDirFor({ workspaceDirs, workerRoots: hub.rootsOf(worker.workerId) });
+          if (dir === null) {
+            for (const f of files) failedFiles.push(`${f.name}(허용된 저장 폴더가 없어 저장 못 함)`);
+          } else {
+            for (const f of files) {
+              try {
+                const r = await hub.call(worker.workerId, "file_fetch", { url: f.url, dir, name: f.name });
+                if (r.ok) savedFiles.push(r.content);
+                else failedFiles.push(`${f.name}(${r.content})`);
+              } catch (err) {
+                // 받아오기 실패가 대화를 막지 않는다 — 이미지 다운로드 실패와 같은 원칙이다.
+                failedFiles.push(`${f.name}(${err instanceof Error ? err.message : String(err)})`);
+              }
             }
           }
         }

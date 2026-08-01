@@ -878,6 +878,51 @@ describe("AgentCore — 첨부 파일을 워커에 저장한다(Task 3)", () => 
     expect(t.published.some((e) => e.type === "assistant_message")).toBe(true);
   });
 
+  // 브리프에 없던 지적(Task 4 문서화 검토) — 위 테스트("워커가 연결돼 있지 않으면...")와 이 두
+  // 테스트는 겉으로 같은 "실패 안내"처럼 보이지만 원인이 다르다. worker===null|hub===undefined
+  // 는 워커 자체가 없는 것이고, 아래는 워커는 붙어 있는데 uploadDirFor 가 저장할 폴더를 못 찾은
+  // 것(허용 폴더 미등록)이다. 예전엔 두 경우가 같은 "워커가 연결돼 있지 않아 저장 못 함" 문구로
+  // 뭉뚱그려져, 후자를 겪은 사람이 워커 연결을 확인하러 가서 헛수고했다 — 이 테스트가 그 구분을
+  // 고정한다.
+  it("워커는 연결돼 있지만 저장 폴더를 못 찾으면(소유자, 워커가 작업 폴더를 하나도 보고하지 않음) 연결 문제와 다른 문구를 낸다", async () => {
+    const hubCalls: Array<{ tool: string; args: Record<string, unknown> }> = [];
+    const fakeHub = {
+      isConnected: () => true,
+      rootsOf: () => [], // 워커가 hello 로 알려온 작업 폴더가 하나도 없다 — uploadDirFor 가 null 을 돌려주는 조건
+      call: async (_w: string, tool: string, args: Record<string, unknown>) => {
+        hubCalls.push({ tool, args });
+        return { ok: true, content: "불려선 안 됨" };
+      },
+    };
+    const t = await setup({ hub: fakeHub });
+    const hint = dmHint("owner", "owner");
+    t.bus.publish({ type: "user_message", channel: "discord", channelRef: hint.discordChannelId, text: "이 파일 봐줘", ts: 1, hint, files: [fileRef] });
+    await t.core.drain();
+
+    expect(hubCalls).toHaveLength(0); // 저장할 폴더를 못 찾으면 file_fetch 시도 자체를 안 한다
+    expect(t.calls).toHaveLength(1); // 턴 자체는 막히지 않는다
+    expect(t.calls[0].prompt).toContain("허용된 저장 폴더가 없어 저장 못 함");
+    // 연결 문제로 오인시키지 않는다 — 워커는 실제로 연결돼 있다(isConnected: () => true).
+    expect(t.calls[0].prompt).not.toContain("워커가 연결돼 있지 않아");
+  });
+
+  it("손님도 워커는 연결돼 있지만 허용 폴더가 하나도 없으면(allowed_dirs 미등록) 같은 문구를 받는다", async () => {
+    const sharedHub = {
+      isConnected: () => true,
+      rootsOf: () => [], // 워커도 작업 폴더를 보고하지 않아, 손님의 빈 workspaceDirs 가 폴백할 곳도 없다
+      call: async () => ({ ok: true, content: "불려선 안 됨" }),
+    };
+    // allowedDirs.add 를 호출하지 않는다 — 그 공유 워커의 allowed_dirs 가 비어 있으면
+    // scopeDirs 가 이 손님의 workspaceDirs 도 빈 배열로 돌려준다(브리프가 설명하는 손님 쪽 경로).
+    const t = await setup({ hub: sharedHub });
+    const hint = dmHint("guest", "allowed");
+    t.bus.publish({ type: "user_message", channel: "discord", channelRef: hint.discordChannelId, text: "이 파일 봐줘", ts: 1, hint, files: [fileRef] });
+    await t.core.drain();
+
+    expect(t.calls[0].prompt).toContain("허용된 저장 폴더가 없어 저장 못 함");
+    expect(t.calls[0].prompt).not.toContain("워커가 연결돼 있지 않아");
+  });
+
   it("워커가 연결돼 있으면 hub.call 이 file_fetch 로 {url,dir,name} 호출되고, 성공한 저장 경로가 runTurn 의 prompt 에 담긴다", async () => {
     const hubCalls: Array<{ tool: string; args: Record<string, unknown> }> = [];
     const fakeHub = {
