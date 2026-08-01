@@ -16,3 +16,18 @@ export const SHARED_MEMORY_MAX_LEN = 4000;
 export function memoryScopeFor(ctx: { isPrivate: boolean }): "user" | "shared" {
   return ctx.isPrivate ? "user" : "shared";
 }
+
+// recall 결과를 사람이 읽을 문자열로. 공용 기억에만 작성자를 붙인다 — 누구나 쓸 수 있는
+// 저장소라 "누가 넣었는지"가 그 정보를 얼마나 믿을지의 근거가 된다. 개인 기억은 본인 것이라
+// 작성자가 자명하므로 붙이지 않는다.
+//
+// 이름을 모르면 생략한다. 숫자 id 를 보여주면 읽는 사람에게 아무 의미가 없고, "누가 넣었는지
+// 알 수 없다"는 사실은 이름이 없는 것만으로 이미 드러난다.
+export function renderMemories(mems: Memory[], names: Record<string, string>): string {
+  return mems
+    .map((m) => {
+      const who = m.scope === "shared" ? names[m.userId] : undefined;
+      return who ? `- [${m.title}] ${m.content} (${who}이 등록)` : `- [${m.title}] ${m.content}`;
+    })
+    .join("\n");
+}

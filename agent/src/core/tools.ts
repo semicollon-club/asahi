@@ -10,7 +10,7 @@ import { assertReadOnlySql, formatQueryResult } from "./sqlGuard.js";
 import { CHARACTER_FACT_LIMIT } from "./turnPrep.js";
 import { REMOTE_TOOL_NAMES, remoteToolHandler } from "./remoteTools.js";
 import { isPathWithinAny, normalizeDir } from "./paths.js";
-import { memoryScopeFor, SHARED_MEMORY_MAX_LEN } from "./memoryScope.js";
+import { memoryScopeFor, SHARED_MEMORY_MAX_LEN, renderMemories } from "./memoryScope.js";
 
 // 도구 서버 이름 → 모델에는 mcp__asahi__<tool> 로 노출된다.
 export const TOOL_SERVER = "asahi";
@@ -126,7 +126,14 @@ export async function recallHandler(ctx: ToolCtx, args: { query: string }): Prom
   const q = (args.query ?? "").trim().toLowerCase();
   const hits = pool.filter((m) => q.length === 0 || `${m.title} ${m.content}`.toLowerCase().includes(q));
   if (hits.length === 0) return "관련 기억이 없어요.";
-  return hits.map((m) => `- [${m.title}] ${m.content}`).join("\n");
+  // 이름 조회 실패는 대화를 막지 않는다 — 작성자 표시만 생략하고 기억은 그대로 보여준다.
+  let names: Record<string, string> = {};
+  try {
+    names = await ctx.repos.users.displayNames();
+  } catch (err) {
+    console.error("[recall] 표시 이름 조회 실패 — 작성자 없이 진행:", err);
+  }
+  return renderMemories(hits, names);
 }
 
 export async function manageAccessHandler(ctx: ToolCtx, args: { userId: string; role: Role }): Promise<string> {

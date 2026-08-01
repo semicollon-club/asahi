@@ -55,7 +55,7 @@ async function ownerCtx(over = {}) {
 }
 
 describe("remember 도구", () => {
-  it("항상 현재 상대(userId)·scope='user' 로 저장한다(손님은 shared 를 못 쓴다)", async () => {
+  it("항상 현재 상대(userId)·scope='user' 로 저장한다(DM 한정 — 서버 채널에서는 손님도 shared 를 쓴다, Task 1)", async () => {
     const c = await ctx({ userId: "guest", isPrivate: true, isOwner: false });
     await rememberHandler(c, { title: "선호", content: "커피는 아메리카노" });
     const all = await c.repos.memories.all();
@@ -95,6 +95,24 @@ describe("remember — 위치가 스코프를 정한다", () => {
     const long = "가".repeat(SHARED_MEMORY_MAX_LEN + 1);
     await rememberHandler(c, { title: "긴 메모", content: long });
     expect((await c.repos.memories.forUser("u1")).map((m) => m.title)).toEqual(["긴 메모"]);
+  });
+});
+
+describe("recall 도구 — 작성자 표시(공용 기억, Task 2)", () => {
+  it("recall 이 공용 기억의 작성자를 보여준다", async () => {
+    const c = await ctx({ userId: "u1", isPrivate: false, isOwner: false });
+    await c.repos.users.upsert("u1", { role: "allowed", displayName: "우성현" });
+    await rememberHandler(c, { title: "회비", content: "학기당 2만원" });
+    expect(await recallHandler(c, { query: "회비" })).toContain("우성현");
+  });
+
+  it("이름 조회가 실패해도 기억은 그대로 보여준다", async () => {
+    // 부가 정보가 본 기능을 인질로 잡지 않는다(proc_list 의 이름 표시와 같은 원칙).
+    const c = await ctx({ userId: "u1", isPrivate: false, isOwner: false });
+    await rememberHandler(c, { title: "회비", content: "학기당 2만원" });
+    c.repos.users.displayNames = async () => { throw new Error("db down"); };
+    const out = await recallHandler(c, { query: "회비" });
+    expect(out).toContain("학기당 2만원");
   });
 });
 
