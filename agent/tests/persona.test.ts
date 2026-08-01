@@ -343,6 +343,27 @@ describe("buildSystemPrompt — 능력 안내에 fs_tree 를 포함한다(fs_tre
   });
 });
 
+// Task 4 — 도구(tools.ts)가 서버 채널에도 remember/forget 을 이미 열어 뒀지만, 아사히가
+// "서버에서는 저장할 수 없다"고 배운 상태면 도구가 열려도 시도하지 않는다. persona.ts 가 정확히
+// 그렇게 말하고 있었다 — 소유자 서버(워커 연결/미연결)·손님 서버 세 분기 모두 공용 기억 저장을
+// 안내해야 한다.
+describe("buildSystemPrompt — 서버 분기는 공용 기억 저장을 안내한다(Task 4)", () => {
+  it("서버 분기는 공용 기억 저장을 안내한다(소유자·손님 모두)", () => {
+    // 도구가 열려도 "저장할 수 없다"고 배운 상태면 시도하지 않는다.
+    for (const ctx of [
+      { role: "owner" as const, isPrivate: false, isOwner: true, workerConnected: true },
+      { role: "owner" as const, isPrivate: false, isOwner: true, workerConnected: false },
+      { role: "allowed" as const, isPrivate: false, isOwner: false, workerConnected: false },
+    ]) {
+      expect(buildSystemPrompt(ctx)).toContain("동아리 공용");
+    }
+  });
+
+  it("캐릭터 설정은 여전히 공개 채널에서 저장할 수 없다고 안내한다", () => {
+    expect(buildSystemPrompt({ role: "allowed", isPrivate: false, isOwner: false })).toContain("새 설정을 저장할 수 없다");
+  });
+});
+
 describe("deriveRapportStage", () => {
   it("10 미만이면 0(서먹)", () => {
     expect(deriveRapportStage(0)).toBe(0);
