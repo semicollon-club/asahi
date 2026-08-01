@@ -57,25 +57,41 @@ frontend-design/unknown/
 
 ### 3.1 구조
 
-`agent/skills/` 를 만들고 **플러그인 하나**로 취급한다.
+`agent/skill-plugin/` 을 만들고 **플러그인 하나**로 취급한다.
 
 ```
-agent/skills/
+agent/skill-plugin/
   .claude-plugin/plugin.json
-  frontend-design/SKILL.md
+  skills/
+    frontend-design/SKILL.md
 ```
+
+**안쪽 `skills/` 는 오타가 아니다.** SDK 는 플러그인 루트 바로 밑이 아니라
+`<루트>/skills/<이름>/SKILL.md` 를 스캔한다. 2026-08-01 실측으로 확정했다 — 같은 플러그인
+루트에 평면(`<루트>/<이름>/SKILL.md`)과 중첩 두 배치를 동시에 두고 물었더니 중첩만
+발견됐고, 평면 쪽 질문에서 모델이 "그건 없지만 중첩된 그 스킬은 있다"고 답해 한 번 더
+확인됐다. 이 프로젝트가 이 배치를 처음 잡을 때 평면으로 갔었고, 리뷰가 잡지 못했다면
+"플러그인은 로드되는데 스킬이 0개"라는 조용한 실패로 배포됐을 것이다.
+
+바깥 폴더를 `skills` 가 아니라 `skill-plugin` 으로 부르는 이유는 그렇게 하면 경로가
+`agent/skills/skills/frontend-design/` 이 되어 오타처럼 읽히기 때문이다. 바깥은 "로컬
+플러그인", 안쪽 `skills/` 는 SDK 가 요구하는 규약이다.
 
 **리포 루트가 아니라 `agent/` 밑인 이유**(계획 작성 중 발견, 스펙 개정): `agent/Dockerfile` 의
 빌드 컨텍스트는 리포 루트가 아니라 `agent/` 다(Railway 서비스의 Root Directory 를 `agent` 로
 지정한 전제). 그 Dockerfile 은 `package.json`·`package-lock.json`·`tsconfig.json`·`src` 만
-복사하므로, **리포 루트에 둔 `skills/` 는 봇 컨테이너에 아예 존재하지 않는다.** `agent/` 밑에
-두고 Dockerfile 에 `COPY skills ./skills` 한 줄을 더하면 양쪽이 성립한다.
+복사하므로, **리포 루트에 둔 폴더는 봇 컨테이너에 아예 존재하지 않는다.** `agent/` 밑에
+두고 Dockerfile 에 `COPY skill-plugin ./skill-plugin` 한 줄을 더하면 양쪽이 성립한다.
+
+`agent/.dockerignore` 의 `*.md` 규칙에도 예외(`!skill-plugin/**/*.md`)가 필요하다 — 없으면
+`LICENSE.txt` 만 이미지에 들어가고 **정작 `SKILL.md` 만 빠진다.** 폴더는 있는데 스킬이 없는
+상태가 되고 로그는 한 줄도 남지 않는다.
 
 이 배치는 경로 계산도 단순하게 만든다. `agent/src/core/agent.ts` 에서 두 단계 위가 `agent/`
 이고, 컨테이너의 `/app/dist/core/agent.js` 에서 두 단계 위가 `/app` 이다 — **개발과 컨테이너가
-같은 상대경로**(`../../skills`)로 맞는다.
+같은 상대경로**(`../../skill-plugin`)로 맞는다.
 
-외부 스킬 설치 = 그 폴더를 `skills/` 밑에 **그대로 복사**하고 커밋한다. 벗겨내기도 변환도
+외부 스킬 설치 = 그 폴더를 `agent/skill-plugin/skills/` 밑에 **그대로 복사**하고 커밋한다. 벗겨내기도 변환도
 없다. 이것이 §5 에서 A 안을 고른 이유 그대로다.
 
 `.claude-plugin/plugin.json`:
@@ -93,11 +109,12 @@ agent/skills/
 `query()` 옵션에 두 줄을 더한다.
 
 ```ts
-plugins: [{ type: "local", path: skillsDir }],
+plugins: [{ type: "local", path: pluginDir }],
 skills: skillsEnabled ? "all" : [],
 ```
 
-`skillsDir` 은 `agent/skills/` 의 절대경로다. `agentCwd` 와 달리 소스 트리 안이지만, 이것은
+`pluginDir` 은 `agent/skill-plugin/` 의 절대경로다(안쪽 `skills/` 가 아니라 **플러그인 루트**를
+넘긴다). `agentCwd` 와 달리 소스 트리 안이지만, 이것은
 에이전트의 **작업 폴더가 아니라 읽기 전용 자원 경로**다 — cwd 정책(에이전트가 소스 트리를
 훑지 않게 한다)은 그대로 유지된다.
 
@@ -173,7 +190,7 @@ export function resolveSkillsEnabled(req: { noSkills?: boolean }): boolean {
 
 - `resolveSkillsEnabled` — 유휴 요약 턴에서 꺼지고 그 외엔 켜진다. `resolveWebToolsEnabled`
   테스트와 같은 모양
-- `skillsDir` 을 만드는 경로 계산 — 봇이 어디서 실행되든 리포의 `skills/` 를 가리킨다
+- `pluginDir` 을 만드는 경로 계산 — 봇이 어디서 실행되든 `agent/skill-plugin/` 을 가리킨다
 
 **유닛이 못 잡는 것 → 스모크로 옮긴다**
 
