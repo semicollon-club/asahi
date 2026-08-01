@@ -9,7 +9,7 @@ import { AllowedDirsRepo } from "../src/store/allowedDirsRepo.js";
 import { IntrospectRepo } from "../src/store/introspectRepo.js";
 import {
   buildToolCtx, buildMultimodalMessage, buildRemoteCtx, resolveTurnWorker,
-  resolveWebToolsEnabled, progressFromMessage,
+  resolveWebToolsEnabled, resolveMemoryWriteEnabled, progressFromMessage,
   type TurnContext, type ToolRepos, type PendingTool,
 } from "../src/core/agent.js";
 import { allowDirHandler, allowedToolsFor, type RuntimeInfo } from "../src/core/tools.js";
@@ -127,7 +127,7 @@ describe("resolveTurnWorker — noRemoteTools 는 워커 연결 여부와 무관
   it("FIX4 — noRemoteTools 인 요청은 워커가 연결돼 있어도 allowedToolsFor 에 원격 도구 이름을 하나도 넘기지 않는다(유휴 요약 턴이 실제로 받는 도구 목록)", async () => {
     const worker = await resolveTurnWorker({ context, noRemoteTools: true }, registry, connectedHub);
     const workerConnected = worker !== null;
-    const tools = allowedToolsFor("owner", context.isPrivate, context.isOwner, "local", workerConnected);
+    const tools = allowedToolsFor("owner", context.isPrivate, context.isOwner, "local", { workerConnected });
     expect(tools.some((n) => n.startsWith("mcp__asahi__fs_") || n === "mcp__asahi__sh_exec")).toBe(false);
     // dir 관리 도구(FIX2 로 workerConnected 하나로 묶임)도 마찬가지로 닫힌다.
     expect(tools).not.toContain("mcp__asahi__allow_dir");
@@ -156,10 +156,21 @@ describe("resolveTurnWorker — 정기 게시(digest) 컨텍스트도 noRemoteTo
     const worker = await resolveTurnWorker({ context: digestContext, noRemoteTools: true }, registry, connectedHub);
     expect(worker).toBeNull();
     const workerConnected = worker !== null;
-    const tools = allowedToolsFor("allowed", digestContext.isPrivate, digestContext.isOwner, "local", workerConnected);
+    const tools = allowedToolsFor("allowed", digestContext.isPrivate, digestContext.isOwner, "local", { workerConnected });
     expect(tools.some((n) => n.startsWith("mcp__asahi__fs_") || n === "mcp__asahi__sh_exec")).toBe(false);
     expect(tools).not.toContain("mcp__asahi__allow_dir");
     // 공개 채널 계층이 원래 받던 것(공용 recall)은 그대로 남는다.
+    expect(tools).toContain("mcp__asahi__recall");
+  });
+
+  // Important 4(최종 전체 브랜치 리뷰) — digest.ts 가 실제로 세우는 noMemoryWrite:true 까지
+  // 합쳐야, 이 턴이 실제로 받는 도구 목록에서 remember 가 빠진다(고치기 전엔 이 계층에
+  // remember 가 조건 없이 들어 있었다 — 위 두 테스트가 원격 도구·recall 만 확인해서 그 구멍을
+  // 못 잡았다).
+  it("digest.ts 가 세우는 noMemoryWrite:true 까지 적용하면 allowedToolsFor 에 remember 가 없고 recall 은 그대로 남는다", () => {
+    const memoryWriteEnabled = resolveMemoryWriteEnabled({ noMemoryWrite: true });
+    const tools = allowedToolsFor("allowed", digestContext.isPrivate, digestContext.isOwner, "local", { memoryWriteEnabled });
+    expect(tools).not.toContain("mcp__asahi__remember");
     expect(tools).toContain("mcp__asahi__recall");
   });
 });
@@ -239,10 +250,35 @@ describe("resolveWebToolsEnabled — noWebTools 는 웹 검색을 별도로 강�
 
   it("FIX3 — noWebTools 인 요청은 allowedToolsFor 에 WebSearch 를 하나도 넘기지 않는다(유휴 요약 턴이 실제로 받는 도구 목록)", () => {
     const webToolsEnabled = resolveWebToolsEnabled({ noWebTools: true });
-    const tools = allowedToolsFor("owner", true, true, "local", false, webToolsEnabled);
+    const tools = allowedToolsFor("owner", true, true, "local", { workerConnected: false, webToolsEnabled });
     expect(tools).not.toContain("WebSearch");
     // 기억·접근관리처럼 웹 검색과 무관한 도구는 그대로 남는다(요약 자체는 대화 처리이므로).
     expect(tools).toContain("mcp__asahi__remember");
+  });
+});
+
+// Important 4(최종 전체 브랜치 리뷰) — noRemoteTools/noWebTools 와 같은 방식으로
+// req.noMemoryWrite 를 뽑아, 이번 턴에 remember(기억 쓰기)를 열지 판정한다. digest.ts 가
+// 이 값을 세운다 — 사람이 안 보는 타이머로 돌며 신뢰할 수 없는 웹 검색 결과를 읽는 턴이
+// remember 로 동아리 공용 기억을 오염시키는 것을 막는다.
+describe("resolveMemoryWriteEnabled — noMemoryWrite 는 remember 만 별도로 강제로 닫는다(Important 4)", () => {
+  it("noMemoryWrite 가 없으면(기본) 기억 쓰기가 열려 있다(회귀 없음)", () => {
+    expect(resolveMemoryWriteEnabled({})).toBe(true);
+  });
+
+  it("noMemoryWrite=true 면 기억 쓰기가 닫힌다(정기 게시 턴)", () => {
+    expect(resolveMemoryWriteEnabled({ noMemoryWrite: true })).toBe(false);
+  });
+
+  it("noMemoryWrite=false 를 명시해도 열려 있다(회귀 없음)", () => {
+    expect(resolveMemoryWriteEnabled({ noMemoryWrite: false })).toBe(true);
+  });
+
+  it("noMemoryWrite 인 요청은 allowedToolsFor 에 remember 를 넘기지 않지만 recall 은 그대로 남긴다(정기 게시 턴이 실제로 받는 도구 목록)", () => {
+    const memoryWriteEnabled = resolveMemoryWriteEnabled({ noMemoryWrite: true });
+    const tools = allowedToolsFor("allowed", false, false, "local", { memoryWriteEnabled });
+    expect(tools).not.toContain("mcp__asahi__remember");
+    expect(tools).toContain("mcp__asahi__recall");
   });
 });
 

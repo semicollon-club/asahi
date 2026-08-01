@@ -85,7 +85,7 @@ describe("DigestRunner — 정기 게시 턴은 원격 도구를 받지 않는�
     const db = await openTestDb();
     const settings = new SettingsRepo(db);
     const bus = new EventBus();
-    const requests: Array<{ noRemoteTools?: boolean; noWebTools?: boolean; noSkills?: boolean }> = [];
+    const requests: Array<{ noRemoteTools?: boolean; noWebTools?: boolean; noSkills?: boolean; noMemoryWrite?: boolean }> = [];
     const runner = new DigestRunner({
       runTurn: async (req) => {
         requests.push(req);
@@ -101,13 +101,15 @@ describe("DigestRunner — 정기 게시 턴은 원격 도구를 받지 않는�
     expect(requests).toHaveLength(1);
     expect(requests[0].noRemoteTools).toBe(true);
     expect(requests[0].noSkills).toBe(true);
+    // Important 4(최종 전체 브랜치 리뷰) — noRemoteTools/noSkills 와 같은 자리의 세 번째 축.
+    expect(requests[0].noMemoryWrite).toBe(true);
   });
 
-  it("checkAndRun(스케줄) 이 runTurn 에 noRemoteTools:true·noSkills:true 를 싣는다 — 웹 검색(noWebTools)은 그대로 열어 둔다", async () => {
+  it("checkAndRun(스케줄) 이 runTurn 에 noRemoteTools:true·noSkills:true·noMemoryWrite:true 를 싣는다 — 웹 검색(noWebTools)은 그대로 열어 둔다", async () => {
     const db = await openTestDb();
     const settings = new SettingsRepo(db);
     const bus = new EventBus();
-    const requests: Array<{ noRemoteTools?: boolean; noWebTools?: boolean; noSkills?: boolean }> = [];
+    const requests: Array<{ noRemoteTools?: boolean; noWebTools?: boolean; noSkills?: boolean; noMemoryWrite?: boolean }> = [];
     const runner = new DigestRunner({
       runTurn: async (req) => {
         requests.push(req);
@@ -125,6 +127,8 @@ describe("DigestRunner — 정기 게시 턴은 원격 도구를 받지 않는�
       expect(req.noRemoteTools).toBe(true);
       // 뉴스 조사에 도움이 되는 스킬이 없으므로 원격 도구와 같은 이유로 막는다.
       expect(req.noSkills).toBe(true);
+      // Important 4 — remember(공용 기억 쓰기)도 같은 이유로 막는다.
+      expect(req.noMemoryWrite).toBe(true);
       // 이 턴의 목적 자체가 웹 검색이므로 noWebTools 는 세우지 않는다(유휴 요약 턴과의 차이).
       expect(req.noWebTools).not.toBe(true);
     }
