@@ -655,6 +655,8 @@ export class AgentCore {
           // db_query 로 소유자 DB 전체를 읽을 수 있는 턴에 외부로 내보낼 통로까지 열려 있었던
           // 셈). 요약은 이미 끝난 대화를 요약할 뿐 검색이 필요 없으므로, 별도 플래그로 함께 닫는다.
           noWebTools: true,
+          // 스킬도 같은 이유로 닫는다 — 이 턴은 사람이 지켜보지 않고, 요약에 스킬이 필요없다.
+          noSkills: true,
         });
         if (result.ok && result.text.trim().length > 0) {
           await this.repos.summaries.insert({

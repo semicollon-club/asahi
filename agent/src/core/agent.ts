@@ -6,14 +6,25 @@ import type { MemoriesRepo } from "../store/memoriesRepo.js";
 import type { AllowedDirsRepo } from "../store/allowedDirsRepo.js";
 import type { IntrospectRepo } from "../store/introspectRepo.js";
 import type { WorkerKind } from "../store/workersRepo.js";
+import fs from "node:fs";
+import { fileURLToPath } from "node:url";
+import path from "node:path";
 import { buildTools, allowedToolsFor, TOOL_SERVER, type ToolCtx, type RuntimeInfo } from "./tools.js";
 import { resolveWorkerSelector } from "./workerSelect.js";
 import type { ImageInput } from "./images.js";
+import { skillPluginDirFrom, resolveSkillsEnabled, skillPluginsFor } from "./skills.js";
 
 // 자기인지(§Task5): SDK_VERSION 은 package.json 의 @anthropic-ai/claude-agent-sdk 버전과 동기화한다.
 // DEFAULT_MODEL 은 makeRunAgentTurn 의 model 인자가 없을 때 쓰는 기본 모델이다.
 const SDK_VERSION = "0.3.207"; // package.json 과 동기화
 const DEFAULT_MODEL = "claude-opus-4-8";
+
+// 프로세스 수명 동안 바뀌지 않으므로 턴마다 다시 계산하지 않는다. 존재 확인도 여기서 한 번만
+// 한다 — 턴마다 디스크를 보는 것은 낭비이고, 스킬 폴더는 배포 산출물이라 도는 중에 생기거나
+// 사라지지 않는다.
+const PLUGIN_DIR = skillPluginDirFrom(path.dirname(fileURLToPath(import.meta.url)));
+const SKILL_PLUGINS = skillPluginsFor({ pluginDir: PLUGIN_DIR, exists: fs.existsSync(PLUGIN_DIR) });
+if (SKILL_PLUGINS.length === 0) console.warn(`[agent] 스킬 폴더가 없어 스킬 없이 돕니다: ${PLUGIN_DIR}`);
 
 // 현재 턴의 상대·대화 컨텍스트. 이걸로 role·is_private 별 도구셋(allowedTools)을 정한다(§7.1).
 export type TurnContext = { role: Role; isPrivate: boolean; isOwner: boolean; userId: string; conversationId: number };
@@ -53,6 +64,7 @@ export const RESULT_SUMMARY_MAX = 200;
 export type TurnRequest = {
   prompt: string; systemPrompt: string; resume?: string; cwd: string; context: TurnContext;
   onProgress?: (u: ProgressUpdate) => void; images?: ImageInput[]; noRemoteTools?: boolean; noWebTools?: boolean;
+  noSkills?: boolean;
 };
 export type TurnResult = { text: string; sessionId?: string; ok: boolean };
 export type TurnRunner = (req: TurnRequest) => Promise<TurnResult>;
@@ -288,6 +300,9 @@ export function makeRunAgentTurn(
     // 반드시 같은 값을 넘겨야 "허용 목록엔 있는데 실행 화이트리스트엔 없음(또는 그 반대)" 불일치가
     // 생기지 않는다.
     const webToolsEnabled = resolveWebToolsEnabled(req);
+    // 스킬도 같은 축으로 닫는다 — 유휴 요약 턴은 사람이 지켜보지 않고 인젝션이 심겼을 수도 있는
+    // 세션을 이어받는다(core.ts 의 noWebTools 주석 참고). 요약에 스킬이 필요하지 않다.
+    const skillsEnabled = resolveSkillsEnabled(req);
     // ctx.remote 구성(호출 통로 + workerId/workerKind + 워커 roots) 자체도 buildRemoteCtx 로
     // 뽑아 테스트한다(agent.test.ts).
     ctx.remote = buildRemoteCtx(worker, hub);
@@ -296,10 +311,16 @@ export function makeRunAgentTurn(
     // (builtinTools=[] 이 SDK 내장 도구를 전부 닫는다). 경로 검사는 이제 워커(remote/roots.ts)가 최종
     // 권한을 갖는다 — 이 프로세스는 내장 도구를 안 여니 canUseTool 로 판정할 대상 자체가 없다.
     const preApprovedTools = allowedTools;
-    // SDK 내장 도구는 웹 검색만 연다(webToolsEnabled 가 false 면 그마저도 닫는다 — 유휴 요약
-    // 턴 전용, FIX3). 파일/Bash 는 원격 도구(fs_*·sh_exec)가 대신하므로 내장 쪽은 계속 닫아
-    // 둔다 — 열면 봇 컨테이너의 파일시스템을 건드리게 된다.
-    const builtinTools: string[] = webToolsEnabled ? ["WebSearch"] : [];
+    // SDK 내장 도구는 웹 검색과 스킬만 연다. 파일/Bash 는 원격 도구(fs_*·sh_exec)가 대신하므로
+    // 계속 닫아 둔다 — 열면 봇 컨테이너의 파일시스템을 건드리게 된다.
+    //
+    // Skill 을 여기 넣어야 하는 이유(2026-08-01 실측, src/scripts/skillProbe.ts): tools 가 비면
+    // SDK 는 Skill 도구까지 닫으며, skills: 'all' 을 줘도 되살아나지 않는다. 즉 스킬을 켜고 끄는
+    // 실제 스위치는 skills 옵션이 아니라 이 배열이다 — WebSearch 와 같은 방식이다.
+    const builtinTools: string[] = [
+      ...(webToolsEnabled ? ["WebSearch"] : []),
+      ...(skillsEnabled ? ["Skill"] : []),
+    ];
 
     let sessionId: string | undefined;
     let text = "";
@@ -324,6 +345,13 @@ export function makeRunAgentTurn(
         permissionMode: "default",
         model,
         maxTurns: 30,
+        // 스킬은 agent/skill-plugin/ 에 플러그인 하나로 모여 있다(agent/skill-plugin/.claude-plugin).
+        // 외부 스킬은 그 폴더에 그대로 복사해 커밋하는 것이 설치 방식이다.
+        plugins: SKILL_PLUGINS,
+        // 항상 'all' 이다. 끄는 일은 위 builtinTools 가 한다 — skills: [] 가 실제로 끄는지는
+        // 실측으로 증명되지 않았고(Task 1 의 C 갈래는 tools: [] 와 겹쳐 분리되지 않았다),
+        // 증명되지 않은 경로에 차단을 걸지 않는다.
+        skills: "all" as const,
       },
     })) {
       if (req.onProgress) {
