@@ -118,7 +118,7 @@ lastReviewed: 2026-08-01
 
 ## 테스트
 
-`agent/` 기준 vitest 45개 파일, **927개 통과 + 3개 skip**(930개, 윈도우에서 측정).
+`agent/` 기준 vitest 50개 파일, **1017개 통과 + 3개 skip**(1020개, 윈도우에서 측정).
 
 skip 3건의 성격은 서로 다르다. 1건은 Postgres READ ONLY 트랜잭션의 실제 쓰기 거부 동작으로,
 테스트용 인메모리 Postgres 구현(pg-mem)의 한계상 유닛 테스트로 재현할 수 없어 실 Supabase
