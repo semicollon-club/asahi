@@ -612,7 +612,30 @@ describe("AgentCore — DM 세션 예약어(/새세션)", () => {
     expect(after?.sessionId).toBeNull(); // 세션이 리셋됐다
     expect(await t.repos.messages.countUserMessages("owner")).toBe(msgCountBefore); // 명령어는 기록되지 않았다
     const notices = t.published.filter((p) => p.type === "assistant_message");
-    expect(notices.some((n) => /새 세션|세션.*시작|새로/.test((n as { text: string }).text))).toBe(true);
+    // 문구가 바뀌었다 — 세션이 "새로 시작"됐다는 것만으론 대화가 끊기는지 알 수 없다.
+    // 이제는 이전 대화를 안 가져간다는 것을 명시한다(Task 3).
+    expect(notices.some((n) => /안 가져갈게/.test((n as { text: string }).text))).toBe(true);
+  });
+
+  it("/새세션 은 바닥선을 긋고 캐릭터 설정을 지우되 기억은 남긴다", async () => {
+    const t = await setup();
+    await t.repos.memories.insert({ userId: "owner", scope: "character", title: "학년", content: "2학년" });
+    await t.repos.memories.insert({ userId: "owner", scope: "shared", title: "회비", content: "2만원" });
+    await t.repos.memories.insert({ userId: "owner", scope: "user", title: "개인", content: "내 메모" });
+    pub(t.bus, dmHint("owner", "owner"), "안녕", 1);
+    await t.core.drain();
+
+    pub(t.bus, dmHint("owner", "owner"), "/새세션", 2);
+    await t.core.drain();
+
+    const after = await t.repos.conversations.getByChannelId("dm-owner");
+    expect(after?.sessionId).toBeNull();
+    expect(after?.contextFloorTs).not.toBeNull();
+    expect(await t.repos.memories.characterFacts(40)).toEqual([]);
+    // 여기가 핵심 — 삭제 범위가 새면 동아리 공용 기억이 복구 불가능하게 사라진다.
+    expect((await t.repos.memories.sharedOnly()).map((m) => m.title)).toEqual(["회비"]);
+    expect((await t.repos.memories.forUser("owner")).map((m) => m.title).sort()).toEqual(["개인", "회비"]);
+    expect(t.calls).toHaveLength(1); // 예약어는 LLM 턴 없이 끝난다(회귀 방지)
   });
 });
 

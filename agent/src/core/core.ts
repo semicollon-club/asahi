@@ -275,12 +275,26 @@ export class AgentCore {
 
     const conv = await this.resolveConversation(hint, ts);
 
-    // 예약어 세션 명령(/새세션 등): LLM 턴·메시지 저장 없이 세션만 리셋하고 확인을 보낸다.
-    // 활발한 DM 이 같은 SDK 세션을 계속 resume 해 페르소나 변경이 반영되지 않는 걸, 소유자가
-    // 직접 끊고 새 세션을 시작하는 용도(새 세션은 buildContextBlock 의 흉내-방지 안내로 캐릭터가 적용된다).
+    // 예약어 세션 명령(/새세션 등): LLM 턴·메시지 저장 없이 세 가지를 함께 하고 확인을 보낸다.
+    // 1) session_id 를 비운다 — 다음 턴에 새 SDK 세션이 열리고 현재 시스템 프롬프트가
+    //    적용된다. resume 된 세션은 만들어질 때의 프롬프트를 유지하므로, 페르소나 파일을
+    //    고쳐 배포해도 활발한 DM 에는 반영되지 않는다. 이 명령의 원래 목적이다.
+    // 2) 컨텍스트 바닥선을 긋는다 — 이전 대화도 이전 요약도 다음 세션에 싣지 않는다.
+    //    데이터는 남는다(소유자는 db_query 로 볼 수 있다).
+    // 3) 캐릭터 설정을 지운다 — 페르소나를 바꾼 뒤에도 옛 즉흥 신상이 남으면 새 페르소나와
+    //    충돌한다. 가리지 않고 지우는 이유는 그것이 전역이기 때문이다: 방별로 가리면 같은
+    //    아사히가 방마다 다른 신상을 갖게 된다(memoriesRepo.characterFacts 주석 참고).
     if (parseSessionCommand(text) === "reset") {
-      await this.repos.conversations.setSession(conv.id, null, ts);
-      this.bus.publish({ type: "assistant_message", channel: "discord", channelRef: conv.discordChannelId, text: "…알겠어. 새 세션으로 시작할게. 다음 메시지부터 새로 대화하자.", ts: this.now() });
+      const t = this.now();
+      await this.repos.conversations.setSession(conv.id, null, t);
+      await this.repos.conversations.setContextFloor(conv.id, t);
+      const cleared = await this.repos.memories.deleteCharacterFacts();
+      const factNote = cleared > 0 ? ` 지어낸 설정 ${cleared}개도 지웠어.` : "";
+      this.bus.publish({
+        type: "assistant_message", channel: "discord", channelRef: conv.discordChannelId,
+        text: `…알겠어. 여기까지 나눈 얘기는 안 가져갈게.${factNote} 기억해둔 건 그대로 있어.`,
+        ts: t,
+      });
       return;
     }
 
