@@ -17,10 +17,14 @@ export class MessagesRepo {
     return Number((r.rows[0] as { id: number | string }).id);
   }
 
-  async recent(conversationId: number, limit: number): Promise<StoredMessage[]> {
+  async recent(conversationId: number, limit: number, sinceTs?: number): Promise<StoredMessage[]> {
+    // sinceTs 는 컨텍스트 바닥선이다 — 그 시각 이전의 원문은 요약으로 대체됐거나(/기억정리)
+    // 일부러 끊긴 것이다(/새세션). 경계 시각의 메시지는 제외한다(> 이지 >= 가 아니다).
     const r = await this.db.query(
-      "SELECT * FROM (SELECT * FROM messages WHERE conversation_id = $1 ORDER BY id DESC LIMIT $2) AS recent_sub ORDER BY id ASC",
-      [conversationId, limit],
+      sinceTs === undefined
+        ? "SELECT * FROM (SELECT * FROM messages WHERE conversation_id = $1 ORDER BY id DESC LIMIT $2) AS recent_sub ORDER BY id ASC"
+        : "SELECT * FROM (SELECT * FROM messages WHERE conversation_id = $1 AND ts > $3 ORDER BY id DESC LIMIT $2) AS recent_sub ORDER BY id ASC",
+      sinceTs === undefined ? [conversationId, limit] : [conversationId, limit, sinceTs],
     );
     return (r.rows as Row[]).map(toMessage);
   }

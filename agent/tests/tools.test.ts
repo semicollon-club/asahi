@@ -282,6 +282,31 @@ describe("allowedToolsFor — forget 노출", () => {
     expect(allowedToolsFor("allowed", true, false)).not.toContain("mcp__asahi__forget");
     expect(allowedToolsFor("allowed", false, false)).not.toContain("mcp__asahi__forget");
   });
+
+  // Important 2(리뷰 후속) — memoryWriteEnabled:false 는 "이 턴은 기억을 쓰면 안 된다"는 뜻인데
+  // 예전엔 remember 만 닫고 forget 은 소유자 분기에서 그대로 열려 있었다. 지우는 것도 기억
+  // 쓰기이고, 오염보다 삭제가 되돌리기 더 어렵다 — 요약 턴이 이 축의 두 번째 호출부가 되면서
+  // 실제로 닿는 구멍이 됐다(대화 주인이 소유자면 그 턴이 forget 을 들고 돈다).
+  it("memoryWriteEnabled:false 면 소유자도 DM·서버 양쪽에서 forget 을 받지 못한다", () => {
+    const dm = allowedToolsFor("owner", true, true, "local", { memoryWriteEnabled: false });
+    expect(dm).not.toContain("mcp__asahi__forget");
+    expect(dm).not.toContain("mcp__asahi__remember");
+    const server = allowedToolsFor("owner", false, true, "local", { memoryWriteEnabled: false });
+    expect(server).not.toContain("mcp__asahi__forget");
+    expect(server).not.toContain("mcp__asahi__remember");
+    // 읽기는 이 축과 무관하다(회귀 가드) — 요약 턴은 공용 기억을 읽어야 할 수 있다.
+    expect(dm).toContain("mcp__asahi__recall");
+    expect(server).toContain("mcp__asahi__recall");
+  });
+
+  it("memoryWriteEnabled 를 생략하거나 true 로 주면 forget 은 예전 그대로 열린다(회귀 가드)", () => {
+    for (const isPrivate of [true, false]) {
+      expect(allowedToolsFor("owner", isPrivate, true, "local", { memoryWriteEnabled: true }))
+        .toEqual(allowedToolsFor("owner", isPrivate, true, "local"));
+      expect(allowedToolsFor("owner", isPrivate, true, "local", { memoryWriteEnabled: true }))
+        .toContain("mcp__asahi__forget");
+    }
+  });
 });
 
 describe("manage_access 도구", () => {
@@ -701,9 +726,30 @@ describe("allowedToolsFor — memoryWriteEnabled 로 remember 만 막고 recall 
     expect(tools.sort()).toEqual(["WebSearch", "mcp__asahi__recall"]);
   });
 
-  it("memoryWriteEnabled 는 character_fact 를 건드리지 않는다(remember 와 다른 축)", () => {
-    const tools = allowedToolsFor("owner", true, true, "local", { memoryWriteEnabled: false });
-    expect(tools).toContain("mcp__asahi__character_fact");
+  // Important 2(최종 전체 브랜치 리뷰) — 이 테스트는 원래 정반대를 고정하고 있었다
+  // ("memoryWriteEnabled 는 character_fact 를 건드리지 않는다"). 그 판단이 틀렸다:
+  // character_fact 는 scope='character' 인 memories 행을 넣는 도구이고, 그 행은 전역이라
+  // 소유자 방을 포함한 모든 방의 컨텍스트 블록에 실린다. "이 턴은 기억을 쓰면 안 된다"는
+  // 이름의 축이 기억 테이블에 행을 넣는 도구를 열어 두면 다음 호출부가 그 이름을 믿고 당한다 —
+  // forget 을 이 축에 묶은 것과 똑같은 이유다.
+  //
+  // 실제로 닿는 경로: 손님 DM 이 유휴 스윕으로 닫힐 때 writeSummary 가 noMemoryWrite:true 로
+  // 도는데, 그 턴의 도구셋은 [recall, character_fact] 였다(실측). 그 세션에 인젝션이 심겨
+  // 있으면 지어낸 신상이 전역 canon 이 되고, 아무도 지켜보지 않는 타이머 위에서 일어난다.
+  it("memoryWriteEnabled:false 면 character_fact 도 닫힌다 — memories 행을 넣는 도구는 전부 이 축이다", () => {
+    for (const [role, isPrivate, isOwner] of [["owner", true, true], ["allowed", true, false]] as const) {
+      const tools = allowedToolsFor(role, isPrivate, isOwner, "local", { memoryWriteEnabled: false });
+      expect(tools).not.toContain("mcp__asahi__character_fact");
+      expect(tools).toContain("mcp__asahi__recall"); // 읽기는 이 축과 무관하다(회귀 가드)
+    }
+  });
+
+  it("memoryWriteEnabled 를 생략하거나 true 로 주면 character_fact 는 예전 그대로 열린다(회귀 가드)", () => {
+    for (const [role, isPrivate, isOwner] of [["owner", true, true], ["allowed", true, false]] as const) {
+      expect(allowedToolsFor(role, isPrivate, isOwner, "local", { memoryWriteEnabled: true }))
+        .toEqual(allowedToolsFor(role, isPrivate, isOwner, "local"));
+      expect(allowedToolsFor(role, isPrivate, isOwner, "local")).toContain("mcp__asahi__character_fact");
+    }
   });
 });
 

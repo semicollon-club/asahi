@@ -65,3 +65,28 @@ describe("MemoriesRepo", () => {
     expect(await repo.searchForUser("owner", "2학년")).toEqual([]);
   });
 });
+
+// /새세션 이 캐릭터 설정을 비울 때 쓰는 삭제 경로. 위 describe 의 beforeEach 픽스처와는 무관하게
+// 매 테스트가 독립된 db 를 새로 연다 — 삭제 범위(scope='character' 만)를 다른 스코프 데이터와
+// 함께 검증해야 하므로 픽스처를 공유하지 않고 여기서 직접 구성한다.
+describe("MemoriesRepo — deleteCharacterFacts", () => {
+  it("deleteCharacterFacts 는 캐릭터 설정만 지우고 개수를 돌려준다", async () => {
+    const db = await openTestDb();
+    const repo = new MemoriesRepo(db);
+    await repo.insert({ userId: "u", scope: "character", title: "학년", content: "2학년" });
+    await repo.insert({ userId: "u", scope: "character", title: "취향", content: "커피" });
+    await repo.insert({ userId: "u", scope: "user", title: "개인", content: "내 메모" });
+    await repo.insert({ userId: "u", scope: "shared", title: "회비", content: "2만원" });
+
+    expect(await repo.deleteCharacterFacts()).toBe(2);
+    expect(await repo.characterFacts(40)).toEqual([]);
+    // 동아리 공용 기억과 개인 기억은 남아야 한다 — 여기서 범위가 새면 복구할 방법이 없다.
+    expect((await repo.sharedOnly()).map((m) => m.title)).toEqual(["회비"]);
+    expect((await repo.forUser("u")).map((m) => m.title).sort()).toEqual(["개인", "회비"]);
+  });
+
+  it("지울 것이 없으면 0 을 돌려준다", async () => {
+    const db = await openTestDb();
+    expect(await new MemoriesRepo(db).deleteCharacterFacts()).toBe(0);
+  });
+});

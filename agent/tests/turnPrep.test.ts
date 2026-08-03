@@ -62,6 +62,18 @@ describe("buildContextBlock — 공용 기억의 작성자", () => {
     const block = await buildContextBlock(repos, await serverConv(), -1);
     expect(block).toContain("학기당 2만원");
   });
+
+  // Task 1(컨텍스트 블록 문자 예산) — 캐릭터 설정·요약·최근 대화는 각각 상한이 있는데
+  // 기억만 무제한이었다. memoryScope.test.ts 는 renderMemories 단위 테스트일 뿐이라, 여기서는
+  // buildContextBlock 이 실제로 MEMORY_SECTION_BUDGET 을 넘겨 호출하는지(turnPrep 배선)를 본다.
+  it("공용 기억이 예산을 넘으면 뒷부분이 제목만 실린다", async () => {
+    for (let i = 0; i < 5; i++) {
+      await repos.memories.insert({ userId: "u1", scope: "shared", title: `주제${i}`, content: "가".repeat(2000) });
+    }
+    const block = await buildContextBlock(repos, await serverConv(), -1);
+    expect(block).toContain("주제4");      // 마지막 것도 제목은 보인다
+    expect(block).toContain("recall");     // 가져오는 방법을 알려준다
+  });
 });
 
 describe("buildContextBlock — 흉내 방지 안내", () => {
@@ -202,5 +214,55 @@ describe("buildContextBlock — 공용 기억·캐릭터 설정의 개행으로 
     const block = await buildContextBlock(repos, conv, -1);
 
     expect(block.split("\n").filter((l) => l === "## 최근 대화 기록").length).toBe(1);
+  });
+});
+
+describe("buildContextBlock — 컨텍스트 바닥선", () => {
+  let db: Db;
+  let repos: { memories: MemoriesRepo; summaries: SummariesRepo; messages: MessagesRepo; users: UsersRepo };
+  let convs: ConversationsRepo;
+
+  beforeEach(async () => {
+    db = await openTestDb();
+    repos = { memories: new MemoriesRepo(db), summaries: new SummariesRepo(db), messages: new MessagesRepo(db), users: new UsersRepo(db) };
+    convs = new ConversationsRepo(db);
+    await convs.create({ kind: "dm", discordChannelId: "c", primaryUserId: "u1", isPrivate: true, lastActiveTs: 1 });
+  });
+
+  const conv = async () => (await convs.getByChannelId("c"))!;
+
+  it("바닥선이 없으면 지금과 똑같이 전부 싣는다(회귀 방지)", async () => {
+    const c = await conv();
+    await repos.messages.insert({ conversationId: c.id, role: "user", content: "옛날얘기", ts: 100, processed: true });
+    expect(await buildContextBlock(repos, c, -1)).toContain("옛날얘기");
+  });
+
+  it("바닥선 이전 메시지는 빠지고 이후는 남는다", async () => {
+    const c = await conv();
+    await repos.messages.insert({ conversationId: c.id, role: "user", content: "옛날얘기", ts: 100, processed: true });
+    await repos.messages.insert({ conversationId: c.id, role: "user", content: "새얘기", ts: 300, processed: true });
+    await convs.setContextFloor(c.id, 200);
+    const block = await buildContextBlock(repos, await conv(), -1);
+    expect(block).not.toContain("옛날얘기");
+    expect(block).toContain("새얘기");
+  });
+
+  it("바닥선 이전 요약은 빠진다", async () => {
+    const c = await conv();
+    await repos.summaries.insert({ conversationId: c.id, fromMessageId: 0, toMessageId: 1, content: "옛요약", createdTs: 100 });
+    await convs.setContextFloor(c.id, 200);
+    expect(await buildContextBlock(repos, await conv(), -1)).not.toContain("옛요약");
+  });
+
+  it("바닥선과 같은 시각의 요약은 남는다", async () => {
+    // /기억정리 가 만드는 요약이 정확히 이 경우다 — 경계에서 만들어져 그 이전을 대신하므로
+    // 포함되어야 한다. 메시지는 반대로 그 시점 이전이 대체된 것이라 빠진다(부등호가 다른 이유).
+    const c = await conv();
+    await repos.summaries.insert({ conversationId: c.id, fromMessageId: 0, toMessageId: 1, content: "경계요약", createdTs: 200 });
+    await repos.messages.insert({ conversationId: c.id, role: "user", content: "경계메시지", ts: 200, processed: true });
+    await convs.setContextFloor(c.id, 200);
+    const block = await buildContextBlock(repos, await conv(), -1);
+    expect(block).toContain("경계요약");
+    expect(block).not.toContain("경계메시지");
   });
 });

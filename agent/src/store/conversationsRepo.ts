@@ -4,14 +4,14 @@ export type Conversation = {
   id: number; kind: "dm" | "thread"; discordChannelId: string; originMessageId: string | null;
   guildId: string | null; parentChannelId: string | null; primaryUserId: string; isPrivate: boolean;
   sessionId: string | null; firstMessageId: number | null; privateMemoryLoaded: boolean;
-  lastActiveTs: number; status: "active" | "idle" | "closed";
+  lastActiveTs: number; status: "active" | "idle" | "closed"; contextFloorTs: number | null;
 };
 
 type Row = {
   id: number | string; kind: "dm" | "thread"; discord_channel_id: string; origin_message_id: string | null;
   guild_id: string | null; parent_channel_id: string | null; primary_user_id: string; is_private: boolean;
   session_id: string | null; first_message_id: number | string | null; private_memory_loaded: boolean;
-  last_active_ts: number; status: "active" | "idle" | "closed";
+  last_active_ts: number; status: "active" | "idle" | "closed"; context_floor_ts: number | string | null;
 };
 
 function toConversation(r: Row): Conversation {
@@ -21,6 +21,7 @@ function toConversation(r: Row): Conversation {
     isPrivate: r.is_private, sessionId: r.session_id,
     firstMessageId: r.first_message_id === null ? null : Number(r.first_message_id),
     privateMemoryLoaded: r.private_memory_loaded, lastActiveTs: r.last_active_ts, status: r.status,
+    contextFloorTs: r.context_floor_ts === null ? null : Number(r.context_floor_ts),
   };
 }
 
@@ -92,5 +93,11 @@ export class ConversationsRepo {
 
   async setFirstMessageId(id: number, messageId: number): Promise<void> {
     await this.db.query("UPDATE conversations SET first_message_id = $1 WHERE id = $2", [messageId, id]);
+  }
+
+  // 이 시각 이전의 대화 내용은 새 세션의 컨텍스트 블록에 싣지 않는다(turnPrep.buildContextBlock).
+  // 데이터를 지우는 것이 아니라 "안 싣는다"는 표시일 뿐이다 — messages·summaries 행은 남는다.
+  async setContextFloor(id: number, ts: number): Promise<void> {
+    await this.db.query("UPDATE conversations SET context_floor_ts = $1 WHERE id = $2", [ts, id]);
   }
 }

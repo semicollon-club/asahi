@@ -3,7 +3,7 @@ import type { MessagesRepo } from "../store/messagesRepo.js";
 import type { SummariesRepo } from "../store/summariesRepo.js";
 import type { MemoriesRepo } from "../store/memoriesRepo.js";
 import type { UsersRepo } from "../store/usersRepo.js";
-import { renderMemories } from "./memoryScope.js";
+import { renderMemories, MEMORY_SECTION_BUDGET } from "./memoryScope.js";
 
 // core.ts(봇 실시간 경로)가 쓰는 턴 준비 로직 — 원래 AgentCore 의 private 메서드/지역 함수였던
 // 것을 그대로 옮긴 것(동작은 완전히 동일하다). 한때는 워커(job 처리, worker/jobRunner.ts)와도
@@ -48,9 +48,14 @@ export async function buildContextBlock(repos: ContextRepos, conv: Conversation,
   // 신상이라 "누가 등록했는가"가 의미 없고, 애초에 전역 canon 이다.
   const factLines = facts.length > 0 ? renderMemories(facts, names) : "(설정 없음)";
   const memories = conv.isPrivate ? await repos.memories.forUser(conv.primaryUserId) : await repos.memories.sharedOnly();
-  const memoryLines = memories.length > 0 ? renderMemories(memories, names) : "(기억 없음)";
-  const summaries = await repos.summaries.recent(conv.id, 3);
-  const recentAll = await repos.messages.recent(conv.id, 21);
+  // Task 1(컨텍스트 블록 문자 예산) — 캐릭터 설정(위 factLines)은 CHARACTER_FACT_LIMIT 로
+  // 건수 상한이 이미 있고, 요약·최근 대화도 각각 3건·20건 상한이 있다. 기억만 무제한이었다 —
+  // 공용 기억은 부원 누구나 늘릴 수 있으므로 여기에만 문자 예산을 건다.
+  const memoryLines = memories.length > 0 ? renderMemories(memories, names, { budget: MEMORY_SECTION_BUDGET }) : "(기억 없음)";
+  // 컨텍스트 바닥선(conv.contextFloorTs) — NULL 이면 지금까지처럼 바닥선 없이 전부 대상이다.
+  const floor = conv.contextFloorTs ?? undefined;
+  const summaries = await repos.summaries.recent(conv.id, 3, floor);
+  const recentAll = await repos.messages.recent(conv.id, 21, floor);
   const recent = recentAll.filter((m) => m.id !== excludeMessageId).slice(-20);
   const recentLines = recent
     .map((m) => `[${new Date(m.ts).toISOString()}] ${m.role === "user" ? "사용자" : m.role === "assistant" ? "비서" : "시스템"}: ${m.content}`)

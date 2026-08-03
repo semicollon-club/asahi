@@ -72,4 +72,13 @@ export class MemoriesRepo {
   async delete(id: number): Promise<void> {
     await this.db.query("DELETE FROM memories WHERE id = $1", [id]);
   }
+
+  // /새세션 이 캐릭터 설정(즉흥으로 지어낸 자기 신상)을 비울 때 쓴다. 전역이다 — 캐릭터 설정은
+  // user_id·conversation_id 로 스코프되지 않으므로(characterFacts 참고) 방별로 가릴 수가 없다.
+  // scope 가 정확히 'character' 인 것만 지운다: user·shared 는 동아리 지식과 개인 기억이라
+  // 여기서 범위가 새면 복구할 방법이 없다.
+  async deleteCharacterFacts(): Promise<number> {
+    const r = await this.db.query("DELETE FROM memories WHERE scope = 'character'");
+    return r.rowCount ?? 0;
+  }
 }

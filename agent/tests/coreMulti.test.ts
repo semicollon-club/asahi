@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { EventBus, type AgentEvent, type ConversationHint } from "../src/events/bus.js";
 import { openTestDb } from "../src/store/db.js";
 import { UsersRepo } from "../src/store/usersRepo.js";
@@ -14,6 +14,8 @@ import { AgentCore } from "../src/core/core.js";
 import { filterFileAttachments, FILE_LIMITS } from "../src/core/attachments.js";
 import type { Config } from "../src/config.js";
 import type { TurnRequest, TurnResult } from "../src/core/agent.js";
+import { resolveMemoryWriteEnabled, resolveWebToolsEnabled, resolveTurnWorker } from "../src/core/agent.js";
+import { allowedToolsFor } from "../src/core/tools.js";
 import type { DigestRunner } from "../src/core/digest.js";
 
 const HOUR = 60 * 60 * 1000;
@@ -40,6 +42,10 @@ async function setup(over: {
   };
   registry?: { personalWorkerOf(userId: string): Promise<string | null>; sharedWorkerId(): Promise<string | null> };
   digest?: DigestRunner;
+  // 코어가 now() 를 부를 때마다 시각이 이만큼 흐르게 한다(기본 0 = 지금까지처럼 고정 시계).
+  // "한 번 구한 시각을 두 곳에 쓴다"는 종류의 불변식은 고정 시계로는 검증할 수 없다 — 두 번
+  // 구해도 같은 값이 나와 버려서 어긋난 구현이 그대로 통과한다(/기억정리 의 바닥선·created_ts).
+  tickMs?: number;
 } = {}) {
   const db = await openTestDb();
   const repos = {
@@ -100,8 +106,11 @@ async function setup(over: {
     call: over.hub.call ?? (async () => ({ ok: false, content: "이 테스트의 가짜 허브는 call 을 구현하지 않았어요." })),
     rootsOf: over.hub.rootsOf ?? (() => []),
   };
+  // 코어에 주입하는 시계만 흐른다. 아래 반환하는 t.now() 는 지금 시각을 읽기만 한다(흐르지
+  // 않는다) — 테스트가 메시지 ts 를 만들 때 쓰는 값이라, 읽는 것만으로 시각이 밀리면 안 된다.
+  const tickMs = over.tickMs ?? 0;
   const core = new AgentCore({
-    bus, config, runTurn, now: () => clock, repos, agentCwd: "/data/agent",
+    bus, config, runTurn, now: () => { const v = clock; clock += tickMs; return v; }, repos, agentCwd: "/data/agent",
     fetchImpl: over.imageFetch, hub, registry, digest: over.digest,
   });
   core.start();
@@ -128,6 +137,25 @@ function threadHint(userId: string, channelId: string, role: "owner" | "allowed"
 }
 function pub(bus: EventBus, hint: ConversationHint, text: string, ts: number): void {
   bus.publish({ type: "user_message", channel: "discord", channelRef: hint.discordChannelId, text, ts, hint });
+}
+
+// Minor 8(최종 전체 브랜치 리뷰) — 어떤 턴이 실제로 받는 도구 목록. 이 헬퍼 이전에는 각
+// 테스트가 allowedToolsFor 를 직접 부르면서 memoryWriteEnabled 만 넘기고 workerConnected·
+// webToolsEnabled 는 빼먹은 채 "agent.ts 가 하는 계산을 그대로 재현한다"고 적어 뒀다. 실제로는
+// webToolsEnabled 가 기본값(true)으로 들어가 요약 턴에는 없는 WebSearch 가 결과에 섞였다 —
+// 단정들이 그 도구를 보지 않아 드러나지 않았을 뿐이다. 세 축을 다 넘겨 그 주장을 참으로 만든다.
+//
+// resolveTurnWorker 에 registry·hub 를 넘기지 않는 것도 재현의 일부다: setup() 은 over.hub 가
+// 없으면 hub 를 주입하지 않으므로 agent.ts 도 이 테스트 환경에서 같은 이유로 null 을 얻는다
+// (요약 턴은 그 위에 noRemoteTools:true 가 있어 레지스트리·허브를 보기 전에 이미 끊긴다).
+// deployTarget "local" 은 setup() 의 config 기본값과 같은 값이다.
+async function toolsForTurn(req: TurnRequest): Promise<string[]> {
+  const worker = await resolveTurnWorker(req);
+  return allowedToolsFor(req.context.role, req.context.isPrivate, req.context.isOwner, "local", {
+    workerConnected: worker !== null,
+    webToolsEnabled: resolveWebToolsEnabled(req),
+    memoryWriteEnabled: resolveMemoryWriteEnabled(req),
+  });
 }
 
 // 예약어 조사의 동시 실행 가드를 테스트하려면 digest.run 이 끝나는 시점을 테스트가 직접
@@ -592,7 +620,83 @@ describe("AgentCore — 유휴 요약 턴은 원격 도구를 강제로 닫는�
   });
 });
 
-describe("AgentCore — DM 세션 예약어(/새세션)", () => {
+// Important 2(리뷰 후속) — 요약 턴의 신원은 명령을 친 사람이 아니라 대화 주인(conv.primaryUserId)
+// 에서 나온다. 어댑터는 이미 있는 스레드에 들어온 손님에게도 그 스레드의 primaryUserId 를 그대로
+// 실어 주므로(discord.ts 의 existingPrimaryUserId), 손님이 소유자 스레드에서 /기억정리 를 치면
+// 손님이 쓴 텍스트가 담긴 세션을 소유자 도구셋으로 이어받는 턴이 뜬다 — FIX3/FIX4 가 막으려던
+// 인젝션 면 그대로다. 그중 forget 은 동아리 공용 기억을 지우고 손님 분기엔 아예 없는 도구다.
+// 신원 자체를 바꾸면 요약 대상 세션과 프롬프트 계층이 어긋나므로, 기억 축을 닫는 쪽으로 막는다.
+describe("AgentCore — 요약 턴은 기억 쓰기 축을 닫는다(Important 2)", () => {
+  it("소유자 스레드에 들어온 손님이 /기억정리 를 쳐도 그 턴은 noMemoryWrite:true 라 remember·forget 을 하나도 받지 못한다", async () => {
+    const t = await setup();
+    // 소유자가 연 스레드(primaryUserId = owner, 세션 s1).
+    pub(t.bus, threadHint("owner", "ch-1", "owner", "o1"), "안녕", 1);
+    await t.core.drain();
+
+    // 손님이 같은 스레드에 들어온다 — 어댑터가 실어 주는 모양 그대로(primaryUserId 는 소유자).
+    const guestInOwnerThread: ConversationHint = {
+      kind: "thread", discordChannelId: "ch-1", originMessageId: "o1", guildId: "g", parentChannelId: "p",
+      isPrivate: false, primaryUserId: "owner", userId: "guest", role: "allowed", discordMessageId: `msg-${seq++}`,
+    };
+    pub(t.bus, guestInOwnerThread, "/기억정리", 2);
+    await t.core.drain();
+
+    const summaryCall = t.calls[t.calls.length - 1];
+    // 신원은 여전히 대화 주인에서 나온다(그 사실 자체는 이 수정이 바꾸지 않는다 — 아래 도구셋으로 막는다).
+    expect(summaryCall.context).toMatchObject({ isOwner: true, role: "owner", userId: "owner" });
+    expect(summaryCall.noMemoryWrite).toBe(true);
+
+    // 그 플래그가 실제 도구 목록까지 도달하는지 — agent.ts 가 하는 계산을 그대로 재현한다
+    // (toolsForTurn, 이 파일 위쪽. 세 축을 다 넘긴다).
+    const tools = await toolsForTurn(summaryCall);
+    expect(tools).not.toContain("mcp__asahi__forget");
+    expect(tools).not.toContain("mcp__asahi__remember");
+    expect(tools).toContain("mcp__asahi__recall");
+    // 다른 두 축도 함께 확인한다 — 이 턴은 noWebTools·noRemoteTools 도 세우므로 WebSearch 와
+    // 원격 도구가 없어야 하고, 그것이 세 축을 다 넘기는 재현이어야 하는 이유다.
+    expect(tools).not.toContain("WebSearch");
+    expect(tools).not.toContain("mcp__asahi__fs_read");
+  });
+
+  // Important 2(최종 전체 브랜치 리뷰) — 위 테스트는 스레드(공개 채널) 계층이라 애초에
+  // character_fact 가 없는 분기였다. 이 축이 실제로 열려 있던 자리는 DM 이다: 손님 DM 이
+  // 유휴 스윕으로 닫힐 때 도는 요약 턴의 도구셋이 [recall, character_fact] 였다(실측).
+  // character_fact 는 scope='character' 인 memories 행을 넣고, 그 행은 유저·대화 스코프가
+  // 없어 소유자 방을 포함한 모든 방의 컨텍스트 블록에 실린다 — 손님 DM 에 심긴 인젝션 한 줄이
+  // 아무도 보지 않는 타이머 위에서 전역 canon 을 만든다. noMemoryWrite 가 막으라고 만들어진
+  // 위협 모델 그 자체다.
+  it("손님 DM 의 유휴 요약 턴은 character_fact 도 받지 못한다 — 전역 캐릭터 설정을 심을 수 없다", async () => {
+    const t = await setup();
+    pub(t.bus, dmHint("guest", "allowed"), "안녕", t.now());
+    await t.core.drain();
+    // 평상시 손님 DM 은 character_fact 를 그대로 받는다(회귀 가드 — 이 수정이 닫는 것은 요약 턴뿐).
+    expect(await toolsForTurn(t.calls[0])).toContain("mcp__asahi__character_fact");
+
+    t.setClock(1_000_000 + 31 * 60 * 1000);
+    await t.core.closeIdleConversations();
+    await t.core.drain();
+
+    const summaryCall = t.calls[t.calls.length - 1];
+    expect(summaryCall.context).toMatchObject({ isPrivate: true, isOwner: false });
+    const tools = await toolsForTurn(summaryCall);
+    expect(tools).not.toContain("mcp__asahi__character_fact");
+    expect(tools).toContain("mcp__asahi__recall");
+  });
+
+  it("유휴 스윕의 요약 턴도 같은 축을 닫는다 — 두 호출부가 writeSummary 하나를 공유한다", async () => {
+    const t = await setup();
+    pub(t.bus, dmHint("owner", "owner"), "안녕", t.now());
+    await t.core.drain();
+    expect(t.calls[0].noMemoryWrite).toBeUndefined(); // 평상시 턴은 그대로(회귀 가드)
+
+    t.setClock(1_000_000 + 31 * 60 * 1000);
+    await t.core.closeIdleConversations();
+    await t.core.drain();
+    expect(t.calls[t.calls.length - 1].noMemoryWrite).toBe(true);
+  });
+});
+
+describe("AgentCore — DM 세션 예약어(/새세션·/기억정리)", () => {
   it("예약어를 받으면 세션을 리셋하고 확인만 보내며, LLM 턴·메시지 저장을 하지 않는다", async () => {
     const t = await setup();
     // 먼저 일반 대화로 세션을 하나 만든다(nextResult.sessionId = 's1').
@@ -612,7 +716,364 @@ describe("AgentCore — DM 세션 예약어(/새세션)", () => {
     expect(after?.sessionId).toBeNull(); // 세션이 리셋됐다
     expect(await t.repos.messages.countUserMessages("owner")).toBe(msgCountBefore); // 명령어는 기록되지 않았다
     const notices = t.published.filter((p) => p.type === "assistant_message");
-    expect(notices.some((n) => /새 세션|세션.*시작|새로/.test((n as { text: string }).text))).toBe(true);
+    // 문구가 바뀌었다 — 세션이 "새로 시작"됐다는 것만으론 대화가 끊기는지 알 수 없다.
+    // 이제는 이전 대화를 안 가져간다는 것을 명시한다(Task 3).
+    expect(notices.some((n) => /안 가져갈게/.test((n as { text: string }).text))).toBe(true);
+  });
+
+  it("/새세션 은 바닥선을 긋고 캐릭터 설정을 지우되 기억은 남긴다", async () => {
+    const t = await setup();
+    await t.repos.memories.insert({ userId: "owner", scope: "character", title: "학년", content: "2학년" });
+    await t.repos.memories.insert({ userId: "owner", scope: "shared", title: "회비", content: "2만원" });
+    await t.repos.memories.insert({ userId: "owner", scope: "user", title: "개인", content: "내 메모" });
+    pub(t.bus, dmHint("owner", "owner"), "안녕", 1);
+    await t.core.drain();
+
+    pub(t.bus, dmHint("owner", "owner"), "/새세션", 2);
+    await t.core.drain();
+
+    const after = await t.repos.conversations.getByChannelId("dm-owner");
+    expect(after?.sessionId).toBeNull();
+    expect(after?.contextFloorTs).not.toBeNull();
+    expect(await t.repos.memories.characterFacts(40)).toEqual([]);
+    // 여기가 핵심 — 삭제 범위가 새면 동아리 공용 기억이 복구 불가능하게 사라진다.
+    expect((await t.repos.memories.sharedOnly()).map((m) => m.title)).toEqual(["회비"]);
+    expect((await t.repos.memories.forUser("owner")).map((m) => m.title).sort()).toEqual(["개인", "회비"]);
+    expect(t.calls).toHaveLength(1); // 예약어는 LLM 턴 없이 끝난다(회귀 방지)
+  });
+
+  // Minor 4(최종 전체 브랜치 리뷰) — 확인 문구가 "지어낸 설정 N개도 지웠어"라고만 해서, 그
+  // 삭제가 이 방이 아니라 모든 방에 걸린다는 사실을 아무도 알 수 없었다. 손님이 자기 DM 에서
+  // 치면 소유자 방의 캐릭터 canon 이 함께 사라지는데 그 사실이 어디에도 안 나간다.
+  it("/새세션 확인 문구가 캐릭터 설정 삭제의 범위(모든 방)를 밝힌다", async () => {
+    const t = await setup();
+    await t.repos.memories.insert({ userId: "guest", scope: "character", title: "학년", content: "2학년" });
+    pub(t.bus, dmHint("guest", "allowed"), "안녕", 1);
+    await t.core.drain();
+
+    pub(t.bus, dmHint("guest", "allowed"), "/새세션", 2);
+    await t.core.drain();
+
+    const notices = t.published.filter((p) => p.type === "assistant_message").map((p) => (p as { text: string }).text);
+    const confirm = notices.find((n) => /안 가져갈게/.test(n))!;
+    expect(confirm).toMatch(/모든 방/);
+  });
+
+  it("/기억정리 는 요약을 남기고 세션·바닥선을 설정한다", async () => {
+    // tickMs:1 — 고정 시계면 now() 를 두 번 불러도 같은 값이 나와, 바닥선과 created_ts 를
+    // 따로 구하는 잘못된 구현도 아래 단정을 그대로 통과한다(실제로 확인함). 시계를 흐르게 해야
+    // "한 번 구해 두 곳에 쓴다"가 진짜로 고정된다.
+    const t = await setup({ tickMs: 1 });
+    pub(t.bus, dmHint("owner", "owner"), "안녕", 1);
+    await t.core.drain();
+
+    pub(t.bus, dmHint("owner", "owner"), "/기억정리", 2);
+    await t.core.drain();
+
+    const conv = (await t.repos.conversations.getByChannelId("dm-owner"))!;
+    expect(await t.repos.summaries.recent(conv.id, 3)).toHaveLength(1);
+    expect(conv.sessionId).toBeNull();
+    expect(conv.contextFloorTs).not.toBeNull();
+    // 바닥선과 요약의 created_ts 가 같아야 요약이 스스로 걸러지지 않는다(필터가 >= 다).
+    // 두 값을 직접 맞춰 본다 — recent(…, floor) 만으로는 created_ts 가 바닥선보다 "뒤"로
+    // 어긋난 경우를 못 잡는다(>= 라서 통과해 버린다).
+    const r = await t.db.query("SELECT created_ts FROM conversation_summaries WHERE conversation_id = $1", [conv.id]);
+    expect(Number((r.rows[0] as { created_ts: number | string }).created_ts)).toBe(conv.contextFloorTs);
+    expect(await t.repos.summaries.recent(conv.id, 3, conv.contextFloorTs!)).toHaveLength(1);
+  });
+
+  it("/기억정리 는 요약이 실패하면 세션도 바닥선도 건드리지 않는다", async () => {
+    // 이 태스크의 핵심 안전장치다 — 밀어놓고 요약이 없으면 대화를 잃고 대신 받은 것도 없다.
+    const t = await setup();
+    pub(t.bus, dmHint("owner", "owner"), "안녕", 1);
+    await t.core.drain();
+    const before = (await t.repos.conversations.getByChannelId("dm-owner"))!;
+
+    // 다음 runTurn 이 ok:false 를 돌려주게 한다. 이 파일에 이미 있는 수단이 setResult 뿐이고,
+    // mode:"throw" 는 예외라 ok:false 와 다른 경로다 — writeSummary 는 둘 다 false 로 접지만,
+    // 브리핑이 고정하려는 것은 "실패한 결과"쪽이므로 그것을 그대로 만든다.
+    t.setResult({ text: "(에이전트 오류: error_during_execution)", sessionId: undefined, ok: false });
+    pub(t.bus, dmHint("owner", "owner"), "/기억정리", 2);
+    await t.core.drain();
+
+    const after = (await t.repos.conversations.getByChannelId("dm-owner"))!;
+    expect(after.sessionId).toBe(before.sessionId);
+    expect(after.contextFloorTs).toBe(before.contextFloorTs);
+    expect(await t.repos.summaries.recent(after.id, 3)).toHaveLength(0);
+  });
+
+  // Minor(리뷰 후속) — writeSummary 는 예외만 로그를 남기고, ok:false·빈 텍스트 갈래는 아무 말
+  // 없이 false 만 돌려줬다. 사용자에게는 "정리하다 실패했어"가 나가는데 로그에는 아무것도 없어,
+  // 모델이 실패한 것인지 빈 답을 낸 것인지조차 구분할 수 없었다.
+  it("요약 턴이 실패하거나 빈 텍스트를 돌려주면 진단할 수 있는 로그를 남긴다", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const t = await setup();
+      pub(t.bus, dmHint("owner", "owner"), "안녕", 1);
+      await t.core.drain();
+
+      t.setResult({ text: "(에이전트 오류: error_during_execution)", sessionId: undefined, ok: false });
+      pub(t.bus, dmHint("owner", "owner"), "/기억정리", 2);
+      await t.core.drain();
+      expect(warn.mock.calls.some((c) => String(c[0]).includes("요약 턴이 실패로 끝남"))).toBe(true);
+
+      // 실패했으므로 세션은 그대로다 — 같은 대화에 한 번 더 칠 수 있다.
+      warn.mockClear();
+      t.setResult({ text: "   ", sessionId: "s1", ok: true });
+      pub(t.bus, dmHint("owner", "owner"), "/기억정리", 3);
+      await t.core.drain();
+      expect(warn.mock.calls.some((c) => String(c[0]).includes("빈 텍스트"))).toBe(true);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("정리할 세션이 없으면 요약을 시도하지 않고 안내만 한다", async () => {
+    const t = await setup();
+    pub(t.bus, dmHint("owner", "owner"), "/기억정리", 1);
+    await t.core.drain();
+    expect(t.calls).toHaveLength(0);
+    const notices = t.published.filter((p) => p.type === "assistant_message");
+    expect(notices).toHaveLength(1);
+  });
+
+  it("/기억정리 는 캐릭터 설정을 지우지 않는다 — 그건 /새세션 의 몫이다", async () => {
+    // 두 명령의 차이가 문구에만 있고 동작에 없으면, 정리하려던 사람이 신상까지 잃는다.
+    const t = await setup();
+    await t.repos.memories.insert({ userId: "owner", scope: "character", title: "학년", content: "2학년" });
+    pub(t.bus, dmHint("owner", "owner"), "안녕", 1);
+    await t.core.drain();
+
+    pub(t.bus, dmHint("owner", "owner"), "/기억정리", 2);
+    await t.core.drain();
+
+    expect((await t.repos.memories.characterFacts(40)).map((m) => m.title)).toEqual(["학년"]);
+  });
+
+  // 리뷰 재현(Important 1) — /기억정리 는 ingest 체인에서 곧바로 돌지만 대화 턴은 turn 체인에서
+  // 돈다. 진행 중이던 턴이 끝나면서 setSession(result.sessionId) 을 쓰면, 그 직전에 정리가 그어
+  // 놓은 바닥선만 남고 세션은 되살아난다 — 다음 턴이 정리되지 않은 세션을 이어받는데 DB 기록은
+  // 바닥선에 가려져 안 보이는 최악의 조합이고, 사용자에게는 "정리했어"라고 이미 말한 뒤다.
+  it("진행 중이던 대화 턴이 /기억정리 가 끊은 세션을 되살리지 못한다", async () => {
+    const t = await setup({ mode: "manual" });
+    pub(t.bus, dmHint("owner", "owner"), "안녕", 1);
+    await flush();
+    t.resolvers[0]!(); // 첫 턴 완료 → 세션 s1 확정
+    await flush();
+    expect((await t.repos.conversations.getByChannelId("dm-owner"))?.sessionId).toBe("s1");
+
+    pub(t.bus, dmHint("owner", "owner"), "하나만 더", 2); // 이 턴은 아직 진행 중이다
+    await flush();
+    expect(t.calls).toHaveLength(2);
+
+    pub(t.bus, dmHint("owner", "owner"), "/기억정리", 3);
+    await flush();
+
+    // 리뷰가 재현한 순서 그대로 — 요약 턴이 먼저 끝나고, 진행 중이던 대화 턴이 그 뒤에 끝난다.
+    // 수정 후에는 요약 턴이 대화 턴 뒤에 직렬화되어 이 시점에 아직 시작조차 안 했으므로
+    // resolvers[2] 가 없다(그래서 옵셔널 호출이고, 아래에서 한 번 더 부른다).
+    t.resolvers[2]?.();
+    await flush();
+    t.resolvers[1]!();
+    await flush();
+    t.resolvers[2]?.();
+    await t.core.drain();
+
+    const after = (await t.repos.conversations.getByChannelId("dm-owner"))!;
+    expect(after.sessionId).toBeNull();
+    expect(after.contextFloorTs).toBe(1_000_000);
+    expect(await t.repos.summaries.recent(after.id, 3)).toHaveLength(1);
+    const notices = t.published.filter((p) => p.type === "assistant_message").map((p) => (p as { text: string }).text);
+    expect(notices.some((n) => /정리했어/.test(n))).toBe(true);
+  });
+
+  // 같은 경합의 /새세션 쪽 — /기억정리 만 고치고 이쪽을 두면, 답이 생성되는 도중에 /새세션 을
+  // 친 사람(사용자가 실제로 겪은 순서다)은 이 명령의 두 가지 일이 함께 깨지는 것을 본다:
+  // 진행 중이던 턴이 뒤늦게 setSession(result.sessionId) 을 써서 세션이 되살아나므로 페르소나가
+  // 다시 적용되지 않고, 모델은 이전 대화를 자기 컨텍스트에 그대로 쥔 채로 바닥선만 DB 기록을
+  // 가린다. 확인 문구("안 가져갈게")는 이미 나간 뒤다.
+  it("진행 중이던 대화 턴이 /새세션 이 끊은 세션을 되살리지 못한다", async () => {
+    const t = await setup({ mode: "manual" });
+    await t.repos.memories.insert({ userId: "owner", scope: "character", title: "학년", content: "2학년" });
+    pub(t.bus, dmHint("owner", "owner"), "안녕", 1);
+    await flush();
+    t.resolvers[0]!(); // 첫 턴 완료 → 세션 s1 확정
+    await flush();
+    expect((await t.repos.conversations.getByChannelId("dm-owner"))?.sessionId).toBe("s1");
+
+    pub(t.bus, dmHint("owner", "owner"), "하나만 더", 2); // 이 턴은 아직 진행 중이다
+    await flush();
+    expect(t.calls).toHaveLength(2);
+
+    pub(t.bus, dmHint("owner", "owner"), "/새세션", 3);
+    await flush();
+
+    // 진행 중이던 대화 턴이 뒤늦게 끝나며 setSession(result.sessionId) 을 쓴다.
+    t.resolvers[1]!();
+    await t.core.drain();
+
+    const after = (await t.repos.conversations.getByChannelId("dm-owner"))!;
+    expect(after.sessionId).toBeNull();
+    expect(after.contextFloorTs).toBe(1_000_000);
+    expect(await t.repos.memories.characterFacts(40)).toEqual([]);
+    expect(t.calls).toHaveLength(2); // /새세션 은 여전히 LLM 턴을 쓰지 않는다
+    const notices = t.published.filter((p) => p.type === "assistant_message").map((p) => (p as { text: string }).text);
+    expect(notices.some((n) => /안 가져갈게/.test(n))).toBe(true);
+  });
+
+  // Important 1(리뷰 후속) — turn 체인 직렬화 위에 한 겹 더. 요약 턴이 도는 동안 다른 경로가
+  // 이 대화에 새 세션을 만들어 놓았다면, 그걸 끊는 것은 사용자가 시킨 일이 아니고 바닥선까지
+  // 그으면 그 새 대화가 통째로 가려진다. summarizeAndClose 가 쓰는 compare-and-close 와 같다.
+  // 세션을 리포로 직접 바꾸는 이유: 어느 경로가 그 쓰기를 했는지가 아니라 "요약하던 세션이
+  // 아니게 됐다"는 사실 하나만이 이 가드의 판정 근거이기 때문이다.
+  it("요약하는 사이에 세션이 다른 것으로 바뀌면 세션도 바닥선도 건드리지 않고 그대로 알린다", async () => {
+    const t = await setup({ mode: "manual" });
+    pub(t.bus, dmHint("owner", "owner"), "안녕", 1);
+    await flush();
+    t.resolvers[0]!();
+    await flush();
+    const conv = (await t.repos.conversations.getByChannelId("dm-owner"))!;
+    expect(conv.sessionId).toBe("s1");
+
+    pub(t.bus, dmHint("owner", "owner"), "/기억정리", 2);
+    await flush();
+    expect(t.calls).toHaveLength(2); // 요약 턴이 떠 있다
+
+    await t.repos.conversations.setSession(conv.id, "s2", t.now());
+    t.resolvers[1]!();
+    await t.core.drain();
+
+    const after = (await t.repos.conversations.getByChannelId("dm-owner"))!;
+    expect(after.sessionId).toBe("s2");
+    expect(after.contextFloorTs).toBeNull();
+    // 이미 쓰인 요약 행은 그대로 둔다 — 바닥선을 안 그었으니 범위 안에 남아 그대로 실린다.
+    expect(await t.repos.summaries.recent(after.id, 3)).toHaveLength(1);
+    const notices = t.published.filter((p) => p.type === "assistant_message").map((p) => (p as { text: string }).text);
+    const guard = notices.find((n) => /정리하는 사이에/.test(n))!;
+    expect(notices.some((n) => /정리했어/.test(n))).toBe(false);
+
+    // Minor 5(최종 전체 브랜치 리뷰) — 문구는 이 가드가 실제로 판정한 것만 말해야 한다.
+    // (가) 판정 근거는 "세션이 요약하던 그것이 아니게 됐다" 하나다. 들어온 메시지일 수도
+    // 있지만 /새세션 이 중간에 끼어들었거나 resume 재시도가 세션을 갈아끼운 것일 수도 있어,
+    // "새 얘기가 들어와서"라고 단정할 근거가 이 코드에는 없다.
+    expect(guard).not.toMatch(/새 얘기/);
+    // (나) 요약 행은 이미 들어갔고 바닥선을 안 그었으니 다음 컨텍스트에 그대로 실린다(위
+    // 단정이 그 행의 존재를 고정한다). "그대로 뒀어"는 아무 일도 없었다는 뜻으로 읽힌다.
+    expect(guard).toMatch(/요약/);
+  });
+
+  // Important 3(최종 전체 브랜치 리뷰) — 두 명령의 본체에는 try/catch 가 없어, 리포 호출 하나만
+  // 던져도 enqueue 의 catch 가 그 예외를 삼키고 아무것도 발행하지 않은 채 끝났다. 어댑터는 그
+  // 메시지를 큐에 넣는 시점에 이미 원본 메시지에 ⏳ 를 달고 채널별 FIFO(discord.ts 의
+  // pendingTriggers)에 밀어 넣은 뒤이고, 그 큐는 나가는 assistant_message·system_notice 한
+  // 건마다 하나씩 꺼내진다 — 한 건도 안 나가면 그 ⏳ 가 안 풀릴 뿐 아니라 그 채널의 이후 모든
+  // 턴이 한 칸씩 밀린 엉뚱한 메시지에 ✅ 를 단다. 채널 하나가 영구히 어긋나는 결함이라,
+  // runConversationTurn 이 같은 실패 모드를 이미 막고 있다(그쪽 catch 주석).
+  //
+  // 세는 대상이 assistant_message + system_notice 인 것이 핵심이다 — 어댑터가 큐를 꺼내는
+  // 기준이 정확히 그 둘이다(progress 는 상태 메시지라 큐를 건드리지 않는다).
+  const outgoing = (e: AgentEvent) => e.type === "assistant_message" || e.type === "system_notice";
+
+  for (const [command, label] of [["/새세션", "resetSession"], ["/기억정리", "compactSession"]] as const) {
+    it(`${command} 은 리포가 던져도 정확히 한 건을 발행한다(${label})`, async () => {
+      const err = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const t = await setup();
+        pub(t.bus, dmHint("owner", "owner"), "안녕", 1);
+        await t.core.drain();
+        const before = t.published.filter(outgoing).length;
+
+        // 두 명령이 공통으로 부르는 쓰기다. 바닥선을 긋는 것은 되돌릴 수 없는 일이라 실패
+        // 자체를 없앨 수는 없고, 실패했을 때 채널이 어긋나지 않는 것만이 지킬 수 있는 보장이다.
+        t.repos.conversations.setContextFloor = async () => { throw new Error("DB 오류(테스트용)"); };
+        pub(t.bus, dmHint("owner", "owner"), command, 2);
+        await t.core.drain();
+
+        expect(t.published.filter(outgoing).length - before).toBe(1);
+      } finally {
+        err.mockRestore();
+      }
+    });
+  }
+
+  it("손님의 /기억정리 는 시간당 한도에 포함되고, 소유자는 포함되지 않는다", async () => {
+    // 이 명령은 실제 LLM 턴을 하나 돌린다 — 예약어라고 한도를 건너뛰면 손님이 연타로 무제한
+    // 요약 턴을 돌릴 수 있다(조사 예약어에서 실제로 났던 결함과 같은 종류).
+    const t = await setup({ config: { maxTurnsPerHourPerUser: 1 } });
+    pub(t.bus, dmHint("guest", "allowed"), "안녕", 1); // 첫 턴이 손님 몫 1개를 소진한다
+    await t.core.drain();
+    const before = (await t.repos.conversations.getByChannelId("dm-guest"))!;
+    expect(before.sessionId).toBe("s1");
+
+    pub(t.bus, dmHint("guest", "allowed"), "/기억정리", 2);
+    await t.core.drain();
+
+    // 한도에 걸려 요약 턴이 아예 돌지 않고, 따라서 세션·바닥선도 그대로다.
+    expect(t.calls).toHaveLength(1);
+    const after = (await t.repos.conversations.getByChannelId("dm-guest"))!;
+    expect(after.sessionId).toBe("s1");
+    expect(after.contextFloorTs).toBeNull();
+
+    // 같은 조건에서 소유자는 한도를 받지 않는다(runConversationTurn 과 같은 규칙).
+    pub(t.bus, dmHint("owner", "owner"), "안녕", 3);
+    await t.core.drain();
+    pub(t.bus, dmHint("owner", "owner"), "/기억정리", 4);
+    await t.core.drain();
+    const ownerConv = (await t.repos.conversations.getByChannelId("dm-owner"))!;
+    expect(ownerConv.sessionId).toBeNull();
+    expect(await t.repos.summaries.recent(ownerConv.id, 3)).toHaveLength(1);
+  });
+
+  // Important 3(리뷰 후속) — 위 테스트는 dmHint 를 써서 대화 주인과 명령을 친 사람이 같은
+  // 사람이다. 그래서 한도 판정 기준을 conv.primaryUserId 로 바꿔도 전부 통과했다(리뷰가 실제로
+  // 뮤테이션으로 확인). 두 신원이 갈리는 자리는 스레드다: 어댑터는 이미 있는 스레드에 들어온
+  // 손님에게도 그 스레드의 primaryUserId 를 그대로 실어 주므로(discord.ts 의
+  // existingPrimaryUserId), 대화 주인으로 재면 손님이 소유자 스레드에서 한도 없이 요약 턴을
+  // 연타할 수 있다. 아래 두 테스트가 그 축을 양방향으로 고정한다.
+  it("소유자 스레드에 들어온 손님의 /기억정리 도 그 손님 한도로 잰다(대화 주인 기준이 아니다)", async () => {
+    const t = await setup({ config: { maxTurnsPerHourPerUser: 1 } });
+    pub(t.bus, threadHint("owner", "ch-1", "owner", "o1"), "안녕", 1); // 소유자는 예약 자체를 안 한다
+    await t.core.drain();
+
+    const guestInOwnerThread: ConversationHint = {
+      kind: "thread", discordChannelId: "ch-1", originMessageId: "o1", guildId: "g", parentChannelId: "p",
+      isPrivate: false, primaryUserId: "owner", userId: "guest", role: "allowed", discordMessageId: `msg-${seq++}`,
+    };
+    pub(t.bus, { ...guestInOwnerThread, discordMessageId: `msg-${seq++}` }, "나도 안녕", 2); // 손님 몫 1개 소진
+    await t.core.drain();
+    expect(t.calls).toHaveLength(2);
+
+    pub(t.bus, guestInOwnerThread, "/기억정리", 3);
+    await t.core.drain();
+
+    // 한도에 걸려 요약 턴이 아예 돌지 않고, 세션·바닥선도 그대로다.
+    expect(t.calls).toHaveLength(2);
+    const after = (await t.repos.conversations.getByChannelId("ch-1"))!;
+    expect(after.sessionId).toBe("s1");
+    expect(after.contextFloorTs).toBeNull();
+    const notices = t.published.filter((p) => p.type === "system_notice").map((p) => (p as { text: string }).text);
+    expect(notices.some((n) => /구독 한도/.test(n))).toBe(true);
+  });
+
+  it("손님 스레드에서 소유자가 친 /기억정리 는 한도를 받지 않는다(전역 한도가 다 찼어도 돈다)", async () => {
+    // 반대 방향 고정 — 기준을 conv.primaryUserId 로 바꾸면 이 대화의 주인이 손님이라 소유자가
+    // 예약을 거쳐야 하고, 전역 한도가 이미 찼으므로 거부된다.
+    const t = await setup({ config: { maxTurnsPerHourGlobal: 1 } });
+    pub(t.bus, threadHint("guest", "ch-2", "allowed", "g1"), "안녕", 1); // 전역 1개를 손님이 소진
+    await t.core.drain();
+    expect(t.calls).toHaveLength(1);
+
+    const ownerInGuestThread: ConversationHint = {
+      kind: "thread", discordChannelId: "ch-2", originMessageId: "g1", guildId: "g", parentChannelId: "p",
+      isPrivate: false, primaryUserId: "guest", userId: "owner", role: "owner", discordMessageId: `msg-${seq++}`,
+    };
+    pub(t.bus, ownerInGuestThread, "/기억정리", 2);
+    await t.core.drain();
+
+    expect(t.calls).toHaveLength(2); // 요약 턴이 돌았다
+    const after = (await t.repos.conversations.getByChannelId("ch-2"))!;
+    expect(after.sessionId).toBeNull();
+    expect(await t.repos.summaries.recent(after.id, 3)).toHaveLength(1);
   });
 });
 

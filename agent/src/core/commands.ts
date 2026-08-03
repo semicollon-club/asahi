@@ -7,12 +7,18 @@ import type { DigestTopic } from "./digest.js";
 // 소유자가 직접 새 세션을 시작할 수 있게 한다(core.ts ingest 에서 이 결과를 처리).
 
 const RESET_COMMANDS = new Set(["/새세션", "/새대화", "/새로시작", "/reset"]);
+// 지금 세션의 대화를 요약해 다음 세션으로 넘긴다(Claude Code 의 /compact 에 해당).
+// /새세션 과 달리 캐릭터 설정을 지우지 않는다 — 이 명령은 "정리해서 넘긴다"는 뜻이지
+// "다른 사람이 되자"가 아니다.
+const COMPACT_COMMANDS = new Set(["/기억정리", "/compact"]);
 
-export type SessionCommand = "reset";
+export type SessionCommand = "reset" | "compact";
 
 export function parseSessionCommand(text: string): SessionCommand | null {
   const t = text.trim().toLowerCase();
-  return RESET_COMMANDS.has(t) ? "reset" : null;
+  if (RESET_COMMANDS.has(t)) return "reset";
+  if (COMPACT_COMMANDS.has(t)) return "compact";
+  return null;
 }
 
 // 정기 게시를 즉시 실행하는 예약어. 세션 예약어와 같은 규칙 — 앞 슬래시를 요구하고
@@ -47,8 +53,9 @@ export function parseHelpCommand(text: string): boolean {
 // 그 채널을 대화로 채택해야 하는데, 그러면 conversations 행이 생겨 이후 그 채널의 모든 메시지에
 // 봇이 답하기 시작한다. 그래서 "대화를 만들지 않고 그 자리에서 끝나는 명령"만 따로 통과시킨다.
 //
-// /새세션 은 제외한다 — 초기화할 세션이 있어야 의미가 있고, 대화가 없는 채널에는 리셋할 대상
-// 자체가 없다(스레드·DM 안에서는 지금까지처럼 그대로 동작한다).
+// /새세션·/기억정리 는 제외한다 — 정리하거나 초기화할 세션이 있어야 의미가 있고, 대화가 없는
+// 채널에는 그 대상 자체가 없다(스레드·DM 안에서는 지금까지처럼 그대로 동작한다). 둘 다
+// parseSessionCommand 로만 인식되므로 이 함수를 건드리지 않아도 자동으로 빠진다.
 export function isChannelCommand(text: string): boolean {
   return parseHelpCommand(text) || parseDigestCommand(text) !== null;
 }
@@ -56,7 +63,11 @@ export function isChannelCommand(text: string): boolean {
 // 안내문은 위 예약어 테이블에서 파생시킨다. 손으로 적으면 예약어를 추가하는 순간
 // 조용히 어긋나고, 그 어긋남은 아무도 눈치채지 못한다(테스트가 이 일치를 검증한다).
 export const COMMAND_HELP: ReadonlyArray<{ commands: readonly string[]; description: string }> = [
-  { commands: [...RESET_COMMANDS], description: "대화를 새 세션으로 시작한다. 성격이나 설정이 바뀐 뒤에 쓴다" },
+  // Minor 4(최종 전체 브랜치 리뷰) — "지어낸 설정도 지운다"만으로는 그 삭제가 이 방에만 걸린다고
+  // 읽힌다. scope='character' 는 유저·대화 스코프가 없어 어느 방에서 쳐도 전부 지워진다 —
+  // 손님이 자기 DM 에서 쳐도 소유자 방의 캐릭터 canon 이 함께 사라지므로, 치기 전에 알아야 한다.
+  { commands: [...RESET_COMMANDS], description: "지금까지의 대화를 끊고 새로 시작한다. 지어낸 설정은 모든 방에서 지운다(기억은 남는다)" },
+  { commands: [...COMPACT_COMMANDS], description: "지금까지의 대화를 요약해서 다음 세션으로 넘긴다" },
   // FIX6(사소, 머지 전 리뷰): 결과가 항상 "대회 소식 채널"에 올라가는 건 아니다 — DM 에서 부르거나
   // 지정 채널(DIGEST_CONTEST_CHANNEL_ID 등)이 설정돼 있지 않으면 명령을 친 곳에 그대로 온다
   // (core.ts 의 startDigestCommand). 조건부 목적지를 그대로 반영해 안내문이 실제 동작과 어긋나지

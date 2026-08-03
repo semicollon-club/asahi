@@ -201,9 +201,13 @@ Asahi 비서는 대화·모델 호출·기억·세션을 전담하는 **봇** �
 **`remember`에는 이제 같은 자리에 차단 스위치가 있다(Important 4, 최종 전체 브랜치 리뷰 —
 2026-08-02 발견, 같은 날 수정).** `allowedToolsFor`(위 "도구셋 결정" 참고)의 옵션 객체에
 `memoryWriteEnabled`가 추가됐다 — `noRemoteTools`/`noWebTools`/`noSkills`와 나란히 놓이는
-세 번째 축이다. `DigestRunner.execute`는 `noMemoryWrite:true`를 세워(`agent.ts`의
-`resolveMemoryWriteEnabled`가 뽑아 `memoryWriteEnabled`로 넘긴다) 이 턴에서 `remember`만
-빼고, `recall`(공용 기억 읽기)은 그대로 둔다 — 공용 기억은 어차피 전 부원이 읽을 수 있고
+세 번째 축이다. 이 축은 `memories` 테이블에 행을 넣거나 지우는 도구 셋 — `remember`·`forget`·
+`character_fact` — 을 한꺼번에 닫는다(`forget`은 Important 2 리뷰 후속, `character_fact`는
+Important 2 최종 전체 브랜치 리뷰에서 합류했다. 셋 다 같은 이유다: "기억을 쓰면 안 되는 턴"
+이라는 이름의 축이 그중 하나를 열어 두면 이 옵션을 믿는 다음 호출부가 조용히 당한다).
+`DigestRunner.execute`는 `noMemoryWrite:true`를 세워(`agent.ts`의 `resolveMemoryWriteEnabled`가
+뽑아 `memoryWriteEnabled`로 넘긴다) 이 턴에서 그 셋을 빼고 — 손님 서버 계층이라 실제로 있던
+것은 `remember` 하나뿐이다 — `recall`(공용 기억 읽기)은 그대로 둔다 — 공용 기억은 어차피 전 부원이 읽을 수 있고
 이 턴의 출력도 공개 채널로 가므로 `recall`까지 막으면 얻는 것 없이 기능만 잃는다. 고치기
 전에는 사람이 지켜보지 않는 타이머로 돌면서 신뢰할 수 없는 웹 검색 결과를 읽어들이다 그
 안에 심긴 지시로 `remember`를 호출하면 조작된 내용이 `scope='shared'`(동아리 공용 기억)로

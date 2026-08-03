@@ -169,6 +169,9 @@ CREATE TABLE IF NOT EXISTS worker_jobs (
 -- 리뷰 #2/#5a 이전에 이미 만들어졌을 수 있는 환경을 위한 안전한 보강(이미 있으면 no-op).
 ALTER TABLE worker_jobs ADD COLUMN IF NOT EXISTS message_id BIGINT;
 ALTER TABLE worker_jobs ADD COLUMN IF NOT EXISTS delivered_ts BIGINT;
+-- 컨텍스트 바닥선: "이 시각 이전의 대화 내용은 새 세션 컨텍스트 블록에 싣지 않는다"는 표시(turnPrep.buildContextBlock).
+-- NULL 이면 바닥선이 없다는 뜻(기존 대화 전부 해당) — 데이터를 지우는 게 아니라 안 싣는다는 표시일 뿐이다.
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS context_floor_ts BIGINT;
 CREATE INDEX IF NOT EXISTS idx_worker_jobs_user_status ON worker_jobs(user_id, status);
 CREATE INDEX IF NOT EXISTS idx_worker_jobs_status ON worker_jobs(status);
 -- 리뷰 #2(HIGH): 위임 job 을 그 트리거 메시지(message_id)로 멱등화한다 — 봇 크래시 후 recoverPending 이
