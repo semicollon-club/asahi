@@ -275,7 +275,9 @@ export class AgentCore {
 
     const conv = await this.resolveConversation(hint, ts);
 
-    // 예약어 세션 명령(/새세션 등): LLM 턴·메시지 저장 없이 세 가지를 함께 하고 확인을 보낸다.
+    // 세션 예약어 두 갈래. 둘 다 메시지를 저장하지 않고 여기서 끝난다.
+    //
+    // /새세션(reset): LLM 턴 없이 세 가지를 함께 하고 확인을 보낸다.
     // 1) session_id 를 비운다 — 다음 턴에 새 SDK 세션이 열리고 현재 시스템 프롬프트가
     //    적용된다. resume 된 세션은 만들어질 때의 프롬프트를 유지하므로, 페르소나 파일을
     //    고쳐 배포해도 활발한 DM 에는 반영되지 않는다. 이 명령의 원래 목적이다.
@@ -284,7 +286,8 @@ export class AgentCore {
     // 3) 캐릭터 설정을 지운다 — 페르소나를 바꾼 뒤에도 옛 즉흥 신상이 남으면 새 페르소나와
     //    충돌한다. 가리지 않고 지우는 이유는 그것이 전역이기 때문이다: 방별로 가리면 같은
     //    아사히가 방마다 다른 신상을 갖게 된다(memoriesRepo.characterFacts 주석 참고).
-    if (parseSessionCommand(text) === "reset") {
+    const sessionCmd = parseSessionCommand(text);
+    if (sessionCmd === "reset") {
       const t = this.now();
       await this.repos.conversations.setSession(conv.id, null, t);
       await this.repos.conversations.setContextFloor(conv.id, t);
@@ -295,6 +298,53 @@ export class AgentCore {
         text: `…알겠어. 여기까지 나눈 얘기는 안 가져갈게.${factNote} 기억해둔 건 그대로 있어.`,
         ts: t,
       });
+      return;
+    }
+
+    // /기억정리: /새세션 이 "끊고 새로"라면 이쪽은 "정리해서 넘기기"다(Claude Code 의 /compact).
+    // 지금 세션을 요약해 summaries 에 넣고 바닥선을 그어, 다음 세션에 원문 20개 대신 그 요약이
+    // 실리게 한다. 캐릭터 설정은 지우지 않는다 — 그건 /새세션 의 몫이다.
+    if (sessionCmd === "compact") {
+      const publish = (text2: string, ts: number) =>
+        this.bus.publish({ type: "assistant_message", channel: "discord", channelRef: conv.discordChannelId, text: text2, ts });
+
+      if (!conv.sessionId) {
+        publish("정리할 대화가 없어. 아직 이 세션에서 얘기한 게 없거든.", this.now());
+        return;
+      }
+
+      // 손님 한도: 이 명령은 실제 LLM 턴을 하나 돌리므로 runConversationTurn·조사 예약어와 같은
+      // 규칙을 그대로 탄다 — 소유자(신원 기준)는 무제한, 손님은 시간당 한도에 포함. 판정 기준은
+      // 대화 주인이 아니라 명령을 친 사람이다(유휴 스윕은 부른 사람이 없어 대화 주인을 쓰지만,
+      // 여기는 있다). 세션 확인보다 뒤에 두는 이유는, 요약할 것이 없으면 턴 자체를 안 돌리므로
+      // 손님 몫을 깎을 이유가 없기 때문이다.
+      if (hint.userId !== this.ownerId) {
+        const reserved = await this.repos.turns.reserve({
+          userId: hint.userId, conversationId: conv.id, kind: "summary", ts: this.now(),
+          perUserLimit: this.config.maxTurnsPerHourPerUser, globalLimit: this.config.maxTurnsPerHourGlobal,
+          ownerReserve: 0, isOwner: false, windowMs: HOUR_MS,
+        });
+        if (!reserved) {
+          await this.notify(conv, "구독 한도 보호를 위해 잠시 쉬고 있어요. 1시간 안에 다시 시도해 주세요.");
+          return;
+        }
+      }
+
+      // 바닥선과 요약의 created_ts 에 같은 값을 쓴다 — 두 번 시각을 구하면 순서에 따라 방금
+      // 만든 요약이 스스로 걸러지는 경합이 생긴다(요약 필터가 created_ts >= floor 이므로).
+      const t = this.now();
+      const ok = await this.writeSummary(conv, t);
+      if (!ok) {
+        // 실패하면 아무것도 바꾸지 않는다. 세션과 바닥선을 밀어놓고 요약이 없으면 대화를 잃고
+        // 대신 받은 것도 없는 상태가 된다 — 사용자는 요약을 받으려고 이 명령을 부른 것이다.
+        // 유휴 스윕(summarizeAndClose)이 "실패해도 세션은 반드시 닫는다"인 것과 반대이며,
+        // 그래야 한다: 그쪽은 요약이 부수적이고 이쪽은 요약이 목적이다.
+        publish("정리하다 실패했어. 대화는 그대로 두었으니 다시 시도해줘.", this.now());
+        return;
+      }
+      await this.repos.conversations.setSession(conv.id, null, t);
+      await this.repos.conversations.setContextFloor(conv.id, t);
+      publish("…정리했어. 지금까지 얘기는 요약해서 가져갈게.", t);
       return;
     }
 
@@ -723,71 +773,98 @@ export class AgentCore {
     if (this.now() - conv.lastActiveTs < this.idleMs()) return; // 그 사이 활동 → 정리 보류
 
     const isOwner = conv.primaryUserId === this.ownerId;
-    const role: Role = isOwner ? "owner" : "allowed";
     // 소유자 대화의 요약도 무제한. 손님 대화 요약만 한도에 포함(초과면 요약은 건너뛰되 세션은 반드시 정리).
     const reserved = isOwner || await this.repos.turns.reserve({
       userId: null, conversationId: conv.id, kind: "summary", ts: this.now(),
       perUserLimit: this.config.maxTurnsPerHourPerUser, globalLimit: this.config.maxTurnsPerHourGlobal,
       ownerReserve: 0, isOwner: false, windowMs: HOUR_MS,
     });
-    if (reserved) {
-      // 리뷰 #4(MED): 클라우드 재배포/재시작 등으로 세션 저장소가 초기화되면 resume 이 실패할 수
-      // 있다(isSessionNotFound 류). 이 요약 시도가 그대로 던지면 예외가 enqueue 의 catch 까지 올라가
-      // 아래 compare-and-close 가 전혀 실행되지 않고, 세션이 active 로 고착되어 매 유휴 스윕마다
-      // 같은 실패를 반복하며(손님 몫이면 전역 한도까지 소진) 대화가 영원히 안 닫힌다. 요약은
-      // "있으면 좋은" 부가 기능이므로, 실패해도 요약만 건너뛰고 아래 세션 정리는 반드시 실행한다.
-      try {
-        const recentMsgs = await this.repos.messages.recent(conv.id, 1);
-        const toMessageId = recentMsgs[0]?.id ?? conv.firstMessageId ?? 0;
-        const result = await this.runTurn({
-          prompt: SUMMARY_PROMPT,
-          // FIX4(중요, 최종 리뷰): 이 턴은 noRemoteTools 로 원격 도구를 강제로 닫으므로(아래),
-          // 페르소나에도 항상 workerConnected:false 를 실어 "안내와 실제 도구"가 어긋나지 않게
-          // 한다 — 실제 hub 연결 상태를 여기서 다시 물어 true 가 나오더라도, 이 턴 자체는
-          // noRemoteTools 때문에 fs_*/sh_exec 를 못 쓰므로 그 상태를 그대로 안내하면 FIX3 가
-          // 고친 것과 같은 종류의 거짓 안내(도구는 없는데 있다고 말하는)가 새로 생긴다.
-          systemPrompt: buildSystemPrompt({ role, isPrivate: conv.isPrivate, isOwner, deployTarget: this.config.deployTarget, workerConnected: false, emotions: this.emotions }),
-          resume: conv.sessionId, cwd: this.agentCwd,
-          context: { role, isPrivate: conv.isPrivate, isOwner, userId: conv.primaryUserId, conversationId: conv.id },
-          // FIX4: 유휴 요약은 사람이 지켜보지 않는 타이머로 돌고, 이전에 모델이 읽은 파일 등을
-          // 통해 프롬프트 인젝션이 심어졌을 수도 있는 세션을 그대로 이어받는다(resume). 워커
-          // 연결 여부·소유자 신원과 무관하게 원격 도구(fs_*/sh_exec, FIX2 로 같은 축에 묶인
-          // allow_dir 등)를 강제로 닫는다.
-          noRemoteTools: true,
-          // FIX3(중요, 최종 리뷰 3차): noRemoteTools 는 이름 그대로 원격 도구 축만 잠그고 SDK
-          // 내장 WebSearch 는 건드리지 않는다 — 이 브랜치로 모든 턴이 웹 검색을 갖게 되면서, 이
-          // 무인 요약 턴도 실제로는 WebSearch 를 그대로 쓸 수 있었다(리뷰 재현: db_schema/
-          // db_query 로 소유자 DB 전체를 읽을 수 있는 턴에 외부로 내보낼 통로까지 열려 있었던
-          // 셈). 요약은 이미 끝난 대화를 요약할 뿐 검색이 필요 없으므로, 별도 플래그로 함께 닫는다.
-          noWebTools: true,
-          // 스킬도 같은 이유로 닫는다 — 이 턴은 사람이 지켜보지 않고, 요약에 스킬이 필요없다.
-          // 판단(M-4, 후속 리뷰): 위 workerConnected:false 와 달리, 이 systemPrompt 는 스킬이
-          // 닫혔다는 사실을 반영하지 않는다 — buildCapabilityBlock 의 스킬 안내 문장은
-          // PersonaContext 의 어떤 필드로도 조건화돼 있지 않아 이 턴에도 그대로 실린다. 의도적으로
-          // 고치지 않는다: 그 문장은 "있을 수 있습니다 … 있으면"으로 헤지된 존재-확인 안내일 뿐
-          // fs_*/sh_exec 안내처럼 특정 도구를 쓸 수 있다고 단언하지 않고, 이 턴의 프롬프트
-          // (SUMMARY_PROMPT)는 "요약 텍스트만 출력"을 지시해 모델이 스킬 사용을 시도할 여지 자체가
-          // 없다 — workerConnected 불일치가 막는 위험(모델이 실제로 fs_*/sh_exec 를 시도해 되는
-          // 줄 아는 것)과 같은 종류가 아니다. 고치려면 PersonaContext 에 축을 하나 더 넣어야
-          // 하는데, 이 한 줄의 실익이 그 비용에 못 미친다고 보고 넘어간다 — 다음에 같은 불일치를
-          // 다시 발견하면 이 주석부터 읽을 것.
-          noSkills: true,
-        });
-        if (result.ok && result.text.trim().length > 0) {
-          await this.repos.summaries.insert({
-            conversationId: conv.id, fromMessageId: conv.firstMessageId ?? 0, toMessageId,
-            content: result.text.trim(), createdTs: this.now(),
-          });
-        }
-      } catch (err) {
-        console.warn("[core] 유휴 요약 실패 — 요약 없이 세션만 정리:", conv.id, err);
-      }
-    }
+    // 리뷰 #4(MED): 클라우드 재배포/재시작 등으로 세션 저장소가 초기화되면 resume 이 실패할 수
+    // 있다(isSessionNotFound 류). 이 요약 시도가 그대로 던지면 예외가 enqueue 의 catch 까지 올라가
+    // 아래 compare-and-close 가 전혀 실행되지 않고, 세션이 active 로 고착되어 매 유휴 스윕마다
+    // 같은 실패를 반복하며(손님 몫이면 전역 한도까지 소진) 대화가 영원히 안 닫힌다. 요약은
+    // "있으면 좋은" 부가 기능이므로, 실패해도 요약만 건너뛰고 아래 세션 정리는 반드시 실행한다
+    // (writeSummary 가 예외를 삼키고 false 만 돌려주므로, 그 결과는 여기서 보지 않는다).
+    //
+    // /기억정리 는 여기와 정반대로 실패하면 아무것도 바꾸지 않는다 — 그쪽은 사용자가 요약을
+    // 받으려고 부른 명령이라 밀어놓고 실패하면 대화를 잃고 대신 받은 것도 없다. 두 동작을
+    // 하나로 합치지 말 것.
+    if (reserved) await this.writeSummary(conv, this.now());
     // compare-and-close: 요약 대상이던 세션이 그대로일 때만 닫는다(동시 생성된 새 세션 보호).
     const fresh = await this.repos.conversations.getById(conv.id);
     if (fresh && fresh.sessionId === conv.sessionId) {
       await this.repos.conversations.setSession(conv.id, null, this.now());
       await this.repos.conversations.setStatus(conv.id, "idle");
+    }
+  }
+
+  // 이 대화의 지금 세션을 요약해 summaries 에 넣는다. 성공하면 true.
+  // summarizeAndClose(유휴 스윕)와 /기억정리 가 함께 쓴다 — 요약 턴의 안전 플래그
+  // (noRemoteTools·noWebTools·noSkills)를 두 곳에서 따로 관리하면 한쪽만 빠뜨렸을 때
+  // 아무도 모른다.
+  //
+  // createdTs 를 인자로 받는 이유: /기억정리 는 요약의 created_ts 와 컨텍스트 바닥선에 반드시
+  // 같은 값을 써야 한다. 요약 필터가 created_ts >= floor 라(summariesRepo.recent), 두 번 시각을
+  // 구하면 순서에 따라 방금 만든 요약이 스스로 걸러지는 경합이 생긴다.
+  //
+  // 한도(turns.reserve)는 여기서 잡지 않는다 — 누가 이 턴의 값을 치르는가는 부르는 쪽마다
+  // 다르다(유휴 스윕은 대화 주인, /기억정리 는 명령을 친 사람). 호출부가 각자 잡는다.
+  private async writeSummary(conv: Conversation, createdTs: number): Promise<boolean> {
+    // 요약할 세션이 없으면 할 일이 없다. 두 호출부 모두 이미 확인하고 부르므로 실제로는 닿지
+    // 않지만, 아래 resume 에 넘길 값이 있다는 것을 여기서 확정해야 한다.
+    if (!conv.sessionId) return false;
+    const isOwner = conv.primaryUserId === this.ownerId;
+    const role: Role = isOwner ? "owner" : "allowed";
+    try {
+      const recentMsgs = await this.repos.messages.recent(conv.id, 1);
+      const toMessageId = recentMsgs[0]?.id ?? conv.firstMessageId ?? 0;
+      const result = await this.runTurn({
+        prompt: SUMMARY_PROMPT,
+        // FIX4(중요, 최종 리뷰): 이 턴은 noRemoteTools 로 원격 도구를 강제로 닫으므로(아래),
+        // 페르소나에도 항상 workerConnected:false 를 실어 "안내와 실제 도구"가 어긋나지 않게
+        // 한다 — 실제 hub 연결 상태를 여기서 다시 물어 true 가 나오더라도, 이 턴 자체는
+        // noRemoteTools 때문에 fs_*/sh_exec 를 못 쓰므로 그 상태를 그대로 안내하면 FIX3 가
+        // 고친 것과 같은 종류의 거짓 안내(도구는 없는데 있다고 말하는)가 새로 생긴다.
+        systemPrompt: buildSystemPrompt({ role, isPrivate: conv.isPrivate, isOwner, deployTarget: this.config.deployTarget, workerConnected: false, emotions: this.emotions }),
+        resume: conv.sessionId, cwd: this.agentCwd,
+        context: { role, isPrivate: conv.isPrivate, isOwner, userId: conv.primaryUserId, conversationId: conv.id },
+        // FIX4: 유휴 요약은 사람이 지켜보지 않는 타이머로 돌고, 이전에 모델이 읽은 파일 등을
+        // 통해 프롬프트 인젝션이 심어졌을 수도 있는 세션을 그대로 이어받는다(resume). 워커
+        // 연결 여부·소유자 신원과 무관하게 원격 도구(fs_*/sh_exec, FIX2 로 같은 축에 묶인
+        // allow_dir 등)를 강제로 닫는다.
+        noRemoteTools: true,
+        // FIX3(중요, 최종 리뷰 3차): noRemoteTools 는 이름 그대로 원격 도구 축만 잠그고 SDK
+        // 내장 WebSearch 는 건드리지 않는다 — 이 브랜치로 모든 턴이 웹 검색을 갖게 되면서, 이
+        // 무인 요약 턴도 실제로는 WebSearch 를 그대로 쓸 수 있었다(리뷰 재현: db_schema/
+        // db_query 로 소유자 DB 전체를 읽을 수 있는 턴에 외부로 내보낼 통로까지 열려 있었던
+        // 셈). 요약은 이미 끝난 대화를 요약할 뿐 검색이 필요 없으므로, 별도 플래그로 함께 닫는다.
+        noWebTools: true,
+        // 스킬도 같은 이유로 닫는다 — 이 턴은 사람이 지켜보지 않고, 요약에 스킬이 필요없다.
+        // 판단(M-4, 후속 리뷰): 위 workerConnected:false 와 달리, 이 systemPrompt 는 스킬이
+        // 닫혔다는 사실을 반영하지 않는다 — buildCapabilityBlock 의 스킬 안내 문장은
+        // PersonaContext 의 어떤 필드로도 조건화돼 있지 않아 이 턴에도 그대로 실린다. 의도적으로
+        // 고치지 않는다: 그 문장은 "있을 수 있습니다 … 있으면"으로 헤지된 존재-확인 안내일 뿐
+        // fs_*/sh_exec 안내처럼 특정 도구를 쓸 수 있다고 단언하지 않고, 이 턴의 프롬프트
+        // (SUMMARY_PROMPT)는 "요약 텍스트만 출력"을 지시해 모델이 스킬 사용을 시도할 여지 자체가
+        // 없다 — workerConnected 불일치가 막는 위험(모델이 실제로 fs_*/sh_exec 를 시도해 되는
+        // 줄 아는 것)과 같은 종류가 아니다. 고치려면 PersonaContext 에 축을 하나 더 넣어야
+        // 하는데, 이 한 줄의 실익이 그 비용에 못 미친다고 보고 넘어간다 — 다음에 같은 불일치를
+        // 다시 발견하면 이 주석부터 읽을 것.
+        noSkills: true,
+      });
+      if (result.ok && result.text.trim().length > 0) {
+        await this.repos.summaries.insert({
+          conversationId: conv.id, fromMessageId: conv.firstMessageId ?? 0, toMessageId,
+          content: result.text.trim(), createdTs,
+        });
+        return true;
+      }
+      return false;
+    } catch (err) {
+      // 예외를 밖으로 던지지 않는다 — 유휴 스윕은 이 실패에도 세션을 반드시 닫아야 하고
+      // (summarizeAndClose 의 리뷰 #4 주석), /기억정리 는 false 를 받아 아무것도 바꾸지 않는다.
+      console.warn("[core] 요약 턴 실패:", conv.id, err);
+      return false;
     }
   }
 

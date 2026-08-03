@@ -13,6 +13,15 @@ describe("parseSessionCommand", () => {
       expect(parseSessionCommand(t)).toBeNull();
     }
   });
+
+  it("/기억정리 를 compact 로 인식한다", () => {
+    expect(parseSessionCommand("/기억정리")).toBe("compact");
+    expect(parseSessionCommand(" /기억정리 ")).toBe("compact");
+  });
+
+  it("/새세션 은 여전히 reset 이다", () => {
+    expect(parseSessionCommand("/새세션")).toBe("reset");
+  });
 });
 
 describe("parseDigestCommand", () => {
@@ -107,6 +116,12 @@ describe("isChannelCommand — 대화 없이 일반 채널에서 처리할 수 �
     for (const t of ["/새세션", "/새대화", "/새로시작", "/reset"]) {
       expect(isChannelCommand(t)).toBe(false);
     }
+  });
+
+  it("/기억정리 는 대화 없는 채널에서 처리하지 않는다", () => {
+    // /새세션 과 같은 이유다 — 정리할 세션이 있어야 의미가 있고, 대화가 없는 채널에는
+    // 대상 자체가 없다. 통과시키면 그 채널이 대화로 채택돼 이후 잡담에 봇이 끼어든다.
+    expect(isChannelCommand("/기억정리")).toBe(false);
   });
 
   it("일반 대화는 통과시키지 않는다", () => {
