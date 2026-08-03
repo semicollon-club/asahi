@@ -105,14 +105,19 @@ export class DigestRunner {
     // 돌리는 것만으로 PC 도구가 구조적으로 열리지 않았다 — 그땐 그 계층 자체에 원격 도구가 없었기
     // 때문이다. 최종 리뷰 FIX2: Task 7 로 그 전제가 깨졌다 — 공개 채널 계층도 공유 워커가
     // 연결되면 fs_*/sh_exec 를 받는다(tools.ts 의 allowedToolsFor 마지막 분기, resolveTurnWorker 는
-    // 위치만으로 이 턴을 공유 워커에 연결한다). 그래서 이제는 계층만으로 안전하지 않고, 아래 세
+    // 위치만으로 이 턴을 공유 워커에 연결한다). 그래서 이제는 계층만으로 안전하지 않고, 아래 네
     // 축을 turn 요청에 직접 세운다 — noRemoteTools:true(원격 도구 차단): 사람이 지켜보지 않는
     // 타이머로 돌면서 신뢰할 수 없는 웹 검색 결과를 그대로 읽어들이는 이 턴에 공유 기계의 셸
     // 접근까지 열려 있으면 안 된다(유휴 요약 턴에 적용한 것과 같은 이유 — agent.ts 의
     // noRemoteTools 계약·core.ts 의 summarizeAndClose 참고). noWebTools 는 세우지 않는다 — 이
     // 턴의 목적 자체가 웹 검색이다. noSkills:true(스킬 차단, M-2 후속 리뷰): 원격 도구를 막은
     // 것과 이유가 같다(사람이 안 보는 타이머 + 신뢰할 수 없는 웹 검색 결과) — 뉴스 조사에
-    // 도움이 되는 스킬이 없으므로 막아도 잃는 기능이 없다.
+    // 도움이 되는 스킬이 없으므로 막아도 잃는 기능이 없다. noMemoryWrite:true(Important 4,
+    // 최종 전체 브랜치 리뷰): 이 계층이 동아리 공용 기억을 여는 이 브랜치로 세 번째 축이
+    // 뚫렸다 — remember 를 무조건 받아, 웹 검색 결과에 심긴 지시가 remember 를 호출하면
+    // 조작된 내용이 scope='shared' 로 저장돼 전 부원에게 노출될 수 있었다. recall(읽기)은
+    // 막지 않는다 — 공용 기억은 어차피 전 부원이 읽을 수 있고 이 턴의 출력도 공개 채널로
+    // 가므로 유출 축이 새로 열리지 않는다.
     const context = { role: "allowed" as const, isPrivate: false, isOwner: false, userId: "digest", conversationId: 0 };
     let text = "";
     let ok = false;
@@ -124,6 +129,7 @@ export class DigestRunner {
         context,
         noRemoteTools: true,
         noSkills: true,
+        noMemoryWrite: true,
       });
       text = result.text.trim();
       ok = result.ok && text.length > 0;

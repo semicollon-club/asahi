@@ -61,10 +61,16 @@ export const RESULT_SUMMARY_MAX = 200;
 // 세운 유휴 요약 턴도 실제로는 WebSearch 를 그대로 쓸 수 있었다(리뷰 재현 — db_schema/db_query 로
 // 소유자 DB 전체를 읽는 턴에 외부 전송 통로까지 열려 있었던 셈). 요약은 이미 끝난 대화를 요약할
 // 뿐 검색이 필요 없으므로, true 로 세워도 잃는 기능이 없다.
+// noMemoryWrite(Important 4, 최종 전체 브랜치 리뷰): noRemoteTools/noSkills 와 같은 자리의 세
+// 번째 축이다. 정기 게시(digest.ts)는 isOwner:false, isPrivate:false 로 돌아 손님 서버 계층과
+// 신원이 같은데, 이 브랜치가 그 계층에 remember 를 열면서 사람이 안 보는 타이머 + 신뢰할 수
+// 없는 웹 검색 결과라는 이 턴의 위협 모델이 remember 호출까지 도달하게 됐다. true 면 remember
+// 만 닫는다 — recall(공용 기억 읽기)은 공용 기억이 어차피 전 부원에게 열려 있고 digest 출력도
+// 공개 채널로 가므로 막을 이유가 없다.
 export type TurnRequest = {
   prompt: string; systemPrompt: string; resume?: string; cwd: string; context: TurnContext;
   onProgress?: (u: ProgressUpdate) => void; images?: ImageInput[]; noRemoteTools?: boolean; noWebTools?: boolean;
-  noSkills?: boolean;
+  noSkills?: boolean; noMemoryWrite?: boolean;
 };
 export type TurnResult = { text: string; sessionId?: string; ok: boolean };
 export type TurnRunner = (req: TurnRequest) => Promise<TurnResult>;
@@ -230,6 +236,14 @@ export function resolveWebToolsEnabled(req: { noWebTools?: boolean }): boolean {
   return !req.noWebTools;
 }
 
+// Important 4(최종 전체 브랜치 리뷰) — req.noMemoryWrite 를 뽑아내는 순수 함수. 위
+// resolveWebToolsEnabled 와 같은 이유로 순수 함수다 — SDK query() 전체를 목업하지 않고 이
+// 판정 하나만 검증하기 위해서다. digest.ts 가 이 값을 true 로 세운다(사람이 안 보는 타이머 +
+// 신뢰할 수 없는 웹 검색 결과 + 이제는 열려 있는 remember 조합).
+export function resolveMemoryWriteEnabled(req: { noMemoryWrite?: boolean }): boolean {
+  return !req.noMemoryWrite;
+}
+
 // Task 7: ctx.remote(호출 통로 + workerId + workerKind + 워커의 실제 작업 폴더)를 구성하는
 // 순수 함수. resolveTurnWorker 가 이미 "어느 워커, 어느 종류(personal/shared)"까지 정했으므로
 // 이 함수는 그 결과를 hub.call/rootsOf 에 실제로 연결하기만 한다 — worker 가 null 이거나 hub 가
@@ -303,10 +317,15 @@ export function makeRunAgentTurn(
     // 스킬도 같은 축으로 닫는다 — 유휴 요약 턴은 사람이 지켜보지 않고 인젝션이 심겼을 수도 있는
     // 세션을 이어받는다(core.ts 의 noWebTools 주석 참고). 요약에 스킬이 필요하지 않다.
     const skillsEnabled = resolveSkillsEnabled(req);
+    // Important 4: 정기 게시(digest.ts)가 req.noMemoryWrite:true 로 remember 만 닫는다(recall 은
+    // 그대로) — noRemoteTools/noWebTools 와 같은 방식으로 뽑아 allowedToolsFor 에 넘긴다.
+    const memoryWriteEnabled = resolveMemoryWriteEnabled(req);
     // ctx.remote 구성(호출 통로 + workerId/workerKind + 워커 roots) 자체도 buildRemoteCtx 로
     // 뽑아 테스트한다(agent.test.ts).
     ctx.remote = buildRemoteCtx(worker, hub);
-    const allowedTools = allowedToolsFor(req.context.role, req.context.isPrivate, req.context.isOwner, deployTarget, workerConnected, webToolsEnabled);
+    const allowedTools = allowedToolsFor(req.context.role, req.context.isPrivate, req.context.isOwner, deployTarget, {
+      workerConnected, webToolsEnabled, memoryWriteEnabled,
+    });
     // 원격 도구는 전부 mcp__asahi__* 이므로 bare 사전승인으로 두고, 내장 파일/Bash 도구는 아예 열지 않는다
     // (builtinTools=[] 이 SDK 내장 도구를 전부 닫는다). 경로 검사는 이제 워커(remote/roots.ts)가 최종
     // 권한을 갖는다 — 이 프로세스는 내장 도구를 안 여니 canUseTool 로 판정할 대상 자체가 없다.

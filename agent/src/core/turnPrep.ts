@@ -2,6 +2,7 @@ import type { Conversation } from "../store/conversationsRepo.js";
 import type { MessagesRepo } from "../store/messagesRepo.js";
 import type { SummariesRepo } from "../store/summariesRepo.js";
 import type { MemoriesRepo } from "../store/memoriesRepo.js";
+import { renderMemoryLine } from "./memoryScope.js";
 
 // core.ts(봇 실시간 경로)가 쓰는 턴 준비 로직 — 원래 AgentCore 의 private 메서드/지역 함수였던
 // 것을 그대로 옮긴 것(동작은 완전히 동일하다). 한때는 워커(job 처리, worker/jobRunner.ts)와도
@@ -22,9 +23,13 @@ export async function buildContextBlock(repos: ContextRepos, conv: Conversation,
   if (probed.length > CHARACTER_FACT_LIMIT) {
     console.warn(`[turnPrep] 캐릭터 설정이 상한(${CHARACTER_FACT_LIMIT})을 넘어 오래된 것만 주입합니다.`);
   }
-  const factLines = facts.length > 0 ? facts.map((f) => `- [${f.title}] ${f.content}`).join("\n") : "(설정 없음)";
+  // Critical(최종 전체 브랜치 리뷰) — renderMemoryLine(memoryScope.ts) 을 쓴다. 예전엔 여기서
+  // 직접 `- [${title}] ${content}` 를 만들어 개행 방어가 없었다 — 서버에서 등록한 공용 기억이
+  // forUser()(scope='shared' 도 포함)를 통해 소유자 DM 컨텍스트에도 실리므로, 내용에 개행과
+  // 가짜 "## 최근 대화 기록" 을 심으면 이 블록의 섹션 구조 자체가 위조됐다.
+  const factLines = facts.length > 0 ? facts.map((f) => renderMemoryLine(f)).join("\n") : "(설정 없음)";
   const memories = conv.isPrivate ? await repos.memories.forUser(conv.primaryUserId) : await repos.memories.sharedOnly();
-  const memoryLines = memories.length > 0 ? memories.map((m) => `- [${m.title}] ${m.content}`).join("\n") : "(기억 없음)";
+  const memoryLines = memories.length > 0 ? memories.map((m) => renderMemoryLine(m)).join("\n") : "(기억 없음)";
   const summaries = await repos.summaries.recent(conv.id, 3);
   const recentAll = await repos.messages.recent(conv.id, 21);
   const recent = recentAll.filter((m) => m.id !== excludeMessageId).slice(-20);
