@@ -855,6 +855,58 @@ describe("AgentCore — DM 세션 예약어(/새세션·/기억정리)", () => {
     expect(ownerConv.sessionId).toBeNull();
     expect(await t.repos.summaries.recent(ownerConv.id, 3)).toHaveLength(1);
   });
+
+  // Important 3(리뷰 후속) — 위 테스트는 dmHint 를 써서 대화 주인과 명령을 친 사람이 같은
+  // 사람이다. 그래서 한도 판정 기준을 conv.primaryUserId 로 바꿔도 전부 통과했다(리뷰가 실제로
+  // 뮤테이션으로 확인). 두 신원이 갈리는 자리는 스레드다: 어댑터는 이미 있는 스레드에 들어온
+  // 손님에게도 그 스레드의 primaryUserId 를 그대로 실어 주므로(discord.ts 의
+  // existingPrimaryUserId), 대화 주인으로 재면 손님이 소유자 스레드에서 한도 없이 요약 턴을
+  // 연타할 수 있다. 아래 두 테스트가 그 축을 양방향으로 고정한다.
+  it("소유자 스레드에 들어온 손님의 /기억정리 도 그 손님 한도로 잰다(대화 주인 기준이 아니다)", async () => {
+    const t = await setup({ config: { maxTurnsPerHourPerUser: 1 } });
+    pub(t.bus, threadHint("owner", "ch-1", "owner", "o1"), "안녕", 1); // 소유자는 예약 자체를 안 한다
+    await t.core.drain();
+
+    const guestInOwnerThread: ConversationHint = {
+      kind: "thread", discordChannelId: "ch-1", originMessageId: "o1", guildId: "g", parentChannelId: "p",
+      isPrivate: false, primaryUserId: "owner", userId: "guest", role: "allowed", discordMessageId: `msg-${seq++}`,
+    };
+    pub(t.bus, { ...guestInOwnerThread, discordMessageId: `msg-${seq++}` }, "나도 안녕", 2); // 손님 몫 1개 소진
+    await t.core.drain();
+    expect(t.calls).toHaveLength(2);
+
+    pub(t.bus, guestInOwnerThread, "/기억정리", 3);
+    await t.core.drain();
+
+    // 한도에 걸려 요약 턴이 아예 돌지 않고, 세션·바닥선도 그대로다.
+    expect(t.calls).toHaveLength(2);
+    const after = (await t.repos.conversations.getByChannelId("ch-1"))!;
+    expect(after.sessionId).toBe("s1");
+    expect(after.contextFloorTs).toBeNull();
+    const notices = t.published.filter((p) => p.type === "system_notice").map((p) => (p as { text: string }).text);
+    expect(notices.some((n) => /구독 한도/.test(n))).toBe(true);
+  });
+
+  it("손님 스레드에서 소유자가 친 /기억정리 는 한도를 받지 않는다(전역 한도가 다 찼어도 돈다)", async () => {
+    // 반대 방향 고정 — 기준을 conv.primaryUserId 로 바꾸면 이 대화의 주인이 손님이라 소유자가
+    // 예약을 거쳐야 하고, 전역 한도가 이미 찼으므로 거부된다.
+    const t = await setup({ config: { maxTurnsPerHourGlobal: 1 } });
+    pub(t.bus, threadHint("guest", "ch-2", "allowed", "g1"), "안녕", 1); // 전역 1개를 손님이 소진
+    await t.core.drain();
+    expect(t.calls).toHaveLength(1);
+
+    const ownerInGuestThread: ConversationHint = {
+      kind: "thread", discordChannelId: "ch-2", originMessageId: "g1", guildId: "g", parentChannelId: "p",
+      isPrivate: false, primaryUserId: "guest", userId: "owner", role: "owner", discordMessageId: `msg-${seq++}`,
+    };
+    pub(t.bus, ownerInGuestThread, "/기억정리", 2);
+    await t.core.drain();
+
+    expect(t.calls).toHaveLength(2); // 요약 턴이 돌았다
+    const after = (await t.repos.conversations.getByChannelId("ch-2"))!;
+    expect(after.sessionId).toBeNull();
+    expect(await t.repos.summaries.recent(after.id, 3)).toHaveLength(1);
+  });
 });
 
 // Task 5(배선) — 정기 게시 예약어(/대회·/개발뉴스)는 세션 예약어(/새세션)와 같은 자리(ingest)에서
