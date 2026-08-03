@@ -63,7 +63,14 @@ lastReviewed: 2026-07-28
 2. (`commandOnly`가 아니면) `resolveConversation`으로 대화 행을 확정한다(멱등:
    `discord_channel_id` → `origin_message_id` → 없으면 생성). 유휴로 닫혔던 대화면
    `active`로 재활성한다.
-3. 예약어 세션 명령(`/새세션` 등)이면 LLM 턴 없이 세션만 리셋하고 즉시 종료한다.
+3. 예약어 세션 명령(`/새세션`·`/기억정리`)이면 메시지를 저장하지 않고 종료한다. 다만 두
+   명령의 **본문은 turn 체인에 enqueue**해서 실행한다(`/새세션`은 `resetSession`,
+   `/기억정리`는 `compactSession`). ingest 안에서 곧바로 실행하면, 이미 turn 체인에서
+   돌고 있던 대화 턴이 나중에 `setSession`을 써서 방금 비운 세션을 되살린다 — 바닥선은
+   그어졌는데 세션은 살아 있어 다음 턴이 옛 SDK 세션을 resume 하고, 페르소나 재적용도
+   대화 끊기도 둘 다 실패하면서 사용자에게는 됐다고 알린 상태가 된다. 답장이 생성되는
+   중에 명령을 치면 실제로 그렇게 된다. 그래서 두 명령은 진행 중인 턴 뒤에 줄을 선다.
+   `/새세션`은 여전히 LLM 턴을 쓰지 않고, `/기억정리`는 요약 턴 하나를 쓴다.
 4. 참가자를 upsert하고, **`processed=false`로 사용자 메시지를 먼저 저장**한다
    (`messages.insert(..., processed: false)`). 저장하는 내용은 이미지가 있어도 원문
    재주입 없이 마커(`buildImageMarker`)만 남긴다.
