@@ -92,9 +92,9 @@ export function renderMemoryLine(m: { title: string; content: string }): string 
 // 회원일수록 오히려 위조하기 좋았다). 생략 대신 "모른다"는 사실 자체를 항상 보여준다.
 const UNKNOWN_AUTHOR_TAG = "작성자 미상";
 
-// recall 결과를 사람이 읽을 문자열로. 공용 기억에는 작성자 표시를 항상 붙인다 — 누구나 쓸 수
-// 있는 저장소라 "누가 넣었는지"가 그 정보를 얼마나 믿을지의 근거가 된다. 개인 기억은 본인
-// 것이라 작성자가 자명하므로 붙이지 않는다.
+// 기억(또는 캐릭터 설정) 한 건을 renderMemories 가 예산과 함께 쓸 한 줄로. 공용 기억에는
+// 작성자 표시를 항상 붙인다 — 누구나 쓸 수 있는 저장소라 "누가 넣었는지"가 그 정보를 얼마나
+// 믿을지의 근거가 된다. 개인 기억은 본인 것이라 작성자가 자명하므로 붙이지 않는다.
 //
 // Important 3(최종 전체 브랜치 리뷰) — 작성자 표시는 줄 끝이 아니라 맨 앞에 둔다. 예전엔
 // "- [제목] 내용 (이름 등록)"이라 내용 끝에 "(소유자 등록)" 을 넣으면 진짜 표시와 구분되지
@@ -102,16 +102,54 @@ const UNKNOWN_AUTHOR_TAG = "작성자 미상";
 // 글자는 title·content 를 붙이기 전에 이 함수가 이미 쓴 자리다 — title·content 가 아무리
 // 조작돼도(개행 없이 그 안에 위조 문구를 넣어도) 그 문구는 이 접두사보다 뒤에만 나타날 수
 // 있다. 그래서 이 접두사가 "이 줄의 진짜 작성자"를 가리키는 유일한 근거로 남는다.
-export function renderMemories(mems: Memory[], names: Record<string, string>): string {
-  return mems
-    .map((m) => {
-      if (m.scope !== "shared") return renderMemoryLine(m);
-      const name = names[m.userId];
-      const who = name !== undefined ? sanitizeAuthorName(name) : undefined;
-      // 조사 없는 형태를 쓴다("이 등록" 이 아니라 "등록") — 이름이 모음으로 끝나면("김지우")
-      // "김지우이 등록"처럼 비문이 된다. 받침 유무를 코드로 판정하는 것은 이 한 줄에 값하지 않는다.
-      const tag = who !== undefined ? `${who} 등록` : UNKNOWN_AUTHOR_TAG;
-      return `- (${tag}) ${titleContentPart(m)}`;
-    })
-    .join("\n");
+//
+// Task 1(컨텍스트 블록 문자 예산) — renderMemories 본문에 있던 .map 콜백을 이름을 붙여
+// 뽑은 것뿐이다. 한 줄을 만드는 규칙은 전혀 바뀌지 않았다 — renderMemories 가 이 결과를
+// 예산 안에 넣을지만 새로 판단한다.
+function renderOne(m: Memory, names: Record<string, string>): string {
+  if (m.scope !== "shared") return renderMemoryLine(m);
+  const name = names[m.userId];
+  const who = name !== undefined ? sanitizeAuthorName(name) : undefined;
+  // 조사 없는 형태를 쓴다("이 등록" 이 아니라 "등록") — 이름이 모음으로 끝나면("김지우")
+  // "김지우이 등록"처럼 비문이 된다. 받침 유무를 코드로 판정하는 것은 이 한 줄에 값하지 않는다.
+  const tag = who !== undefined ? `${who} 등록` : UNKNOWN_AUTHOR_TAG;
+  return `- (${tag}) ${titleContentPart(m)}`;
+}
+
+// 컨텍스트 블록의 기억 섹션 문자 예산. recall 에는 걸지 않는다 — 그쪽은 사용자가 명시적으로
+// 물어본 결과다.
+//
+// 6000 인 이유: 기억 1건 상한이 4000자(SHARED_MEMORY_MAX_LEN)이므로 큰 기억 한 건이 예산을
+// 통째로 먹지 않고, 2026-08-03 실제 규모(공용 7건 1,409자)의 네 배까지는 동작이 전혀 바뀌지
+// 않는다.
+export const MEMORY_SECTION_BUDGET = 6000;
+
+// 예산을 넘긴 기억을 "자르지" 않고 제목만 남기는 이유: 잘린 기억은 모델에게 존재 자체가 안
+// 보인다. 아는 것이 있는데 없는 줄 아는 상태가 되고, 그러면 recall 할 생각도 못 한다. 제목이
+// 남으면 "그 주제가 있다"는 것을 알고 가져올 수 있다.
+export function renderMemories(
+  mems: Memory[],
+  names: Record<string, string>,
+  opts: { budget?: number } = {},
+): string {
+  const budget = opts.budget;
+  const full: string[] = [];
+  const titlesOnly: string[] = [];
+  let used = 0;
+  for (const m of mems) {
+    const line = renderOne(m, names);
+    // 첫 건은 예산을 넘겨도 싣는다 — 안 그러면 큰 기억 하나 때문에 섹션 전체가 색인이 된다.
+    if (budget === undefined || full.length === 0 || used + line.length <= budget) {
+      full.push(line);
+      used += line.length;
+    } else {
+      titlesOnly.push(`- [${stripNewlines(m.title)}]`);
+    }
+  }
+  if (titlesOnly.length === 0) return full.join("\n");
+  return [
+    ...full,
+    "(아래 주제는 제목만 있어요 — 내용이 필요하면 recall 로 물어보세요)",
+    ...titlesOnly,
+  ].join("\n");
 }

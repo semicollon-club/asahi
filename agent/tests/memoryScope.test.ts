@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { memoryScopeFor, SHARED_MEMORY_MAX_LEN, SHARED_MEMORY_TITLE_MAX_LEN, renderMemories, renderMemoryLine } from "../src/core/memoryScope.js";
+import { memoryScopeFor, SHARED_MEMORY_MAX_LEN, SHARED_MEMORY_TITLE_MAX_LEN, renderMemories, renderMemoryLine, MEMORY_SECTION_BUDGET } from "../src/core/memoryScope.js";
 
 describe("memoryScopeFor — 어디서 말하느냐가 스코프를 정한다", () => {
   it("DM 은 개인 기억이다", () => {
@@ -166,5 +166,51 @@ describe("renderMemoryLine — 기억 한 건을 한 줄로(turnPrep·recall 공
   it("작성자 표시를 붙이지 않는다 — 그건 renderMemories(recall 전용)의 책임이다", () => {
     // turnPrep 은 표시 이름을 조회하지 않으므로(다른 계층), 이 함수 자체는 작성자 개념이 없다.
     expect(renderMemoryLine({ title: "학년", content: "2학년" })).not.toMatch(/등록|미상/);
+  });
+});
+
+describe("renderMemories — 문자 예산", () => {
+  const big = (i: number, len: number) =>
+    mem({ id: i, userId: "u1", scope: "shared" as const, title: `주제${i}`, content: "가".repeat(len) });
+
+  it("예산을 안 넘으면 지금과 똑같다", () => {
+    const out = renderMemories([big(1, 100), big(2, 100)], { u1: "우성현" }, { budget: 6000 });
+    expect(out).toContain("가".repeat(100));
+    expect(out).not.toContain("제목만");
+  });
+
+  it("예산을 넘으면 나머지는 제목만 싣고 안내를 붙인다", () => {
+    // 자르지 않는다 — 잘린 기억은 모델에게 존재 자체가 안 보여 recall 할 생각도 못 한다.
+    const out = renderMemories([big(1, 500), big(2, 500), big(3, 500)], {}, { budget: 700 });
+    expect(out).toContain("가".repeat(500)); // 첫 건은 내용까지
+    expect(out).toContain("주제3");          // 넘친 건도 제목은 남는다
+    expect(out).toContain("recall");         // 어떻게 가져오는지 알려준다
+  });
+
+  it("넘친 기억의 내용은 실리지 않는다", () => {
+    // budget 은 650 이 아니라 620 이다 — 첫 건 렌더 결과(작성자 미상 태그 포함 617자)에 둘째
+    // 건(19자)을 더해도 636자라 650 예산은 넘지 않아 이 테스트가 검증하려는 상황(둘째 건이
+    // 넘쳐 제목만 남는 것) 자체가 생기지 않는다(직접 계산해 확인). 620 이면 636 > 620 이라
+    // 실제로 넘친다.
+    const out = renderMemories([big(1, 600), mem({ id: 2, scope: "shared" as const, title: "뒤", content: "비밀내용" })], {}, { budget: 620 });
+    expect(out).toContain("뒤");
+    expect(out).not.toContain("비밀내용");
+  });
+
+  it("예산을 안 주면 전부 내용까지 싣는다(recall 은 예산이 없다)", () => {
+    const out = renderMemories([big(1, 5000), big(2, 5000)], {});
+    expect(out).toContain("주제1");
+    expect(out).toContain("주제2");
+    expect(out).not.toContain("제목만");
+  });
+
+  it("첫 건이 이미 예산을 넘겨도 그 건은 내용까지 싣는다", () => {
+    // 예산 때문에 아무것도 못 싣는 상태를 만들지 않는다 — 그러면 블록이 통째로 색인이 된다.
+    const out = renderMemories([big(1, 5000)], {}, { budget: 100 });
+    expect(out).toContain("가".repeat(5000));
+  });
+
+  it("상한 상수는 6000 이다", () => {
+    expect(MEMORY_SECTION_BUDGET).toBe(6000);
   });
 });

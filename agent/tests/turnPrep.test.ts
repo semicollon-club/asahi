@@ -62,6 +62,18 @@ describe("buildContextBlock — 공용 기억의 작성자", () => {
     const block = await buildContextBlock(repos, await serverConv(), -1);
     expect(block).toContain("학기당 2만원");
   });
+
+  // Task 1(컨텍스트 블록 문자 예산) — 캐릭터 설정·요약·최근 대화는 각각 상한이 있는데
+  // 기억만 무제한이었다. memoryScope.test.ts 는 renderMemories 단위 테스트일 뿐이라, 여기서는
+  // buildContextBlock 이 실제로 MEMORY_SECTION_BUDGET 을 넘겨 호출하는지(turnPrep 배선)를 본다.
+  it("공용 기억이 예산을 넘으면 뒷부분이 제목만 실린다", async () => {
+    for (let i = 0; i < 5; i++) {
+      await repos.memories.insert({ userId: "u1", scope: "shared", title: `주제${i}`, content: "가".repeat(2000) });
+    }
+    const block = await buildContextBlock(repos, await serverConv(), -1);
+    expect(block).toContain("주제4");      // 마지막 것도 제목은 보인다
+    expect(block).toContain("recall");     // 가져오는 방법을 알려준다
+  });
 });
 
 describe("buildContextBlock — 흉내 방지 안내", () => {
