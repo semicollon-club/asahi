@@ -822,6 +822,40 @@ describe("AgentCore — DM 세션 예약어(/새세션·/기억정리)", () => {
     expect(notices.some((n) => /정리했어/.test(n))).toBe(true);
   });
 
+  // 같은 경합의 /새세션 쪽 — /기억정리 만 고치고 이쪽을 두면, 답이 생성되는 도중에 /새세션 을
+  // 친 사람(사용자가 실제로 겪은 순서다)은 이 명령의 두 가지 일이 함께 깨지는 것을 본다:
+  // 진행 중이던 턴이 뒤늦게 setSession(result.sessionId) 을 써서 세션이 되살아나므로 페르소나가
+  // 다시 적용되지 않고, 모델은 이전 대화를 자기 컨텍스트에 그대로 쥔 채로 바닥선만 DB 기록을
+  // 가린다. 확인 문구("안 가져갈게")는 이미 나간 뒤다.
+  it("진행 중이던 대화 턴이 /새세션 이 끊은 세션을 되살리지 못한다", async () => {
+    const t = await setup({ mode: "manual" });
+    await t.repos.memories.insert({ userId: "owner", scope: "character", title: "학년", content: "2학년" });
+    pub(t.bus, dmHint("owner", "owner"), "안녕", 1);
+    await flush();
+    t.resolvers[0]!(); // 첫 턴 완료 → 세션 s1 확정
+    await flush();
+    expect((await t.repos.conversations.getByChannelId("dm-owner"))?.sessionId).toBe("s1");
+
+    pub(t.bus, dmHint("owner", "owner"), "하나만 더", 2); // 이 턴은 아직 진행 중이다
+    await flush();
+    expect(t.calls).toHaveLength(2);
+
+    pub(t.bus, dmHint("owner", "owner"), "/새세션", 3);
+    await flush();
+
+    // 진행 중이던 대화 턴이 뒤늦게 끝나며 setSession(result.sessionId) 을 쓴다.
+    t.resolvers[1]!();
+    await t.core.drain();
+
+    const after = (await t.repos.conversations.getByChannelId("dm-owner"))!;
+    expect(after.sessionId).toBeNull();
+    expect(after.contextFloorTs).toBe(1_000_000);
+    expect(await t.repos.memories.characterFacts(40)).toEqual([]);
+    expect(t.calls).toHaveLength(2); // /새세션 은 여전히 LLM 턴을 쓰지 않는다
+    const notices = t.published.filter((p) => p.type === "assistant_message").map((p) => (p as { text: string }).text);
+    expect(notices.some((n) => /안 가져갈게/.test(n))).toBe(true);
+  });
+
   // Important 1(리뷰 후속) — turn 체인 직렬화 위에 한 겹 더. 요약 턴이 도는 동안 다른 경로가
   // 이 대화에 새 세션을 만들어 놓았다면, 그걸 끊는 것은 사용자가 시킨 일이 아니고 바닥선까지
   // 그으면 그 새 대화가 통째로 가려진다. summarizeAndClose 가 쓰는 compare-and-close 와 같다.

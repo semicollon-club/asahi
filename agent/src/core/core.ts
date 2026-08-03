@@ -277,29 +277,20 @@ export class AgentCore {
 
     const conv = await this.resolveConversation(hint, ts);
 
-    // 세션 예약어 두 갈래. 둘 다 메시지를 저장하지 않고 여기서 끝난다.
+    // 세션 예약어 두 갈래. 둘 다 메시지를 저장하지 않고, 본체는 이 ingest 체인이 아니라 그
+    // 대화의 turn 체인에 실어 보낸다(각 본체는 resetSession·compactSession).
     //
-    // /새세션(reset): LLM 턴 없이 세 가지를 함께 하고 확인을 보낸다.
-    // 1) session_id 를 비운다 — 다음 턴에 새 SDK 세션이 열리고 현재 시스템 프롬프트가
-    //    적용된다. resume 된 세션은 만들어질 때의 프롬프트를 유지하므로, 페르소나 파일을
-    //    고쳐 배포해도 활발한 DM 에는 반영되지 않는다. 이 명령의 원래 목적이다.
-    // 2) 컨텍스트 바닥선을 긋는다 — 이전 대화도 이전 요약도 다음 세션에 싣지 않는다.
-    //    데이터는 남는다(소유자는 db_query 로 볼 수 있다).
-    // 3) 캐릭터 설정을 지운다 — 페르소나를 바꾼 뒤에도 옛 즉흥 신상이 남으면 새 페르소나와
-    //    충돌한다. 가리지 않고 지우는 이유는 그것이 전역이기 때문이다: 방별로 가리면 같은
-    //    아사히가 방마다 다른 신상을 갖게 된다(memoriesRepo.characterFacts 주석 참고).
+    // /새세션(reset)이 이 배선을 쓰는 이유는 바로 아래 /기억정리 갈래의 주석에 적힌 것과
+    // 완전히 같은 경합이다 — 세션을 끊는다는 점이 같으니 되살아나는 방식도 같다. 다만 깨지는
+    // 것이 다르다: 이 명령이 하는 두 가지 일(페르소나 재적용을 위한 세션 끊기, 바닥선)이 함께
+    // 무너져, 모델은 이전 대화를 자기 컨텍스트에 그대로 쥔 채 이어가는데 바닥선은 DB 기록만
+    // 가린다. 사용자에게는 이미 "안 가져갈게"라고 말한 뒤다. 이 브랜치를 만든 제보가 정확히
+    // 이것이다("/새세션 을 했는데 이전 대화를 계속 이어하려고 한다").
+    //
+    // 큐 키로 conv.discordChannelId 가 아니라 hint.discordChannelId 를 쓰는 이유도 그쪽과 같다.
     const sessionCmd = parseSessionCommand(text);
     if (sessionCmd === "reset") {
-      const t = this.now();
-      await this.repos.conversations.setSession(conv.id, null, t);
-      await this.repos.conversations.setContextFloor(conv.id, t);
-      const cleared = await this.repos.memories.deleteCharacterFacts();
-      const factNote = cleared > 0 ? ` 지어낸 설정 ${cleared}개도 지웠어.` : "";
-      this.bus.publish({
-        type: "assistant_message", channel: "discord", channelRef: conv.discordChannelId,
-        text: `…알겠어. 여기까지 나눈 얘기는 안 가져갈게.${factNote} 기억해둔 건 그대로 있어.`,
-        ts: t,
-      });
+      this.enqueue(this.turnChains, hint.discordChannelId, () => this.resetSession(conv.id));
       return;
     }
 
@@ -774,6 +765,42 @@ export class AgentCore {
       await this.repos.conversations.setSession(conv.id, null, this.now());
       await this.repos.conversations.setStatus(conv.id, "idle");
     }
+  }
+
+  // /새세션 의 본체(ingest 가 그 대화의 turn 체인에 실어 부른다 — 그 이유는 ingest 쪽 주석).
+  // LLM 턴 없이 세 가지를 함께 하고 확인을 보낸다.
+  // 1) session_id 를 비운다 — 다음 턴에 새 SDK 세션이 열리고 현재 시스템 프롬프트가 적용된다.
+  //    resume 된 세션은 만들어질 때의 프롬프트를 유지하므로, 페르소나 파일을 고쳐 배포해도
+  //    활발한 DM 에는 반영되지 않는다. 이 명령의 원래 목적이다.
+  // 2) 컨텍스트 바닥선을 긋는다 — 이전 대화도 이전 요약도 다음 세션에 싣지 않는다.
+  //    데이터는 남는다(소유자는 db_query 로 볼 수 있다).
+  // 3) 캐릭터 설정을 지운다 — 페르소나를 바꾼 뒤에도 옛 즉흥 신상이 남으면 새 페르소나와
+  //    충돌한다. 가리지 않고 지우는 이유는 그것이 전역이기 때문이다: 방별로 가리면 같은
+  //    아사히가 방마다 다른 신상을 갖게 된다(memoriesRepo.characterFacts 주석 참고).
+  //
+  // 셋 중 캐릭터 설정 삭제만 ingest 에 남겨 두지 않은 이유: (가) 진행 중이던 턴이 그 뒤에
+  // remember(scope:"character") 를 쓰면 방금 지운 신상이 되살아난다 — 세션과 똑같은 경합이다.
+  // (나) 삭제 개수는 확인 문구에 실리므로 문구를 만드는 시점과 갈리면 안 된다. (다) 무엇보다
+  // 확인 문구 자체가 세 가지가 다 끝난 뒤에 나가야 한다 — 이 결함의 본질이 "안 됐는데 됐다고
+  // 말한 것"이라, 문구만 먼저 내보내면 고친 의미가 없다.
+  //
+  // conv 를 인자로 받지 않고 여기서 다시 읽는 것은 compactSession 과 같은 이유다. 다만 그쪽의
+  // compare-and-close 같은 세션 비교는 하지 않는다 — 이 명령은 "지금 세션이 무엇이든 끊어라"라서
+  // 기다리는 사이 세션이 바뀌었다는 사실이 건너뛸 근거가 되지 못하고(그래도 사용자는 끊기를
+  // 원한다), 요약과 달리 버려질 결과물도 없다.
+  private async resetSession(convId: number): Promise<void> {
+    const conv = await this.repos.conversations.getById(convId);
+    if (!conv) return;
+    const t = this.now();
+    await this.repos.conversations.setSession(conv.id, null, t);
+    await this.repos.conversations.setContextFloor(conv.id, t);
+    const cleared = await this.repos.memories.deleteCharacterFacts();
+    const factNote = cleared > 0 ? ` 지어낸 설정 ${cleared}개도 지웠어.` : "";
+    this.bus.publish({
+      type: "assistant_message", channel: "discord", channelRef: conv.discordChannelId,
+      text: `…알겠어. 여기까지 나눈 얘기는 안 가져갈게.${factNote} 기억해둔 건 그대로 있어.`,
+      ts: t,
+    });
   }
 
   // /기억정리 의 본체(ingest 가 그 대화의 turn 체인에 실어 부른다 — 그 이유는 ingest 쪽 주석).
