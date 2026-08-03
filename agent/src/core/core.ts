@@ -290,7 +290,7 @@ export class AgentCore {
     // 큐 키로 conv.discordChannelId 가 아니라 hint.discordChannelId 를 쓰는 이유도 그쪽과 같다.
     const sessionCmd = parseSessionCommand(text);
     if (sessionCmd === "reset") {
-      this.enqueue(this.turnChains, hint.discordChannelId, () => this.resetSession(conv.id));
+      this.enqueue(this.turnChains, hint.discordChannelId, () => this.resetSession(conv.id, conv.discordChannelId));
       return;
     }
 
@@ -313,7 +313,7 @@ export class AgentCore {
     // 같은 값이지만(resolveConversation 은 채널로 먼저 찾는다) 오리진 메시지로 찾아온 대화에서는
     // 갈릴 수 있고, 그때 다른 키를 쓰면 막으려던 병렬 실행이 그대로 돌아온다.
     if (sessionCmd === "compact") {
-      this.enqueue(this.turnChains, hint.discordChannelId, () => this.compactSession(conv.id, hint.userId));
+      this.enqueue(this.turnChains, hint.discordChannelId, () => this.compactSession(conv.id, hint.userId, conv.discordChannelId));
       return;
     }
 
@@ -788,18 +788,50 @@ export class AgentCore {
   // compare-and-close 같은 세션 비교는 하지 않는다 — 이 명령은 "지금 세션이 무엇이든 끊어라"라서
   // 기다리는 사이 세션이 바뀌었다는 사실이 건너뛸 근거가 되지 못하고(그래도 사용자는 끊기를
   // 원한다), 요약과 달리 버려질 결과물도 없다.
-  private async resetSession(convId: number): Promise<void> {
-    const conv = await this.repos.conversations.getById(convId);
-    if (!conv) return;
-    const t = this.now();
-    await this.repos.conversations.setSession(conv.id, null, t);
-    await this.repos.conversations.setContextFloor(conv.id, t);
-    const cleared = await this.repos.memories.deleteCharacterFacts();
-    const factNote = cleared > 0 ? ` 지어낸 설정 ${cleared}개도 지웠어.` : "";
+  //
+  // Important 3(최종 전체 브랜치 리뷰) — 어떤 경로로 끝나든 정확히 한 건을 발행한다(아래
+  // commandFailed 주석). channelRef 를 인자로 받는 이유도 거기에 적었다.
+  private async resetSession(convId: number, channelRef: string): Promise<void> {
+    try {
+      const conv = await this.repos.conversations.getById(convId);
+      // 대화 행을 지우는 코드는 이 저장소에 없으므로 실제로는 닿지 않는다. 그래도 조용히
+      // 돌아가지 않는 이유는 아래 commandFailed 와 같다 — 발행 없이 끝나는 갈래를 하나라도
+      // 남기면 그 갈래가 채널을 영구히 어긋나게 한다.
+      if (!conv) return this.commandFailed(channelRef, "/새세션", new Error(`대화를 찾지 못했다: ${convId}`));
+      const t = this.now();
+      await this.repos.conversations.setSession(conv.id, null, t);
+      await this.repos.conversations.setContextFloor(conv.id, t);
+      const cleared = await this.repos.memories.deleteCharacterFacts();
+      const factNote = cleared > 0 ? ` 지어낸 설정 ${cleared}개도 지웠어.` : "";
+      this.bus.publish({
+        type: "assistant_message", channel: "discord", channelRef: conv.discordChannelId,
+        text: `…알겠어. 여기까지 나눈 얘기는 안 가져갈게.${factNote} 기억해둔 건 그대로 있어.`,
+        ts: t,
+      });
+    } catch (err) {
+      this.commandFailed(channelRef, "/새세션", err);
+    }
+  }
+
+  // 세션 예약어 본체가 실패했을 때 나가는 한 건. runConversationTurn 의 catch(그쪽 주석)와 같은
+  // 이유로 존재한다: 어댑터는 이 메시지를 큐에 넣는 시점에 이미 원본 메시지에 ⏳ 를 달고 채널별
+  // FIFO(discord.ts 의 pendingTriggers)에 밀어 넣었고, 그 큐는 나가는 assistant_message·
+  // system_notice 한 건마다 하나씩 꺼내진다. 본체가 한 건도 발행하지 않고 끝나면 그 ⏳ 가 안
+  // 풀릴 뿐 아니라 그 채널의 이후 모든 턴이 한 칸씩 밀린 엉뚱한 메시지에 ✅ 를 단다 — 되돌아오지
+  // 않는 어긋남이다. 두 명령의 본체(resetSession·compactSession)에는 이 보장이 없었다.
+  //
+  // notify 가 아니라 bus.publish 를 직접 쓰는 이유: notify 는 messages 행을 먼저 넣는데, 이
+  // 경로가 존재하는 이유인 실패(리포 호출이 던지는 것)가 바로 그 쓰기도 함께 막는 종류의
+  // 실패다. 같은 이유로 channelRef 도 여기서 다시 조회하지 않고 호출부가 인자로 넘겨준다 —
+  // conv 조회 자체가 던지는 경우까지 덮으려면 DB 를 한 번도 안 거치는 값이어야 한다. 그 값은
+  // ingest 가 이미 들고 있는 conv.discordChannelId 다(성공 경로가 발행하는 곳과 같은 값이라
+  // 새로운 비대칭을 만들지 않는다).
+  private commandFailed(channelRef: string, command: string, err: unknown): void {
+    console.error(`[core] ${command} 처리 실패:`, err);
     this.bus.publish({
-      type: "assistant_message", channel: "discord", channelRef: conv.discordChannelId,
-      text: `…알겠어. 여기까지 나눈 얘기는 안 가져갈게.${factNote} 기억해둔 건 그대로 있어.`,
-      ts: t,
+      type: "system_notice", channel: "discord", channelRef,
+      text: `${command} 처리 중 문제가 생겼어요. 잠시 후 다시 시도해 주세요.`,
+      ts: this.now(),
     });
   }
 
@@ -807,9 +839,27 @@ export class AgentCore {
   // invokerId 는 명령을 친 사람이다. conv 를 인자로 받지 않고 여기서 다시 읽는 이유: 큐에서
   // 기다리는 동안 앞선 턴이나 /새세션 이 세션을 바꿨을 수 있어, ingest 시점의 스냅샷으로
   // 판단하면 이미 없는 세션을 요약하려 들 수 있다(summarizeAndClose 와 같은 이유·같은 모양).
-  private async compactSession(convId: number, invokerId: string): Promise<void> {
+  //
+  // Important 3(최종 전체 브랜치 리뷰) — resetSession 과 마찬가지로 어떤 경로로 끝나든 정확히
+  // 한 건을 발행한다(commandFailed 주석). 아래 갈래별 publish·notify 는 각각 뒤에 곧바로
+  // return 이 붙어 서로 겹치지 않고, bus.publish 는 구독자 예외를 자기가 삼키므로(events/bus.ts)
+  // 발행 뒤에 이 catch 로 떨어져 두 번 나가는 경우도 없다.
+  private async compactSession(convId: number, invokerId: string, channelRef: string): Promise<void> {
+    try {
+      await this.compactSessionBody(convId, invokerId);
+    } catch (err) {
+      this.commandFailed(channelRef, "/기억정리", err);
+    }
+  }
+
+  // compactSession 의 본문. 갈래가 많아(세션 없음·한도·요약 실패·세션 바뀜·성공) try 블록으로
+  // 통째로 감싸면 들여쓰기 한 겹이 더 생겨 그 갈래들이 읽기 어려워지므로, 감싸는 쪽과 본문을
+  // 나눈다 — 보장(정확히 한 건 발행)은 위 compactSession 이 지고, 여기는 원래 모양 그대로 둔다.
+  private async compactSessionBody(convId: number, invokerId: string): Promise<void> {
     const conv = await this.repos.conversations.getById(convId);
-    if (!conv) return;
+    // resetSession 과 같은 이유로 조용히 돌아가지 않는다 — 발행 없이 끝나는 갈래를 남기면
+    // 그 갈래가 채널을 영구히 어긋나게 한다(commandFailed 주석).
+    if (!conv) throw new Error(`대화를 찾지 못했다: ${convId}`);
     const publish = (text: string, ts: number) =>
       this.bus.publish({ type: "assistant_message", channel: "discord", channelRef: conv.discordChannelId, text, ts });
 

@@ -71,6 +71,11 @@ lastReviewed: 2026-07-28
    대화 끊기도 둘 다 실패하면서 사용자에게는 됐다고 알린 상태가 된다. 답장이 생성되는
    중에 명령을 치면 실제로 그렇게 된다. 그래서 두 명령은 진행 중인 턴 뒤에 줄을 선다.
    `/새세션`은 여전히 LLM 턴을 쓰지 않고, `/기억정리`는 요약 턴 하나를 쓴다.
+   두 본문 모두 **어떤 경로로 끝나든 정확히 한 건을 발행한다**(`commandFailed`) —
+   `runConversationTurn`의 catch 와 같은 이유다. 어댑터는 이 메시지를 큐에 넣는 시점에 이미
+   ⏳ 를 달고 채널별 FIFO(`pendingTriggers`)에 밀어 넣었고, 그 큐는 나가는
+   `assistant_message`·`system_notice` 한 건마다 하나씩 꺼내진다. 한 건도 안 나가면 그 채널의
+   이후 모든 턴이 한 칸씩 밀린 엉뚱한 메시지에 ✅ 를 단다.
 4. 참가자를 upsert하고, **`processed=false`로 사용자 메시지를 먼저 저장**한다
    (`messages.insert(..., processed: false)`). 저장하는 내용은 이미지가 있어도 원문
    재주입 없이 마커(`buildImageMarker`)만 남긴다.

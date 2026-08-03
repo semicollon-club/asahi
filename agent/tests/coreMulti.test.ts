@@ -917,6 +917,40 @@ describe("AgentCore — DM 세션 예약어(/새세션·/기억정리)", () => {
     expect(notices.some((n) => /정리했어/.test(n))).toBe(false);
   });
 
+  // Important 3(최종 전체 브랜치 리뷰) — 두 명령의 본체에는 try/catch 가 없어, 리포 호출 하나만
+  // 던져도 enqueue 의 catch 가 그 예외를 삼키고 아무것도 발행하지 않은 채 끝났다. 어댑터는 그
+  // 메시지를 큐에 넣는 시점에 이미 원본 메시지에 ⏳ 를 달고 채널별 FIFO(discord.ts 의
+  // pendingTriggers)에 밀어 넣은 뒤이고, 그 큐는 나가는 assistant_message·system_notice 한
+  // 건마다 하나씩 꺼내진다 — 한 건도 안 나가면 그 ⏳ 가 안 풀릴 뿐 아니라 그 채널의 이후 모든
+  // 턴이 한 칸씩 밀린 엉뚱한 메시지에 ✅ 를 단다. 채널 하나가 영구히 어긋나는 결함이라,
+  // runConversationTurn 이 같은 실패 모드를 이미 막고 있다(그쪽 catch 주석).
+  //
+  // 세는 대상이 assistant_message + system_notice 인 것이 핵심이다 — 어댑터가 큐를 꺼내는
+  // 기준이 정확히 그 둘이다(progress 는 상태 메시지라 큐를 건드리지 않는다).
+  const outgoing = (e: AgentEvent) => e.type === "assistant_message" || e.type === "system_notice";
+
+  for (const [command, label] of [["/새세션", "resetSession"], ["/기억정리", "compactSession"]] as const) {
+    it(`${command} 은 리포가 던져도 정확히 한 건을 발행한다(${label})`, async () => {
+      const err = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const t = await setup();
+        pub(t.bus, dmHint("owner", "owner"), "안녕", 1);
+        await t.core.drain();
+        const before = t.published.filter(outgoing).length;
+
+        // 두 명령이 공통으로 부르는 쓰기다. 바닥선을 긋는 것은 되돌릴 수 없는 일이라 실패
+        // 자체를 없앨 수는 없고, 실패했을 때 채널이 어긋나지 않는 것만이 지킬 수 있는 보장이다.
+        t.repos.conversations.setContextFloor = async () => { throw new Error("DB 오류(테스트용)"); };
+        pub(t.bus, dmHint("owner", "owner"), command, 2);
+        await t.core.drain();
+
+        expect(t.published.filter(outgoing).length - before).toBe(1);
+      } finally {
+        err.mockRestore();
+      }
+    });
+  }
+
   it("손님의 /기억정리 는 시간당 한도에 포함되고, 소유자는 포함되지 않는다", async () => {
     // 이 명령은 실제 LLM 턴을 하나 돌린다 — 예약어라고 한도를 건너뛰면 손님이 연타로 무제한
     // 요약 턴을 돌릴 수 있다(조사 예약어에서 실제로 났던 결함과 같은 종류).
