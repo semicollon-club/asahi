@@ -106,14 +106,37 @@ const UNKNOWN_AUTHOR_TAG = "작성자 미상";
 // Task 1(컨텍스트 블록 문자 예산) — renderMemories 본문에 있던 .map 콜백을 이름을 붙여
 // 뽑은 것뿐이다. 한 줄을 만드는 규칙은 전혀 바뀌지 않았다 — renderMemories 가 이 결과를
 // 예산 안에 넣을지만 새로 판단한다.
+//
+// Important 1(최종 전체 브랜치 리뷰) — 태그를 만드는 부분만 authorTag 로 다시 뽑았다. 예산을
+// 넘겨 "제목만" 남는 줄이 이 함수를 거치지 않고 접두사를 따로 만들면서 작성자 표시를 통째로
+// 잃었기 때문이다(아래 renderTitleOnly 주석). 두 갈래가 같은 함수 하나에서 접두사를 받게 해,
+// 한쪽만 고치는 드리프트가 다시 생길 수 없게 한다.
 function renderOne(m: Memory, names: Record<string, string>): string {
-  if (m.scope !== "shared") return renderMemoryLine(m);
+  return `- ${authorTag(m, names)}${titleContentPart(m)}`;
+}
+
+// "- " 뒤에 붙는 작성자 접두사("(우성현 등록) ")를 만든다. 공용 기억이 아니면 빈 문자열이다 —
+// 개인 기억은 본인 것이라 작성자가 자명하고, 캐릭터 설정(scope='character')은 아사히가 지어낸
+// 값이라 작성자 개념 자체가 없다.
+function authorTag(m: Memory, names: Record<string, string>): string {
+  if (m.scope !== "shared") return "";
   const name = names[m.userId];
   const who = name !== undefined ? sanitizeAuthorName(name) : undefined;
   // 조사 없는 형태를 쓴다("이 등록" 이 아니라 "등록") — 이름이 모음으로 끝나면("김지우")
   // "김지우이 등록"처럼 비문이 된다. 받침 유무를 코드로 판정하는 것은 이 한 줄에 값하지 않는다.
   const tag = who !== undefined ? `${who} 등록` : UNKNOWN_AUTHOR_TAG;
-  return `- (${tag}) ${titleContentPart(m)}`;
+  return `(${tag}) `;
+}
+
+// Important 1(최종 전체 브랜치 리뷰) — 예산을 넘긴 기억의 "제목만" 줄. 예전엔 renderMemories
+// 본문이 이 줄을 `- [제목]` 으로 직접 만들어 작성자 표시를 붙이지 않았다 — 그 형식은 개인
+// 기억이 렌더링되는 형식과 모양이 같아서, 공용 기억이 예산을 넘기는 순간 작성자 표시를 잃고
+// 소유자 개인 기억과 구분되지 않는 줄이 됐다. 위 renderOne 이 태그를 맨 앞에 두는 이유(제목·
+// 내용이 아무리 조작돼도 닿을 수 없는 자리)가 이 갈래에서만 통째로 무효였던 셈이고, remember
+// 는 서버 채널에서 부원 누구나 쓸 수 있으므로 공격자가 그 상태를 스스로 만들 수 있었다.
+// stripNewlines 는 그대로 둔다 — 그건 섹션 헤더 위조를 막는 별개의 축이다.
+function renderTitleOnly(m: Memory, names: Record<string, string>): string {
+  return `- ${authorTag(m, names)}[${stripNewlines(m.title)}]`;
 }
 
 // 컨텍스트 블록의 기억 섹션 문자 예산. recall 에는 걸지 않는다 — 그쪽은 사용자가 명시적으로
@@ -143,7 +166,7 @@ export function renderMemories(
       full.push(line);
       used += line.length;
     } else {
-      titlesOnly.push(`- [${stripNewlines(m.title)}]`);
+      titlesOnly.push(renderTitleOnly(m, names));
     }
   }
   if (titlesOnly.length === 0) return full.join("\n");
