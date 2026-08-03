@@ -905,6 +905,11 @@ export class AgentCore {
         });
         return true;
       }
+      // Minor(리뷰 후속): 이 두 갈래는 예전엔 아무 말 없이 false 만 돌려줬다 — /기억정리 사용자는
+      // "정리하다 실패했어"를 받는데 로그에는 아무것도 없어, 모델이 실패한 것인지 빈 답을 낸
+      // 것인지조차 구분할 수 없었다. 아래 catch 와 같은 수준으로 남긴다.
+      if (!result.ok) console.warn("[core] 요약 턴이 실패로 끝남:", conv.id, result.text);
+      else console.warn("[core] 요약 턴이 빈 텍스트를 돌려줌:", conv.id);
       return false;
     } catch (err) {
       // 예외를 밖으로 던지지 않는다 — 유휴 스윕은 이 실패에도 세션을 반드시 닫아야 하고

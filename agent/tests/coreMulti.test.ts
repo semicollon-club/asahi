@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { EventBus, type AgentEvent, type ConversationHint } from "../src/events/bus.js";
 import { openTestDb } from "../src/store/db.js";
 import { UsersRepo } from "../src/store/usersRepo.js";
@@ -735,6 +735,32 @@ describe("AgentCore — DM 세션 예약어(/새세션·/기억정리)", () => {
     expect(after.sessionId).toBe(before.sessionId);
     expect(after.contextFloorTs).toBe(before.contextFloorTs);
     expect(await t.repos.summaries.recent(after.id, 3)).toHaveLength(0);
+  });
+
+  // Minor(리뷰 후속) — writeSummary 는 예외만 로그를 남기고, ok:false·빈 텍스트 갈래는 아무 말
+  // 없이 false 만 돌려줬다. 사용자에게는 "정리하다 실패했어"가 나가는데 로그에는 아무것도 없어,
+  // 모델이 실패한 것인지 빈 답을 낸 것인지조차 구분할 수 없었다.
+  it("요약 턴이 실패하거나 빈 텍스트를 돌려주면 진단할 수 있는 로그를 남긴다", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const t = await setup();
+      pub(t.bus, dmHint("owner", "owner"), "안녕", 1);
+      await t.core.drain();
+
+      t.setResult({ text: "(에이전트 오류: error_during_execution)", sessionId: undefined, ok: false });
+      pub(t.bus, dmHint("owner", "owner"), "/기억정리", 2);
+      await t.core.drain();
+      expect(warn.mock.calls.some((c) => String(c[0]).includes("요약 턴이 실패로 끝남"))).toBe(true);
+
+      // 실패했으므로 세션은 그대로다 — 같은 대화에 한 번 더 칠 수 있다.
+      warn.mockClear();
+      t.setResult({ text: "   ", sessionId: "s1", ok: true });
+      pub(t.bus, dmHint("owner", "owner"), "/기억정리", 3);
+      await t.core.drain();
+      expect(warn.mock.calls.some((c) => String(c[0]).includes("빈 텍스트"))).toBe(true);
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("정리할 세션이 없으면 요약을 시도하지 않고 안내만 한다", async () => {
