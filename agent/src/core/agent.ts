@@ -64,9 +64,15 @@ export const RESULT_SUMMARY_MAX = 200;
 // noMemoryWrite(Important 4, 최종 전체 브랜치 리뷰): noRemoteTools/noSkills 와 같은 자리의 세
 // 번째 축이다. 정기 게시(digest.ts)는 isOwner:false, isPrivate:false 로 돌아 손님 서버 계층과
 // 신원이 같은데, 이 브랜치가 그 계층에 remember 를 열면서 사람이 안 보는 타이머 + 신뢰할 수
-// 없는 웹 검색 결과라는 이 턴의 위협 모델이 remember 호출까지 도달하게 됐다. true 면 remember
-// 만 닫는다 — recall(공용 기억 읽기)은 공용 기억이 어차피 전 부원에게 열려 있고 digest 출력도
-// 공개 채널로 가므로 막을 이유가 없다.
+// 없는 웹 검색 결과라는 이 턴의 위협 모델이 remember 호출까지 도달하게 됐다. true 면 기억을
+// 바꾸는 도구(remember·forget)를 닫는다 — recall(공용 기억 읽기)은 공용 기억이 어차피 전
+// 부원에게 열려 있고 digest 출력도 공개 채널로 가므로 막을 이유가 없다.
+//
+// Important 2(리뷰 후속): 처음엔 remember 만 닫았는데, 요약 턴(core.ts 의 writeSummary)이 이
+// 축을 두 번째 호출부로 쓰면서 구멍이 드러났다 — 그 턴은 대화 주인의 신원으로 서므로 소유자
+// 스레드에서는 forget 까지 들고 도는데, forget 은 동아리 공용 기억을 지운다. "기억을 쓰면 안
+// 되는 턴"이라는 축이 삭제 도구를 열어 두는 것은 다음 호출부를 향한 함정이라, 둘을 한 축으로
+// 묶었다(tools.ts 의 memoryWriteEnabled).
 export type TurnRequest = {
   prompt: string; systemPrompt: string; resume?: string; cwd: string; context: TurnContext;
   onProgress?: (u: ProgressUpdate) => void; images?: ImageInput[]; noRemoteTools?: boolean; noWebTools?: boolean;
@@ -238,8 +244,8 @@ export function resolveWebToolsEnabled(req: { noWebTools?: boolean }): boolean {
 
 // Important 4(최종 전체 브랜치 리뷰) — req.noMemoryWrite 를 뽑아내는 순수 함수. 위
 // resolveWebToolsEnabled 와 같은 이유로 순수 함수다 — SDK query() 전체를 목업하지 않고 이
-// 판정 하나만 검증하기 위해서다. digest.ts 가 이 값을 true 로 세운다(사람이 안 보는 타이머 +
-// 신뢰할 수 없는 웹 검색 결과 + 이제는 열려 있는 remember 조합).
+// 판정 하나만 검증하기 위해서다. digest.ts 와 core.ts 의 writeSummary 가 이 값을 true 로 세운다
+// (둘 다 사람이 안 보는 채로 신뢰할 수 없는 텍스트를 이어받으면서, 텍스트만 만들면 되는 턴이다).
 export function resolveMemoryWriteEnabled(req: { noMemoryWrite?: boolean }): boolean {
   return !req.noMemoryWrite;
 }
@@ -317,8 +323,9 @@ export function makeRunAgentTurn(
     // 스킬도 같은 축으로 닫는다 — 유휴 요약 턴은 사람이 지켜보지 않고 인젝션이 심겼을 수도 있는
     // 세션을 이어받는다(core.ts 의 noWebTools 주석 참고). 요약에 스킬이 필요하지 않다.
     const skillsEnabled = resolveSkillsEnabled(req);
-    // Important 4: 정기 게시(digest.ts)가 req.noMemoryWrite:true 로 remember 만 닫는다(recall 은
-    // 그대로) — noRemoteTools/noWebTools 와 같은 방식으로 뽑아 allowedToolsFor 에 넘긴다.
+    // Important 4: 정기 게시(digest.ts)와 요약 턴(core.ts 의 writeSummary)이 req.noMemoryWrite:true
+    // 로 기억을 바꾸는 도구(remember·forget)를 닫는다(recall 은 그대로) — noRemoteTools/noWebTools
+    // 와 같은 방식으로 뽑아 allowedToolsFor 에 넘긴다.
     const memoryWriteEnabled = resolveMemoryWriteEnabled(req);
     // ctx.remote 구성(호출 통로 + workerId/workerKind + 워커 roots) 자체도 buildRemoteCtx 로
     // 뽑아 테스트한다(agent.test.ts).

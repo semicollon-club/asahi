@@ -851,6 +851,12 @@ export class AgentCore {
         // 하는데, 이 한 줄의 실익이 그 비용에 못 미친다고 보고 넘어간다 — 다음에 같은 불일치를
         // 다시 발견하면 이 주석부터 읽을 것.
         noSkills: true,
+        // Important 2(리뷰 후속): 이 턴은 대화 주인(conv.primaryUserId)의 신원으로 서므로, 소유자
+        // 스레드에 들어온 손님이 /기억정리 를 치면 손님이 쓴 텍스트가 담긴 세션을 소유자 도구셋
+        // (remember·forget 포함)으로 이어받게 된다 — 위 FIX3/FIX4 가 막으려던 인젝션 면과 같은
+        // 면이다. 요약 턴은 텍스트만 만들면 되고 기억을 건드릴 일이 전혀 없으므로, 그 축을 통째로
+        // 닫아 이 경로에서 기억이 오염·삭제될 여지 자체를 없앤다(정기 게시 턴과 같은 조치).
+        noMemoryWrite: true,
       });
       if (result.ok && result.text.trim().length > 0) {
         await this.repos.summaries.insert({

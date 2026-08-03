@@ -371,10 +371,15 @@ export async function runtimeInfoHandler(ctx: ToolCtx): Promise<string> {
 export type AllowedToolsOptions = {
   workerConnected?: boolean;
   webToolsEnabled?: boolean;
-  // remember(기억 쓰기)를 열지. false 여도 recall(읽기)은 이 값과 무관하게 항상 그대로다 —
-  // 정기 게시(digest.ts)처럼 사람이 안 보는 타이머로 돌며 신뢰할 수 없는 웹 검색 결과를
-  // 읽어들이는 턴이 remember 로 동아리 공용 기억을 오염시키는 것만 막고, 공용 기억은 어차피
-  // 전 부원이 읽을 수 있으므로 recall 까지 막을 이유는 없다.
+  // 기억을 바꾸는 도구(remember·forget)를 열지. false 여도 recall(읽기)은 이 값과 무관하게 항상
+  // 그대로다 — 정기 게시(digest.ts)·요약(core.ts 의 writeSummary)처럼 사람이 안 보는 채로 돌며
+  // 신뢰할 수 없는 텍스트(웹 검색 결과·손님이 쓴 대화)를 이어받는 턴이 동아리 공용 기억을
+  // 바꾸는 것만 막고, 공용 기억은 어차피 전 부원이 읽을 수 있으므로 recall 까지 막을 이유는 없다.
+  //
+  // Important 2(리뷰 후속): 예전엔 이 축이 remember 만 닫고 forget 은 소유자 분기에서 따로
+  // 열려 있었다. 기억을 지우는 것도 기억 쓰기다 — "기억을 쓰면 안 되는 턴"이라고 이름 붙인
+  // 축이 삭제 도구를 열어 두면, 이 옵션을 믿고 쓰는 다음 호출부가 조용히 당한다(게다가 오염보다
+  // 삭제가 더 되돌리기 어렵다). 두 도구를 한 축에 묶는다.
   memoryWriteEnabled?: boolean;
 };
 
@@ -414,12 +419,15 @@ export function allowedToolsFor(
   const webTools = webToolsEnabled ? WEB_TOOLS : [];
   // Important 4 — remember 는 네 분기 모두 이 배열 하나로만 열고 닫는다. memoryWriteEnabled
   // 가 기본값(true)인 한 아래 각 분기의 결과는 예전과 완전히 동일하다(회귀 없음) — false 를
-  // 넘기는 호출부(정기 게시)만 remember 를 잃고 recall 은 그대로 유지한다.
+  // 넘기는 호출부(정기 게시·요약 턴)만 remember 를 잃고 recall 은 그대로 유지한다.
   const memoryTools = memoryWriteEnabled ? [t("remember")] : [];
+  // Important 2(리뷰 후속) — forget 도 같은 축에 묶는다. 소유자 두 분기에만 들어가므로 배열을
+  // 따로 두는 이유는 자리다: remember 와 forget 이 각 분기에서 서로 다른 위치에 놓인다.
+  const forgetTools = memoryWriteEnabled ? [t("forget")] : [];
   if (isOwner && isPrivate) {
     return [
       ...remote,
-      ...memoryTools, t("recall"), t("character_fact"), t("manage_access"), t("forget"),
+      ...memoryTools, t("recall"), t("character_fact"), t("manage_access"), ...forgetTools,
       ...dirTools,
       t("db_schema"), t("db_query"), t("runtime_info"),
       ...webTools,
@@ -433,7 +441,8 @@ export function allowedToolsFor(
   // 공용 기억이고(memoryScope.ts), 그것을 만들 수 있는 곳이 여기뿐이다.
   // forget 도 같은 이유로 연다(2026-08-02, Task 3): 부원이 쌓는 공용 기억이 틀리거나 낡으면
   // 정리해야 하는데, 그 정리 대상도 그걸 할 수 있는 소유자도 전부 이 서버 분기에만 있다.
-  if (isOwner) return [...remote, ...memoryTools, t("recall"), t("forget"), ...dirTools, t("runtime_info"), ...webTools];
+  // 단 remember 와 마찬가지로 memoryWriteEnabled 축이 닫히면 함께 닫힌다(위 forgetTools).
+  if (isOwner) return [...remote, ...memoryTools, t("recall"), ...forgetTools, ...dirTools, t("runtime_info"), ...webTools];
   // 손님: DM 이든 서버든 공유 기계로 간다. 폴더 관리는 주지 않는다.
   if (isPrivate && (role === "owner" || role === "allowed")) {
     return [...remote, ...memoryTools, t("recall"), t("character_fact"), ...webTools];

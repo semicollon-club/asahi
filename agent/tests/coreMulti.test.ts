@@ -14,6 +14,8 @@ import { AgentCore } from "../src/core/core.js";
 import { filterFileAttachments, FILE_LIMITS } from "../src/core/attachments.js";
 import type { Config } from "../src/config.js";
 import type { TurnRequest, TurnResult } from "../src/core/agent.js";
+import { resolveMemoryWriteEnabled } from "../src/core/agent.js";
+import { allowedToolsFor } from "../src/core/tools.js";
 import type { DigestRunner } from "../src/core/digest.js";
 
 const HOUR = 60 * 60 * 1000;
@@ -596,6 +598,53 @@ describe("AgentCore — 유휴 요약 턴은 원격 도구를 강제로 닫는�
     // 닫혀 있으므로 페르소나도 "가능하다"고 말하면 안 된다.
     expect(summaryCall.systemPrompt).not.toMatch(/fs_read/);
     expect(summaryCall.systemPrompt).not.toMatch(/클라우드에서 실행 중이라/);
+  });
+});
+
+// Important 2(리뷰 후속) — 요약 턴의 신원은 명령을 친 사람이 아니라 대화 주인(conv.primaryUserId)
+// 에서 나온다. 어댑터는 이미 있는 스레드에 들어온 손님에게도 그 스레드의 primaryUserId 를 그대로
+// 실어 주므로(discord.ts 의 existingPrimaryUserId), 손님이 소유자 스레드에서 /기억정리 를 치면
+// 손님이 쓴 텍스트가 담긴 세션을 소유자 도구셋으로 이어받는 턴이 뜬다 — FIX3/FIX4 가 막으려던
+// 인젝션 면 그대로다. 그중 forget 은 동아리 공용 기억을 지우고 손님 분기엔 아예 없는 도구다.
+// 신원 자체를 바꾸면 요약 대상 세션과 프롬프트 계층이 어긋나므로, 기억 축을 닫는 쪽으로 막는다.
+describe("AgentCore — 요약 턴은 기억 쓰기 축을 닫는다(Important 2)", () => {
+  it("소유자 스레드에 들어온 손님이 /기억정리 를 쳐도 그 턴은 noMemoryWrite:true 라 remember·forget 을 하나도 받지 못한다", async () => {
+    const t = await setup();
+    // 소유자가 연 스레드(primaryUserId = owner, 세션 s1).
+    pub(t.bus, threadHint("owner", "ch-1", "owner", "o1"), "안녕", 1);
+    await t.core.drain();
+
+    // 손님이 같은 스레드에 들어온다 — 어댑터가 실어 주는 모양 그대로(primaryUserId 는 소유자).
+    const guestInOwnerThread: ConversationHint = {
+      kind: "thread", discordChannelId: "ch-1", originMessageId: "o1", guildId: "g", parentChannelId: "p",
+      isPrivate: false, primaryUserId: "owner", userId: "guest", role: "allowed", discordMessageId: `msg-${seq++}`,
+    };
+    pub(t.bus, guestInOwnerThread, "/기억정리", 2);
+    await t.core.drain();
+
+    const summaryCall = t.calls[t.calls.length - 1];
+    // 신원은 여전히 대화 주인에서 나온다(그 사실 자체는 이 수정이 바꾸지 않는다 — 아래 도구셋으로 막는다).
+    expect(summaryCall.context).toMatchObject({ isOwner: true, role: "owner", userId: "owner" });
+    expect(summaryCall.noMemoryWrite).toBe(true);
+
+    // 그 플래그가 실제 도구 목록까지 도달하는지 — agent.ts 가 하는 계산을 그대로 재현한다.
+    const memoryWriteEnabled = resolveMemoryWriteEnabled(summaryCall);
+    const tools = allowedToolsFor(summaryCall.context.role, summaryCall.context.isPrivate, summaryCall.context.isOwner, "local", { memoryWriteEnabled });
+    expect(tools).not.toContain("mcp__asahi__forget");
+    expect(tools).not.toContain("mcp__asahi__remember");
+    expect(tools).toContain("mcp__asahi__recall");
+  });
+
+  it("유휴 스윕의 요약 턴도 같은 축을 닫는다 — 두 호출부가 writeSummary 하나를 공유한다", async () => {
+    const t = await setup();
+    pub(t.bus, dmHint("owner", "owner"), "안녕", t.now());
+    await t.core.drain();
+    expect(t.calls[0].noMemoryWrite).toBeUndefined(); // 평상시 턴은 그대로(회귀 가드)
+
+    t.setClock(1_000_000 + 31 * 60 * 1000);
+    await t.core.closeIdleConversations();
+    await t.core.drain();
+    expect(t.calls[t.calls.length - 1].noMemoryWrite).toBe(true);
   });
 });
 

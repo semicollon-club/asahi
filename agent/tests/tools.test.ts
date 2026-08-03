@@ -282,6 +282,31 @@ describe("allowedToolsFor — forget 노출", () => {
     expect(allowedToolsFor("allowed", true, false)).not.toContain("mcp__asahi__forget");
     expect(allowedToolsFor("allowed", false, false)).not.toContain("mcp__asahi__forget");
   });
+
+  // Important 2(리뷰 후속) — memoryWriteEnabled:false 는 "이 턴은 기억을 쓰면 안 된다"는 뜻인데
+  // 예전엔 remember 만 닫고 forget 은 소유자 분기에서 그대로 열려 있었다. 지우는 것도 기억
+  // 쓰기이고, 오염보다 삭제가 되돌리기 더 어렵다 — 요약 턴이 이 축의 두 번째 호출부가 되면서
+  // 실제로 닿는 구멍이 됐다(대화 주인이 소유자면 그 턴이 forget 을 들고 돈다).
+  it("memoryWriteEnabled:false 면 소유자도 DM·서버 양쪽에서 forget 을 받지 못한다", () => {
+    const dm = allowedToolsFor("owner", true, true, "local", { memoryWriteEnabled: false });
+    expect(dm).not.toContain("mcp__asahi__forget");
+    expect(dm).not.toContain("mcp__asahi__remember");
+    const server = allowedToolsFor("owner", false, true, "local", { memoryWriteEnabled: false });
+    expect(server).not.toContain("mcp__asahi__forget");
+    expect(server).not.toContain("mcp__asahi__remember");
+    // 읽기는 이 축과 무관하다(회귀 가드) — 요약 턴은 공용 기억을 읽어야 할 수 있다.
+    expect(dm).toContain("mcp__asahi__recall");
+    expect(server).toContain("mcp__asahi__recall");
+  });
+
+  it("memoryWriteEnabled 를 생략하거나 true 로 주면 forget 은 예전 그대로 열린다(회귀 가드)", () => {
+    for (const isPrivate of [true, false]) {
+      expect(allowedToolsFor("owner", isPrivate, true, "local", { memoryWriteEnabled: true }))
+        .toEqual(allowedToolsFor("owner", isPrivate, true, "local"));
+      expect(allowedToolsFor("owner", isPrivate, true, "local", { memoryWriteEnabled: true }))
+        .toContain("mcp__asahi__forget");
+    }
+  });
 });
 
 describe("manage_access 도구", () => {
