@@ -635,6 +635,35 @@ describe("AgentCore — 요약 턴은 기억 쓰기 축을 닫는다(Important 2
     expect(tools).toContain("mcp__asahi__recall");
   });
 
+  // Important 2(최종 전체 브랜치 리뷰) — 위 테스트는 스레드(공개 채널) 계층이라 애초에
+  // character_fact 가 없는 분기였다. 이 축이 실제로 열려 있던 자리는 DM 이다: 손님 DM 이
+  // 유휴 스윕으로 닫힐 때 도는 요약 턴의 도구셋이 [recall, character_fact] 였다(실측).
+  // character_fact 는 scope='character' 인 memories 행을 넣고, 그 행은 유저·대화 스코프가
+  // 없어 소유자 방을 포함한 모든 방의 컨텍스트 블록에 실린다 — 손님 DM 에 심긴 인젝션 한 줄이
+  // 아무도 보지 않는 타이머 위에서 전역 canon 을 만든다. noMemoryWrite 가 막으라고 만들어진
+  // 위협 모델 그 자체다.
+  it("손님 DM 의 유휴 요약 턴은 character_fact 도 받지 못한다 — 전역 캐릭터 설정을 심을 수 없다", async () => {
+    const t = await setup();
+    pub(t.bus, dmHint("guest", "allowed"), "안녕", t.now());
+    await t.core.drain();
+    // 평상시 손님 DM 은 character_fact 를 그대로 받는다(회귀 가드 — 이 수정이 닫는 것은 요약 턴뿐).
+    expect(allowedToolsFor(t.calls[0].context.role, t.calls[0].context.isPrivate, t.calls[0].context.isOwner, "local", {
+      memoryWriteEnabled: resolveMemoryWriteEnabled(t.calls[0]),
+    })).toContain("mcp__asahi__character_fact");
+
+    t.setClock(1_000_000 + 31 * 60 * 1000);
+    await t.core.closeIdleConversations();
+    await t.core.drain();
+
+    const summaryCall = t.calls[t.calls.length - 1];
+    expect(summaryCall.context).toMatchObject({ isPrivate: true, isOwner: false });
+    const tools = allowedToolsFor(summaryCall.context.role, summaryCall.context.isPrivate, summaryCall.context.isOwner, "local", {
+      memoryWriteEnabled: resolveMemoryWriteEnabled(summaryCall),
+    });
+    expect(tools).not.toContain("mcp__asahi__character_fact");
+    expect(tools).toContain("mcp__asahi__recall");
+  });
+
   it("유휴 스윕의 요약 턴도 같은 축을 닫는다 — 두 호출부가 writeSummary 하나를 공유한다", async () => {
     const t = await setup();
     pub(t.bus, dmHint("owner", "owner"), "안녕", t.now());
