@@ -103,6 +103,16 @@ describe("renderCommandHelp — 안내문이 실제 예약어와 어긋나지 �
       expect(g.description.length).toBeGreaterThan(5);
     }
   });
+
+  // Minor 4(최종 전체 브랜치 리뷰) — /새세션 이 지우는 캐릭터 설정은 전역이다(scope='character'
+  // 는 유저·대화 스코프가 없다). 손님이 자기 DM 에서 /새세션 을 치면 소유자 방의 캐릭터
+  // canon 까지 함께 사라지는데, 안내문도 확인 문구도 그 사실을 한 글자도 말하지 않았다.
+  // 권한 모델 자체는 그대로 둔다(쓰기가 이미 전역이라 비우기만 막는 것이 앞뒤가 안 맞는다) —
+  // 말해주지 않는 것만 고친다.
+  it("/새세션 안내가 캐릭터 설정 삭제의 범위(모든 방)를 밝힌다", () => {
+    const reset = COMMAND_HELP.find((g) => g.commands.includes("/새세션"));
+    expect(reset?.description).toMatch(/모든 방/);
+  });
 });
 
 describe("isChannelCommand — 대화 없이 일반 채널에서 처리할 수 있는 예약어", () => {

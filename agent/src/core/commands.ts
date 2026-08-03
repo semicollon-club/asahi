@@ -63,7 +63,10 @@ export function isChannelCommand(text: string): boolean {
 // 안내문은 위 예약어 테이블에서 파생시킨다. 손으로 적으면 예약어를 추가하는 순간
 // 조용히 어긋나고, 그 어긋남은 아무도 눈치채지 못한다(테스트가 이 일치를 검증한다).
 export const COMMAND_HELP: ReadonlyArray<{ commands: readonly string[]; description: string }> = [
-  { commands: [...RESET_COMMANDS], description: "지금까지의 대화를 끊고 새로 시작한다. 지어낸 설정도 지운다(기억은 남는다)" },
+  // Minor 4(최종 전체 브랜치 리뷰) — "지어낸 설정도 지운다"만으로는 그 삭제가 이 방에만 걸린다고
+  // 읽힌다. scope='character' 는 유저·대화 스코프가 없어 어느 방에서 쳐도 전부 지워진다 —
+  // 손님이 자기 DM 에서 쳐도 소유자 방의 캐릭터 canon 이 함께 사라지므로, 치기 전에 알아야 한다.
+  { commands: [...RESET_COMMANDS], description: "지금까지의 대화를 끊고 새로 시작한다. 지어낸 설정은 모든 방에서 지운다(기억은 남는다)" },
   { commands: [...COMPACT_COMMANDS], description: "지금까지의 대화를 요약해서 다음 세션으로 넘긴다" },
   // FIX6(사소, 머지 전 리뷰): 결과가 항상 "대회 소식 채널"에 올라가는 건 아니다 — DM 에서 부르거나
   // 지정 채널(DIGEST_CONTEST_CHANNEL_ID 등)이 설정돼 있지 않으면 명령을 친 곳에 그대로 온다

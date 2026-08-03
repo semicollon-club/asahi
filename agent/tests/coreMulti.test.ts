@@ -723,6 +723,23 @@ describe("AgentCore — DM 세션 예약어(/새세션·/기억정리)", () => {
     expect(t.calls).toHaveLength(1); // 예약어는 LLM 턴 없이 끝난다(회귀 방지)
   });
 
+  // Minor 4(최종 전체 브랜치 리뷰) — 확인 문구가 "지어낸 설정 N개도 지웠어"라고만 해서, 그
+  // 삭제가 이 방이 아니라 모든 방에 걸린다는 사실을 아무도 알 수 없었다. 손님이 자기 DM 에서
+  // 치면 소유자 방의 캐릭터 canon 이 함께 사라지는데 그 사실이 어디에도 안 나간다.
+  it("/새세션 확인 문구가 캐릭터 설정 삭제의 범위(모든 방)를 밝힌다", async () => {
+    const t = await setup();
+    await t.repos.memories.insert({ userId: "guest", scope: "character", title: "학년", content: "2학년" });
+    pub(t.bus, dmHint("guest", "allowed"), "안녕", 1);
+    await t.core.drain();
+
+    pub(t.bus, dmHint("guest", "allowed"), "/새세션", 2);
+    await t.core.drain();
+
+    const notices = t.published.filter((p) => p.type === "assistant_message").map((p) => (p as { text: string }).text);
+    const confirm = notices.find((n) => /안 가져갈게/.test(n))!;
+    expect(confirm).toMatch(/모든 방/);
+  });
+
   it("/기억정리 는 요약을 남기고 세션·바닥선을 설정한다", async () => {
     // tickMs:1 — 고정 시계면 now() 를 두 번 불러도 같은 값이 나와, 바닥선과 created_ts 를
     // 따로 구하는 잘못된 구현도 아래 단정을 그대로 통과한다(실제로 확인함). 시계를 흐르게 해야

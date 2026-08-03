@@ -802,7 +802,11 @@ export class AgentCore {
       await this.repos.conversations.setSession(conv.id, null, t);
       await this.repos.conversations.setContextFloor(conv.id, t);
       const cleared = await this.repos.memories.deleteCharacterFacts();
-      const factNote = cleared > 0 ? ` 지어낸 설정 ${cleared}개도 지웠어.` : "";
+      // Minor 4(최종 전체 브랜치 리뷰) — "N개도 지웠어"만으로는 그 삭제가 이 방에만 걸린다고
+      // 읽힌다. scope='character' 는 유저·대화 스코프가 없어 어느 방에서 쳐도 전부 지워지고,
+      // 손님이 자기 DM 에서 쳐도 소유자 방의 캐릭터 canon 이 함께 사라진다. 권한 모델은 그대로
+      // 둔다(쓰기가 이미 전역이라 비우기만 막는 것이 앞뒤가 안 맞는다) — 말해주지 않던 것만 고친다.
+      const factNote = cleared > 0 ? ` 지어낸 설정 ${cleared}개는 모든 방에서 지웠어.` : "";
       this.bus.publish({
         type: "assistant_message", channel: "discord", channelRef: conv.discordChannelId,
         text: `…알겠어. 여기까지 나눈 얘기는 안 가져갈게.${factNote} 기억해둔 건 그대로 있어.`,
