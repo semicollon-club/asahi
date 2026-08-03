@@ -216,3 +216,53 @@ describe("buildContextBlock — 공용 기억·캐릭터 설정의 개행으로 
     expect(block.split("\n").filter((l) => l === "## 최근 대화 기록").length).toBe(1);
   });
 });
+
+describe("buildContextBlock — 컨텍스트 바닥선", () => {
+  let db: Db;
+  let repos: { memories: MemoriesRepo; summaries: SummariesRepo; messages: MessagesRepo; users: UsersRepo };
+  let convs: ConversationsRepo;
+
+  beforeEach(async () => {
+    db = await openTestDb();
+    repos = { memories: new MemoriesRepo(db), summaries: new SummariesRepo(db), messages: new MessagesRepo(db), users: new UsersRepo(db) };
+    convs = new ConversationsRepo(db);
+    await convs.create({ kind: "dm", discordChannelId: "c", primaryUserId: "u1", isPrivate: true, lastActiveTs: 1 });
+  });
+
+  const conv = async () => (await convs.getByChannelId("c"))!;
+
+  it("바닥선이 없으면 지금과 똑같이 전부 싣는다(회귀 방지)", async () => {
+    const c = await conv();
+    await repos.messages.insert({ conversationId: c.id, role: "user", content: "옛날얘기", ts: 100, processed: true });
+    expect(await buildContextBlock(repos, c, -1)).toContain("옛날얘기");
+  });
+
+  it("바닥선 이전 메시지는 빠지고 이후는 남는다", async () => {
+    const c = await conv();
+    await repos.messages.insert({ conversationId: c.id, role: "user", content: "옛날얘기", ts: 100, processed: true });
+    await repos.messages.insert({ conversationId: c.id, role: "user", content: "새얘기", ts: 300, processed: true });
+    await convs.setContextFloor(c.id, 200);
+    const block = await buildContextBlock(repos, await conv(), -1);
+    expect(block).not.toContain("옛날얘기");
+    expect(block).toContain("새얘기");
+  });
+
+  it("바닥선 이전 요약은 빠진다", async () => {
+    const c = await conv();
+    await repos.summaries.insert({ conversationId: c.id, fromMessageId: 0, toMessageId: 1, content: "옛요약", createdTs: 100 });
+    await convs.setContextFloor(c.id, 200);
+    expect(await buildContextBlock(repos, await conv(), -1)).not.toContain("옛요약");
+  });
+
+  it("바닥선과 같은 시각의 요약은 남는다", async () => {
+    // /기억정리 가 만드는 요약이 정확히 이 경우다 — 경계에서 만들어져 그 이전을 대신하므로
+    // 포함되어야 한다. 메시지는 반대로 그 시점 이전이 대체된 것이라 빠진다(부등호가 다른 이유).
+    const c = await conv();
+    await repos.summaries.insert({ conversationId: c.id, fromMessageId: 0, toMessageId: 1, content: "경계요약", createdTs: 200 });
+    await repos.messages.insert({ conversationId: c.id, role: "user", content: "경계메시지", ts: 200, processed: true });
+    await convs.setContextFloor(c.id, 200);
+    const block = await buildContextBlock(repos, await conv(), -1);
+    expect(block).toContain("경계요약");
+    expect(block).not.toContain("경계메시지");
+  });
+});

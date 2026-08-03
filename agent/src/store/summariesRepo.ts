@@ -11,10 +11,14 @@ export class SummariesRepo {
     );
   }
 
-  async recent(conversationId: number, limit: number): Promise<string[]> {
+  async recent(conversationId: number, limit: number, sinceTs?: number): Promise<string[]> {
+    // 메시지와 달리 경계 시각의 요약은 포함한다(>= 이지 > 가 아니다) — /기억정리 가 만드는
+    // 요약이 정확히 그 시각에 생기고, 그것이 그 이전 대화를 대신하는 물건이기 때문이다.
     const r = await this.db.query(
-      "SELECT content FROM conversation_summaries WHERE conversation_id = $1 ORDER BY id DESC LIMIT $2",
-      [conversationId, limit],
+      sinceTs === undefined
+        ? "SELECT content FROM conversation_summaries WHERE conversation_id = $1 ORDER BY id DESC LIMIT $2"
+        : "SELECT content FROM conversation_summaries WHERE conversation_id = $1 AND created_ts >= $3 ORDER BY id DESC LIMIT $2",
+      sinceTs === undefined ? [conversationId, limit] : [conversationId, limit, sinceTs],
     );
     return (r.rows as Array<{ content: string }>).map((row) => row.content);
   }

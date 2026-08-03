@@ -52,8 +52,10 @@ export async function buildContextBlock(repos: ContextRepos, conv: Conversation,
   // 건수 상한이 이미 있고, 요약·최근 대화도 각각 3건·20건 상한이 있다. 기억만 무제한이었다 —
   // 공용 기억은 부원 누구나 늘릴 수 있으므로 여기에만 문자 예산을 건다.
   const memoryLines = memories.length > 0 ? renderMemories(memories, names, { budget: MEMORY_SECTION_BUDGET }) : "(기억 없음)";
-  const summaries = await repos.summaries.recent(conv.id, 3);
-  const recentAll = await repos.messages.recent(conv.id, 21);
+  // 컨텍스트 바닥선(conv.contextFloorTs) — NULL 이면 지금까지처럼 바닥선 없이 전부 대상이다.
+  const floor = conv.contextFloorTs ?? undefined;
+  const summaries = await repos.summaries.recent(conv.id, 3, floor);
+  const recentAll = await repos.messages.recent(conv.id, 21, floor);
   const recent = recentAll.filter((m) => m.id !== excludeMessageId).slice(-20);
   const recentLines = recent
     .map((m) => `[${new Date(m.ts).toISOString()}] ${m.role === "user" ? "사용자" : m.role === "assistant" ? "비서" : "시스템"}: ${m.content}`)
