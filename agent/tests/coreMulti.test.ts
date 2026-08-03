@@ -14,7 +14,7 @@ import { AgentCore } from "../src/core/core.js";
 import { filterFileAttachments, FILE_LIMITS } from "../src/core/attachments.js";
 import type { Config } from "../src/config.js";
 import type { TurnRequest, TurnResult } from "../src/core/agent.js";
-import { resolveMemoryWriteEnabled } from "../src/core/agent.js";
+import { resolveMemoryWriteEnabled, resolveWebToolsEnabled, resolveTurnWorker } from "../src/core/agent.js";
 import { allowedToolsFor } from "../src/core/tools.js";
 import type { DigestRunner } from "../src/core/digest.js";
 
@@ -137,6 +137,25 @@ function threadHint(userId: string, channelId: string, role: "owner" | "allowed"
 }
 function pub(bus: EventBus, hint: ConversationHint, text: string, ts: number): void {
   bus.publish({ type: "user_message", channel: "discord", channelRef: hint.discordChannelId, text, ts, hint });
+}
+
+// Minor 8(최종 전체 브랜치 리뷰) — 어떤 턴이 실제로 받는 도구 목록. 이 헬퍼 이전에는 각
+// 테스트가 allowedToolsFor 를 직접 부르면서 memoryWriteEnabled 만 넘기고 workerConnected·
+// webToolsEnabled 는 빼먹은 채 "agent.ts 가 하는 계산을 그대로 재현한다"고 적어 뒀다. 실제로는
+// webToolsEnabled 가 기본값(true)으로 들어가 요약 턴에는 없는 WebSearch 가 결과에 섞였다 —
+// 단정들이 그 도구를 보지 않아 드러나지 않았을 뿐이다. 세 축을 다 넘겨 그 주장을 참으로 만든다.
+//
+// resolveTurnWorker 에 registry·hub 를 넘기지 않는 것도 재현의 일부다: setup() 은 over.hub 가
+// 없으면 hub 를 주입하지 않으므로 agent.ts 도 이 테스트 환경에서 같은 이유로 null 을 얻는다
+// (요약 턴은 그 위에 noRemoteTools:true 가 있어 레지스트리·허브를 보기 전에 이미 끊긴다).
+// deployTarget "local" 은 setup() 의 config 기본값과 같은 값이다.
+async function toolsForTurn(req: TurnRequest): Promise<string[]> {
+  const worker = await resolveTurnWorker(req);
+  return allowedToolsFor(req.context.role, req.context.isPrivate, req.context.isOwner, "local", {
+    workerConnected: worker !== null,
+    webToolsEnabled: resolveWebToolsEnabled(req),
+    memoryWriteEnabled: resolveMemoryWriteEnabled(req),
+  });
 }
 
 // 예약어 조사의 동시 실행 가드를 테스트하려면 digest.run 이 끝나는 시점을 테스트가 직접
@@ -627,12 +646,16 @@ describe("AgentCore — 요약 턴은 기억 쓰기 축을 닫는다(Important 2
     expect(summaryCall.context).toMatchObject({ isOwner: true, role: "owner", userId: "owner" });
     expect(summaryCall.noMemoryWrite).toBe(true);
 
-    // 그 플래그가 실제 도구 목록까지 도달하는지 — agent.ts 가 하는 계산을 그대로 재현한다.
-    const memoryWriteEnabled = resolveMemoryWriteEnabled(summaryCall);
-    const tools = allowedToolsFor(summaryCall.context.role, summaryCall.context.isPrivate, summaryCall.context.isOwner, "local", { memoryWriteEnabled });
+    // 그 플래그가 실제 도구 목록까지 도달하는지 — agent.ts 가 하는 계산을 그대로 재현한다
+    // (toolsForTurn, 이 파일 위쪽. 세 축을 다 넘긴다).
+    const tools = await toolsForTurn(summaryCall);
     expect(tools).not.toContain("mcp__asahi__forget");
     expect(tools).not.toContain("mcp__asahi__remember");
     expect(tools).toContain("mcp__asahi__recall");
+    // 다른 두 축도 함께 확인한다 — 이 턴은 noWebTools·noRemoteTools 도 세우므로 WebSearch 와
+    // 원격 도구가 없어야 하고, 그것이 세 축을 다 넘기는 재현이어야 하는 이유다.
+    expect(tools).not.toContain("WebSearch");
+    expect(tools).not.toContain("mcp__asahi__fs_read");
   });
 
   // Important 2(최종 전체 브랜치 리뷰) — 위 테스트는 스레드(공개 채널) 계층이라 애초에
@@ -647,9 +670,7 @@ describe("AgentCore — 요약 턴은 기억 쓰기 축을 닫는다(Important 2
     pub(t.bus, dmHint("guest", "allowed"), "안녕", t.now());
     await t.core.drain();
     // 평상시 손님 DM 은 character_fact 를 그대로 받는다(회귀 가드 — 이 수정이 닫는 것은 요약 턴뿐).
-    expect(allowedToolsFor(t.calls[0].context.role, t.calls[0].context.isPrivate, t.calls[0].context.isOwner, "local", {
-      memoryWriteEnabled: resolveMemoryWriteEnabled(t.calls[0]),
-    })).toContain("mcp__asahi__character_fact");
+    expect(await toolsForTurn(t.calls[0])).toContain("mcp__asahi__character_fact");
 
     t.setClock(1_000_000 + 31 * 60 * 1000);
     await t.core.closeIdleConversations();
@@ -657,9 +678,7 @@ describe("AgentCore — 요약 턴은 기억 쓰기 축을 닫는다(Important 2
 
     const summaryCall = t.calls[t.calls.length - 1];
     expect(summaryCall.context).toMatchObject({ isPrivate: true, isOwner: false });
-    const tools = allowedToolsFor(summaryCall.context.role, summaryCall.context.isPrivate, summaryCall.context.isOwner, "local", {
-      memoryWriteEnabled: resolveMemoryWriteEnabled(summaryCall),
-    });
+    const tools = await toolsForTurn(summaryCall);
     expect(tools).not.toContain("mcp__asahi__character_fact");
     expect(tools).toContain("mcp__asahi__recall");
   });
