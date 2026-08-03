@@ -759,6 +759,75 @@ describe("AgentCore — DM 세션 예약어(/새세션·/기억정리)", () => {
     expect((await t.repos.memories.characterFacts(40)).map((m) => m.title)).toEqual(["학년"]);
   });
 
+  // 리뷰 재현(Important 1) — /기억정리 는 ingest 체인에서 곧바로 돌지만 대화 턴은 turn 체인에서
+  // 돈다. 진행 중이던 턴이 끝나면서 setSession(result.sessionId) 을 쓰면, 그 직전에 정리가 그어
+  // 놓은 바닥선만 남고 세션은 되살아난다 — 다음 턴이 정리되지 않은 세션을 이어받는데 DB 기록은
+  // 바닥선에 가려져 안 보이는 최악의 조합이고, 사용자에게는 "정리했어"라고 이미 말한 뒤다.
+  it("진행 중이던 대화 턴이 /기억정리 가 끊은 세션을 되살리지 못한다", async () => {
+    const t = await setup({ mode: "manual" });
+    pub(t.bus, dmHint("owner", "owner"), "안녕", 1);
+    await flush();
+    t.resolvers[0]!(); // 첫 턴 완료 → 세션 s1 확정
+    await flush();
+    expect((await t.repos.conversations.getByChannelId("dm-owner"))?.sessionId).toBe("s1");
+
+    pub(t.bus, dmHint("owner", "owner"), "하나만 더", 2); // 이 턴은 아직 진행 중이다
+    await flush();
+    expect(t.calls).toHaveLength(2);
+
+    pub(t.bus, dmHint("owner", "owner"), "/기억정리", 3);
+    await flush();
+
+    // 리뷰가 재현한 순서 그대로 — 요약 턴이 먼저 끝나고, 진행 중이던 대화 턴이 그 뒤에 끝난다.
+    // 수정 후에는 요약 턴이 대화 턴 뒤에 직렬화되어 이 시점에 아직 시작조차 안 했으므로
+    // resolvers[2] 가 없다(그래서 옵셔널 호출이고, 아래에서 한 번 더 부른다).
+    t.resolvers[2]?.();
+    await flush();
+    t.resolvers[1]!();
+    await flush();
+    t.resolvers[2]?.();
+    await t.core.drain();
+
+    const after = (await t.repos.conversations.getByChannelId("dm-owner"))!;
+    expect(after.sessionId).toBeNull();
+    expect(after.contextFloorTs).toBe(1_000_000);
+    expect(await t.repos.summaries.recent(after.id, 3)).toHaveLength(1);
+    const notices = t.published.filter((p) => p.type === "assistant_message").map((p) => (p as { text: string }).text);
+    expect(notices.some((n) => /정리했어/.test(n))).toBe(true);
+  });
+
+  // Important 1(리뷰 후속) — turn 체인 직렬화 위에 한 겹 더. 요약 턴이 도는 동안 다른 경로가
+  // 이 대화에 새 세션을 만들어 놓았다면, 그걸 끊는 것은 사용자가 시킨 일이 아니고 바닥선까지
+  // 그으면 그 새 대화가 통째로 가려진다. summarizeAndClose 가 쓰는 compare-and-close 와 같다.
+  // 세션을 리포로 직접 바꾸는 이유: 어느 경로가 그 쓰기를 했는지가 아니라 "요약하던 세션이
+  // 아니게 됐다"는 사실 하나만이 이 가드의 판정 근거이기 때문이다.
+  it("요약하는 사이에 세션이 다른 것으로 바뀌면 세션도 바닥선도 건드리지 않고 그대로 알린다", async () => {
+    const t = await setup({ mode: "manual" });
+    pub(t.bus, dmHint("owner", "owner"), "안녕", 1);
+    await flush();
+    t.resolvers[0]!();
+    await flush();
+    const conv = (await t.repos.conversations.getByChannelId("dm-owner"))!;
+    expect(conv.sessionId).toBe("s1");
+
+    pub(t.bus, dmHint("owner", "owner"), "/기억정리", 2);
+    await flush();
+    expect(t.calls).toHaveLength(2); // 요약 턴이 떠 있다
+
+    await t.repos.conversations.setSession(conv.id, "s2", t.now());
+    t.resolvers[1]!();
+    await t.core.drain();
+
+    const after = (await t.repos.conversations.getByChannelId("dm-owner"))!;
+    expect(after.sessionId).toBe("s2");
+    expect(after.contextFloorTs).toBeNull();
+    // 이미 쓰인 요약 행은 그대로 둔다 — 바닥선을 안 그었으니 범위 안에 남아 그대로 실린다.
+    expect(await t.repos.summaries.recent(after.id, 3)).toHaveLength(1);
+    const notices = t.published.filter((p) => p.type === "assistant_message").map((p) => (p as { text: string }).text);
+    expect(notices.some((n) => /다시 시도해줘/.test(n))).toBe(true);
+    expect(notices.some((n) => /정리했어/.test(n))).toBe(false);
+  });
+
   it("손님의 /기억정리 는 시간당 한도에 포함되고, 소유자는 포함되지 않는다", async () => {
     // 이 명령은 실제 LLM 턴을 하나 돌린다 — 예약어라고 한도를 건너뛰면 손님이 연타로 무제한
     // 요약 턴을 돌릴 수 있다(조사 예약어에서 실제로 났던 결함과 같은 종류).

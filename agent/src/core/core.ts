@@ -250,7 +250,9 @@ export class AgentCore {
   // processed=false 로 DB 에 있다. 뒤이은 LLM 턴은 turnChains 로 넘겨 별도로 직렬화한다.
   private async ingest(hint: ConversationHint, ts: number, text: string, images: ImageRef[], files: FileRef[], rejectedFiles: string[]): Promise<void> {
     // M-2(최종 리뷰, 의도적으로 고치지 않음): 아래의 조기 반환 갈래들(이 if 블록·바로 아래의
-    // /새세션·/help·조사 예약어 — 전부 messages.insert/runConversationTurn 이전에 return 한다)은
+    // /새세션·/기억정리·/help·조사 예약어 — 전부 messages.insert/runConversationTurn 이전에 return
+    // 한다. 손으로 적은 목록이라 예약어가 늘면 조용히 어긋난다 — commands.ts 의 COMMAND_HELP
+    // 주석이 같은 함정을 지적한다. 여기 갈래를 더할 때 이 줄도 같이 고칠 것)은
     // images/files/rejectedFiles 를 전혀 참조하지 않고 그대로 버린다. 이 경로들은 예약어 하나만
     // 처리하고 LLM 턴도 메시지 저장도 열지 않으므로, 그 메시지에 마침 첨부가 함께 왔어도(예약어와
     // 파일을 같은 메시지로 보내는 드문 경우) 그걸 실을 자리가 없다. 이미지가 이미 겪던 것과 같은
@@ -304,47 +306,23 @@ export class AgentCore {
     // /기억정리: /새세션 이 "끊고 새로"라면 이쪽은 "정리해서 넘기기"다(Claude Code 의 /compact).
     // 지금 세션을 요약해 summaries 에 넣고 바닥선을 그어, 다음 세션에 원문 20개 대신 그 요약이
     // 실리게 한다. 캐릭터 설정은 지우지 않는다 — 그건 /새세션 의 몫이다.
+    //
+    // Important 1(리뷰 후속): 본체를 여기서 곧바로 돌리지 않고 그 대화의 turn 체인에 실어 보낸다.
+    // 이 함수는 ingest 체인에서 도는데 대화 턴은 turn 체인에서 돌므로, 인라인으로 정리하면 진행
+    // 중이던 턴과 완전히 병렬로 실행된다 — 그 턴이 끝나며 setSession(result.sessionId) 을 쓰면
+    // 정리가 방금 끊어 놓은 세션이 되살아나고, 바닥선만 그어진 채로 남는다(리뷰 재현 결과:
+    // session="s1" + floor 설정됨). 그러면 다음 턴은 정리 안 된 세션을 이어받으면서 DB 기록은
+    // 바닥선에 가려 못 보는데, 사용자에게는 이미 "정리했어"라고 말한 뒤다. 게다가 요약 턴 자신이
+    // 진행 중인 턴과 같은 SDK 세션을 동시에 resume 하게 되어, turn 체인이 지키는 "같은 대화
+    // 재진입 금지" 불변식도 깨진다. 유휴 스윕(summarizeAndClose)이 같은 이유로 처음부터 turn
+    // 체인에 실려 있다 — 같은 배선을 그대로 따른다.
+    //
+    // 큐 키는 conv.discordChannelId 가 아니라 hint.discordChannelId 다 — 이 정리가 직렬화되어야
+    // 하는 상대가 바로 아래에서 같은 키로 큐잉되는 runConversationTurn 이기 때문이다. 둘은 보통
+    // 같은 값이지만(resolveConversation 은 채널로 먼저 찾는다) 오리진 메시지로 찾아온 대화에서는
+    // 갈릴 수 있고, 그때 다른 키를 쓰면 막으려던 병렬 실행이 그대로 돌아온다.
     if (sessionCmd === "compact") {
-      const publish = (text2: string, ts: number) =>
-        this.bus.publish({ type: "assistant_message", channel: "discord", channelRef: conv.discordChannelId, text: text2, ts });
-
-      if (!conv.sessionId) {
-        publish("정리할 대화가 없어. 아직 이 세션에서 얘기한 게 없거든.", this.now());
-        return;
-      }
-
-      // 손님 한도: 이 명령은 실제 LLM 턴을 하나 돌리므로 runConversationTurn·조사 예약어와 같은
-      // 규칙을 그대로 탄다 — 소유자(신원 기준)는 무제한, 손님은 시간당 한도에 포함. 판정 기준은
-      // 대화 주인이 아니라 명령을 친 사람이다(유휴 스윕은 부른 사람이 없어 대화 주인을 쓰지만,
-      // 여기는 있다). 세션 확인보다 뒤에 두는 이유는, 요약할 것이 없으면 턴 자체를 안 돌리므로
-      // 손님 몫을 깎을 이유가 없기 때문이다.
-      if (hint.userId !== this.ownerId) {
-        const reserved = await this.repos.turns.reserve({
-          userId: hint.userId, conversationId: conv.id, kind: "summary", ts: this.now(),
-          perUserLimit: this.config.maxTurnsPerHourPerUser, globalLimit: this.config.maxTurnsPerHourGlobal,
-          ownerReserve: 0, isOwner: false, windowMs: HOUR_MS,
-        });
-        if (!reserved) {
-          await this.notify(conv, "구독 한도 보호를 위해 잠시 쉬고 있어요. 1시간 안에 다시 시도해 주세요.");
-          return;
-        }
-      }
-
-      // 바닥선과 요약의 created_ts 에 같은 값을 쓴다 — 두 번 시각을 구하면 순서에 따라 방금
-      // 만든 요약이 스스로 걸러지는 경합이 생긴다(요약 필터가 created_ts >= floor 이므로).
-      const t = this.now();
-      const ok = await this.writeSummary(conv, t);
-      if (!ok) {
-        // 실패하면 아무것도 바꾸지 않는다. 세션과 바닥선을 밀어놓고 요약이 없으면 대화를 잃고
-        // 대신 받은 것도 없는 상태가 된다 — 사용자는 요약을 받으려고 이 명령을 부른 것이다.
-        // 유휴 스윕(summarizeAndClose)이 "실패해도 세션은 반드시 닫는다"인 것과 반대이며,
-        // 그래야 한다: 그쪽은 요약이 부수적이고 이쪽은 요약이 목적이다.
-        publish("정리하다 실패했어. 대화는 그대로 두었으니 다시 시도해줘.", this.now());
-        return;
-      }
-      await this.repos.conversations.setSession(conv.id, null, t);
-      await this.repos.conversations.setContextFloor(conv.id, t);
-      publish("…정리했어. 지금까지 얘기는 요약해서 가져갈게.", t);
+      this.enqueue(this.turnChains, hint.discordChannelId, () => this.compactSession(conv.id, hint.userId));
       return;
     }
 
@@ -798,9 +776,71 @@ export class AgentCore {
     }
   }
 
+  // /기억정리 의 본체(ingest 가 그 대화의 turn 체인에 실어 부른다 — 그 이유는 ingest 쪽 주석).
+  // invokerId 는 명령을 친 사람이다. conv 를 인자로 받지 않고 여기서 다시 읽는 이유: 큐에서
+  // 기다리는 동안 앞선 턴이나 /새세션 이 세션을 바꿨을 수 있어, ingest 시점의 스냅샷으로
+  // 판단하면 이미 없는 세션을 요약하려 들 수 있다(summarizeAndClose 와 같은 이유·같은 모양).
+  private async compactSession(convId: number, invokerId: string): Promise<void> {
+    const conv = await this.repos.conversations.getById(convId);
+    if (!conv) return;
+    const publish = (text: string, ts: number) =>
+      this.bus.publish({ type: "assistant_message", channel: "discord", channelRef: conv.discordChannelId, text, ts });
+
+    if (!conv.sessionId) {
+      publish("정리할 대화가 없어. 아직 이 세션에서 얘기한 게 없거든.", this.now());
+      return;
+    }
+
+    // 손님 한도: 이 명령은 실제 LLM 턴을 하나 돌리므로 runConversationTurn·조사 예약어와 같은
+    // 규칙을 그대로 탄다 — 소유자(신원 기준)는 무제한, 손님은 시간당 한도에 포함. 판정 기준은
+    // 대화 주인(conv.primaryUserId)이 아니라 명령을 친 사람(invokerId)이다: 어댑터는 이미 있는
+    // 스레드에 들어온 손님에게도 그 스레드의 primaryUserId 를 그대로 실어 주므로(discord.ts 의
+    // existingPrimaryUserId), 대화 주인으로 재면 손님이 소유자 소유 스레드에서 한도 없이 요약
+    // 턴을 연타할 수 있다. 유휴 스윕은 부른 사람이 없어 대화 주인을 쓰지만, 여기는 있다.
+    // 세션 확인보다 뒤에 두는 이유는, 요약할 것이 없으면 턴 자체를 안 돌리므로 손님 몫을 깎을
+    // 이유가 없기 때문이다.
+    if (invokerId !== this.ownerId) {
+      const reserved = await this.repos.turns.reserve({
+        userId: invokerId, conversationId: conv.id, kind: "summary", ts: this.now(),
+        perUserLimit: this.config.maxTurnsPerHourPerUser, globalLimit: this.config.maxTurnsPerHourGlobal,
+        ownerReserve: 0, isOwner: false, windowMs: HOUR_MS,
+      });
+      if (!reserved) {
+        await this.notify(conv, "구독 한도 보호를 위해 잠시 쉬고 있어요. 1시간 안에 다시 시도해 주세요.");
+        return;
+      }
+    }
+
+    // 바닥선과 요약의 created_ts 에 같은 값을 쓴다 — 두 번 시각을 구하면 순서에 따라 방금
+    // 만든 요약이 스스로 걸러지는 경합이 생긴다(요약 필터가 created_ts >= floor 이므로).
+    const t = this.now();
+    const ok = await this.writeSummary(conv, t);
+    if (!ok) {
+      // 실패하면 아무것도 바꾸지 않는다. 세션과 바닥선을 밀어놓고 요약이 없으면 대화를 잃고
+      // 대신 받은 것도 없는 상태가 된다 — 사용자는 요약을 받으려고 이 명령을 부른 것이다.
+      // 유휴 스윕(summarizeAndClose)이 "실패해도 세션은 반드시 닫는다"인 것과 반대이며,
+      // 그래야 한다: 그쪽은 요약이 부수적이고 이쪽은 요약이 목적이다.
+      publish("정리하다 실패했어. 대화는 그대로 두었으니 다시 시도해줘.", this.now());
+      return;
+    }
+    // compare-and-close(summarizeAndClose 와 같은 패턴): 요약한 그 세션이 그대로일 때만 끊는다.
+    // turn 체인 직렬화가 대화 턴과의 경합은 이미 막지만, 이 대화의 세션을 바꾸는 경로가 그것뿐이라는
+    // 보장은 없다 — 다른 경로가 요약 도중에 새 세션을 만들어 놓았다면, 그것을 끊는 것은 사용자가
+    // 시킨 일이 아니고 바닥선도 그 새 대화를 가려 버린다. 이미 저장된 요약 행은 그대로 둔다:
+    // 바닥선을 안 그었으니 범위 안에 남아 다음 컨텍스트에 그대로 실린다(버릴 이유가 없다).
+    const fresh = await this.repos.conversations.getById(conv.id);
+    if (!fresh || fresh.sessionId !== conv.sessionId) {
+      publish("정리하는 사이에 새 얘기가 들어와서 그대로 뒀어. 다시 시도해줘.", this.now());
+      return;
+    }
+    await this.repos.conversations.setSession(conv.id, null, t);
+    await this.repos.conversations.setContextFloor(conv.id, t);
+    publish("…정리했어. 지금까지 얘기는 요약해서 가져갈게.", t);
+  }
+
   // 이 대화의 지금 세션을 요약해 summaries 에 넣는다. 성공하면 true.
-  // summarizeAndClose(유휴 스윕)와 /기억정리 가 함께 쓴다 — 요약 턴의 안전 플래그
-  // (noRemoteTools·noWebTools·noSkills)를 두 곳에서 따로 관리하면 한쪽만 빠뜨렸을 때
+  // summarizeAndClose(유휴 스윕)와 compactSession(/기억정리)이 함께 쓴다 — 요약 턴의 안전 플래그
+  // (noRemoteTools·noWebTools·noSkills·noMemoryWrite)를 두 곳에서 따로 관리하면 한쪽만 빠뜨렸을 때
   // 아무도 모른다.
   //
   // createdTs 를 인자로 받는 이유: /기억정리 는 요약의 created_ts 와 컨텍스트 바닥선에 반드시
