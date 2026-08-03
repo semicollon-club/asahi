@@ -911,7 +911,13 @@ export class AgentCore {
     // 바닥선을 안 그었으니 범위 안에 남아 다음 컨텍스트에 그대로 실린다(버릴 이유가 없다).
     const fresh = await this.repos.conversations.getById(conv.id);
     if (!fresh || fresh.sessionId !== conv.sessionId) {
-      publish("정리하는 사이에 새 얘기가 들어와서 그대로 뒀어. 다시 시도해줘.", this.now());
+      // Minor 5(최종 전체 브랜치 리뷰) — 예전 문구는 "새 얘기가 들어와서 그대로 뒀어"였는데
+      // 둘 다 이 가드가 판정한 것이 아니다. (가) 판정 근거는 "세션이 요약하던 그것이 아니게
+      // 됐다" 하나뿐이라 원인을 들어온 메시지로 단정할 수 없다 — /새세션 이 중간에 끼어들었거나
+      // resume 재시도가 세션을 갈아끼웠을 수도 있다. (나) 요약 행은 바로 위에서 이미 들어갔고
+      // 바닥선을 안 그었으니 범위 안에 남아 다음 컨텍스트에 그대로 실린다 — "그대로 뒀어"는
+      // 아무 일도 없었다는 뜻으로 읽힌다. 동작은 그대로 두고 문구만 실제에 맞춘다.
+      publish("정리하는 사이에 세션이 바뀌어서 여기서 멈췄어. 만들어 둔 요약은 남아 있으니 다음 얘기에 실릴 거야.", this.now());
       return;
     }
     await this.repos.conversations.setSession(conv.id, null, t);

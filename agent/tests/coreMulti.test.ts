@@ -930,8 +930,17 @@ describe("AgentCore — DM 세션 예약어(/새세션·/기억정리)", () => {
     // 이미 쓰인 요약 행은 그대로 둔다 — 바닥선을 안 그었으니 범위 안에 남아 그대로 실린다.
     expect(await t.repos.summaries.recent(after.id, 3)).toHaveLength(1);
     const notices = t.published.filter((p) => p.type === "assistant_message").map((p) => (p as { text: string }).text);
-    expect(notices.some((n) => /다시 시도해줘/.test(n))).toBe(true);
+    const guard = notices.find((n) => /정리하는 사이에/.test(n))!;
     expect(notices.some((n) => /정리했어/.test(n))).toBe(false);
+
+    // Minor 5(최종 전체 브랜치 리뷰) — 문구는 이 가드가 실제로 판정한 것만 말해야 한다.
+    // (가) 판정 근거는 "세션이 요약하던 그것이 아니게 됐다" 하나다. 들어온 메시지일 수도
+    // 있지만 /새세션 이 중간에 끼어들었거나 resume 재시도가 세션을 갈아끼운 것일 수도 있어,
+    // "새 얘기가 들어와서"라고 단정할 근거가 이 코드에는 없다.
+    expect(guard).not.toMatch(/새 얘기/);
+    // (나) 요약 행은 이미 들어갔고 바닥선을 안 그었으니 다음 컨텍스트에 그대로 실린다(위
+    // 단정이 그 행의 존재를 고정한다). "그대로 뒀어"는 아무 일도 없었다는 뜻으로 읽힌다.
+    expect(guard).toMatch(/요약/);
   });
 
   // Important 3(최종 전체 브랜치 리뷰) — 두 명령의 본체에는 try/catch 가 없어, 리포 호출 하나만
