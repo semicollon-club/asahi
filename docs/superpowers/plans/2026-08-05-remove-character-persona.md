@@ -523,6 +523,29 @@ cd agent && npx vitest run tests/turnPrep.test.ts -t "캐릭터 설정 섹션이
 
 `agent/tests/tools.test.ts` 에서 `character_fact` 를 단정하는 케이스를 지운다. **`noMemoryWrite` 가 `remember`·`forget` 을 닫는 것을 검증하는 케이스는 남긴다.**
 
+- [ ] **Step 5b: `persona.ts` 에 남은 `character_fact` 안내 두 곳을 지운다**
+
+Task 2 는 캐릭터 블록만 걷어냈다. `character_fact` 를 안내하는 문장은 그 밖의 두 블록에 남아 있다.
+
+1. `buildMemoryBlock` 의 `selfFactLine` — `ctx.isPrivate` 일 때만 나가던 `"\n- 네 자신의 신상·설정은 remember 가 아니라 character_fact 로 저장한다. remember 는 사용자에 대한 사실 전용이다."`. **`selfFactLine` 변수 자체와 그 분기를 없애고** `buildMemoryBlock` 을 `ctx` 를 안 받는 상수로 되돌린다(분기할 이유가 그것뿐이었다). `buildSystemPrompt` 의 호출부도 함께 고친다.
+2. `buildCapabilityBlock` 의 손님 DM 분기 — `"\n- 네 설정을 고정하는 character_fact 도 쓸 수 있습니다."`. **이 한 줄만** 지운다. 이 블록의 나머지는 Global Constraints 대로 손대지 않는다.
+
+지운 뒤 `agent/tests/persona.test.ts` 에 회귀 방지를 더한다.
+
+```ts
+  it("어느 분기에도 character_fact 안내가 없다", () => {
+    // 도구가 사라졌으므로 안내가 남으면 모델에게 없는 도구를 쓰라고 지시하는 것이 된다.
+    for (const ctx of [
+      { role: "owner" as const, isPrivate: true, isOwner: true },
+      { role: "owner" as const, isPrivate: false, isOwner: true },
+      { role: "allowed" as const, isPrivate: true, isOwner: false },
+      { role: "allowed" as const, isPrivate: false, isOwner: false },
+    ]) {
+      expect(buildSystemPrompt(ctx)).not.toContain("character_fact");
+    }
+  });
+```
+
 - [ ] **Step 6: `/새세션` 의 세 번째 동작을 뺀다**
 
 `agent/src/core/core.ts` 의 `resetSession` 에서 `deleteCharacterFacts()` 호출과 `cleared`/`factNote` 를 지운다. 확인 문구를 존댓말로 바꾼다.
