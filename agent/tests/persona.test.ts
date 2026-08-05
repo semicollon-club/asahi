@@ -37,13 +37,18 @@ describe("buildSystemPrompt", () => {
 
   it("어느 분기에도 character_fact 안내가 없다", () => {
     // 도구가 사라졌으므로 안내가 남으면 모델에게 없는 도구를 쓰라고 지시하는 것이 된다.
+    // 리뷰 후속 — workerConnected 를 생략(기본 false)한 네 신원만 돌고 있었다.
+    // buildCapabilityBlock 은 이 값으로도 갈리고 연결 분기가 텍스트도 가장 많은데, 그 분기는
+    // 한 번도 검사되지 않았다 — 여덟 조합(신원 4 × workerConnected 2) 전부를 돌게 넓힌다.
     for (const ctx of [
       { role: "owner" as const, isPrivate: true, isOwner: true },
       { role: "owner" as const, isPrivate: false, isOwner: true },
       { role: "allowed" as const, isPrivate: true, isOwner: false },
       { role: "allowed" as const, isPrivate: false, isOwner: false },
     ]) {
-      expect(buildSystemPrompt(ctx)).not.toContain("character_fact");
+      for (const workerConnected of [true, false]) {
+        expect(buildSystemPrompt({ ...ctx, workerConnected })).not.toContain("character_fact");
+      }
     }
   });
 

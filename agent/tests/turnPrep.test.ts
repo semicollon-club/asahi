@@ -88,7 +88,7 @@ describe("buildContextBlock — 흉내 방지 안내", () => {
   let db: Db;
   beforeEach(async () => { db = await openTestDb(); });
 
-  it("최근 대화 기록이 참고용이며 이전 답변 말투를 흉내내지 말고 캐릭터 지침을 따르라는 안내를 포함한다", async () => {
+  it("최근 대화 기록이 참고용이며 이전 답변 말투를 흉내내지 말고 시스템 지침을 따르라는 안내를 포함한다", async () => {
     const convs = new ConversationsRepo(db);
     await convs.create({ kind: "dm", discordChannelId: "c", primaryUserId: "u", isPrivate: true, lastActiveTs: 1 });
     const conv = (await convs.getByChannelId("c"))!;
@@ -96,7 +96,10 @@ describe("buildContextBlock — 흉내 방지 안내", () => {
 
     const block = await buildContextBlock(repos, conv, -1);
     expect(block).toMatch(/흉내/);
-    expect(block).toMatch(/캐릭터|시스템 지침/);
+    // 리뷰 후속 — 예전엔 /캐릭터|시스템 지침/ 라 두 표현 중 어느 쪽이 실려도 통과했다(캐릭터
+    // 설정이 사라진 뒤에도 옛 문구가 남아 있으면 이 disjunction 이 그걸 가려 주지 못한다).
+    // "캐릭터" 갈래를 지워 지금 실제로 쓰는 문구("시스템 지침")만 고정한다.
+    expect(block).toMatch(/시스템 지침/);
     expect(block).toMatch(/참고용/);
   });
 });

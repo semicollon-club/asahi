@@ -53,7 +53,7 @@ export async function buildContextBlock(repos: ContextRepos, conv: Conversation,
     "## 이전 대화 요약 (최신순)",
     summaries.length > 0 ? summaries.join("\n---\n") : "(요약 없음)",
     "## 최근 대화 기록",
-    "(무슨 이야기를 나눴는지 파악하기 위한 참고용입니다. 아래 '비서:' 이전 답변의 말투·성격을 흉내내지 말고, 당신의 말투·성격·정체성은 반드시 위 시스템 지침의 캐릭터 설정을 따르세요.)",
+    "(무슨 이야기를 나눴는지 파악하기 위한 참고용입니다. 아래 '비서:' 이전 답변의 말투·성격을 흉내내지 말고, 당신의 말투·성격·정체성은 반드시 위 시스템 지침을 따르세요.)",
     recentLines.length > 0 ? recentLines : "(기록 없음)",
   ].join("\n\n");
 }

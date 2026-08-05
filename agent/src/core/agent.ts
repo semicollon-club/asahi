@@ -79,8 +79,8 @@ export const RESULT_SUMMARY_MAX = 200;
 // 축을 두 번째 호출부로 쓰면서 구멍이 드러났다 — 그 턴은 대화 주인의 신원으로 서므로 소유자
 // 스레드에서는 forget 까지 들고 도는데, forget 은 동아리 공용 기억을 지운다. "기억을 쓰면 안
 // 되는 턴"이라는 축이 삭제 도구를 열어 두는 것은 다음 호출부를 향한 함정이라, 둘을 한 축으로
-// 묶었다(tools.ts 의 memoryWriteEnabled). memories 행을 만드는 도구가 새로 생기면 그것도
-// 같은 이유로 이 축에 묶는다.
+// 묶었다(tools.ts 의 memoryWriteEnabled). memories 행을 만들거나 지우는 도구가 새로 생기면
+// 그것도 같은 이유로 이 축에 묶는다.
 export type TurnRequest = {
   prompt: string; systemPrompt: string; resume?: string; cwd: string; context: TurnContext;
   onProgress?: (u: ProgressUpdate) => void; images?: ImageInput[]; noRemoteTools?: boolean; noWebTools?: boolean;

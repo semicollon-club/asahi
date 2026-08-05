@@ -684,7 +684,6 @@ describe("allowedToolsFor — 서버에서도 기억을 저장할 수 있다", (
     // 동아리 지식이 소유자 한 사람 손으로만 쌓이지 않게 한다(스펙 §2.1).
     expect(allowedToolsFor("allowed", false, false)).toContain("mcp__asahi__remember");
   });
-
 });
 
 // Important 4(최종 전체 브랜치 리뷰) — 정기 게시(digest.ts) 턴은 isOwner:false, isPrivate:false

@@ -3,12 +3,14 @@ import type { DigestTopic } from "./digest.js";
 // 소유자(또는 허용 사용자)가 대화에서 세션을 수동으로 초기화하는 예약어 명령을 판별하는 순수 함수.
 // 앞 슬래시를 요구해 일반 대화와 확실히 구분한다(대소문자·앞뒤 공백 무시, 정확히 일치할 때만).
 // 배경: 활발히 쓰는 DM 은 같은 SDK 세션을 계속 resume 하는데, resume 은 세션 생성 시점의
-// 시스템 프롬프트를 유지한다. 페르소나가 바뀌어도 세션이 새로 시작되기 전엔 반영되지 않으므로,
+// 시스템 프롬프트를 유지한다. 시스템 프롬프트가 바뀌어도 세션이 새로 시작되기 전엔 반영되지 않으므로,
 // 소유자가 직접 새 세션을 시작할 수 있게 한다(core.ts ingest 에서 이 결과를 처리).
 
 const RESET_COMMANDS = new Set(["/새세션", "/새대화", "/새로시작", "/reset"]);
 // 지금 세션의 대화를 요약해 다음 세션으로 넘긴다(Claude Code 의 /compact 에 해당).
-// /새세션 과 달리 컨텍스트를 버리지 않는다 — 이 명령은 "정리해서 넘긴다"는 뜻이다.
+// /새세션 과 똑같이 컨텍스트 바닥선을 긋는다(compactSessionBody 의 setContextFloor) — 이전
+// 대화를 다음 컨텍스트 블록에서 가리는 것은 같다. 다른 점은 그 자리에 요약을 남겨 다음
+// 세션으로 넘긴다는 것이다.
 const COMPACT_COMMANDS = new Set(["/기억정리", "/compact"]);
 
 export type SessionCommand = "reset" | "compact";

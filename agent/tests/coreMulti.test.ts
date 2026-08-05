@@ -702,6 +702,10 @@ describe("AgentCore — DM 세션 예약어(/새세션·/기억정리)", () => {
     // 문구가 바뀌었다 — 세션이 "새로 시작"됐다는 것만으론 대화가 끊기는지 알 수 없다.
     // 이제는 이전 대화를 안 가져간다는 것을 명시한다(Task 3).
     expect(notices.some((n) => /가져가지 않을게요/.test((n as { text: string }).text))).toBe(true);
+    // 리뷰 후속 — 두 절 다 의미가 있다(core.ts 의 resetSession, "무엇이 빠지고 무엇이 남는지
+    // 둘 다 말한다" 주석 참고). 이 명령을 치는 사람의 진짜 걱정은 "기억까지 날아가나"이므로,
+    // 앞절만 확인하면 뒷절이 조용히 빠져도 이 테스트가 못 잡는다.
+    expect(notices.some((n) => /그대로 있습니다/.test((n as { text: string }).text))).toBe(true);
   });
 
   it("/새세션 은 바닥선을 긋되 기억은 남긴다", async () => {
@@ -868,6 +872,8 @@ describe("AgentCore — DM 세션 예약어(/새세션·/기억정리)", () => {
     expect(t.calls).toHaveLength(2); // /새세션 은 여전히 LLM 턴을 쓰지 않는다
     const notices = t.published.filter((p) => p.type === "assistant_message").map((p) => (p as { text: string }).text);
     expect(notices.some((n) => /가져가지 않을게요/.test(n))).toBe(true);
+    // 위 테스트(예약어를 받으면 …)와 같은 이유로 뒷절(기억은 남는다)도 확인한다.
+    expect(notices.some((n) => /그대로 있습니다/.test(n))).toBe(true);
   });
 
   // Important 1(리뷰 후속) — turn 체인 직렬화 위에 한 겹 더. 요약 턴이 도는 동안 다른 경로가
