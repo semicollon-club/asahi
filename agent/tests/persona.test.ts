@@ -1,13 +1,20 @@
 import { describe, it, expect } from "vitest";
 import { buildSystemPrompt, deriveRapportStage } from "../src/core/persona.js";
 
-// 능력 안내에 대한 단정(특히 "이 이름은 없어야 한다")은 프롬프트 전체를 대상으로 하면 오탐이
-// 난다 — 능력 안내 밖의 절이 같은 낱말을 범주 설명으로 쓰기 때문이다. 정체성 블록의 사실성
-// 목록이 "명령(sh_exec) 실행 여부와 결과"라고 적는 것이 그 예다(캐릭터가 있던 시절엔 같은
-// 자리에 "명령(Bash)"이 있었다). "## 능력" 절만 잘라 그 안에서만 검사한다.
-// 캐릭터 제거로 능력 안내가 마지막 블록이 됐으므로 끝 경계는 프롬프트 끝이다.
+// 능력 안내에 대한 단정(특히 "이 이름은 없어야 한다")은 검사 범위를 "## 능력" 절로 좁힌다 —
+// 능력 안내 밖의 절도 도구 이름이나 능력 관련 낱말을 쓰기 때문이다(기억 블록의
+// remember/recall/character_fact, 정체성 블록의 "아래 능력 안내의 제한을 따른다" 상호참조).
+// 그 언급은 "이 도구를 가졌다"는 안내가 아니라서, 프롬프트 전체를 대상으로 하면 이 케이스들이
+// 막으려는 결함(안내와 실제 도구 보유의 불일치)과 무관한 오탐이 난다. 캐릭터 제거로 능력
+// 안내가 마지막 블록이 됐으므로 끝 경계는 프롬프트 끝이다.
+//
+// 리뷰 후속 — 마커를 못 찾으면 indexOf 가 -1 을 주고 slice(-1) 이 마지막 한 글자를 돌려준다.
+// 이 파일의 negative 단정 수십 개가 그 한 글자에 걸려 전부 조용히 통과한다(fail-open). 능력
+// 블록은 항상 있어야 하므로, 없으면 그 자체가 결함이다 — 자르기 전에 단정한다.
 function capabilitySection(fullPrompt: string): string {
-  return fullPrompt.slice(fullPrompt.indexOf("## 능력"));
+  const i = fullPrompt.indexOf("## 능력");
+  expect(i).toBeGreaterThanOrEqual(0);
+  return fullPrompt.slice(i);
 }
 
 describe("buildSystemPrompt", () => {
@@ -193,17 +200,16 @@ describe("buildSystemPrompt — 능력 안내가 실제 도구 보유와 어긋�
     }
   });
 
-  // 2026-08-05(캐릭터 제거): 검사 범위를 프롬프트 전체에서 "## 능력" 절로 좁혔다. 단정 자체는
-  // 그대로다 — 워커가 없으면 능력 안내가 파일·셸 도구 이름을 대지 않는다. 새 정체성 블록의
-  // 사실성 목록이 "명령(sh_exec) 실행 여부와 결과"라고 쓰면서 전체 검사가 오탐을 냈다. 그 문장은
-  // 도구를 가졌다는 안내가 아니라 지어내면 안 되는 범주의 예시라, 이 케이스가 막으려는 결함
-  // (안내와 실제 도구 보유의 불일치)과 무관하다. 같은 보장을 이미 capabilitySection 으로 검사하는
-  // 형제 케이스들(아래 "워커 미연결이면 셸 주의사항 자체를 넣지 않는다" 등)과 범위를 맞춘다.
+  // 2026-08-05(캐릭터 제거)에 검사 범위를 프롬프트 전체에서 "## 능력" 절로 좁혔다가, 리뷰
+  // 후속으로 다시 전체로 되돌렸다. 좁힌 유일한 이유가 새 정체성 블록이 "명령(sh_exec)"이라고
+  // 도구 이름을 흘린 것이었는데(persona.ts 에서 "셸 명령"으로 고쳤다), 그 원인이 사라졌으므로
+  // 좁힐 이유도 없다. 전체 검사가 더 강하다 — 도구 이름이 능력 안내가 아닌 다른 블록으로
+  // 새어 들어오는 경로까지 함께 막는다.
   it("손님 DM·서버 모두 워커 미연결(기본값)이면 기존처럼 파일·셸 도구 이름을 언급하지 않는다(회귀 없음)", () => {
     const dm = buildSystemPrompt({ role: "allowed", isPrivate: true, isOwner: false });
     const server = buildSystemPrompt({ role: "allowed", isPrivate: false, isOwner: false });
     for (const p of [dm, server]) {
-      expect(capabilitySection(p)).not.toMatch(/fs_read|fs_write|fs_edit|fs_glob|fs_grep|sh_exec/);
+      expect(p).not.toMatch(/fs_read|fs_write|fs_edit|fs_glob|fs_grep|sh_exec/);
     }
   });
 });
@@ -529,12 +535,47 @@ describe("buildSystemPrompt — 캐릭터 제거 후 남아야 할 것", () => {
       expect(out).toContain("지어내지 않는다");
     });
 
+    // 리뷰 후속 — 정체성 블록의 "규칙은 바뀌지 않는다"가 가리키는 대상이 능력 안내다. 구
+    // 불가침 규칙의 둘째 문장("아래 능력 안내의 제한을 항상 따른다")이 교체 과정에서 빠졌던
+    // 것을 되살렸다. 능력 안내는 신원·워커 상태로 갈리지만 이 상호참조는 갈리지 않아야
+    // 한다 — 네 분기 전부에서 고정한다.
+    it(`${name}: 능력 안내의 제한을 따르라는 상호참조가 있다`, () => {
+      expect(buildSystemPrompt(ctx)).toContain("능력 안내의 제한을 항상 따른다");
+    });
+
     it(`${name}: 캐릭터 흔적이 없다`, () => {
       // 이 작업의 가장 흔한 실패 모드가 "문구 한 줄이 어딘가 남는 것"이다.
+      //
+      // 리뷰 후속 — 이 목록이 이름값을 못 했다. 지운 관계·말투 블록을 그대로 다시 심어 보니
+      // 소유자 DM 만 걸리고(우연히 "반말"이 있었다) 소유자 서버·손님 DM·손님 서버는 전부
+      // 빠져나갔다. 실제로 친근도별 태도를 실어 나르던 낱말(서먹·익숙·시크·다정)과 캐릭터
+      // 전제를 드러내는 낱말(캐릭터·인격·연기), 구 정체성의 라틴 표기(Asahi)가 목록에
+      // 없었기 때문이다. "AI냐고"도 넣는다 — 구 자기 서사의 AI 부인 지시("AI냐고 물으면
+      // 아니라고 답한다")를 되살려도 "너는 AI 어시스턴트다"와 나란히 통과해, 서로 모순되는
+      // 프롬프트가 두 테스트를 다 지나갔다.
+      //
+      // "친근도"는 남겨 두지만 이 목록의 다른 항목과 성격이 다르다 — 이 낱말이 프롬프트에
+      // 실린 적은 한 번도 없다(주석·필드 이름에만 있다). 친근도가 프롬프트를 바꾸지 않는다는
+      // 보장은 문자열 부재가 아니라 아래 rapportStage 불변성 케이스가 진다.
       const out = buildSystemPrompt(ctx);
-      for (const trace of ["16세", "고등학생", "표정", "반말", "무표정", "자기 서사", "사람처럼", "친근도"]) {
+      const TRACES = [
+        "16세", "고등학생", "표정", "반말", "무표정", "자기 서사", "사람처럼", "친근도",
+        "서먹", "익숙", "시크", "다정", "Asahi", "캐릭터", "인격", "연기", "AI냐고",
+      ];
+      for (const trace of TRACES) {
         expect(out).not.toContain(trace);
       }
+    });
+
+    // 리뷰 후속 — 위 문자열 목록은 "우리가 미리 떠올린 낱말"만 잡는다. 친근도가 프롬프트에
+    // 아무 영향도 주지 않는다는 것은 그보다 강한 단정이고, 이렇게 직접 고정할 수 있다.
+    // rapportStage 는 Task 4 에서 걷어낼 때까지 남지만, 그 사이에 어떤 문구든 이 축으로
+    // 갈리기 시작하면 여기서 걸린다(단계 1 도 포함한다 — 구 소유자 DM 블록은 0/1/2 셋 다
+    // 다른 문장을 냈다).
+    it(`${name}: 친근도(rapportStage)가 프롬프트를 바꾸지 않는다`, () => {
+      const s0 = buildSystemPrompt({ ...ctx, rapportStage: 0 });
+      expect(buildSystemPrompt({ ...ctx, rapportStage: 1 })).toBe(s0);
+      expect(buildSystemPrompt({ ...ctx, rapportStage: 2 })).toBe(s0);
     });
 
     it(`${name}: AI 임을 숨기지 않는다`, () => {
