@@ -9,10 +9,9 @@ export const SHARED_MEMORY_MAX_LEN = 4000;
 // 검사가 content 에만 걸려 title 에는 상한이 아예 없었다(12,000자 제목 저장이 실측으로
 // 성공했다). 제목은 recall·forget 목록에 한 줄로 나열되고, turnPrep 프롬프트에도 매 서버
 // 턴마다 실려 사실상 모든 대화에 영구히 얹힌다 — content(4000)와 같은 크기일 이유가 없다.
-// remember 도구 설명이 스스로 "짧은 제목"이라 부르는 값이므로, character_fact 의 제목
-// 상한(40, tools.ts 의 CHARACTER_FACT_TITLE_MAX_LEN)보다는 넉넉히 잡는다 — 동아리 문서
-// 제목은 지어낸 캐릭터 신상 항목("학년" 등)보다 서술적일 수 있다(예: "2학기 회비 및 활동
-// 시간 안내"). 100자면 그런 제목도 넉넉히 담고도 "제목"이라는 성격을 벗어나지 않는다.
+// remember 도구 설명이 스스로 "짧은 제목"이라 부르는 값이지만, 동아리 문서 제목은 서술적일
+// 수 있어(예: "2학기 회비 및 활동 시간 안내") 낱말 하나짜리 제목만 상정하면 좁다. 100자면
+// 그런 제목도 넉넉히 담고도 "제목"이라는 성격을 벗어나지 않는다.
 export const SHARED_MEMORY_TITLE_MAX_LEN = 100;
 
 // 이번 저장이 개인 기억인지 동아리 공용 기억인지. 위치 하나로만 정한다.
@@ -68,8 +67,8 @@ function titleContentPart(m: { title: string; content: string }): string {
   return `[${stripNewlines(m.title)}] ${stripNewlines(m.content)}`;
 }
 
-// Critical(최종 전체 브랜치 리뷰) — 기억(또는 캐릭터 설정) 한 건을 "- [제목] 내용" 한 줄로.
-// turnPrep.ts(세션을 여는 프롬프트 본문 — buildContextBlock 의 캐릭터 설정 줄·기억 줄)가 이
+// Critical(최종 전체 브랜치 리뷰) — 기억 한 건을 "- [제목] 내용" 한 줄로.
+// turnPrep.ts(세션을 여는 프롬프트 본문 — buildContextBlock 의 기억 줄)가 이
 // 함수 이전에는 같은 형식을 직접 만들면서 개행 방어가 없었다. recall(아래 renderMemories)은
 // 도구 결과일 뿐이지만 turnPrep 쪽은 세션마다 열리는 시스템 프롬프트 본문이고, 서버에서 등록한
 // 공용 기억이 forUser()(scope='shared' 도 포함)를 통해 소유자 DM 컨텍스트에도 실린다 —
@@ -92,7 +91,7 @@ export function renderMemoryLine(m: { title: string; content: string }): string 
 // 회원일수록 오히려 위조하기 좋았다). 생략 대신 "모른다"는 사실 자체를 항상 보여준다.
 const UNKNOWN_AUTHOR_TAG = "작성자 미상";
 
-// 기억(또는 캐릭터 설정) 한 건을 renderMemories 가 예산과 함께 쓸 한 줄로. 공용 기억에는
+// 기억 한 건을 renderMemories 가 예산과 함께 쓸 한 줄로. 공용 기억에는
 // 작성자 표시를 항상 붙인다 — 누구나 쓸 수 있는 저장소라 "누가 넣었는지"가 그 정보를 얼마나
 // 믿을지의 근거가 된다. 개인 기억은 본인 것이라 작성자가 자명하므로 붙이지 않는다.
 //
@@ -116,8 +115,8 @@ function renderOne(m: Memory, names: Record<string, string>): string {
 }
 
 // "- " 뒤에 붙는 작성자 접두사("(우성현 등록) ")를 만든다. 공용 기억이 아니면 빈 문자열이다 —
-// 개인 기억은 본인 것이라 작성자가 자명하고, 캐릭터 설정(scope='character')은 아사히가 지어낸
-// 값이라 작성자 개념 자체가 없다.
+// 개인 기억은 본인 것이라 작성자가 자명하고, DB 에 남아 있는 옛 scope='character' 행은 봇이
+// 지어낸 값이라 작성자 개념 자체가 없다.
 function authorTag(m: Memory, names: Record<string, string>): string {
   if (m.scope !== "shared") return "";
   const name = names[m.userId];

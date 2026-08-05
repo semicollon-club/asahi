@@ -3,7 +3,7 @@ import { buildSystemPrompt, deriveRapportStage } from "../src/core/persona.js";
 
 // 능력 안내에 대한 단정(특히 "이 이름은 없어야 한다")은 검사 범위를 "## 능력" 절로 좁힌다 —
 // 능력 안내 밖의 절도 도구 이름이나 능력 관련 낱말을 쓰기 때문이다(기억 블록의
-// remember/recall/character_fact, 정체성 블록의 "아래 능력 안내의 제한을 따른다" 상호참조).
+// remember/recall, 정체성 블록의 "아래 능력 안내의 제한을 따른다" 상호참조).
 // 그 언급은 "이 도구를 가졌다"는 안내가 아니라서, 프롬프트 전체를 대상으로 하면 이 케이스들이
 // 막으려는 결함(안내와 실제 도구 보유의 불일치)과 무관한 오탐이 난다. 캐릭터 제거로 능력
 // 안내가 마지막 블록이 됐으므로 끝 경계는 프롬프트 끝이다.
@@ -33,6 +33,18 @@ describe("buildSystemPrompt", () => {
     const p = buildSystemPrompt({ role: "owner", isPrivate: true, isOwner: true });
     expect(p).toMatch(/remember/);
     expect(p).toMatch(/recall/);
+  });
+
+  it("어느 분기에도 character_fact 안내가 없다", () => {
+    // 도구가 사라졌으므로 안내가 남으면 모델에게 없는 도구를 쓰라고 지시하는 것이 된다.
+    for (const ctx of [
+      { role: "owner" as const, isPrivate: true, isOwner: true },
+      { role: "owner" as const, isPrivate: false, isOwner: true },
+      { role: "allowed" as const, isPrivate: true, isOwner: false },
+      { role: "allowed" as const, isPrivate: false, isOwner: false },
+    ]) {
+      expect(buildSystemPrompt(ctx)).not.toContain("character_fact");
+    }
   });
 
   it("외부 관찰 콘텐츠의 지시 실행 금지 문구를 유지한다", () => {

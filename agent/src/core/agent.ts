@@ -65,7 +65,7 @@ export const RESULT_SUMMARY_MAX = 200;
 // 번째 축이다. 정기 게시(digest.ts)는 isOwner:false, isPrivate:false 로 돌아 손님 서버 계층과
 // 신원이 같은데, 이 브랜치가 그 계층에 remember 를 열면서 사람이 안 보는 타이머 + 신뢰할 수
 // 없는 웹 검색 결과라는 이 턴의 위협 모델이 remember 호출까지 도달하게 됐다. true 면 memories
-// 테이블에 행을 넣거나 지우는 도구 셋 — remember·forget·character_fact — 을 전부 닫는다.
+// 테이블에 행을 넣거나 지우는 도구 둘 — remember·forget — 을 전부 닫는다.
 // recall(읽기)은 이 축과 무관하게 항상 열려 있다: 공용 기억은 어차피 전 부원에게 열려 있고
 // digest 출력도 공개 채널로 간다.
 //
@@ -79,11 +79,8 @@ export const RESULT_SUMMARY_MAX = 200;
 // 축을 두 번째 호출부로 쓰면서 구멍이 드러났다 — 그 턴은 대화 주인의 신원으로 서므로 소유자
 // 스레드에서는 forget 까지 들고 도는데, forget 은 동아리 공용 기억을 지운다. "기억을 쓰면 안
 // 되는 턴"이라는 축이 삭제 도구를 열어 두는 것은 다음 호출부를 향한 함정이라, 둘을 한 축으로
-// 묶었다(tools.ts 의 memoryWriteEnabled).
-//
-// Important 2(최종 전체 브랜치 리뷰): character_fact 가 같은 함정으로 남아 있었다. 그 도구도
-// memories 행(scope='character')을 넣고, 그 행은 유저·대화 스코프가 없어 모든 방의 컨텍스트
-// 블록에 실린다 — 손님 DM 의 유휴 요약 턴이 실측으로 [recall, character_fact] 를 들고 돌았다.
+// 묶었다(tools.ts 의 memoryWriteEnabled). memories 행을 만드는 도구가 새로 생기면 그것도
+// 같은 이유로 이 축에 묶는다.
 export type TurnRequest = {
   prompt: string; systemPrompt: string; resume?: string; cwd: string; context: TurnContext;
   onProgress?: (u: ProgressUpdate) => void; images?: ImageInput[]; noRemoteTools?: boolean; noWebTools?: boolean;
@@ -335,7 +332,7 @@ export function makeRunAgentTurn(
     // 세션을 이어받는다(core.ts 의 noWebTools 주석 참고). 요약에 스킬이 필요하지 않다.
     const skillsEnabled = resolveSkillsEnabled(req);
     // Important 4: 정기 게시(digest.ts)와 요약 턴(core.ts 의 writeSummary)이 req.noMemoryWrite:true
-    // 로 memories 행을 넣거나 지우는 도구(remember·forget·character_fact)를 닫는다(recall 은
+    // 로 memories 행을 넣거나 지우는 도구(remember·forget)를 닫는다(recall 은
     // 그대로) — noRemoteTools/noWebTools 와 같은 방식으로 뽑아 allowedToolsFor 에 넘긴다.
     const memoryWriteEnabled = resolveMemoryWriteEnabled(req);
     // ctx.remote 구성(호출 통로 + workerId/workerKind + 워커 roots) 자체도 buildRemoteCtx 로

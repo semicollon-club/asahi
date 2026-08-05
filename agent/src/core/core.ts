@@ -94,7 +94,7 @@ export const PROGRESS_SUMMARY_MAX = 80;
 // 자른다. 자른 자리에 말줄임표를 남긴다 — 한 줄짜리 UI 라 생략해도 되지만, 잘렸는지 아닌지를
 // 부원이 구분할 수 있어야 "사유가 원래 이게 전부"라고 오해하지 않는다.
 // 코드포인트 단위로 자른다(slice 는 UTF-16 코드유닛 기준이라 이모지가 경계에 걸리면 서로게이트
-// 쌍이 쪼개진다 — tools.ts 의 truncateChars 와 같은 이유).
+// 쌍이 쪼개진다).
 function summaryLine(summary: string, baseDirs?: string[]): string {
   const line = shortenPath(summary.split("\n")[0]!, baseDirs);
   const chars = [...line];
@@ -278,9 +278,9 @@ export class AgentCore {
     //
     // /새세션(reset)이 이 배선을 쓰는 이유는 바로 아래 /기억정리 갈래의 주석에 적힌 것과
     // 완전히 같은 경합이다 — 세션을 끊는다는 점이 같으니 되살아나는 방식도 같다. 다만 깨지는
-    // 것이 다르다: 이 명령이 하는 두 가지 일(페르소나 재적용을 위한 세션 끊기, 바닥선)이 함께
-    // 무너져, 모델은 이전 대화를 자기 컨텍스트에 그대로 쥔 채 이어가는데 바닥선은 DB 기록만
-    // 가린다. 사용자에게는 이미 "안 가져갈게"라고 말한 뒤다. 이 브랜치를 만든 제보가 정확히
+    // 것이 다르다: 이 명령이 하는 두 가지 일(시스템 프롬프트 재적용을 위한 세션 끊기, 바닥선)이
+    // 함께 무너져, 모델은 이전 대화를 자기 컨텍스트에 그대로 쥔 채 이어가는데 바닥선은 DB 기록만
+    // 가린다. 사용자에게는 이미 "가져가지 않을게요"라고 말한 뒤다. 이 브랜치를 만든 제보가 정확히
     // 이것이다("/새세션 을 했는데 이전 대화를 계속 이어하려고 한다").
     //
     // 큐 키로 conv.discordChannelId 가 아니라 hint.discordChannelId 를 쓰는 이유도 그쪽과 같다.
@@ -292,14 +292,14 @@ export class AgentCore {
 
     // /기억정리: /새세션 이 "끊고 새로"라면 이쪽은 "정리해서 넘기기"다(Claude Code 의 /compact).
     // 지금 세션을 요약해 summaries 에 넣고 바닥선을 그어, 다음 세션에 원문 20개 대신 그 요약이
-    // 실리게 한다. 캐릭터 설정은 지우지 않는다 — 그건 /새세션 의 몫이다.
+    // 실리게 한다.
     //
     // Important 1(리뷰 후속): 본체를 여기서 곧바로 돌리지 않고 그 대화의 turn 체인에 실어 보낸다.
     // 이 함수는 ingest 체인에서 도는데 대화 턴은 turn 체인에서 돌므로, 인라인으로 정리하면 진행
     // 중이던 턴과 완전히 병렬로 실행된다 — 그 턴이 끝나며 setSession(result.sessionId) 을 쓰면
     // 정리가 방금 끊어 놓은 세션이 되살아나고, 바닥선만 그어진 채로 남는다(리뷰 재현 결과:
     // session="s1" + floor 설정됨). 그러면 다음 턴은 정리 안 된 세션을 이어받으면서 DB 기록은
-    // 바닥선에 가려 못 보는데, 사용자에게는 이미 "정리했어"라고 말한 뒤다. 게다가 요약 턴 자신이
+    // 바닥선에 가려 못 보는데, 사용자에게는 이미 "정리했습니다"라고 말한 뒤다. 게다가 요약 턴 자신이
     // 진행 중인 턴과 같은 SDK 세션을 동시에 resume 하게 되어, turn 체인이 지키는 "같은 대화
     // 재진입 금지" 불변식도 깨진다. 유휴 스윕(summarizeAndClose)이 같은 이유로 처음부터 turn
     // 체인에 실려 있다 — 같은 배선을 그대로 따른다.
@@ -762,21 +762,15 @@ export class AgentCore {
   }
 
   // /새세션 의 본체(ingest 가 그 대화의 turn 체인에 실어 부른다 — 그 이유는 ingest 쪽 주석).
-  // LLM 턴 없이 세 가지를 함께 하고 확인을 보낸다.
+  // LLM 턴 없이 두 가지를 함께 하고 확인을 보낸다.
   // 1) session_id 를 비운다 — 다음 턴에 새 SDK 세션이 열리고 현재 시스템 프롬프트가 적용된다.
-  //    resume 된 세션은 만들어질 때의 프롬프트를 유지하므로, 페르소나 파일을 고쳐 배포해도
+  //    resume 된 세션은 만들어질 때의 프롬프트를 유지하므로, 시스템 프롬프트를 고쳐 배포해도
   //    활발한 DM 에는 반영되지 않는다. 이 명령의 원래 목적이다.
   // 2) 컨텍스트 바닥선을 긋는다 — 이전 대화도 이전 요약도 다음 세션에 싣지 않는다.
   //    데이터는 남는다(소유자는 db_query 로 볼 수 있다).
-  // 3) 캐릭터 설정을 지운다 — 페르소나를 바꾼 뒤에도 옛 즉흥 신상이 남으면 새 페르소나와
-  //    충돌한다. 가리지 않고 지우는 이유는 그것이 전역이기 때문이다: 방별로 가리면 같은
-  //    아사히가 방마다 다른 신상을 갖게 된다(memoriesRepo.characterFacts 주석 참고).
   //
-  // 셋 중 캐릭터 설정 삭제만 ingest 에 남겨 두지 않은 이유: (가) 진행 중이던 턴이 그 뒤에
-  // remember(scope:"character") 를 쓰면 방금 지운 신상이 되살아난다 — 세션과 똑같은 경합이다.
-  // (나) 삭제 개수는 확인 문구에 실리므로 문구를 만드는 시점과 갈리면 안 된다. (다) 무엇보다
-  // 확인 문구 자체가 세 가지가 다 끝난 뒤에 나가야 한다 — 이 결함의 본질이 "안 됐는데 됐다고
-  // 말한 것"이라, 문구만 먼저 내보내면 고친 의미가 없다.
+  // 확인 문구는 두 가지가 다 끝난 뒤에 나간다 — 이 결함의 본질이 "안 됐는데 됐다고 말한 것"이라,
+  // 문구만 먼저 내보내면 고친 의미가 없다.
   //
   // conv 를 인자로 받지 않고 여기서 다시 읽는 것은 compactSession 과 같은 이유다. 다만 그쪽의
   // compare-and-close 같은 세션 비교는 하지 않는다 — 이 명령은 "지금 세션이 무엇이든 끊어라"라서
@@ -795,15 +789,11 @@ export class AgentCore {
       const t = this.now();
       await this.repos.conversations.setSession(conv.id, null, t);
       await this.repos.conversations.setContextFloor(conv.id, t);
-      const cleared = await this.repos.memories.deleteCharacterFacts();
-      // Minor 4(최종 전체 브랜치 리뷰) — "N개도 지웠어"만으로는 그 삭제가 이 방에만 걸린다고
-      // 읽힌다. scope='character' 는 유저·대화 스코프가 없어 어느 방에서 쳐도 전부 지워지고,
-      // 손님이 자기 DM 에서 쳐도 소유자 방의 캐릭터 canon 이 함께 사라진다. 권한 모델은 그대로
-      // 둔다(쓰기가 이미 전역이라 비우기만 막는 것이 앞뒤가 안 맞는다) — 말해주지 않던 것만 고친다.
-      const factNote = cleared > 0 ? ` 지어낸 설정 ${cleared}개는 모든 방에서 지웠어.` : "";
+      // 무엇이 빠지고 무엇이 남는지 둘 다 말한다 — 이 명령을 치는 사람이 실제로 걱정하는 것이
+      // "기억까지 날아가나"이고, 바닥선은 대화만 가릴 뿐 기억에는 손대지 않는다.
       this.bus.publish({
         type: "assistant_message", channel: "discord", channelRef: conv.discordChannelId,
-        text: `…알겠어. 여기까지 나눈 얘기는 안 가져갈게.${factNote} 기억해둔 건 그대로 있어.`,
+        text: "알겠습니다. 여기까지 나눈 얘기는 가져가지 않을게요. 기억해둔 건 그대로 있습니다.",
         ts: t,
       });
     } catch (err) {
@@ -862,7 +852,7 @@ export class AgentCore {
       this.bus.publish({ type: "assistant_message", channel: "discord", channelRef: conv.discordChannelId, text, ts });
 
     if (!conv.sessionId) {
-      publish("정리할 대화가 없어. 아직 이 세션에서 얘기한 게 없거든.", this.now());
+      publish("정리할 대화가 없어요. 아직 이 세션에서 얘기한 게 없습니다.", this.now());
       return;
     }
 
@@ -895,7 +885,7 @@ export class AgentCore {
       // 대신 받은 것도 없는 상태가 된다 — 사용자는 요약을 받으려고 이 명령을 부른 것이다.
       // 유휴 스윕(summarizeAndClose)이 "실패해도 세션은 반드시 닫는다"인 것과 반대이며,
       // 그래야 한다: 그쪽은 요약이 부수적이고 이쪽은 요약이 목적이다.
-      publish("정리하다 실패했어. 대화는 그대로 두었으니 다시 시도해줘.", this.now());
+      publish("정리하다 실패했어요. 대화는 그대로 두었으니 다시 시도해 주세요.", this.now());
       return;
     }
     // compare-and-close(summarizeAndClose 와 같은 패턴): 요약한 그 세션이 그대로일 때만 끊는다.
@@ -911,12 +901,12 @@ export class AgentCore {
       // resume 재시도가 세션을 갈아끼웠을 수도 있다. (나) 요약 행은 바로 위에서 이미 들어갔고
       // 바닥선을 안 그었으니 범위 안에 남아 다음 컨텍스트에 그대로 실린다 — "그대로 뒀어"는
       // 아무 일도 없었다는 뜻으로 읽힌다. 동작은 그대로 두고 문구만 실제에 맞춘다.
-      publish("정리하는 사이에 세션이 바뀌어서 여기서 멈췄어. 만들어 둔 요약은 남아 있으니 다음 얘기에 실릴 거야.", this.now());
+      publish("정리하는 사이에 세션이 바뀌어서 여기서 멈췄어요. 만들어 둔 요약은 남아 있으니 다음 얘기에 실립니다.", this.now());
       return;
     }
     await this.repos.conversations.setSession(conv.id, null, t);
     await this.repos.conversations.setContextFloor(conv.id, t);
-    publish("…정리했어. 지금까지 얘기는 요약해서 가져갈게.", t);
+    publish("정리했습니다. 지금까지 얘기는 요약해서 가져갈게요.", t);
   }
 
   // 이 대화의 지금 세션을 요약해 summaries 에 넣는다. 성공하면 true.
@@ -976,9 +966,7 @@ export class AgentCore {
         // 스레드에 들어온 손님이 /기억정리 를 치면 손님이 쓴 텍스트가 담긴 세션을 소유자 도구셋
         // (remember·forget 포함)으로 이어받게 된다 — 위 FIX3/FIX4 가 막으려던 인젝션 면과 같은
         // 면이다. 요약 턴은 기억을 건드릴 일이 전혀 없으므로, 그 축을 통째로 닫는다(정기 게시
-        // 턴과 같은 조치). Important 2(최종 전체 브랜치 리뷰)로 character_fact 까지 이 축에
-        // 묶였다 — 손님 DM 의 유휴 요약 턴이 실측으로 그 도구를 들고 돌았고, 그것이 넣는
-        // scope='character' 행은 방을 가리지 않아 소유자 방에도 그대로 실린다.
+        // 턴과 같은 조치).
         //
         // 이 플래그가 닫는 것은 기억뿐이다. 네 플래그를 다 세워도 이 턴이 "텍스트 요약만" 하는
         // 상태가 되지는 않는다 — 소유자 DM 에서는 manage_access·db_schema·db_query·runtime_info
@@ -995,7 +983,7 @@ export class AgentCore {
         return true;
       }
       // Minor(리뷰 후속): 이 두 갈래는 예전엔 아무 말 없이 false 만 돌려줬다 — /기억정리 사용자는
-      // "정리하다 실패했어"를 받는데 로그에는 아무것도 없어, 모델이 실패한 것인지 빈 답을 낸
+      // "정리하다 실패했어요"를 받는데 로그에는 아무것도 없어, 모델이 실패한 것인지 빈 답을 낸
       // 것인지조차 구분할 수 없었다. 아래 catch 와 같은 수준으로 남긴다.
       if (!result.ok) console.warn("[core] 요약 턴이 실패로 끝남:", conv.id, result.text);
       else console.warn("[core] 요약 턴이 빈 텍스트를 돌려줌:", conv.id);

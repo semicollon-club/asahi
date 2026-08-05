@@ -81,17 +81,11 @@ const QUALITY = `## 답변 품질
 - 응답은 디스코드 메시지로 전달됩니다. 필요할 때만 짧은 불릿 등 최소한의 구조를 쓰고, 긴 표나 장황한 마크다운은 피합니다.`;
 
 // ── 블록 ③ 기억 ─────────────────────────────────────────────────────────────
-// character_fact 안내는 ctx.isPrivate 로 분기한다: 공개 서버 채널은 character_fact 도구 자체가
-// 없으므로(allowedToolsFor), 거기서도 이 안내를 내보내면 모델이 없는 도구를 쓰라고 지시받는
-// 모순이 생기고, "저장했다"고 지어내는(=작업 사실 조작) 위험이 따라온다.
-function buildMemoryBlock(ctx: PersonaContext): string {
-  const selfFactLine = ctx.isPrivate
-    ? "\n- 네 자신의 신상·설정은 remember 가 아니라 character_fact 로 저장한다. remember 는 사용자에 대한 사실 전용이다."
-    : "";
-  return `## 기억 (도구)
+// 2026-08-05: ctx 를 안 받는 상수로 되돌렸다. 분기하던 이유는 DM 에서만 열리던 도구를
+// 안내하는 한 줄뿐이었고, 그 도구가 사라지면서 신원·위치로 갈릴 것이 하나도 남지 않았다.
+const MEMORY = `## 기억 (도구)
 - 기억은 remember/recall 도구(데이터베이스)로 관리합니다. 파일로 저장하지 마세요.
-- 먼저 사용자에게 간결히 답하세요. 매 턴 저장/조회하지 말고, 정말 오래 기억할 가치가 있을 때만 remember 를, 필요할 때만 recall 을 쓰세요.${selfFactLine}`;
-}
+- 먼저 사용자에게 간결히 답하세요. 매 턴 저장/조회하지 말고, 정말 오래 기억할 가치가 있을 때만 remember 를, 필요할 때만 recall 을 쓰세요.`;
 
 // ── 블록 ④ 능력(§7.1) ───────────────────────────────────────────────────────
 // FIX3(중요, 최종 리뷰): owner-DM 분기는 이제 deployTarget 이 아니라 workerConnected 로 갈린다 —
@@ -215,8 +209,7 @@ function buildCapabilityBlock(ctx: PersonaContext): string {
     "\n- 특정 작업(예: UI 디자인)에는 전용 스킬이 있을 수 있습니다. 먼저 쓸 수 있는 스킬이 있는지 살펴보고, 있으면 그 지침을 따르세요.";
   if (ctx.isPrivate) {
     return `## 능력
-- 대화와 본인 기억(remember/recall)만 사용할 수 있습니다. 접근 권한 변경은 할 수 없습니다.${guestPcLine}
-- 네 설정을 고정하는 character_fact 도 쓸 수 있습니다.${guestSkillLine}`;
+- 대화와 본인 기억(remember/recall)만 사용할 수 있습니다. 접근 권한 변경은 할 수 없습니다.${guestPcLine}${guestSkillLine}`;
   }
   return `## 능력
 - 공개 채널(서버) 대화입니다. remember 로 저장하면 개인 기억이 아니라 동아리 공용 기억이 되어 모든 부원에게 보입니다 — recall 로 조회할 수 있습니다. 동아리 문서를 전달받으면 "회비"·"활동 시간"·"가입 절차"처럼 주제별로 나눠 저장하세요 — 한 건에 문서 전체를 넣으면 recall 이 매번 전문을 그대로 돌려줍니다.
@@ -229,7 +222,7 @@ export function buildSystemPrompt(ctx: PersonaContext): string {
   return [
     IDENTITY,
     QUALITY,
-    buildMemoryBlock(ctx),
+    MEMORY,
     buildCapabilityBlock(ctx),
   ].filter((block) => block.length > 0).join("\n\n");
 }
