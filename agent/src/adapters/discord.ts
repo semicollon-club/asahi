@@ -1,5 +1,5 @@
 import {
-  ChannelType, Client, GatewayIntentBits, Partials, ThreadAutoArchiveDuration, EmbedBuilder, type Message,
+  ChannelType, Client, GatewayIntentBits, Partials, ThreadAutoArchiveDuration, type Message,
 } from "discord.js";
 import type { EventBus, ConversationHint } from "../events/bus.js";
 import type { Config } from "../config.js";
@@ -7,9 +7,7 @@ import type { UsersRepo, Role } from "../store/usersRepo.js";
 import type { ConversationsRepo } from "../store/conversationsRepo.js";
 import { filterImageAttachments, type ImageRef } from "../core/images.js";
 import { filterFileAttachments, type FileRef } from "../core/attachments.js";
-import { parseExpression } from "../core/expressions.js";
 import { isChannelCommand } from "../core/commands.js";
-import type { CharacterImagesRepo } from "../store/characterImagesRepo.js";
 
 export function chunkMessage(text: string, max = 2000): string[] {
   const chunks: string[] = [];
@@ -33,49 +31,15 @@ export function chunkMessage(text: string, max = 2000): string[] {
   return chunks;
 }
 
-// 같은 대화에서 표정 이미지를 연달아 보내지 않도록 하는 하한. 프롬프트 지침은 반드시 새므로
-// 어댑터가 최종 방어선이 된다 — 모델이 매 답변마다 마커를 붙여도 실제로는 이 간격으로 걸러진다.
-// 지침대로 쓰면 애초에 이보다 드물게 나오므로 정상 동작을 막지 않는다.
-export const EXPRESSION_MIN_INTERVAL_MS = 120_000;
+// 본문이 비어 아무것도 못 보내는 경우의 최소 응답. 조용히 아무 것도 안 나가면 finishStatus 가
+// 그대로 완료 반응(✅)을 달아 "성공했지만 무응답"이 된다 — 이 저장소가 반복해서 고쳐 온 실패
+// 모드라 표정이 사라져도 이 방어선은 남긴다.
+export const SEND_EMPTY_FALLBACK = "이번엔 드릴 답을 만들지 못했어요. 다시 한 번 말씀해 주세요.";
 
-// FIX1(치명): 마커만 있는 답변(본문 없음)에서 이미지 해석까지 실패하면 정말 아무 것도 안 나간다 —
-// 그래도 finishStatus 는 완료 반응(✅)을 달아버려 "성공했지만 무응답"이 된다. core.ts 의 빈 응답
-// 폴백("이번엔 드릴 답을 만들지 못했어요. 다시 한 번 말씀해 주세요.")과 같은 톤으로 최소한의 응답을 보장한다.
-export const EXPRESSION_EMPTY_FALLBACK = "이번엔 보여드릴 게 없었어요. 다시 한 번 말씀해 주세요.";
-
-// 그 감정의 URL 중 하나를 고른다. 직전에 보낸 것과 겹치지 않게 하되, 후보가 하나뿐이면
-// 그대로 쓴다(웃음 폴더처럼 이미지가 한 장인 경우).
-export function pickExpressionUrl(
-  urls: string[],
-  lastUrl: string | undefined,
-  rand: () => number = Math.random,
-): string | undefined {
-  if (urls.length === 0) return undefined;
-  const pool = urls.length > 1 ? urls.filter((u) => u !== lastUrl) : urls;
-  const candidates = pool.length > 0 ? pool : urls;
-  return candidates[Math.min(candidates.length - 1, Math.floor(rand() * candidates.length))];
-}
-
-// 아직 상한 안이면 true — 즉 "이번엔 보내지 않는다". 경계(정확히 상한만큼 지남)는 보내는 쪽이다.
-export function withinExpressionInterval(
-  lastTs: number | undefined,
-  now: number,
-  minMs: number = EXPRESSION_MIN_INTERVAL_MS,
-): boolean {
-  if (lastTs === undefined) return false;
-  return now - lastTs < minMs;
-}
-
-// 텍스트와 이미지 유무로 전송 형태를 정한다. send() 는 이 결과를 그대로 실행만 한다 —
+// 텍스트를 디스코드 상한에 맞춰 나눈다. send() 는 이 결과를 그대로 실행만 한다 —
 // 판단을 여기로 몰아야 디스코드 채널 없이 테스트할 수 있다.
-export function planSend(text: string, hasImage: boolean): {
-  chunks: string[];
-  embedOnLast: boolean;
-  embedOnly: boolean;
-} {
-  const chunks = text.length > 0 ? chunkMessage(text) : [];
-  if (chunks.length === 0) return { chunks: [], embedOnLast: false, embedOnly: hasImage };
-  return { chunks, embedOnLast: hasImage, embedOnly: false };
+export function planSend(text: string): { chunks: string[] } {
+  return { chunks: text.length > 0 ? chunkMessage(text) : [] };
 }
 
 // ── 순수 라우팅 결정 (테스트 용이) ──────────────────────────────────────────
@@ -201,16 +165,12 @@ export class DiscordAdapter {
   // 완료되도록 강제한다(sendChains/statusChains 와 같은 패턴).
   private inboundChains = new Map<string, Promise<void>>();
   private progressState = new Map<string, ProgressState>();
-  // 대화별 표정 전송 상태(메모리). 재배포로 초기화돼도 무해하다 — 최악이 이미지 한 장 더 나가는 것이다.
-  private expressionState = new Map<string, { lastTs: number; lastUrl?: string }>();
-  private characterImages?: CharacterImagesRepo;
 
-  constructor(deps: { bus: EventBus; config: Config; users: UsersRepo; conversations: ConversationsRepo; characterImages?: CharacterImagesRepo }) {
+  constructor(deps: { bus: EventBus; config: Config; users: UsersRepo; conversations: ConversationsRepo }) {
     this.bus = deps.bus;
     this.config = deps.config;
     this.users = deps.users;
     this.conversations = deps.conversations;
-    this.characterImages = deps.characterImages;
     this.client = new Client({
       intents: [
         GatewayIntentBits.Guilds,          // 채널·스레드 메타
@@ -232,11 +192,7 @@ export class DiscordAdapter {
     });
     this.bus.subscribe("assistant_message", (e) => {
       const statusDone = this.enqueueStatus(e.channelRef, () => this.finishStatus(e.channelRef));
-      const { text, emotion } = parseExpression(e.text);
-      // FIX3(중요): resolveExpression(DB 조회)을 핸들러에서 미리 await 하지 않는다 — enqueueSendAfter
-      // 를 동기로 호출해야 발행(publish) 순서가 곧 전송 체인에 올라타는 순서가 된다. 자세한 이유는
-      // enqueueSendAfter 주석 참고. system_notice 핸들러와 구조가 대칭이 된다.
-      this.enqueueSendAfter(e.channelRef, statusDone, text, emotion);
+      this.enqueueSendAfter(e.channelRef, statusDone, e.text);
     });
     this.bus.subscribe("system_notice", (e) => {
       const statusDone = this.enqueueStatus(e.channelRef, () => this.finishStatus(e.channelRef));
@@ -401,51 +357,15 @@ export class DiscordAdapter {
   }
 
   // 기존 sendChains 직렬화에 더해, 그 채널의 상태 정리(wait)가 끝난 뒤에만 전송하도록 합류시킨다.
-  // FIX3(중요): 표정 해석(resolveExpression, DB 조회)을 핸들러가 아니라 이 체인 "안"에서 수행한다.
-  // prev/next 를 읽고 쓰는 부분은 완전히 동기라서(그 사이 await 이 없다), 같은 channelRef 에 대해
-  // enqueueSendAfter 가 호출되는 순서(= 이벤트가 publish 되는 순서)가 그대로 sendChains 에 이어붙는
-  // 순서가 된다. 예전처럼 핸들러가 resolveExpression 을 먼저 await 하면, 그 사이 나중에 publish 됐지만
-  // DB 조회가 더 빨리 끝나는 턴(system_notice 의 빠른 실패 경로 등)이 먼저 체인에 올라타 답장 순서가
-  // 뒤바뀔 수 있었다. emotion 이 없으면(system_notice) resolveExpression 내부에서 즉시 undefined 로
-  // 끝나 DB 조회 자체를 건너뛴다 — system_notice 는 여전히 이미지를 받지 않는다.
-  // FIX4 부수효과: 같은 channelRef 에 대한 두 호출이 이제 완전히 직렬화되므로, resolveExpression 의
-  // "간격 상태 읽기 → urlsFor await → 간격 상태 쓰기" 구간이 한 채널에서 더는 겹칠 수 없다(아래
-  // resolveExpression 주석 참고).
-  private enqueueSendAfter(channelRef: string, wait: Promise<void>, text: string, emotion: string | null = null): void {
+  // prev/next 를 읽고 쓰는 부분이 완전히 동기라서(그 사이 await 이 없다), 같은 channelRef 에 대해
+  // 이 메서드가 호출되는 순서(= 이벤트가 publish 되는 순서)가 그대로 sendChains 에 이어붙는
+  // 순서가 된다 — 답장이 뒤바뀌지 않는 근거가 이것이다.
+  private enqueueSendAfter(channelRef: string, wait: Promise<void>, text: string): void {
     const prev = this.sendChains.get(channelRef) ?? Promise.resolve();
-    const textIsEmpty = text.length === 0;
     const next = Promise.all([prev, wait])
-      .then(() => this.resolveExpression(channelRef, emotion, textIsEmpty))
-      .then((imageUrl) => this.send(channelRef, text, imageUrl))
+      .then(() => this.send(channelRef, text))
       .catch(() => {});
     this.sendChains.set(channelRef, next);
-  }
-
-  // 감정 이름을 실제 이미지 URL 로 바꾼다. 어떤 이유로든 실패하면 undefined 를 돌려주고,
-  // 호출측은 이미지 없이 텍스트만 보낸다 — 이미지 때문에 답변이 막히면 안 된다.
-  // FIX1(치명): textIsEmpty 는 "본문 없이 마커만 있는 답변인가"를 나타낸다. 이 경우 이미지가 곧
-  // 전체 응답이므로, 그걸 간격 제한으로 막아버리면 답장 자체가 통째로 사라진다 — 그래서 본문이
-  // 없을 때만 간격 검사를 건너뛴다(본문이 있는 일반적인 경우엔 기존대로 제한을 적용한다).
-  // FIX4: state 를 읽는 시점과 urlsFor 를 await 하는 시점 사이에 겹치는 호출이 있으면 같은 채널에
-  // 대해 두 호출이 모두 낡은 스냅샷으로 간격 검사를 통과할 수 있었다. 이제 이 메서드는 항상
-  // enqueueSendAfter 의 채널별 직렬 체인 "안"에서만 호출되므로(위 enqueueSendAfter 주석 참고),
-  // 같은 channelRef 에 대한 두 번째 호출은 첫 번째 호출의 read-await-write 가 전부 끝난 뒤에야
-  // 시작된다 — 겹칠 수 없다.
-  private async resolveExpression(channelRef: string, emotion: string | null, textIsEmpty: boolean): Promise<string | undefined> {
-    if (!emotion || !this.characterImages) return undefined;
-    const now = Date.now();
-    const state = this.expressionState.get(channelRef);
-    if (!textIsEmpty && withinExpressionInterval(state?.lastTs, now)) return undefined;
-    try {
-      const urls = await this.characterImages.urlsFor(emotion);
-      const url = pickExpressionUrl(urls, state?.lastUrl);
-      if (!url) return undefined;
-      this.expressionState.set(channelRef, { lastTs: now, lastUrl: url });
-      return url;
-    } catch (err) {
-      console.error("[discord] 표정 이미지 조회 실패:", err);
-      return undefined;
-    }
   }
 
   private getProgressState(channelRef: string): ProgressState {
@@ -540,45 +460,19 @@ export class DiscordAdapter {
     }
   }
 
-  private async send(channelRef: string, text: string, imageUrl?: string): Promise<void> {
+  private async send(channelRef: string, text: string): Promise<void> {
     try {
       const channel = await this.client.channels.fetch(channelRef);
       if (!channel || !channel.isSendable()) return;
-
-      // FIX2(치명): URL 문자열이 있어도 EmbedBuilder.setImage 는 형식이 아니면(빈 문자열·프로토콜
-      // 없음·공백 등) 동기적으로 던진다(character_images.url 오염 등으로 실제 발생 가능). 여기서
-      // 격리하지 않으면 정상적인 긴 텍스트 답장까지 통째로 유실된다 — embed 생성 실패는 로그만
-      // 남기고 이미지 없이 계속한다.
-      let embeds: EmbedBuilder[] = [];
-      if (imageUrl) {
-        try {
-          embeds = [new EmbedBuilder().setImage(imageUrl)];
-        } catch (err) {
-          console.error(`[discord] 이미지 embed 생성 실패(채널 ${channelRef}) — 이미지 없이 계속:`, err);
-        }
-      }
-      // hasImage 는 "URL 문자열이 있었는가"가 아니라 "embed 를 실제로 만들었는가"로 판단해야
-      // planSend 의 결정(embedOnLast/embedOnly)이 실제로 나갈 내용과 어긋나지 않는다.
-      const hasImage = embeds.length > 0;
-
-      const plan = planSend(text, hasImage);
-      if (plan.embedOnly) {
-        // 마커만 있고 본문이 없는 경우 — 이미지만 보낸다.
-        await channel.send({ embeds });
-        return;
-      }
+      const plan = planSend(text);
       if (plan.chunks.length === 0) {
-        // FIX1(치명): 본문도 이미지도 없다 — 마커만 있던 답변에서 이미지 해석까지 실패한 경우 등.
-        // 조용히 아무 것도 안 나가면 finishStatus 가 그대로 완료 반응(✅)을 달아 "성공했지만
-        // 무응답"이 된다. 원인 추적을 위해 채널을 특정해 로그를 남기고, 최소한의 응답은 보장한다.
+        // 본문이 없다. 조용히 넘어가면 완료 반응만 달리고 답이 없는 상태가 된다.
         console.error(`[discord] 보낼 내용이 없어 폴백으로 대체 — 채널 ${channelRef}`);
-        await channel.send(EXPRESSION_EMPTY_FALLBACK);
+        await channel.send(SEND_EMPTY_FALLBACK);
         return;
       }
-      for (let i = 0; i < plan.chunks.length; i++) {
-        // 이미지는 마지막 청크와 함께 보낸다. 따로 보내면 메시지가 둘로 갈라져 어색하다.
-        const isLast = i === plan.chunks.length - 1;
-        await channel.send(isLast && plan.embedOnLast ? { content: plan.chunks[i], embeds } : plan.chunks[i]);
+      for (const chunk of plan.chunks) {
+        await channel.send(chunk);
       }
     } catch (err) {
       console.error("[discord] 전송 실패:", err);

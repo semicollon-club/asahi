@@ -165,9 +165,6 @@ export class AgentCore {
   private ingestChains = new Map<string, Promise<void>>();
   private turnChains = new Map<string, Promise<void>>();
   private fetchImpl: typeof fetch;
-  // 카탈로그에 이미지가 있는 감정 이름들. 기동 시 한 번 읽어 넣는다(index.ts) — 생략되면 빈
-  // 배열로 취급되어 persona.ts 가 표정 지침 자체를 프롬프트에서 뺀다.
-  private emotions: string[];
   // FIX3(중요, 최종 리뷰): 능력 안내(persona.ts)가 실제 도구 상태를 반영하려면, systemPrompt 를
   // 만드는 시점(runTurn 호출 전)에 이미 "이번 턴에 워커가 연결돼 있는가"를 알아야 한다 — 그
   // 판정은 agent.ts 의 resolveTurnWorker 가 쓰는 것과 동일하다. Task 7: hub.isConnected 는
@@ -209,7 +206,7 @@ export class AgentCore {
       rootsOf(workerId: string): string[];
     };
     registry?: { personalWorkerOf(userId: string): Promise<string | null>; sharedWorkerId(): Promise<string | null> };
-    emotions?: string[]; digest?: DigestRunner;
+    digest?: DigestRunner;
   }) {
     this.bus = deps.bus;
     this.config = deps.config;
@@ -221,7 +218,6 @@ export class AgentCore {
     this.fetchImpl = deps.fetchImpl ?? fetch;
     this.hub = deps.hub;
     this.registry = deps.registry;
-    this.emotions = deps.emotions ?? [];
     this.digest = deps.digest;
   }
 
@@ -363,10 +359,8 @@ export class AgentCore {
     // FIX6(사소, 머지 전 리뷰): 리다이렉트 안내는 오류·거부가 아니라 정상 진행 상황이다. discord.ts 는
     // system_notice 를 전부 ⚠️ 로 접두해(어댑터가 갖는 유일한 시각적 구분) 진짜 경고를 눈에 띄게
     // 하는데, 이 문구까지 그 경로를 타면 담담한 안내가 경고처럼 보인다. assistant_message 로 보내
-    // 그 접두사를 피한다 — 이 텍스트엔 표정 마커가 없어 parseExpression 은 그대로 통과시키고
-    // (emotion:null), resolveExpression 도 즉시 undefined 로 끝나 이미지 경로에 영향이 없다. 턴 종료
-    // (finishStatus, ✅ 반응) 처리는 system_notice 와 완전히 같은 경로를 그대로 타므로 그 동작도
-    // 달라지지 않는다.
+    // 그 접두사를 피한다. 턴 종료(finishStatus, ✅ 반응) 처리는 system_notice 와 완전히 같은 경로를
+    // 그대로 타므로 그 동작도 달라지지 않는다.
     const publishAck = (text: string) =>
       this.bus.publish({ type: "assistant_message", channel: "discord", channelRef: o.replyRef, text, ts: this.now() });
 
@@ -575,7 +569,7 @@ export class AgentCore {
       // 건드리지 않는다 — 그 시점엔 아직 받아오기 전이라 저장 경로가 없고, 파일명만 적으면 사실이
       // 아닌 것을 기록하게 된다.
       prompt = buildFileMarker(prompt, savedFiles, failedFiles);
-      const systemPrompt = buildSystemPrompt({ role, isPrivate: conv.isPrivate, isOwner, deployTarget: this.config.deployTarget, rapportStage, workerConnected, emotions: this.emotions, workspaceDirs });
+      const systemPrompt = buildSystemPrompt({ role, isPrivate: conv.isPrivate, isOwner, deployTarget: this.config.deployTarget, rapportStage, workerConnected, workspaceDirs });
       const onProgress = (u: ProgressUpdate) => {
         this.bus.publish({ type: "progress", channel: "discord", channelRef: conv.discordChannelId, text: formatProgress(u, workspaceDirs), ts: this.now() });
         // 기록은 도구 호출이 끝난 시점에만 남긴다(tool 이벤트는 짝이 맞춰져 이 한 행에 흡수된다).
@@ -952,7 +946,7 @@ export class AgentCore {
         // 한다 — 실제 hub 연결 상태를 여기서 다시 물어 true 가 나오더라도, 이 턴 자체는
         // noRemoteTools 때문에 fs_*/sh_exec 를 못 쓰므로 그 상태를 그대로 안내하면 FIX3 가
         // 고친 것과 같은 종류의 거짓 안내(도구는 없는데 있다고 말하는)가 새로 생긴다.
-        systemPrompt: buildSystemPrompt({ role, isPrivate: conv.isPrivate, isOwner, deployTarget: this.config.deployTarget, workerConnected: false, emotions: this.emotions }),
+        systemPrompt: buildSystemPrompt({ role, isPrivate: conv.isPrivate, isOwner, deployTarget: this.config.deployTarget, workerConnected: false }),
         resume: conv.sessionId, cwd: this.agentCwd,
         context: { role, isPrivate: conv.isPrivate, isOwner, userId: conv.primaryUserId, conversationId: conv.id },
         // FIX4: 유휴 요약은 사람이 지켜보지 않는 타이머로 돌고, 이전에 모델이 읽은 파일 등을

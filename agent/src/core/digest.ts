@@ -70,7 +70,6 @@ export class DigestRunner {
   private settings: SettingsRepo;
   private agentCwd: string;
   private channels: DigestChannels;
-  private emotions: string[];
   private now: () => number;
   // FIX1(치명, 최종 리뷰 3차) — 주제별 실행 중 표시. checkAndRun 은 60초마다 fire-and-forget 로
   // 불리므로(index.ts), 이전 틱의 턴이 안 끝난 채 다음 틱이 와도 lastRun 은 성공 후에만 기록돼
@@ -82,14 +81,13 @@ export class DigestRunner {
 
   constructor(deps: {
     runTurn: TurnRunner; bus: EventBus; settings: SettingsRepo; agentCwd: string;
-    channels: DigestChannels; emotions?: string[]; now?: () => number;
+    channels: DigestChannels; now?: () => number;
   }) {
     this.runTurn = deps.runTurn;
     this.bus = deps.bus;
     this.settings = deps.settings;
     this.agentCwd = deps.agentCwd;
     this.channels = deps.channels;
-    this.emotions = deps.emotions ?? [];
     this.now = deps.now ?? Date.now;
   }
 
@@ -124,7 +122,7 @@ export class DigestRunner {
     try {
       const result = await this.runTurn({
         prompt: spec.prompt,
-        systemPrompt: buildSystemPrompt({ role: "allowed", isPrivate: false, isOwner: false, emotions: this.emotions }),
+        systemPrompt: buildSystemPrompt({ role: "allowed", isPrivate: false, isOwner: false }),
         cwd: this.agentCwd,
         context,
         noRemoteTools: true,

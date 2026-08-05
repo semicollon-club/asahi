@@ -206,15 +206,9 @@ CREATE TABLE IF NOT EXISTS allowed_dirs (
   PRIMARY KEY (worker_id, dir)
 );
 
--- 캐릭터 표정 이미지 카탈로그. 실제 파일은 Supabase Storage 에 있고 여기엔 URL 만 둔다.
--- agent/scripts/sync-images.mjs 가 image/ 를 훑어 전체를 교체한다(부분 갱신 없음).
-CREATE TABLE IF NOT EXISTS character_images (
-  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  emotion TEXT NOT NULL,
-  url TEXT NOT NULL,
-  created_ts BIGINT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_character_images_emotion ON character_images(emotion);
+-- character_images 테이블은 2026-08-05 에 정의를 지웠다(표정 이미지 기능 제거). 이미 만들어진
+-- DB 의 테이블과 행은 그대로 둔다 — 읽는 코드가 없어 무해하고, 여기에 DROP 을 넣으면 부팅마다
+-- 돈다. 필요하면 소유자가 db_query 로 직접 지운다.
 
 -- 워커 신원의 정본. 워커는 hello 프레임에 자기 id 와 토큰을 실어 보내고, 허브가 여기서 행을
 -- 찾아 token_hash 를 대조한다(remote/hub.ts). 평문 토큰은 저장하지 않는다 — 발급 시점에
