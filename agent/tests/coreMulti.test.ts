@@ -485,23 +485,10 @@ describe("AgentCore — 멀티유저/멀티대화", () => {
   });
 });
 
-describe("AgentCore — 친근도(rapportStage) 주입", () => {
-  it("누적 user 메시지가 적으면 소유자 프롬프트에 '서먹', 10개 이상이면 '익숙' 문구가 담긴다", async () => {
-    const t = await setup();
-    // 첫 대화: 이번 메시지 1개만 카운트 → stage 0(서먹)
-    pub(t.bus, dmHint("owner", "owner"), "안녕", 1);
-    await t.core.drain();
-    expect(t.calls[0].systemPrompt).toMatch(/서먹/);
-
-    // owner user 메시지를 9개 추가로 심어 다음 턴의 카운트를 10으로 만든다(9 + 이번 1 = 10)
-    for (let i = 0; i < 9; i++) {
-      await t.repos.messages.insert({ conversationId: 1, ts: 10 + i, role: "user", userId: "owner", content: `m${i}` });
-    }
-    pub(t.bus, dmHint("owner", "owner"), "또 안녕", 100);
-    await t.core.drain();
-    expect(t.calls[1].systemPrompt).toMatch(/익숙/);
-  });
-});
+// 2026-08-05(캐릭터 제거) — 여기 있던 "친근도(rapportStage) 주입" 테스트는 프롬프트에 '서먹'·
+// '익숙' 같은 다정함 농도 문구가 담기는지를 봤다. 그 문구를 만들던 관계·말투 블록이 없어져
+// 검증할 관찰 가능한 효과 자체가 사라졌다. core.ts 는 아직 rapportStage 를 계산해 싣지만
+// 프롬프트를 바꾸지 않는다 — 그 주입을 걷어내는 것은 다음 태스크의 몫이다.
 
 // FIX3(중요, 최종 리뷰) — 능력 안내(persona.ts)는 이제 deployTarget 이 아니라 "이번 턴에 워커가
 // 실제로 연결돼 있는가"로 갈린다. core.ts 는 이 판정을 agent.ts 의 shouldConnectWorker 로 직접

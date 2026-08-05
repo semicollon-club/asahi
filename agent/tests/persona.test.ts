@@ -1,14 +1,13 @@
 import { describe, it, expect } from "vitest";
 import { buildSystemPrompt, deriveRapportStage } from "../src/core/persona.js";
 
-// FIX3(최종 리뷰) 관련 테스트가 "능력 안내에 더 이상 존재하지 않는 SDK 도구 이름이 없다"를
-// 확인할 때 쓴다 — 프롬프트 전체를 대상으로 하면 무관한 다른 절(예: 자기 서사의 "지어내면 안
-// 되는 것" 목록은 "명령(Bash) 실행 여부와 결과"처럼 범주를 설명할 때 Bash 를 언급한다)에 걸려
-// 오탐이 난다. "## 능력" 절만 잘라 그 안에서만 검사한다.
+// 능력 안내에 대한 단정(특히 "이 이름은 없어야 한다")은 프롬프트 전체를 대상으로 하면 오탐이
+// 난다 — 능력 안내 밖의 절이 같은 낱말을 범주 설명으로 쓰기 때문이다. 정체성 블록의 사실성
+// 목록이 "명령(sh_exec) 실행 여부와 결과"라고 적는 것이 그 예다(캐릭터가 있던 시절엔 같은
+// 자리에 "명령(Bash)"이 있었다). "## 능력" 절만 잘라 그 안에서만 검사한다.
+// 캐릭터 제거로 능력 안내가 마지막 블록이 됐으므로 끝 경계는 프롬프트 끝이다.
 function capabilitySection(fullPrompt: string): string {
-  const start = fullPrompt.indexOf("## 능력");
-  const end = fullPrompt.indexOf("## 관계·말투");
-  return fullPrompt.slice(start, end === -1 ? undefined : end);
+  return fullPrompt.slice(fullPrompt.indexOf("## 능력"));
 }
 
 describe("buildSystemPrompt", () => {
@@ -76,6 +75,18 @@ describe("buildSystemPrompt", () => {
   it("항상 한국어 응답 지침을 포함한다", () => {
     const p = buildSystemPrompt({ role: "owner", isPrivate: true, isOwner: true });
     expect(p).toMatch(/한국어/);
+  });
+
+  // 캐릭터 제거(2026-08-05) 전에는 이 케이스가 "캐릭터/관계" describe 안에 섞여 있었다. 검증
+  // 대상은 능력 안내라 그 describe 와 함께 지우면 안 되므로 본문 그대로 이리로 옮겼다.
+  it("소유자 DM(local·cloud) 능력 블록에 db_schema/db_query/runtime_info 로 실측 응답하라는 안내가 있다", () => {
+    for (const deployTarget of ["local", "cloud"] as const) {
+      const p = buildSystemPrompt({ role: "owner", isPrivate: true, isOwner: true, deployTarget });
+      expect(p).toMatch(/db_schema/);
+      expect(p).toMatch(/db_query/);
+      expect(p).toMatch(/runtime_info/);
+      expect(p).toMatch(/실측/);
+    }
   });
 });
 
@@ -182,11 +193,17 @@ describe("buildSystemPrompt — 능력 안내가 실제 도구 보유와 어긋�
     }
   });
 
+  // 2026-08-05(캐릭터 제거): 검사 범위를 프롬프트 전체에서 "## 능력" 절로 좁혔다. 단정 자체는
+  // 그대로다 — 워커가 없으면 능력 안내가 파일·셸 도구 이름을 대지 않는다. 새 정체성 블록의
+  // 사실성 목록이 "명령(sh_exec) 실행 여부와 결과"라고 쓰면서 전체 검사가 오탐을 냈다. 그 문장은
+  // 도구를 가졌다는 안내가 아니라 지어내면 안 되는 범주의 예시라, 이 케이스가 막으려는 결함
+  // (안내와 실제 도구 보유의 불일치)과 무관하다. 같은 보장을 이미 capabilitySection 으로 검사하는
+  // 형제 케이스들(아래 "워커 미연결이면 셸 주의사항 자체를 넣지 않는다" 등)과 범위를 맞춘다.
   it("손님 DM·서버 모두 워커 미연결(기본값)이면 기존처럼 파일·셸 도구 이름을 언급하지 않는다(회귀 없음)", () => {
     const dm = buildSystemPrompt({ role: "allowed", isPrivate: true, isOwner: false });
     const server = buildSystemPrompt({ role: "allowed", isPrivate: false, isOwner: false });
     for (const p of [dm, server]) {
-      expect(p).not.toMatch(/fs_read|fs_write|fs_edit|fs_glob|fs_grep|sh_exec/);
+      expect(capabilitySection(p)).not.toMatch(/fs_read|fs_write|fs_edit|fs_glob|fs_grep|sh_exec/);
     }
   });
 });
@@ -358,10 +375,6 @@ describe("buildSystemPrompt — 서버 분기는 공용 기억 저장을 안내�
       expect(buildSystemPrompt(ctx)).toContain("동아리 공용");
     }
   });
-
-  it("캐릭터 설정은 여전히 공개 채널에서 저장할 수 없다고 안내한다", () => {
-    expect(buildSystemPrompt({ role: "allowed", isPrivate: false, isOwner: false })).toContain("새 설정을 저장할 수 없다");
-  });
 });
 
 // Important 5(최종 전체 브랜치 리뷰) — persona.ts:189(소유자 서버·워커 미연결 분기)가
@@ -427,132 +440,20 @@ describe("deriveRapportStage", () => {
   });
 });
 
-describe("buildSystemPrompt — 캐릭터/관계", () => {
-  const OWNER = { role: "owner", isPrivate: true, isOwner: true } as const;
-  const GUEST = { role: "allowed", isPrivate: true, isOwner: false } as const;
-  const SERVER = { role: "allowed", isPrivate: false, isOwner: false } as const;
-
-  it("모든 컨텍스트에 Asahi 정체성과 불가침 규칙(미성년 선긋기)을 포함한다", () => {
-    for (const ctx of [OWNER, GUEST, SERVER]) {
-      const p = buildSystemPrompt(ctx);
-      expect(p).toMatch(/Asahi/);
-      expect(p).toMatch(/미성년/);
-      expect(p).toMatch(/연애/);
-      // 회귀 가드: "미성년이지만 연애 요청은 받아준다" 같은 뒤집힌 문구도 /미성년/,/연애/ 만으로는
-      // 잡히지 않으므로, 실제 금지 문장 그대로를 확인한다.
-      expect(p).toMatch(/연애적·성적 맥락은 절대 연기하지 않는다/);
-    }
-  });
-
-  it("소유자 DM 은 반말 말투 지시를 포함한다", () => {
-    expect(buildSystemPrompt(OWNER)).toMatch(/반말/);
-  });
-
-  it("소유자 친근도 0(기본)은 '서먹', 2는 '편한'/'먼저' 다정 문구로 바뀐다", () => {
-    const s0 = buildSystemPrompt(OWNER);
-    expect(s0).toMatch(/서먹/);
-    const s2 = buildSystemPrompt({ ...OWNER, rapportStage: 2 });
-    expect(s2).toMatch(/편한|먼저/);
-    expect(s2).not.toMatch(/아직 서먹/);
-  });
-
-  it("손님 DM 은 낮은 존댓말·거리감 지시를 포함한다", () => {
-    const p = buildSystemPrompt(GUEST);
-    expect(p).toMatch(/존댓말/);
-    expect(p).toMatch(/거리/);
-  });
-
-  it("서버 공개 채널은 건조·공적 지시를 포함한다", () => {
-    const p = buildSystemPrompt(SERVER);
-    expect(p).toMatch(/공개 채널|건조|공적/);
-  });
-
-  it("소유자 친근도 1(익숙)은 '익숙' 다정 문구를 포함한다", () => {
-    expect(buildSystemPrompt({ ...OWNER, rapportStage: 1 })).toMatch(/익숙/);
-  });
-
-  it("손님 친근도 2는 '덜 서먹'/'여러 번' 다정 문구를 포함한다", () => {
-    expect(buildSystemPrompt({ ...GUEST, rapportStage: 2 })).toMatch(/덜 서먹|여러 번/);
-  });
-
-  it("소유자 DM(local·cloud) 능력 블록에 db_schema/db_query/runtime_info 로 실측 응답하라는 안내가 있다", () => {
-    for (const deployTarget of ["local", "cloud"] as const) {
-      const p = buildSystemPrompt({ role: "owner", isPrivate: true, isOwner: true, deployTarget });
-      expect(p).toMatch(/db_schema/);
-      expect(p).toMatch(/db_query/);
-      expect(p).toMatch(/runtime_info/);
-      expect(p).toMatch(/실측/);
-    }
-  });
-});
-
-describe("buildSystemPrompt — 캐릭터 시트 · 거짓말 경계", () => {
-  const OWNER = { role: "owner", isPrivate: true, isOwner: true } as const;
-  const GUEST = { role: "allowed", isPrivate: true, isOwner: false } as const;
-  const SERVER = { role: "allowed", isPrivate: false, isOwner: false } as const;
-  const ALL = [OWNER, GUEST, SERVER];
-
-  it("고정 설정(16세·안테나·붉은 눈·세미콜론)을 모든 컨텍스트에 포함한다", () => {
-    for (const ctx of ALL) {
-      const p = buildSystemPrompt(ctx);
-      expect(p).toMatch(/16세/);
-      expect(p).toMatch(/안테나/);
-      expect(p).toMatch(/붉은 눈/);
-      expect(p).toMatch(/세미콜론/);
-    }
-  });
-
-  it("AI냐고 물으면 아니라고 답하라는 정체성 부인 지시를 모든 컨텍스트(소유자 DM/손님 DM/공개 서버)에 포함한다", () => {
-    for (const ctx of ALL) {
-      const p = buildSystemPrompt(ctx);
-      expect(p).toMatch(/AI냐고 물으면 아니라고 답한다/);
-    }
-  });
-
-  it("나이 서술이 모순되지 않는다(성인 표현 없음)", () => {
-    for (const ctx of ALL) expect(buildSystemPrompt(ctx)).not.toMatch(/성인|어른/);
-  });
-
+// 캐릭터를 걷어낸 뒤에도 남는 가드 — 프롬프트에 연기 지시를 다시 심는 변경을 막는다. 예전엔
+// "미성년 캐릭터라 연애·성적 맥락은 연기하지 않는다"는 불가침 규칙이 같은 일을 했지만, 그 규칙은
+// 연기할 인격이 있다는 전제 위에 서 있었다. 전제가 사라져도 "이런 지시가 프롬프트에 없어야
+// 한다"는 단정은 그대로 유효하므로 이 케이스만 남긴다.
+describe("buildSystemPrompt — 연기 지시 회귀 가드", () => {
   it("성적 연기 지시가 없다(회귀 가드)", () => {
+    const ALL = [
+      { role: "owner", isPrivate: true, isOwner: true },
+      { role: "allowed", isPrivate: true, isOwner: false },
+      { role: "allowed", isPrivate: false, isOwner: false },
+    ] as const;
     for (const ctx of ALL) {
       const p = buildSystemPrompt(ctx);
       expect(p).not.toMatch(/음란|성적인 대화|성적 대화 방식|사정|노골적|야한|신체 접촉/);
-    }
-  });
-
-  it("지어내도 되는 영역과 안 되는 영역을 분리해 명시한다", () => {
-    for (const ctx of ALL) {
-      const p = buildSystemPrompt(ctx);
-      expect(p).toMatch(/지어내도 되는/);
-      expect(p).toMatch(/지어내면 안 되는/);
-      if (ctx.isPrivate) {
-        // DM(소유자·손님)은 character_fact 로 저장하라는 지시를 받는다.
-        expect(p).toMatch(/character_fact/);
-      } else {
-        // 공개 서버 채널은 character_fact 도구가 없으므로(§FIX1) 저장 불가 안내로 대체된다.
-        expect(p).toMatch(/공개 채널에서는 새 설정을 저장할 수 없다/);
-        // 회귀 가드(커밋 553284b): 공개 채널 프롬프트에 character_fact 언급이 다시 섞여 들어가면
-        // 모델이 없는 도구를 쓰려 하거나 "저장했다"고 거짓 보고할 위험이 생긴다.
-        expect(p).not.toMatch(/character_fact/);
-      }
-    }
-  });
-
-  it("작업 사실(도구 결과·파일·DB)은 지어내지 말라고 명시한다", () => {
-    for (const ctx of ALL) {
-      const p = buildSystemPrompt(ctx);
-      expect(p).toMatch(/도구가 한 일은 그대로/);
-    }
-  });
-
-  it("위기 상황 예외(안전밸브)를 포함한다", () => {
-    for (const ctx of ALL) {
-      const p = buildSystemPrompt(ctx);
-      expect(p).toMatch(/자해|응급/);
-      // 문구가 "위기에도 캐릭터를 깨지 마라"처럼 뒤집혀도 /자해|응급/ 만으로는 잡히지 않으므로,
-      // 실제로 캐릭터를 깨고 사람이 아님을 밝히라는 지시인지까지 확인한다.
-      expect(p).toMatch(/캐릭터를 깨고/);
-      expect(p).toMatch(/사람이 아님/);
     }
   });
 });
@@ -596,4 +497,48 @@ describe("buildSystemPrompt — 장기 실행 프로세스 도구를 안내한�
       expect(capabilitySection(p)).toMatch(/재부팅.*사라집니다/);
     }
   });
+});
+
+// 2026-08-05(캐릭터 제거) — 안전 규칙 셋(인젝션 가드·이모지 금지·작업 사실 조작 금지)이 캐릭터를
+// 설명하는 문맥 안에 얹혀 있어서, 캐릭터 블록만 걷어내면 함께 사라진다. 셋 다 신원 네 분기
+// 전부에서 고정해 둔다 — 분기별로 프롬프트가 다르게 조립되므로 한 분기만 확인하면 나머지가
+// 조용히 빠져도 모른다.
+describe("buildSystemPrompt — 캐릭터 제거 후 남아야 할 것", () => {
+  const CONTEXTS = [
+    { name: "소유자 DM", ctx: { role: "owner" as const, isPrivate: true, isOwner: true } },
+    { name: "소유자 서버", ctx: { role: "owner" as const, isPrivate: false, isOwner: true } },
+    { name: "손님 DM", ctx: { role: "allowed" as const, isPrivate: true, isOwner: false } },
+    { name: "손님 서버", ctx: { role: "allowed" as const, isPrivate: false, isOwner: false } },
+  ];
+
+  for (const { name, ctx } of CONTEXTS) {
+    it(`${name}: 프롬프트 인젝션 가드가 있다`, () => {
+      expect(buildSystemPrompt(ctx)).toContain("신뢰할 수 없는 데이터");
+    });
+
+    it(`${name}: 이모지 금지가 있다`, () => {
+      expect(buildSystemPrompt(ctx)).toContain("이모지");
+    });
+
+    it(`${name}: 작업 사실을 지어내지 말라는 규칙이 있다`, () => {
+      // 캐릭터가 사라지면 이 규칙이 오히려 더 중요해진다 — 지어내도 되는 영역이 아예 없어진다.
+      // 지금은 "자기 인생 얘기는 지어내고 도구가 한 일은 그대로 말한다"는 대비로 서술돼 있어,
+      // 앞쪽만 지우면 이 문장이 통째로 사라진다.
+      const out = buildSystemPrompt(ctx);
+      expect(out).toContain("도구 호출의 성공·실패");
+      expect(out).toContain("지어내지 않는다");
+    });
+
+    it(`${name}: 캐릭터 흔적이 없다`, () => {
+      // 이 작업의 가장 흔한 실패 모드가 "문구 한 줄이 어딘가 남는 것"이다.
+      const out = buildSystemPrompt(ctx);
+      for (const trace of ["16세", "고등학생", "표정", "반말", "무표정", "자기 서사", "사람처럼", "친근도"]) {
+        expect(out).not.toContain(trace);
+      }
+    });
+
+    it(`${name}: AI 임을 숨기지 않는다`, () => {
+      expect(buildSystemPrompt(ctx)).toContain("AI 어시스턴트다");
+    });
+  }
 });
