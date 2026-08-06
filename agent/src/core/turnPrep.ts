@@ -4,12 +4,14 @@ import type { SummariesRepo } from "../store/summariesRepo.js";
 import type { MemoriesRepo } from "../store/memoriesRepo.js";
 import type { UsersRepo } from "../store/usersRepo.js";
 import { renderMemories, MEMORY_SECTION_BUDGET } from "./memoryScope.js";
+import { speakerLabel } from "./speaker.js";
 
 // core.ts(봇 실시간 경로)가 쓰는 턴 준비 로직 — 원래 AgentCore 의 private 메서드/지역 함수였던
 // 것을 그대로 옮긴 것(동작은 완전히 동일하다). 한때는 워커(job 처리, worker/jobRunner.ts)와도
 // 공유했으나, Task 8(위임 기계장치 삭제)에서 그 워커 자체가 삭제되어 지금은 core.ts 단독 사용이다.
 
-// users 는 공용 기억의 작성자 이름을 붙이기 위해 필요하다(아래 buildContextBlock 주석 참고).
+// users 는 공용 기억의 작성자 이름과 과거 발화의 화자 이름을 붙이기 위해 필요하다(아래
+// buildContextBlock 주석 참고).
 export type ContextRepos = { memories: MemoriesRepo; summaries: SummariesRepo; messages: MessagesRepo; users: UsersRepo };
 
 // Important 1(최종 전체 브랜치 리뷰) — 이건 기능 복원이 아니라 과거 데이터 처리다.
@@ -62,8 +64,17 @@ export async function buildContextBlock(repos: ContextRepos, conv: Conversation,
   const summaries = await repos.summaries.recent(conv.id, 3, floor);
   const recentAll = await repos.messages.recent(conv.id, 21, floor);
   const recent = recentAll.filter((m) => m.id !== excludeMessageId).slice(-20);
+  // 공유 스레드에서는 모든 사용자 턴이 "사용자:"로 뭉개져 모델이 화자를 구분하지 못했다. names 는
+  // 위(52행)에서 기억 작성자 표시용으로 이미 불러온 것을 재사용한다 — 조회를 두 번 하지 않는다.
+  // 라벨 조합은 speakerLabel(speaker.ts)에게 맡긴다: 표시 이름은 누구나 바꿀 수 있는 값이라
+  // 직접 이어 붙이면 괄호·콜론·개행으로 턴 경계를 위조할 수 있다.
   const recentLines = recent
-    .map((m) => `[${new Date(m.ts).toISOString()}] ${m.role === "user" ? "사용자" : m.role === "assistant" ? "비서" : "시스템"}: ${stripLegacyMarkers(m.content)}`)
+    .map((m) => {
+      const who = m.role === "user"
+        ? speakerLabel(m.userId === null ? undefined : names[m.userId])
+        : m.role === "assistant" ? "비서" : "시스템";
+      return `[${new Date(m.ts).toISOString()}] ${who}: ${stripLegacyMarkers(m.content)}`;
+    })
     .join("\n");
   return [
     "[기억 컨텍스트 — 새 세션 시작]",
