@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { DiscordAdapter, SEND_EMPTY_FALLBACK } from "../src/adapters/discord.js";
+import { DiscordAdapter, SEND_EMPTY_FALLBACK, planSend } from "../src/adapters/discord.js";
 import { EventBus } from "../src/events/bus.js";
 import type { Config } from "../src/config.js";
 import type { UsersRepo } from "../src/store/usersRepo.js";
@@ -85,6 +85,39 @@ describe("send — 텍스트가 없으면 폴백 텍스트를 보낸다", () => 
     expect(loggedChannel).toBe(true); // 채널을 특정할 수 있는 로그가 남아야 한다
 
     errorSpy.mockRestore();
+  });
+});
+
+// Minor 7(최종 전체 브랜치 리뷰) — send() 의 다중 청크 루프를 실제로 도는 테스트가 하나도
+// 없었다. 삭제된 expressionSend.test.ts 가 유일한 커버리지였고, sendPlan.test.ts 는 planSend
+// 순수 함수만, 이 파일의 나머지는 빈 텍스트만 본다. 즉 "계획은 여러 조각인데 채널에는 한 번만
+// 보낸다"거나 "역순으로 나간다" 같은 회귀가 아무 테스트도 건드리지 않고 지나갈 수 있었다.
+describe("send — 긴 본문은 계획된 모든 청크가 순서대로 나간다", () => {
+  it("2000자 상한을 넘는 본문이 여러 번에 나뉘어 순서대로 전송되고, 이어 붙이면 원문이 된다", async () => {
+    const { view, sent } = makeAdapter();
+    // 줄바꿈이 없는 본문을 쓴다 — chunkMessage 는 줄바꿈에서 자를 때 그 줄바꿈 한 글자를
+    // 먹으므로(경계 문자 소비), 강제 절단 경로여야 "이어 붙이면 원문"이 정확히 성립한다.
+    const text = Array.from({ length: 5000 }, (_, i) => String.fromCharCode(0xac00 + (i % 100))).join("");
+
+    await view.send("chan-long", text);
+
+    expect(sent.length).toBeGreaterThan(1);            // 한 번에 다 보내지 않았다
+    expect(sent).toEqual(planSend(text).chunks);       // 계획 그대로, 순서까지 같다
+    expect(sent.join("")).toBe(text);                  // 빠지거나 뒤바뀐 조각이 없다
+    for (const chunk of sent) expect(chunk.length).toBeLessThanOrEqual(2000);
+  });
+
+  it("줄바꿈이 있는 긴 본문도 계획된 청크가 하나도 빠지지 않고 순서대로 나간다", async () => {
+    const { view, sent } = makeAdapter();
+    const text = Array.from({ length: 400 }, (_, i) => `${i}번째 줄입니다. ${"가".repeat(20)}`).join("\n");
+
+    await view.send("chan-lines", text);
+
+    const chunks = planSend(text).chunks;
+    expect(chunks.length).toBeGreaterThan(1);
+    expect(sent).toEqual(chunks);
+    // 줄바꿈에서 자른 경우 그 한 글자는 청크에 남지 않는다 — 개행으로 이으면 원문이 된다.
+    expect(sent.join("\n")).toBe(text);
   });
 });
 
