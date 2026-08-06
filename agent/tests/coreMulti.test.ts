@@ -1598,6 +1598,23 @@ describe("AgentCore — 조사 결과는 주제의 지정 채널로 간다", () 
     expect(notice?.text).toContain("news-대회");         // 어디에 올리는지 링크로 알린다
   });
 
+  // Important 3(최종 전체 브랜치 리뷰) — 이 안내는 조사 결과보다 먼저 사용자에게 도착하는
+  // 사용자 대면 문자열인데 반말로 남아 있었다. deploy/smoke-test.md 의 정기 게시 항목이
+  // /개발뉴스 에 존댓말을 기대하므로, 조사가 돌기도 전에 이 줄에서 어긋났다.
+  it("리다이렉트 안내가 존댓말이다(Important 3)", async () => {
+    const digest = { run: async () => ({ started: true }) };
+    const t = await setup({ config: { digestChannels: { contest: "news-대회" } }, digest } as any);
+
+    pub(t.bus, threadHint("owner", "thread-1", "owner", "o1"), "/대회", 1);
+    await t.core.drain();
+
+    const text = (t.published.find((e) => e.type === "assistant_message") as { text: string }).text;
+    expect(text).not.toContain("올릴게");
+    expect(text).not.toContain("잠깐만.");
+    expect(text).toContain("올리겠습니다");
+    expect(text).toContain("잠시만 기다려 주세요");
+  });
+
   it("일반 채널에서 불러도 마찬가지다", async () => {
     const digestCalls: Array<{ topic: string; channelRef: string }> = [];
     const digest = { run: async (topic: string, channelRef: string) => { digestCalls.push({ topic, channelRef }); return { started: true }; } };

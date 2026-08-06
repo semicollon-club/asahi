@@ -394,7 +394,7 @@ export class AgentCore {
     // 곳이 아니다. 공개 채널에 올리고 싶으면 서버에서 부르면 된다(양쪽 다 가능해진다).
     const target = o.isPrivate ? o.replyRef : (this.config.digestChannels[topic] ?? o.replyRef);
     if (target !== o.replyRef) {
-      publishAck(`「${DIGEST_TOPICS[topic].label}」 소식은 <#${target}> 에 올릴게. 잠깐만.`);
+      publishAck(`「${DIGEST_TOPICS[topic].label}」 소식은 <#${target}> 에 올리겠습니다. 잠시만 기다려 주세요.`);
     }
 
     // 같은 주제의 동시 실행 방지는 DigestRunner 내부의 주제별 running Set 이 담당한다 —

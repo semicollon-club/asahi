@@ -50,7 +50,9 @@ export function shouldRunDigest(
 export type DigestChannels = Partial<Record<DigestTopic, string>>;
 
 const LAST_RUN_KEY = (topic: DigestTopic) => `digest.lastRun.${topic}`;
-const FAILED_TEXT = "…오늘은 못 찾았어. 나중에 다시 볼게.";
+// Important 3(최종 전체 브랜치 리뷰): 채널에 그대로 게시되는 사용자 대면 문자열이라 존댓말로
+// 맞춘다. 앞머리의 "…"도 뗐다 — 이 브랜치가 다른 곳에서 걷어낸 캐릭터 말버릇이다.
+const FAILED_TEXT = "오늘은 소식을 찾지 못했습니다. 나중에 다시 보겠습니다.";
 
 // FIX2(치명, 최종 리뷰 3차) — 실패한 날은 lastRun 을 기록하지 않으므로 shouldRunDigest 가
 // 자정까지 계속 true 를 낸다. 그 상태로 실패가 계속되면(만료된 토큰·error_max_turns 등, 구독

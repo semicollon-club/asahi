@@ -143,7 +143,7 @@ async function main() {
   // 봇이 실제로 접근할 수 있는지(canReachChannel) 확인한다 — 로그인 전에는 channels.fetch 자체가
   // 실패해 여기서 확인할 수 없다. 채널 ID 오타·권한 누락은 이 확인이 없으면 매 조사 성공 뒤
   // 전송 실패로만 나타나(discord.ts 의 send() catch) 로그 한 줄에 묻힌다 — 사용자는 리다이렉트
-  // 안내("...에 올릴게")를 받고 기다리다가 그냥 아무것도 못 받는다. 일시적으로 못 보는 채널
+  // 안내("...에 올리겠습니다")를 받고 기다리다가 그냥 아무것도 못 받는다. 일시적으로 못 보는 채널
   // 때문에 봇 전체가 멈추면 안 되므로 치명적으로 취급하지 않는다(경고만 남기고 계속 진행).
   for (const topic of Object.keys(DIGEST_TOPICS) as DigestTopic[]) {
     const channelId = config.digestChannels[topic];

@@ -64,15 +64,15 @@ export function isChannelCommand(text: string): boolean {
 // 안내문은 위 예약어 테이블에서 파생시킨다. 손으로 적으면 예약어를 추가하는 순간
 // 조용히 어긋나고, 그 어긋남은 아무도 눈치채지 못한다(테스트가 이 일치를 검증한다).
 export const COMMAND_HELP: ReadonlyArray<{ commands: readonly string[]; description: string }> = [
-  { commands: [...RESET_COMMANDS], description: "지금까지의 대화를 끊고 새로 시작한다(기억은 남는다)" },
-  { commands: [...COMPACT_COMMANDS], description: "지금까지의 대화를 요약해서 다음 세션으로 넘긴다" },
+  { commands: [...RESET_COMMANDS], description: "지금까지의 대화를 끊고 새로 시작합니다(기억은 남습니다)" },
+  { commands: [...COMPACT_COMMANDS], description: "지금까지의 대화를 요약해서 다음 세션으로 넘깁니다" },
   // FIX6(사소, 머지 전 리뷰): 결과가 항상 "대회 소식 채널"에 올라가는 건 아니다 — DM 에서 부르거나
   // 지정 채널(DIGEST_CONTEST_CHANNEL_ID 등)이 설정돼 있지 않으면 명령을 친 곳에 그대로 온다
   // (core.ts 의 startDigestCommand). 조건부 목적지를 그대로 반영해 안내문이 실제 동작과 어긋나지
   // 않게 한다.
-  { commands: ["/대회"], description: "코딩·CTF 대회 소식을 지금 조사한다. 지정 채널이 있으면 그리로, DM이거나 없으면 여기로 온다" },
-  { commands: ["/개발뉴스"], description: "개발 관련 소식을 지금 조사한다. 지정 채널이 있으면 그리로, DM이거나 없으면 여기로 온다" },
-  { commands: [...HELP_COMMANDS], description: "이 목록을 보여준다" },
+  { commands: ["/대회"], description: "코딩·CTF 대회 소식을 지금 조사합니다. 지정 채널이 있으면 그리로, DM이거나 없으면 여기로 옵니다" },
+  { commands: ["/개발뉴스"], description: "개발 관련 소식을 지금 조사합니다. 지정 채널이 있으면 그리로, DM이거나 없으면 여기로 옵니다" },
+  { commands: [...HELP_COMMANDS], description: "이 목록을 보여드립니다" },
 ];
 
 // 손님용 능력 안내. /help 는 손님도 보므로(예약어가 없는 부원도 이 목록으로 먼저 안내받는다),
@@ -87,10 +87,14 @@ export const COMMAND_HELP: ReadonlyArray<{ commands: readonly string[]; descript
 //
 // Task 4(장기 실행 프로세스 관리): proc_* 넷도 같은 이유로 한 줄을 더한다 — 도구는 있어도
 // "그렇게 물어봐도 된다"는 걸 모르면 안 쓰인다. 한 사람당 하나까지라는 상한도 여기서 먼저 알린다.
+//
+// Important 3(최종 전체 브랜치 리뷰): 봇 자신의 목소리는 존댓말로 바꿨다. 다만 각 줄의 앞부분
+// (" - " 과 " — " 사이)은 사용자가 봇에게 하는 말의 예시라 그대로 둔다 — 그건 봇의 말투가
+// 아니고, 존댓말로 고치면 "이렇게 말해야 한다"는 없는 규칙을 만들어 안내의 뜻이 바뀐다.
 const GUEST_TIPS = [
-  "이런 것도 말로 시키면 돼:",
-  "- 내 폴더에 뭐 있는지 보여줘 — 작업 폴더 구조를 그대로 훑어서 알려줘",
-  "- 파일 만들어줘 / 읽어줘 / 고쳐줘 — 네 작업 폴더 안에서",
+  "이런 것도 말로 시키면 됩니다:",
+  "- 내 폴더에 뭐 있는지 보여줘 — 작업 폴더 구조를 그대로 훑어서 알려드립니다",
+  "- 파일 만들어줘 / 읽어줘 / 고쳐줘 — 본인 작업 폴더 안에서",
   "- 이런 파일 찾아줘 / 이 내용 들어간 파일 검색해줘 — 이름이나 파일 안의 글자로",
   "- 명령 실행해줘 — 예: 테스트 돌려줘, 빌드해줘",
   "- 개발서버 띄워줘 / 뭐 돌고 있어? / 그거 꺼줘 — 오래 도는 프로세스는 한 사람당 하나까지",
@@ -99,7 +103,7 @@ const GUEST_TIPS = [
 // 워커가 없을 때 GUEST_TIPS 대신 나가는 한 줄. 침묵하지 않는 이유: /help 를 친 사람은 "무엇을
 // 시킬 수 있나"를 물은 것이고, 아무 말도 없으면 원래 그런 기능이 없는 줄 안다. persona.ts 의
 // 미연결 분기들도 같은 방식으로 "지금은 안 되고, 연결되면 된다"를 명시한다.
-const NO_WORKER_TIP = "지금은 동아리 PC가 연결돼 있지 않아서 파일·명령 작업은 못 해. 연결되면 그때 시킬 수 있어.";
+const NO_WORKER_TIP = "지금은 동아리 PC가 연결돼 있지 않아서 파일·명령 작업은 할 수 없습니다. 연결되면 그때 시키실 수 있습니다.";
 
 // 최종 리뷰 Important 3 — 능력 안내는 워커 연결 여부로 갈린다.
 //
@@ -117,5 +121,5 @@ export function renderCommandHelp(workerConnected: boolean): string {
   const lines = COMMAND_HELP.map((g) => `- ${g.commands.join(" · ")} — ${g.description}`);
   // 예약어 목록 자체는 워커와 무관하므로 어느 경우에도 그대로 나온다.
   const capability = workerConnected ? GUEST_TIPS : NO_WORKER_TIP;
-  return `쓸 수 있는 명령어야.\n\n${lines.join("\n")}\n\n${capability}\n\n그 외에는 그냥 말 걸면 돼.`;
+  return `쓸 수 있는 명령어입니다.\n\n${lines.join("\n")}\n\n${capability}\n\n그 외에는 그냥 말 걸어 주세요.`;
 }
