@@ -51,7 +51,10 @@ export class MessagesRepo {
     await this.db.query("UPDATE messages SET processed = TRUE WHERE id = $1", [id]);
   }
 
-  // 친근도(rapportStage) 파생 소스: 그 사용자의 user 역할 메시지 누적 수.
+  // 그 사용자의 user 역할 메시지 누적 수. 2026-08-05 에 친근도가 사라져 프로덕션 호출부는
+  // 없어졌지만, 테스트가 "예약어는 사용자 메시지를 저장하지 않는다"를 이걸로 검증한다.
+  // 인덱스도 schema.ts 에 남긴다 — 정의만 지워도 이미 만들어진 DB 에서는 사라지지 않아
+  // 새 환경과 기존 환경이 갈라진다.
   async countUserMessages(userId: string): Promise<number> {
     const r = await this.db.query(
       "SELECT COUNT(*) AS n FROM messages WHERE user_id = $1 AND role = 'user'",

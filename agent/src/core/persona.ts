@@ -8,8 +8,6 @@ export type PersonaContext = {
   // 더 이상 영향을 주지 않는다 — 그 축은 아래 workerConnected 로 옮겨갔다. runtime_info 등
   // 다른 자기인지 용도로는 여전히 의미가 있어 필드 자체는 남긴다.
   deployTarget?: "local" | "cloud";
-  // 친근도 단계(가벼운 관계 진화). 생략 시 0(서먹). core/worker 가 계산해 주입.
-  rapportStage?: 0 | 1 | 2;
   // FIX3(중요, 최종 리뷰): 이번 턴에 원격 워커(fs_*/sh_exec)가 실제로 열려 있는지 — core.ts 가
   // agent.ts 의 resolveTurnWorker(Task 7 이전엔 shouldConnectWorker/resolveWorkerConnected)와
   // 같은 판정을 계산해 싣는다. 생략 시 false(워커 미연결로 간주 — 안전한 기본값). 이 필드가 도입되기 전에는
@@ -28,18 +26,6 @@ export type PersonaContext = {
   // 않고, 애초에 list_dirs 로 직접 조회할 수 있다. 워커 미연결이면 무시된다(도구가 없으므로).
   workspaceDirs?: string[];
 };
-
-// 친근도 단계 경계(초기 추정치, 튜닝 가능).
-const RAPPORT_STAGE1_MIN = 10;
-const RAPPORT_STAGE2_MIN = 50;
-
-// 그 사용자와 누적 대화(user 메시지) 수 → 친근도 3단계. 다정함의 농도만 조절하고
-// 성격·말투 register 는 바꾸지 않는다. 소유자도 messages 에 기록되므로 동일 적용.
-export function deriveRapportStage(userMessageCount: number): 0 | 1 | 2 {
-  if (userMessageCount >= RAPPORT_STAGE2_MIN) return 2;
-  if (userMessageCount >= RAPPORT_STAGE1_MIN) return 1;
-  return 0;
-}
 
 // ── 블록 ① 정체성과 불가침 규칙 ─────────────────────────────────────────────
 // 2026-08-05: 캐릭터 연기를 걷어내면서, 원래 캐릭터 블록 안에 얹혀 있던 안전 규칙 셋을

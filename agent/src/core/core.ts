@@ -2,7 +2,7 @@ import path from "node:path";
 import type { EventBus, UserMessageEvent, ConversationHint } from "../events/bus.js";
 import type { Config } from "../config.js";
 import { resolveTurnWorker, type TurnRunner, type TurnContext, type TurnResult, type ProgressUpdate } from "./agent.js";
-import { buildSystemPrompt, deriveRapportStage } from "./persona.js";
+import { buildSystemPrompt } from "./persona.js";
 import { parseSessionCommand, parseDigestCommand, parseHelpCommand, renderCommandHelp } from "./commands.js";
 import { DIGEST_TOPICS } from "./digest.js";
 import type { DigestRunner, DigestTopic } from "./digest.js";
@@ -502,7 +502,6 @@ export class AgentCore {
       }
 
       const context: TurnContext = { role, isPrivate: conv.isPrivate, isOwner, userId, conversationId: conv.id };
-      const rapportStage = deriveRapportStage(await this.repos.messages.countUserMessages(userId));
       // Task 7: 능력 안내는 "지금 이 턴에 워커가 실제로 연결돼 있는가"로 갈린다 — agent.ts 의
       // resolveTurnWorker 와 완전히 같은 판정(위치 기반 선택 → registry 로 workerId 조회 → hub
       // 연결 확인)을 여기서도 계산해 페르소나에 싣는다. 예전(shouldConnectWorker)엔 hub.isConnected
@@ -569,7 +568,7 @@ export class AgentCore {
       // 건드리지 않는다 — 그 시점엔 아직 받아오기 전이라 저장 경로가 없고, 파일명만 적으면 사실이
       // 아닌 것을 기록하게 된다.
       prompt = buildFileMarker(prompt, savedFiles, failedFiles);
-      const systemPrompt = buildSystemPrompt({ role, isPrivate: conv.isPrivate, isOwner, deployTarget: this.config.deployTarget, rapportStage, workerConnected, workspaceDirs });
+      const systemPrompt = buildSystemPrompt({ role, isPrivate: conv.isPrivate, isOwner, deployTarget: this.config.deployTarget, workerConnected, workspaceDirs });
       const onProgress = (u: ProgressUpdate) => {
         this.bus.publish({ type: "progress", channel: "discord", channelRef: conv.discordChannelId, text: formatProgress(u, workspaceDirs), ts: this.now() });
         // 기록은 도구 호출이 끝난 시점에만 남긴다(tool 이벤트는 짝이 맞춰져 이 한 행에 흡수된다).

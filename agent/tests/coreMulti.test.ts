@@ -485,11 +485,6 @@ describe("AgentCore — 멀티유저/멀티대화", () => {
   });
 });
 
-// 2026-08-05(캐릭터 제거) — 여기 있던 "친근도(rapportStage) 주입" 테스트는 프롬프트에 '서먹'·
-// '익숙' 같은 다정함 농도 문구가 담기는지를 봤다. 그 문구를 만들던 관계·말투 블록이 없어져
-// 검증할 관찰 가능한 효과 자체가 사라졌다. core.ts 는 아직 rapportStage 를 계산해 싣지만
-// 프롬프트를 바꾸지 않는다 — 그 주입을 걷어내는 것은 다음 태스크의 몫이다.
-
 // FIX3(중요, 최종 리뷰) — 능력 안내(persona.ts)는 이제 deployTarget 이 아니라 "이번 턴에 워커가
 // 실제로 연결돼 있는가"로 갈린다. core.ts 는 이 판정을 agent.ts 의 shouldConnectWorker 로 직접
 // 계산해(makeRunAgentTurn 이 도구셋을 계산할 때 쓰는 것과 동일한 함수) systemPrompt 에 싣는다 —

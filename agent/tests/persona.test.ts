@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildSystemPrompt, deriveRapportStage } from "../src/core/persona.js";
+import { buildSystemPrompt } from "../src/core/persona.js";
 
 // 능력 안내에 대한 단정(특히 "이 이름은 없어야 한다")은 검사 범위를 "## 능력" 절로 좁힌다 —
 // 능력 안내 밖의 절도 도구 이름이나 능력 관련 낱말을 쓰기 때문이다(기억 블록의
@@ -448,21 +448,6 @@ describe("buildSystemPrompt — persona 가 forget 을 안내한다(Important 5,
   });
 });
 
-describe("deriveRapportStage", () => {
-  it("10 미만이면 0(서먹)", () => {
-    expect(deriveRapportStage(0)).toBe(0);
-    expect(deriveRapportStage(9)).toBe(0);
-  });
-  it("10~49면 1(보통)", () => {
-    expect(deriveRapportStage(10)).toBe(1);
-    expect(deriveRapportStage(49)).toBe(1);
-  });
-  it("50 이상이면 2(편함)", () => {
-    expect(deriveRapportStage(50)).toBe(2);
-    expect(deriveRapportStage(1000)).toBe(2);
-  });
-});
-
 // 캐릭터를 걷어낸 뒤에도 남는 가드 — 프롬프트에 연기 지시를 다시 심는 변경을 막는다. 예전엔
 // "미성년 캐릭터라 연애·성적 맥락은 연기하지 않는다"는 불가침 규칙이 같은 일을 했지만, 그 규칙은
 // 연기할 인격이 있다는 전제 위에 서 있었다. 전제가 사라져도 "이런 지시가 프롬프트에 없어야
@@ -565,34 +550,19 @@ describe("buildSystemPrompt — 캐릭터 제거 후 남아야 할 것", () => {
       //
       // 리뷰 후속 — 이 목록이 이름값을 못 했다. 지운 관계·말투 블록을 그대로 다시 심어 보니
       // 소유자 DM 만 걸리고(우연히 "반말"이 있었다) 소유자 서버·손님 DM·손님 서버는 전부
-      // 빠져나갔다. 실제로 친근도별 태도를 실어 나르던 낱말(서먹·익숙·시크·다정)과 캐릭터
+      // 빠져나갔다. 실제로 관계 단계별 태도를 실어 나르던 낱말(서먹·익숙·시크·다정)과 캐릭터
       // 전제를 드러내는 낱말(캐릭터·인격·연기), 구 정체성의 라틴 표기(Asahi)가 목록에
       // 없었기 때문이다. "AI냐고"도 넣는다 — 구 자기 서사의 AI 부인 지시("AI냐고 물으면
       // 아니라고 답한다")를 되살려도 "너는 AI 어시스턴트다"와 나란히 통과해, 서로 모순되는
       // 프롬프트가 두 테스트를 다 지나갔다.
-      //
-      // "친근도"는 남겨 두지만 이 목록의 다른 항목과 성격이 다르다 — 이 낱말이 프롬프트에
-      // 실린 적은 한 번도 없다(주석·필드 이름에만 있다). 친근도가 프롬프트를 바꾸지 않는다는
-      // 보장은 문자열 부재가 아니라 아래 rapportStage 불변성 케이스가 진다.
       const out = buildSystemPrompt(ctx);
       const TRACES = [
-        "16세", "고등학생", "표정", "반말", "무표정", "자기 서사", "사람처럼", "친근도",
+        "16세", "고등학생", "표정", "반말", "무표정", "자기 서사", "사람처럼",
         "서먹", "익숙", "시크", "다정", "Asahi", "캐릭터", "인격", "연기", "AI냐고",
       ];
       for (const trace of TRACES) {
         expect(out).not.toContain(trace);
       }
-    });
-
-    // 리뷰 후속 — 위 문자열 목록은 "우리가 미리 떠올린 낱말"만 잡는다. 친근도가 프롬프트에
-    // 아무 영향도 주지 않는다는 것은 그보다 강한 단정이고, 이렇게 직접 고정할 수 있다.
-    // rapportStage 는 Task 4 에서 걷어낼 때까지 남지만, 그 사이에 어떤 문구든 이 축으로
-    // 갈리기 시작하면 여기서 걸린다(단계 1 도 포함한다 — 구 소유자 DM 블록은 0/1/2 셋 다
-    // 다른 문장을 냈다).
-    it(`${name}: 친근도(rapportStage)가 프롬프트를 바꾸지 않는다`, () => {
-      const s0 = buildSystemPrompt({ ...ctx, rapportStage: 0 });
-      expect(buildSystemPrompt({ ...ctx, rapportStage: 1 })).toBe(s0);
-      expect(buildSystemPrompt({ ...ctx, rapportStage: 2 })).toBe(s0);
     });
 
     it(`${name}: AI 임을 숨기지 않는다`, () => {
