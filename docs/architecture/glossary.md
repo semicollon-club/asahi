@@ -1,5 +1,5 @@
 ---
-lastReviewed: 2026-07-28
+lastReviewed: 2026-08-06
 ---
 
 # 용어집 (Glossary)
@@ -55,19 +55,6 @@ lastReviewed: 2026-07-28
 (`docs/decisions/0006-thin-worker.md`)으로 이미 삭제됐다 — SDK 내장 파일/Bash 도구 자체를
 `agent/src/core/agent.ts`의 `builtinTools`가 애초에 열지 않으므로 재검증할 대상이 없다.
 `deployTarget`은 지금은 `runtime_info` 도구가 보고하는 배포 정보로만 의미가 남아 있다.
-
-## `rapportStage`(0/1/2)
-
-`persona.ts`의 `deriveRapportStage(userMessageCount)`가 그 사용자의 누적 user 메시지
-수로 계산하는 친근도 3단계.
-
-- **0**(서먹): 누적 10회 미만.
-- **1**(익숙): 10회 이상.
-- **2**(편함): 50회 이상.
-
-성격·말투의 register(반말/존댓말 등)는 바꾸지 않고, 다정함의 농도만 조절한다
-(`buildRelationshipBlock`). 소유자도 `messages`에 동일하게 집계되므로 예외 없이
-적용된다.
 
 ## turns 예약(reserve)
 

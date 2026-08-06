@@ -1,5 +1,5 @@
 ---
-lastReviewed: 2026-08-02
+lastReviewed: 2026-08-06
 ---
 
 # 능력 계층 모델 (Capability Model)
@@ -59,9 +59,9 @@ Asahi 비서는 대화·모델 호출·기억·세션을 전담하는 **봇** �
 
 | 계층 | 조건 | 워커 | 열리는 도구 |
 | --- | --- | --- | --- |
-| 소유자 DM | `isOwner && isPrivate`(local·cloud 동일) | 그 소유자의 **개인 워커** | `remember`/`recall`(전원) + `character_fact` + `manage_access` + `forget`(공용 기억 삭제) + `db_schema`/`db_query`/`runtime_info` + `WebSearch`. **워커 연결 시**(`workerConnected`) `allow_dir`/`revoke_dir`/`list_dirs` 와 `fs_read`/`fs_write`/`fs_edit`/`fs_glob`/`fs_grep`/`fs_tree`/`sh_exec`/`proc_start`/`proc_stop`/`proc_list`/`proc_logs` 가 함께 추가된다(그 개인 워커의 `allowed_dirs` 전체 — 좁혀지지 않는다) — `deployTarget`(local/cloud)은 더 이상 이 계층의 도구 목록에 영향을 주지 않는다(최종 리뷰 FIX2). `proc_*`(장기 실행 프로세스 관리) 의 한계는 아래 "장기 실행 프로세스의 한계" 절 참고 |
+| 소유자 DM | `isOwner && isPrivate`(local·cloud 동일) | 그 소유자의 **개인 워커** | `remember`/`recall`(전원) + `manage_access` + `forget`(공용 기억 삭제) + `db_schema`/`db_query`/`runtime_info` + `WebSearch`. **워커 연결 시**(`workerConnected`) `allow_dir`/`revoke_dir`/`list_dirs` 와 `fs_read`/`fs_write`/`fs_edit`/`fs_glob`/`fs_grep`/`fs_tree`/`sh_exec`/`proc_start`/`proc_stop`/`proc_list`/`proc_logs` 가 함께 추가된다(그 개인 워커의 `allowed_dirs` 전체 — 좁혀지지 않는다) — `deployTarget`(local/cloud)은 더 이상 이 계층의 도구 목록에 영향을 주지 않는다(최종 리뷰 FIX2). `proc_*`(장기 실행 프로세스 관리) 의 한계는 아래 "장기 실행 프로세스의 한계" 절 참고 |
 | 소유자 서버/스레드 | `isOwner && !isPrivate` | **공유 워커**(동아리 미니PC), 관리자 스코프 | `remember`(공용 기억) + `recall`(공용) + `forget`(공용 기억 삭제) + `runtime_info` + `WebSearch`. **워커 연결 시** `allow_dir`/`revoke_dir`/`list_dirs` 와 `fs_*`/`sh_exec`/`proc_*`(4개) 가 추가된다 — `scopeDirs` 가 소유자는 좁히지 않으므로 손님 폴더를 포함한 그 기계의 `allowed_dirs` 전체에 접근한다(관리자). `proc_list` 도 필터 없이 전원이 보이고 `proc_stop`/`proc_logs` 는 이름을 지정해 남의 프로세스를 다룰 수 있다(아래 "장기 실행 프로세스의 한계" 참고). DB·접근관리(`db_query`/`manage_access`)는 주지 않는다 — 기계가 아니라 봇 자신에 대한 권한이라 공개 채널에서 열 이유가 없다 |
-| 손님 DM | `isPrivate && role in {allowed, owner}`, `isOwner` 는 아님 | **공유 워커**, 본인 폴더로 스코프 | `remember`/`recall`(본인 스코프만) + `character_fact` + `WebSearch`. **워커 연결 시** `fs_*`/`sh_exec`/`proc_*`(4개) 가 추가된다 — `fs_*` 는 `scopeDirs` 가 `<루트>/<디스코드 userId>/` 하위로 좁히지만, **`sh_exec` 는 이 스코프의 대상이 아니다**(아래 "경로 게이팅" 참고). `proc_*` 는 경로가 아니라 이름으로 좁혀진다 — `proc_start` 의 이름·작업폴더, `proc_stop`/`proc_logs` 의 대상 이름, `proc_list` 의 필터가 전부 본인 것으로 강제 주입되고 모델이 준 값은 무시된다(아래 "장기 실행 프로세스의 한계" 참고). dir 관리 도구는 절대 받지 않는다 |
+| 손님 DM | `isPrivate && role in {allowed, owner}`, `isOwner` 는 아님 | **공유 워커**, 본인 폴더로 스코프 | `remember`/`recall`(본인 스코프만) + `WebSearch`. **워커 연결 시** `fs_*`/`sh_exec`/`proc_*`(4개) 가 추가된다 — `fs_*` 는 `scopeDirs` 가 `<루트>/<디스코드 userId>/` 하위로 좁히지만, **`sh_exec` 는 이 스코프의 대상이 아니다**(아래 "경로 게이팅" 참고). `proc_*` 는 경로가 아니라 이름으로 좁혀진다 — `proc_start` 의 이름·작업폴더, `proc_stop`/`proc_logs` 의 대상 이름, `proc_list` 의 필터가 전부 본인 것으로 강제 주입되고 모델이 준 값은 무시된다(아래 "장기 실행 프로세스의 한계" 참고). dir 관리 도구는 절대 받지 않는다 |
 | 손님 서버/스레드 | 그 외(`!isPrivate`, 손님) | **공유 워커**, 본인 폴더로 스코프 | `remember`(공용 기억)/`recall`(공용 스코프만) + `WebSearch`. **워커 연결 시** `fs_*`/`sh_exec`/`proc_*`(4개) 가 추가된다 — 손님 DM 행과 동일하게 `fs_*` 만 자기 폴더로 좁혀지고 `sh_exec` 는 좁혀지지 않으며, `proc_*` 는 이름으로 본인 것에 강제로 좁혀진다. `forget`(공용 기억 삭제)은 받지 않는다 — 보태는 것과 남의 기여를 지우는 것은 같은 권한이 아니다 |
 
 `remember`/`recall`/`forget`(사용자 기억)의 저장 스코프는 **위치**(DM/서버)가 정한다
@@ -71,11 +71,6 @@ Asahi 비서는 대화·모델 호출·기억·세션을 전담하는 **봇** �
 **소유자 전용**이다(위 표의 소유자 두 행에만 있다) — 보태는 것과 남의 기여를 없애는 것은 같은
 권한이 아니라는 것이 이 구분의 근거다. 이전에는 `scope='shared'` 를 쓰는 저장 경로 자체가
 없어, 서버 채널의 `recall`(공용 스코프만 조회)이 구조적으로 항상 빈손이었다.
-
-`character_fact`(캐릭터가 지어낸 자기 설정 고정)는 DM 계열 두 계층(소유자·손님)에만 열린다.
-공개 서버 채널에서는 조작으로 설정을 오염시킬 여지가 크고 얻는 값이 작아 읽기(`recall`)만
-남긴다. `character_fact`(`scope='character'`)는 위 기억 스코프 축과 무관하다 — `remember`/
-`recall`/`forget`이 서버 채널에도 열리게 된 이 변경으로 노출 범위나 조건이 달라지지 않았다.
 
 `WebSearch`(SDK 내장 웹 검색)는 위 표의 네 계층 모두에 열려 있다 — 발화자의 신원(소유자·손님)이나
 대화 위치(DM·서버)와 무관하며, 아래 정기 게시(뉴스 조사) 턴에도 동일하게 열린다(`WEB_TOOLS`,
@@ -201,12 +196,12 @@ Asahi 비서는 대화·모델 호출·기억·세션을 전담하는 **봇** �
 **`remember`에는 이제 같은 자리에 차단 스위치가 있다(Important 4, 최종 전체 브랜치 리뷰 —
 2026-08-02 발견, 같은 날 수정).** `allowedToolsFor`(위 "도구셋 결정" 참고)의 옵션 객체에
 `memoryWriteEnabled`가 추가됐다 — `noRemoteTools`/`noWebTools`/`noSkills`와 나란히 놓이는
-세 번째 축이다. 이 축은 `memories` 테이블에 행을 넣거나 지우는 도구 셋 — `remember`·`forget`·
-`character_fact` — 을 한꺼번에 닫는다(`forget`은 Important 2 리뷰 후속, `character_fact`는
-Important 2 최종 전체 브랜치 리뷰에서 합류했다. 셋 다 같은 이유다: "기억을 쓰면 안 되는 턴"
-이라는 이름의 축이 그중 하나를 열어 두면 이 옵션을 믿는 다음 호출부가 조용히 당한다).
+세 번째 축이다. 이 축은 `memories` 테이블에 행을 넣거나 지우는 도구 둘 — `remember`·`forget`
+— 을 한꺼번에 닫는다(`forget`은 Important 2 리뷰 후속으로 합류했다. 둘 다 같은 이유다: "기억을
+쓰면 안 되는 턴"이라는 이름의 축이 그중 하나를 열어 두면 이 옵션을 믿는 다음 호출부가 조용히
+당한다).
 `DigestRunner.execute`는 `noMemoryWrite:true`를 세워(`agent.ts`의 `resolveMemoryWriteEnabled`가
-뽑아 `memoryWriteEnabled`로 넘긴다) 이 턴에서 그 셋을 빼고 — 손님 서버 계층이라 실제로 있던
+뽑아 `memoryWriteEnabled`로 넘긴다) 이 턴에서 그 둘을 빼고 — 손님 서버 계층이라 실제로 있던
 것은 `remember` 하나뿐이다 — `recall`(공용 기억 읽기)은 그대로 둔다 — 공용 기억은 어차피 전 부원이 읽을 수 있고
 이 턴의 출력도 공개 채널로 가므로 `recall`까지 막으면 얻는 것 없이 기능만 잃는다. 고치기
 전에는 사람이 지켜보지 않는 타이머로 돌면서 신뢰할 수 없는 웹 검색 결과를 읽어들이다 그
@@ -422,30 +417,22 @@ pm2 jlist 가 돌려주는 명령은 이제 회원이 실제로 실행한 값이
 계층이 없어(셸의 토큰 분리는 ASCII 공백·메타문자 기준이고 UTF-8 연속 바이트는 그 무엇과도 겹치지
 않는다) 같은 문제가 애초에 성립하지 않으므로 POSIX 쪽에는 이 제약을 두지 않았다.
 
-## character_fact 전역 스코프와 DM→공개 데이터 흐름
+## character_fact 전역 스코프 — 제거됨(2026-08-05)
 
-`character_fact`(위 능력 계층표)로 저장되는 캐릭터 설정은 `scope='character'` 하나의 전역
-저장소다. `MemoriesRepo.characterFacts`(`agent/src/store/memoriesRepo.ts`)는 `user_id` 로
-거르지 않고, `buildContextBlock`(`agent/src/core/turnPrep.ts`)은 `conv.isPrivate` 값과
-무관하게 매 세션 시작마다 이 전역 목록을 `## 내 설정` 섹션에 그대로 주입한다. 소유자에게 한
-번 확정한 설정이 손님에게도, 공개 서버 채널에서도 똑같아야 캐릭터 일관성이 유지되므로
-의도된 설계다.
+`character_fact` 도구는 이 브랜치에서 캐릭터 페르소나와 함께 삭제됐다 — 위 능력 계층표
+어디에도 없다. 있을 때는 이 코드베이스에서 유일하게 "DM 은 개인, 서버는 공용"이라는
+프라이버시 원칙을 거꾸로 뒤집는 자리였다: `scope='character'`는 `user_id`로 거르지 않는
+단일 전역 저장소였고, `buildContextBlock`(`agent/src/core/turnPrep.ts`)이 대화 위치와
+무관하게 매 세션 시작마다 그 전역 목록을 컨텍스트 블록에 그대로 주입해 — 손님이 자신의 DM
+에서 캐릭터를 유도해 저장시킨 설정이 소유자와의 대화와 공개 서버 채널에도 그대로 나타났다.
 
-다만 이 전역성은 이 코드베이스에서 유일하게 존재하는 **DM→공개 데이터 흐름**이다. 나머지
-전 영역의 프라이버시 원칙은 "DM 은 상대의 개인+공용, 서버/스레드는 공용만"(`recallHandler`,
-위 능력 계층표)인데, `character_fact` 는 이 원칙의 반대쪽 끝에 있다.
-
-- **쓰기**: 소유자 DM 뿐 아니라 손님 DM에서도 쓸 수 있다.
-- **읽기**: 소유자 DM·손님 DM·공개 서버 채널 등 모든 컨텍스트에서 예외 없이 주입된다 —
-  `recall` 처럼 신원·대화 위치별로 걸러지지 않는다.
-- **결과**: 손님이 자신의 DM 에서 캐릭터를 유도해 저장시킨 설정이, 소유자와의 대화와 공개
-  서버 채널에도 그대로 나타난다.
-
-이건 사용자에 대한 사실(`scope='user'`/`shared`)이 아니라 **캐릭터가 연기하는 캐논**이므로
-같은 위험 등급으로 취급하지는 않는다 — 새어나갈 수 있는 건 캐릭터가 지어낸 자기 신상뿐이고,
-제목·본문 길이 상한과 저장 개수 상한(도달 시 저장 자체를 거부)이 오염 폭을 제한한다. 그래도
-"손님이 쓴 내용이 소유자의 비공개 대화에도 노출된다"는 사실 자체는 남으므로, 이 전역 스코프에
-기대는 새 기능을 설계할 때는 이 절을 먼저 참고한다.
+`scope='character'`로 저장된 `memories` 행은 지우지 않고 DB에 그대로 남아 있지만, 이제 모든
+사용자 대면 읽기 경로에서 도달할 수 없다 — `MemoriesRepo`(`agent/src/store/memoriesRepo.ts`)의
+`all()`은 `scope <> 'character'`로 명시적으로 제외하고, `forUser`/`sharedOnly`/`searchForUser`
+는 SQL 조건이 애초에 `'shared'`·`'user'` 스코프만 고르므로 `'character'` 행이 결과에 섞일 수
+없다. 남는 유일한 읽기 경로는 소유자 DM의 `db_query`뿐이다 — 임의 SELECT를 그대로 실행하는
+읽기전용 SQL 도구일 뿐, 이 스코프를 알고 다루는 애플리케이션 코드가 아니다. 이 행을 DB에서
+마주치면 이 문단이 이유다 — 정리하려면 소유자가 `db_query`로 직접 지운다.
 
 ## 신원 vs 역할 게이팅
 
