@@ -135,6 +135,44 @@ turn 체인에 들어간 `runConversationTurn(convId, userId, role, text, messag
 `docs/architecture/overview.md` "원격 도구 호출" 절, `docs/security/capability-model.md`를
 참고한다.
 
+### 프롬프트 조립 — 화자 표기(Task 1~3)
+
+프롬프트 문자열은 `speakerLabel(displayName)`(`agent/src/core/speaker.ts`)이 만든 화자
+라벨(이름이 없으면 `사용자`, 있으면 `사용자(이름)`)을 앞에 붙여 `${화자} 메시지: ${text}`
+형태로 조립된다. 2026-08-06 서버 스레드에서 소유자와 부원이 번갈아 말하는 동안, 봇이
+부원에게 한 거절을 곧바로 이어진 소유자 차례에도 그대로 반복한 사고가 있었다. 그 네 발화가
+전부 한 세션 안이었던 탓에 화자 이름이 실리는 컨텍스트 블록이 한 번도 다시 조립되지 않았고,
+모델은 화자가 바뀐 것을 알 방법이 없었다. 그래서 이 라벨은 프롬프트가 조립되는 **세 지점**
+모두에 실려야 한다 — 하나라도 빠지면 그 경로에서만 증상이 되살아난다.
+
+1. 열린 세션을 이어받는 경우(`resume`) — 사용자 원문에만 화자를 붙인다(`core.ts:498`).
+2. 새 세션을 여는 경우 — `buildContextBlock`(`agent/src/core/turnPrep.ts`)이 만든 기억·요약·
+   최근 대화 블록 뒤에 같은 형식을 붙인다(`core.ts:502`). 그 블록이 되짚는 과거 사용자
+   발화 각각에도 같은 `speakerLabel`이 붙는다 — 두 조립기가 라벨 조합을 따로 하면 한쪽만
+   고치는 드리프트가 나므로, 정제·조합은 `speaker.ts` 하나가 맡는다.
+3. `resume` 세션을 SDK가 찾지 못해 새 세션으로 재시도하는 경우 — 컨텍스트 블록을 다시
+   조립해 같은 형식을 붙인다(`core.ts:621`).
+
+화자 이름은 코어가 직접 조회하지 않고 `ConversationHint.displayName`(`agent/src/events/
+bus.ts`)으로 실려 온다. 어댑터(`discord.ts`)가 그 턴의 참가자를 upsert할 때 쓴 것과 같은
+이름을 힌트에 그대로 얹으므로, 코어가 매 턴 `users` 테이블을 따로 조회할 필요가 없다. 부팅
+시 재개되는 경로(`recoverPending`, `core.ts:662`)는 이 힌트 없이 `runConversationTurn`을
+직접 다시 호출하므로(위 "크래시 복구 불변식" 참고) `displayName`이 주어지지 않고, 그 턴은
+이름 없는 `사용자`로 나간다 — 크래시 복구는 과거 메시지 재생이라 힌트가 남아 있지 않은 데서
+오는 의도된 동작이다.
+
+### 도구 등록 — 그 턴에 허용된 것만(Task 4)
+
+`makeRunAgentTurn`(`agent/src/core/agent.ts`)은 `allowedToolsFor`로 이번 턴의 허용 도구
+목록을 정한 **뒤에** `buildTools(ctx, allowedTools)`(`agent/src/core/tools.ts`)를 불러 MCP
+서버를 만든다. `buildTools`는 내부의 `allowedToolDefinitions(ctx, allowed)`로 그 목록에
+없는 도구의 정의 자체를 걸러내므로, 이번 턴에 쓸 수 없는 도구(예: 손님 턴의 `runtime_info`)는
+모델에게 이름도 설명도 보이지 않는다. 예전에는 서버 생성이 이 계산보다 앞에 있어 도구 정의를
+항상 전부 등록하고 차단은 SDK 사전승인 목록(`allowedTools`)에서만 걸었다 — 그러면 모델이 쓸
+수 없는 도구를 보고 부른 뒤 SDK가 만든 영문 거부를 받았고, 그 문자열에는 이유가 없어 모델이
+그럴듯한 한국어 사유를 지어냈다(2026-08-06, "이 채널에서는 안 된다"는 없는 규칙을 만들어낸
+사고).
+
 턴 처리가 끝나면(성공·실패·예외 모두) **`finally`에서 `messages.markProcessed(messageId)`를
 호출**해 그 사용자 메시지를 `processed=true`로 닫는다.
 

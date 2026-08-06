@@ -582,3 +582,16 @@ describe("buildSystemPrompt — 캐릭터 제거 후 남아야 할 것", () => {
     });
   }
 });
+
+// Task 5 — persona.ts 의 "## 사실성" 절 끝에 더한 보조 지침(상태·버전·목록처럼 시간에 따라
+// 변하는 값은 다시 조회하라)이 네 신원 분기 모두에서 빠짐없이 실리는지 고정한다. IDENTITY 는
+// ctx 로 갈리지 않는 상수라 네 분기 전부 동일하게 나와야 정상이다 — 이 지침은 보조일 뿐,
+// 화자 표기(speaker.ts)와 턴별 도구 등록(tools.ts 의 allowedToolDefinitions)이 하는 구조적
+// 수정을 대신하지 않는다.
+describe("buildSystemPrompt — 시간에 따라 변하는 값은 다시 조회하라는 지침(Task 5)", () => {
+  for (const { name, ctx } of ALL_IDENTITIES) {
+    it(`${name}: 시간에 따라 변하는 것은 다시 조회하라는 지침이 있다`, () => {
+      expect(buildSystemPrompt(ctx)).toContain("새로 조회한다");
+    });
+  }
+});
