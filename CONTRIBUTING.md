@@ -1,5 +1,5 @@
 ---
-lastReviewed: 2026-07-28
+lastReviewed: 2026-08-06
 ---
 
 # 기여 가이드 (CONTRIBUTING)
@@ -102,7 +102,7 @@ npm start       # node dist/index.js
 - `overview.md` — 3-프로세스(Railway 봇 / 로컬 워커 / Supabase Postgres) 토폴로지, 위임 규칙
 - `data-flow.md` — 메시지 → 저장 → 응답 경로
 - `module-boundaries.md` — 디렉토리별 책임과 허용 의존 방향
-- `glossary.md` — `deployTarget`, `rapportStage` 같은 코드 안 용어 정의
+- `glossary.md` — `deployTarget`, `allowedDirs` 같은 코드 안 용어 정의
 
 ## 설계 문서 히스토리
 

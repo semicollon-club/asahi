@@ -8,10 +8,11 @@ import type { ConversationsRepo } from "../src/store/conversationsRepo.js";
 // FIX2(중요, 머지 전 리뷰) — 정기 게시 채널(DIGEST_CONTEST_CHANNEL_ID 등)이 잘못된 ID 이거나
 // 봇에게 채널을 볼 권한이 없으면, 지금까지는 "매 조사 성공 뒤 전송이 조용히 실패"로만 드러났다
 // (discord.ts 의 send() 는 실패를 로그 한 줄로만 남긴다). 사용자는 리다이렉트 안내("...에
-// 올릴게")를 받고 기다리다가 그냥 아무것도 못 받는다. 부팅 시 한 번 그 채널에 실제로 접근할 수
+// 올리겠습니다")를 받고 기다리다가 그냥 아무것도 못 받는다. 부팅 시 한 번 그 채널에 실제로 접근할 수
 // 있는지 확인해 이름과 ID 를 콕 집어 경고하도록 DiscordAdapter.canReachChannel 을 추가한다 —
-// 실 디스코드 연결 없이 client 만 가짜로 갈아끼워 검증한다(expressionSend.test.ts 의 makeAdapter
-// 와 같은 패턴).
+// 실 디스코드 연결 없이 client 만 가짜로 갈아끼워 검증한다(discordSend.test.ts 의 makeAdapter
+// 와 같은 패턴 — 원래 이 주석이 가리키던 expressionSend.test.ts 는 표정 이미지 기능과 함께
+// 2026-08-05 에 삭제됐고, 그 패턴은 discordSend.test.ts 로 옮겨졌다).
 
 type TestableAdapter = { client: unknown; canReachChannel(channelId: string): Promise<boolean> };
 

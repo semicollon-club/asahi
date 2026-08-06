@@ -485,24 +485,6 @@ describe("AgentCore — 멀티유저/멀티대화", () => {
   });
 });
 
-describe("AgentCore — 친근도(rapportStage) 주입", () => {
-  it("누적 user 메시지가 적으면 소유자 프롬프트에 '서먹', 10개 이상이면 '익숙' 문구가 담긴다", async () => {
-    const t = await setup();
-    // 첫 대화: 이번 메시지 1개만 카운트 → stage 0(서먹)
-    pub(t.bus, dmHint("owner", "owner"), "안녕", 1);
-    await t.core.drain();
-    expect(t.calls[0].systemPrompt).toMatch(/서먹/);
-
-    // owner user 메시지를 9개 추가로 심어 다음 턴의 카운트를 10으로 만든다(9 + 이번 1 = 10)
-    for (let i = 0; i < 9; i++) {
-      await t.repos.messages.insert({ conversationId: 1, ts: 10 + i, role: "user", userId: "owner", content: `m${i}` });
-    }
-    pub(t.bus, dmHint("owner", "owner"), "또 안녕", 100);
-    await t.core.drain();
-    expect(t.calls[1].systemPrompt).toMatch(/익숙/);
-  });
-});
-
 // FIX3(중요, 최종 리뷰) — 능력 안내(persona.ts)는 이제 deployTarget 이 아니라 "이번 턴에 워커가
 // 실제로 연결돼 있는가"로 갈린다. core.ts 는 이 판정을 agent.ts 의 shouldConnectWorker 로 직접
 // 계산해(makeRunAgentTurn 이 도구셋을 계산할 때 쓰는 것과 동일한 함수) systemPrompt 에 싣는다 —
@@ -658,19 +640,15 @@ describe("AgentCore — 요약 턴은 기억 쓰기 축을 닫는다(Important 2
     expect(tools).not.toContain("mcp__asahi__fs_read");
   });
 
-  // Important 2(최종 전체 브랜치 리뷰) — 위 테스트는 스레드(공개 채널) 계층이라 애초에
-  // character_fact 가 없는 분기였다. 이 축이 실제로 열려 있던 자리는 DM 이다: 손님 DM 이
-  // 유휴 스윕으로 닫힐 때 도는 요약 턴의 도구셋이 [recall, character_fact] 였다(실측).
-  // character_fact 는 scope='character' 인 memories 행을 넣고, 그 행은 유저·대화 스코프가
-  // 없어 소유자 방을 포함한 모든 방의 컨텍스트 블록에 실린다 — 손님 DM 에 심긴 인젝션 한 줄이
-  // 아무도 보지 않는 타이머 위에서 전역 canon 을 만든다. noMemoryWrite 가 막으라고 만들어진
-  // 위협 모델 그 자체다.
-  it("손님 DM 의 유휴 요약 턴은 character_fact 도 받지 못한다 — 전역 캐릭터 설정을 심을 수 없다", async () => {
+  // 위 테스트는 스레드(공개 채널) 계층이라 forget 이 열려 있는 자리를 본다. DM 쪽도 같은 축이
+  // 닫혀야 한다 — 손님 DM 이 유휴 스윕으로 닫힐 때 도는 요약 턴은 사람이 지켜보지 않는 타이머
+  // 위에서 손님이 쓴 텍스트가 담긴 세션을 그대로 이어받는다.
+  it("손님 DM 의 유휴 요약 턴도 remember 를 받지 못한다 — 아무도 보지 않는 턴이 기억을 쓰지 못한다", async () => {
     const t = await setup();
     pub(t.bus, dmHint("guest", "allowed"), "안녕", t.now());
     await t.core.drain();
-    // 평상시 손님 DM 은 character_fact 를 그대로 받는다(회귀 가드 — 이 수정이 닫는 것은 요약 턴뿐).
-    expect(await toolsForTurn(t.calls[0])).toContain("mcp__asahi__character_fact");
+    // 평상시 손님 DM 은 remember 를 그대로 받는다(회귀 가드 — 이 축이 닫는 것은 요약 턴뿐).
+    expect(await toolsForTurn(t.calls[0])).toContain("mcp__asahi__remember");
 
     t.setClock(1_000_000 + 31 * 60 * 1000);
     await t.core.closeIdleConversations();
@@ -679,7 +657,7 @@ describe("AgentCore — 요약 턴은 기억 쓰기 축을 닫는다(Important 2
     const summaryCall = t.calls[t.calls.length - 1];
     expect(summaryCall.context).toMatchObject({ isPrivate: true, isOwner: false });
     const tools = await toolsForTurn(summaryCall);
-    expect(tools).not.toContain("mcp__asahi__character_fact");
+    expect(tools).not.toContain("mcp__asahi__remember");
     expect(tools).toContain("mcp__asahi__recall");
   });
 
@@ -718,12 +696,15 @@ describe("AgentCore — DM 세션 예약어(/새세션·/기억정리)", () => {
     const notices = t.published.filter((p) => p.type === "assistant_message");
     // 문구가 바뀌었다 — 세션이 "새로 시작"됐다는 것만으론 대화가 끊기는지 알 수 없다.
     // 이제는 이전 대화를 안 가져간다는 것을 명시한다(Task 3).
-    expect(notices.some((n) => /안 가져갈게/.test((n as { text: string }).text))).toBe(true);
+    expect(notices.some((n) => /가져가지 않을게요/.test((n as { text: string }).text))).toBe(true);
+    // 리뷰 후속 — 두 절 다 의미가 있다(core.ts 의 resetSession, "무엇이 빠지고 무엇이 남는지
+    // 둘 다 말한다" 주석 참고). 이 명령을 치는 사람의 진짜 걱정은 "기억까지 날아가나"이므로,
+    // 앞절만 확인하면 뒷절이 조용히 빠져도 이 테스트가 못 잡는다.
+    expect(notices.some((n) => /그대로 있습니다/.test((n as { text: string }).text))).toBe(true);
   });
 
-  it("/새세션 은 바닥선을 긋고 캐릭터 설정을 지우되 기억은 남긴다", async () => {
+  it("/새세션 은 바닥선을 긋되 기억은 남긴다", async () => {
     const t = await setup();
-    await t.repos.memories.insert({ userId: "owner", scope: "character", title: "학년", content: "2학년" });
     await t.repos.memories.insert({ userId: "owner", scope: "shared", title: "회비", content: "2만원" });
     await t.repos.memories.insert({ userId: "owner", scope: "user", title: "개인", content: "내 메모" });
     pub(t.bus, dmHint("owner", "owner"), "안녕", 1);
@@ -735,28 +716,10 @@ describe("AgentCore — DM 세션 예약어(/새세션·/기억정리)", () => {
     const after = await t.repos.conversations.getByChannelId("dm-owner");
     expect(after?.sessionId).toBeNull();
     expect(after?.contextFloorTs).not.toBeNull();
-    expect(await t.repos.memories.characterFacts(40)).toEqual([]);
-    // 여기가 핵심 — 삭제 범위가 새면 동아리 공용 기억이 복구 불가능하게 사라진다.
+    // 동아리 공용 기억은 주제를 갈아탄다고 잊을 일이 아니다.
     expect((await t.repos.memories.sharedOnly()).map((m) => m.title)).toEqual(["회비"]);
     expect((await t.repos.memories.forUser("owner")).map((m) => m.title).sort()).toEqual(["개인", "회비"]);
-    expect(t.calls).toHaveLength(1); // 예약어는 LLM 턴 없이 끝난다(회귀 방지)
-  });
-
-  // Minor 4(최종 전체 브랜치 리뷰) — 확인 문구가 "지어낸 설정 N개도 지웠어"라고만 해서, 그
-  // 삭제가 이 방이 아니라 모든 방에 걸린다는 사실을 아무도 알 수 없었다. 손님이 자기 DM 에서
-  // 치면 소유자 방의 캐릭터 canon 이 함께 사라지는데 그 사실이 어디에도 안 나간다.
-  it("/새세션 확인 문구가 캐릭터 설정 삭제의 범위(모든 방)를 밝힌다", async () => {
-    const t = await setup();
-    await t.repos.memories.insert({ userId: "guest", scope: "character", title: "학년", content: "2학년" });
-    pub(t.bus, dmHint("guest", "allowed"), "안녕", 1);
-    await t.core.drain();
-
-    pub(t.bus, dmHint("guest", "allowed"), "/새세션", 2);
-    await t.core.drain();
-
-    const notices = t.published.filter((p) => p.type === "assistant_message").map((p) => (p as { text: string }).text);
-    const confirm = notices.find((n) => /안 가져갈게/.test(n))!;
-    expect(confirm).toMatch(/모든 방/);
+    expect(t.calls).toHaveLength(1);
   });
 
   it("/기억정리 는 요약을 남기고 세션·바닥선을 설정한다", async () => {
@@ -837,19 +800,6 @@ describe("AgentCore — DM 세션 예약어(/새세션·/기억정리)", () => {
     expect(notices).toHaveLength(1);
   });
 
-  it("/기억정리 는 캐릭터 설정을 지우지 않는다 — 그건 /새세션 의 몫이다", async () => {
-    // 두 명령의 차이가 문구에만 있고 동작에 없으면, 정리하려던 사람이 신상까지 잃는다.
-    const t = await setup();
-    await t.repos.memories.insert({ userId: "owner", scope: "character", title: "학년", content: "2학년" });
-    pub(t.bus, dmHint("owner", "owner"), "안녕", 1);
-    await t.core.drain();
-
-    pub(t.bus, dmHint("owner", "owner"), "/기억정리", 2);
-    await t.core.drain();
-
-    expect((await t.repos.memories.characterFacts(40)).map((m) => m.title)).toEqual(["학년"]);
-  });
-
   // 리뷰 재현(Important 1) — /기억정리 는 ingest 체인에서 곧바로 돌지만 대화 턴은 turn 체인에서
   // 돈다. 진행 중이던 턴이 끝나면서 setSession(result.sessionId) 을 쓰면, 그 직전에 정리가 그어
   // 놓은 바닥선만 남고 세션은 되살아난다 — 다음 턴이 정리되지 않은 세션을 이어받는데 DB 기록은
@@ -884,17 +834,16 @@ describe("AgentCore — DM 세션 예약어(/새세션·/기억정리)", () => {
     expect(after.contextFloorTs).toBe(1_000_000);
     expect(await t.repos.summaries.recent(after.id, 3)).toHaveLength(1);
     const notices = t.published.filter((p) => p.type === "assistant_message").map((p) => (p as { text: string }).text);
-    expect(notices.some((n) => /정리했어/.test(n))).toBe(true);
+    expect(notices.some((n) => /정리했습니다/.test(n))).toBe(true);
   });
 
   // 같은 경합의 /새세션 쪽 — /기억정리 만 고치고 이쪽을 두면, 답이 생성되는 도중에 /새세션 을
   // 친 사람(사용자가 실제로 겪은 순서다)은 이 명령의 두 가지 일이 함께 깨지는 것을 본다:
-  // 진행 중이던 턴이 뒤늦게 setSession(result.sessionId) 을 써서 세션이 되살아나므로 페르소나가
-  // 다시 적용되지 않고, 모델은 이전 대화를 자기 컨텍스트에 그대로 쥔 채로 바닥선만 DB 기록을
-  // 가린다. 확인 문구("안 가져갈게")는 이미 나간 뒤다.
+  // 진행 중이던 턴이 뒤늦게 setSession(result.sessionId) 을 써서 세션이 되살아나므로 시스템
+  // 프롬프트가 다시 적용되지 않고, 모델은 이전 대화를 자기 컨텍스트에 그대로 쥔 채로 바닥선만
+  // DB 기록을 가린다. 확인 문구("가져가지 않을게요")는 이미 나간 뒤다.
   it("진행 중이던 대화 턴이 /새세션 이 끊은 세션을 되살리지 못한다", async () => {
     const t = await setup({ mode: "manual" });
-    await t.repos.memories.insert({ userId: "owner", scope: "character", title: "학년", content: "2학년" });
     pub(t.bus, dmHint("owner", "owner"), "안녕", 1);
     await flush();
     t.resolvers[0]!(); // 첫 턴 완료 → 세션 s1 확정
@@ -915,10 +864,11 @@ describe("AgentCore — DM 세션 예약어(/새세션·/기억정리)", () => {
     const after = (await t.repos.conversations.getByChannelId("dm-owner"))!;
     expect(after.sessionId).toBeNull();
     expect(after.contextFloorTs).toBe(1_000_000);
-    expect(await t.repos.memories.characterFacts(40)).toEqual([]);
     expect(t.calls).toHaveLength(2); // /새세션 은 여전히 LLM 턴을 쓰지 않는다
     const notices = t.published.filter((p) => p.type === "assistant_message").map((p) => (p as { text: string }).text);
-    expect(notices.some((n) => /안 가져갈게/.test(n))).toBe(true);
+    expect(notices.some((n) => /가져가지 않을게요/.test(n))).toBe(true);
+    // 위 테스트(예약어를 받으면 …)와 같은 이유로 뒷절(기억은 남는다)도 확인한다.
+    expect(notices.some((n) => /그대로 있습니다/.test(n))).toBe(true);
   });
 
   // Important 1(리뷰 후속) — turn 체인 직렬화 위에 한 겹 더. 요약 턴이 도는 동안 다른 경로가
@@ -950,7 +900,7 @@ describe("AgentCore — DM 세션 예약어(/새세션·/기억정리)", () => {
     expect(await t.repos.summaries.recent(after.id, 3)).toHaveLength(1);
     const notices = t.published.filter((p) => p.type === "assistant_message").map((p) => (p as { text: string }).text);
     const guard = notices.find((n) => /정리하는 사이에/.test(n))!;
-    expect(notices.some((n) => /정리했어/.test(n))).toBe(false);
+    expect(notices.some((n) => /정리했습니다/.test(n))).toBe(false);
 
     // Minor 5(최종 전체 브랜치 리뷰) — 문구는 이 가드가 실제로 판정한 것만 말해야 한다.
     // (가) 판정 근거는 "세션이 요약하던 그것이 아니게 됐다" 하나다. 들어온 메시지일 수도
@@ -1646,6 +1596,23 @@ describe("AgentCore — 조사 결과는 주제의 지정 채널로 간다", () 
     const notice = t.published.find((e) => e.type === "assistant_message");
     expect(notice?.channelRef).toBe("thread-1");        // 안내는 명령을 친 곳에
     expect(notice?.text).toContain("news-대회");         // 어디에 올리는지 링크로 알린다
+  });
+
+  // Important 3(최종 전체 브랜치 리뷰) — 이 안내는 조사 결과보다 먼저 사용자에게 도착하는
+  // 사용자 대면 문자열인데 반말로 남아 있었다. deploy/smoke-test.md 의 정기 게시 항목이
+  // /개발뉴스 에 존댓말을 기대하므로, 조사가 돌기도 전에 이 줄에서 어긋났다.
+  it("리다이렉트 안내가 존댓말이다(Important 3)", async () => {
+    const digest = { run: async () => ({ started: true }) };
+    const t = await setup({ config: { digestChannels: { contest: "news-대회" } }, digest } as any);
+
+    pub(t.bus, threadHint("owner", "thread-1", "owner", "o1"), "/대회", 1);
+    await t.core.drain();
+
+    const text = (t.published.find((e) => e.type === "assistant_message") as { text: string }).text;
+    expect(text).not.toContain("올릴게");
+    expect(text).not.toContain("잠깐만.");
+    expect(text).toContain("올리겠습니다");
+    expect(text).toContain("잠시만 기다려 주세요");
   });
 
   it("일반 채널에서 불러도 마찬가지다", async () => {

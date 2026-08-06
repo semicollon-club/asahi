@@ -1,5 +1,5 @@
 ---
-lastReviewed: 2026-07-28
+lastReviewed: 2026-08-06
 ---
 
 # 메시지 데이터 흐름 (수명주기)
@@ -137,6 +137,14 @@ turn 체인에 들어간 `runConversationTurn(convId, userId, role, text, messag
 
 턴 처리가 끝나면(성공·실패·예외 모두) **`finally`에서 `messages.markProcessed(messageId)`를
 호출**해 그 사용자 메시지를 `processed=true`로 닫는다.
+
+`assistant_message`를 받은 뒤 실제로 내보내는 순서는 어댑터의 몫이다
+(`agent/src/adapters/discord.ts`) — 채널별로 `sendChains`를 직렬화하는 `enqueueSendAfter`가
+등록된 호출 순서(= 이벤트가 publish된 순서)대로 나가는 것을 보장한다. 이 순서 보장은 원래
+표정 마커(`[표정:이름]`)를 이미지로 바꿔 붙이는 단계(`resolveExpression`)와 같은 메서드 안에
+있었지만, 순서를 지켜야 하는 이유 자체는 표정과 무관했다 — 같은 채널에 빠르게 이어진 두
+응답이 등록 순서와 다르게 나가면 안 된다는 요구가 근거였다. 2026-08-05 표정 이미지 기능
+제거로 마커 해석 단계는 사라졌고, 채널별 직렬화 구조와 순서 보장만 그대로 남았다.
 
 ## 크래시 복구 불변식
 

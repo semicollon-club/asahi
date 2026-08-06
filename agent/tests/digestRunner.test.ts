@@ -314,6 +314,21 @@ describe("DigestRunner — 일일 재시도 상한(FIX2, 최종 리뷰 3차)", (
     expect((contestNotices[0] as any).text).not.toContain("오늘의 소식");
   });
 
+  // Important 3(최종 전체 브랜치 리뷰) — 이 안내는 채널에 그대로 게시되는 사용자 대면 문자열인데
+  // 반말이었고, 앞머리의 "…"는 이 브랜치가 다른 곳에서 걷어낸 캐릭터 말버릇이었다.
+  it("실패 안내는 담백한 존댓말이고 말줄임 말버릇으로 시작하지 않는다", async () => {
+    const { runner, sent } = await make({ result: { text: "", ok: false } });
+
+    await runner.checkAndRun();
+
+    const text = (sent[0] as any).text as string;
+    expect(text.startsWith("…")).toBe(false);
+    expect(text).not.toContain("못 찾았어");
+    expect(text).not.toContain("다시 볼게");
+    expect(text).toMatch(/찾지 못했습니다/);
+    expect(text).toMatch(/다시 보겠습니다/);
+  });
+
   it("실패해도 lastRun 은 기록하지 않는다(회귀 유지 — 다음날 재시도)", async () => {
     const { runner, settings } = await make({ result: { text: "", ok: false } });
 

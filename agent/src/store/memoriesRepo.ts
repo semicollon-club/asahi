@@ -1,5 +1,6 @@
 import type { Db } from "./db.js";
 
+// 'character' 는 2026-08-05 에 쓰기 경로가 사라졌지만 기존 행이 DB 에 남아 있어 타입에는 둔다.
 export type MemoryScope = "user" | "shared" | "character";
 export type Memory = { id: number; userId: string; scope: MemoryScope; title: string; content: string };
 type Row = { id: number | string; user_id: string; scope: MemoryScope; title: string; content: string };
@@ -31,21 +32,11 @@ export class MemoriesRepo {
     return (r.rows as Row[]).map(toMemory);
   }
 
-  // 소유자 recall 풀. scope='character'(지어낸 캐릭터 설정)는 제외한다 —
-  // 픽션이 실제 기억 조회 결과에 섞이면 "작업 사실은 지어내지 않는다"는 경계가 무너진다.
+  // 소유자 recall 풀. scope='character'(옛 캐릭터 설정)는 제외한다 — 그 시절 지어낸 픽션이
+  // 실제 기억 조회 결과에 섞이면 "작업 사실은 지어내지 않는다"는 경계가 무너진다. 쓰기 경로는
+  // 사라졌지만 기존 행이 DB 에 남아 있으므로 이 필터는 계속 필요하다.
   async all(): Promise<Memory[]> {
     const r = await this.db.query("SELECT id, user_id, scope, title, content FROM memories WHERE scope <> 'character' ORDER BY id");
-    return (r.rows as Row[]).map(toMemory);
-  }
-
-  // 캐릭터가 대화 중 지어내 확정한 자기 설정(픽션). 유저 스코프가 아니라 캐릭터 전역이다 —
-  // 소유자에게 한 말이 손님에게도 동일해야 하므로 user_id 로 거르지 않는다.
-  // id ASC: 먼저 말한 설정이 먼저 온다. 상한에 걸려 잘려도 초기 canon 이 안정적으로 남는다.
-  async characterFacts(limit: number): Promise<Memory[]> {
-    const r = await this.db.query(
-      "SELECT id, user_id, scope, title, content FROM memories WHERE scope = 'character' ORDER BY id LIMIT $1",
-      [Math.max(0, limit)],
-    );
     return (r.rows as Row[]).map(toMemory);
   }
 
@@ -71,14 +62,5 @@ export class MemoriesRepo {
 
   async delete(id: number): Promise<void> {
     await this.db.query("DELETE FROM memories WHERE id = $1", [id]);
-  }
-
-  // /새세션 이 캐릭터 설정(즉흥으로 지어낸 자기 신상)을 비울 때 쓴다. 전역이다 — 캐릭터 설정은
-  // user_id·conversation_id 로 스코프되지 않으므로(characterFacts 참고) 방별로 가릴 수가 없다.
-  // scope 가 정확히 'character' 인 것만 지운다: user·shared 는 동아리 지식과 개인 기억이라
-  // 여기서 범위가 새면 복구할 방법이 없다.
-  async deleteCharacterFacts(): Promise<number> {
-    const r = await this.db.query("DELETE FROM memories WHERE scope = 'character'");
-    return r.rowCount ?? 0;
   }
 }

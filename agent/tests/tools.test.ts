@@ -11,10 +11,8 @@ import {
   rememberHandler, recallHandler, forgetHandler, manageAccessHandler,
   allowDirHandler, revokeDirHandler, listDirsHandler,
   dbSchemaHandler, dbQueryHandler, runtimeInfoHandler,
-  characterFactHandler, CHARACTER_FACT_MAX_LEN, CHARACTER_FACT_TITLE_MAX_LEN,
   allowedToolsFor, buildToolDefinitions, type ToolCtx,
 } from "../src/core/tools.js";
-import { CHARACTER_FACT_LIMIT } from "../src/core/turnPrep.js";
 import { SHARED_MEMORY_MAX_LEN, SHARED_MEMORY_TITLE_MAX_LEN } from "../src/core/memoryScope.js";
 
 // remote 는 부분만 받아 나머지를 기본값으로 채운다. 이 파일의 테스트가 지정하는 건 roots·call·
@@ -99,7 +97,7 @@ describe("remember — 위치가 스코프를 정한다", () => {
 
   // Important 1(최종 전체 브랜치 리뷰) — 4000자 상한 검사가 content 에만 걸려 title 에는
   // 상한이 아예 없었다. title 은 recall·turnPrep 양쪽에 실리므로 모든 서버 턴 프롬프트에
-  // 영구히 얹힌다 — character_fact(같은 파일)가 title·content 둘 다 자르는 것과 대조된다.
+  // 영구히 얹힌다.
   it("공용 기억 제목이 상한을 넘으면 저장하지 않고 길이와 상한을 함께 말한다(자르지 않고 거절)", async () => {
     const c = await ctx({ userId: "u1", isPrivate: false, isOwner: false });
     const longTitle = "가".repeat(SHARED_MEMORY_TITLE_MAX_LEN + 1);
@@ -582,9 +580,9 @@ describe("allowedToolsFor — 능력 계층(§7.1)", () => {
 
   // Task 3(웹 검색 개방)로 WebSearch 가 모든 계층에 추가돼 이 계층의 정확 배열도 갱신했다 —
   // 다른 항목은 그대로고 WebSearch 만 늘었다.
-  it("손님 DM 은 remember/recall/character_fact 와 WebSearch 만(파일·manage_access·Bash·dir 도구 없음)", () => {
+  it("손님 DM 은 remember/recall 과 WebSearch 만(파일·manage_access·Bash·dir 도구 없음)", () => {
     const tools = allowedToolsFor("allowed", true, false);
-    expect(tools).toEqual(["mcp__asahi__remember", "mcp__asahi__recall", "mcp__asahi__character_fact", "WebSearch"]);
+    expect(tools).toEqual(["mcp__asahi__remember", "mcp__asahi__recall", "WebSearch"]);
     expect(tools).not.toContain("Read");
     expect(tools).not.toContain("Bash");
     expect(tools).not.toContain("mcp__asahi__manage_access");
@@ -627,12 +625,11 @@ describe("allowedToolsFor — 능력 계층(§7.1)", () => {
   // 테스트가 FIX2 의 핵심(워커만 연결되면 cloud 에서도 dir 관리 도구가 열린다)을 직접 확인한다.
   // Task 3(공용 기억 삭제): forget 이 이 계층(소유자 DM)에 추가됐다 — manage_access 옆에 둔
   // 이유는 같다: 이것도 소유자만 하는 관리 작업이다. 정확 배열 단정이라 실제로 갱신해야 했다.
-  it("deployTarget='cloud' + 소유자 DM + 워커 미연결이면 PC 도구(파일·Bash·dir 관리)를 빼고 remember/recall/character_fact/manage_access/forget/db_schema/db_query/runtime_info/WebSearch 만 남는다", () => {
+  it("deployTarget='cloud' + 소유자 DM + 워커 미연결이면 PC 도구(파일·Bash·dir 관리)를 빼고 remember/recall/manage_access/forget/db_schema/db_query/runtime_info/WebSearch 만 남는다", () => {
     const tools = allowedToolsFor("owner", true, true, "cloud");
     expect(tools).toEqual([
       "mcp__asahi__remember",
       "mcp__asahi__recall",
-      "mcp__asahi__character_fact",
       "mcp__asahi__manage_access",
       "mcp__asahi__forget",
       "mcp__asahi__db_schema",
@@ -672,7 +669,7 @@ describe("allowedToolsFor — 능력 계층(§7.1)", () => {
   });
 
   it("deployTarget='cloud' 라도 손님 DM·서버는 로컬과 동일(영향 없음)", () => {
-    expect(allowedToolsFor("allowed", true, false, "cloud")).toEqual(["mcp__asahi__remember", "mcp__asahi__recall", "mcp__asahi__character_fact", "WebSearch"]);
+    expect(allowedToolsFor("allowed", true, false, "cloud")).toEqual(["mcp__asahi__remember", "mcp__asahi__recall", "WebSearch"]);
     expect(allowedToolsFor("owner", false, false, "cloud")).toEqual(["mcp__asahi__remember", "mcp__asahi__recall", "WebSearch"]);
     expect(allowedToolsFor("allowed", false, false, "cloud")).toEqual(["mcp__asahi__remember", "mcp__asahi__recall", "WebSearch"]);
   });
@@ -686,12 +683,6 @@ describe("allowedToolsFor — 서버에서도 기억을 저장할 수 있다", (
   it("손님 서버 채널에도 remember 가 열린다", () => {
     // 동아리 지식이 소유자 한 사람 손으로만 쌓이지 않게 한다(스펙 §2.1).
     expect(allowedToolsFor("allowed", false, false)).toContain("mcp__asahi__remember");
-  });
-
-  it("character_fact 는 여전히 DM 전용이다", () => {
-    // 지어낸 캐릭터 신상은 이 계획의 대상이 아니다.
-    expect(allowedToolsFor("allowed", false, false)).not.toContain("mcp__asahi__character_fact");
-    expect(allowedToolsFor("owner", false, true)).not.toContain("mcp__asahi__character_fact");
   });
 });
 
@@ -726,29 +717,15 @@ describe("allowedToolsFor — memoryWriteEnabled 로 remember 만 막고 recall 
     expect(tools.sort()).toEqual(["WebSearch", "mcp__asahi__recall"]);
   });
 
-  // Important 2(최종 전체 브랜치 리뷰) — 이 테스트는 원래 정반대를 고정하고 있었다
-  // ("memoryWriteEnabled 는 character_fact 를 건드리지 않는다"). 그 판단이 틀렸다:
-  // character_fact 는 scope='character' 인 memories 행을 넣는 도구이고, 그 행은 전역이라
-  // 소유자 방을 포함한 모든 방의 컨텍스트 블록에 실린다. "이 턴은 기억을 쓰면 안 된다"는
-  // 이름의 축이 기억 테이블에 행을 넣는 도구를 열어 두면 다음 호출부가 그 이름을 믿고 당한다 —
-  // forget 을 이 축에 묶은 것과 똑같은 이유다.
-  //
-  // 실제로 닿는 경로: 손님 DM 이 유휴 스윕으로 닫힐 때 writeSummary 가 noMemoryWrite:true 로
-  // 도는데, 그 턴의 도구셋은 [recall, character_fact] 였다(실측). 그 세션에 인젝션이 심겨
-  // 있으면 지어낸 신상이 전역 canon 이 되고, 아무도 지켜보지 않는 타이머 위에서 일어난다.
-  it("memoryWriteEnabled:false 면 character_fact 도 닫힌다 — memories 행을 넣는 도구는 전부 이 축이다", () => {
-    for (const [role, isPrivate, isOwner] of [["owner", true, true], ["allowed", true, false]] as const) {
-      const tools = allowedToolsFor(role, isPrivate, isOwner, "local", { memoryWriteEnabled: false });
-      expect(tools).not.toContain("mcp__asahi__character_fact");
-      expect(tools).toContain("mcp__asahi__recall"); // 읽기는 이 축과 무관하다(회귀 가드)
-    }
-  });
-
-  it("memoryWriteEnabled 를 생략하거나 true 로 주면 character_fact 는 예전 그대로 열린다(회귀 가드)", () => {
+  // DM 두 분기도 같은 축이다. 위 케이스가 네 계층을 다 돌지만, "이 턴은 기억을 쓰면 안 된다"는
+  // 이름의 축이 실제로 닿는 자리(손님 DM 이 유휴 스윕으로 닫힐 때 writeSummary 가
+  // noMemoryWrite:true 로 도는 경로)를 true 쪽과 나란히 고정해 둔다 — 기본값이 조용히 바뀌면
+  // 이 두 단정이 서로 다른 방향으로 깨진다.
+  it("memoryWriteEnabled 를 생략하거나 true 로 주면 DM 두 분기의 도구 목록이 완전히 같다(회귀 가드)", () => {
     for (const [role, isPrivate, isOwner] of [["owner", true, true], ["allowed", true, false]] as const) {
       expect(allowedToolsFor(role, isPrivate, isOwner, "local", { memoryWriteEnabled: true }))
         .toEqual(allowedToolsFor(role, isPrivate, isOwner, "local"));
-      expect(allowedToolsFor(role, isPrivate, isOwner, "local")).toContain("mcp__asahi__character_fact");
+      expect(allowedToolsFor(role, isPrivate, isOwner, "local")).toContain("mcp__asahi__remember");
     }
   });
 });
@@ -912,67 +889,6 @@ describe("allowedToolsFor — db 도구 노출", () => {
   it("손님 DM·서버엔 노출하지 않는다", () => {
     expect(allowedToolsFor("allowed", true, false, "local")).not.toContain("mcp__asahi__db_query");
     expect(allowedToolsFor("allowed", false, false, "local")).not.toContain("mcp__asahi__db_query");
-  });
-});
-
-describe("character_fact — 캐릭터 확정 설정 저장", () => {
-  it("scope='character' 로 저장한다(실제 기억과 분리)", async () => {
-    const c = await ctx({ userId: "owner", isPrivate: true, isOwner: true });
-
-    await characterFactHandler(c, { title: "학년", content: "2학년" });
-
-    const facts = await c.repos.memories.characterFacts(40);
-    expect(facts.map((f) => f.title)).toEqual(["학년"]);
-    expect(facts[0].scope).toBe("character");
-    expect(await c.repos.memories.forUser("owner")).toEqual([]); // 실제 기억에는 안 들어간다
-    expect(await c.repos.memories.all()).toEqual([]);            // recall 풀에도 안 들어간다
-  });
-
-  it("content 를 상한 길이로 자른다", async () => {
-    const c = await ctx({ userId: "owner", isPrivate: true, isOwner: true });
-
-    await characterFactHandler(c, { title: "긴설정", content: "가".repeat(CHARACTER_FACT_MAX_LEN + 50) });
-
-    expect((await c.repos.memories.characterFacts(40))[0].content).toHaveLength(CHARACTER_FACT_MAX_LEN);
-  });
-
-  it("title 을 상한 길이(40)로 자른다 — 손님이 쓸 수 있는 전역 저장소라 실제로 강제해야 한다", async () => {
-    const c = await ctx({ userId: "owner", isPrivate: true, isOwner: true });
-
-    await characterFactHandler(c, { title: "제".repeat(CHARACTER_FACT_TITLE_MAX_LEN + 10), content: "내용" });
-
-    expect((await c.repos.memories.characterFacts(40))[0].title).toHaveLength(CHARACTER_FACT_TITLE_MAX_LEN);
-  });
-
-  it("상한(40개)에 도달하면 저장을 거부하고 그 사실을 알린다 — 죽은 행을 만들어 거짓 성공을 보고하지 않는다", async () => {
-    const c = await ctx({ userId: "owner", isPrivate: true, isOwner: true });
-    for (let i = 0; i < CHARACTER_FACT_LIMIT; i++) {
-      await c.repos.memories.insert({ userId: c.userId, scope: "character", title: `설정${i}`, content: `내용${i}` });
-    }
-
-    const out = await characterFactHandler(c, { title: "새설정", content: "새내용" });
-
-    expect(out).toMatch(/가득 차/);
-    expect(out).not.toMatch(/설정 고정/);
-    // 행 수가 그대로다 — 41번째(주입되지 않을 죽은 행)가 실제로 저장되지 않았다.
-    const facts = await c.repos.memories.characterFacts(CHARACTER_FACT_LIMIT + 1);
-    expect(facts).toHaveLength(CHARACTER_FACT_LIMIT);
-    expect(facts.map((f) => f.title)).not.toContain("새설정");
-  });
-});
-
-describe("allowedToolsFor — character_fact 노출 계층", () => {
-  const CF = "mcp__asahi__character_fact";
-
-  it("DM 계열 세 분기 전부에 노출한다", () => {
-    expect(allowedToolsFor("owner", true, true, "local")).toContain(CF);
-    expect(allowedToolsFor("owner", true, true, "cloud")).toContain(CF);
-    expect(allowedToolsFor("allowed", true, false, "local")).toContain(CF); // 손님 DM
-  });
-
-  it("공개 서버 채널에는 노출하지 않는다", () => {
-    expect(allowedToolsFor("allowed", false, false, "local")).not.toContain(CF);
-    expect(allowedToolsFor("owner", false, true, "local")).not.toContain(CF);
   });
 });
 

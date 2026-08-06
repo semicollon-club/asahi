@@ -7,7 +7,6 @@ import type { AllowedDirsRepo } from "../store/allowedDirsRepo.js";
 import type { IntrospectRepo } from "../store/introspectRepo.js";
 import type { WorkerKind } from "../store/workersRepo.js";
 import { assertReadOnlySql, formatQueryResult } from "./sqlGuard.js";
-import { CHARACTER_FACT_LIMIT } from "./turnPrep.js";
 import { REMOTE_TOOL_NAMES, remoteToolHandler } from "./remoteTools.js";
 import { isPathWithinAny, normalizeDir } from "./paths.js";
 import { memoryScopeFor, SHARED_MEMORY_MAX_LEN, SHARED_MEMORY_TITLE_MAX_LEN, renderMemories } from "./memoryScope.js";
@@ -79,8 +78,7 @@ export async function rememberHandler(ctx: ToolCtx, args: { title: string; conte
   // 스코프는 위치가 정한다(memoryScope.ts) — DM 은 개인, 서버 채널은 동아리 공용이다.
   const scope = memoryScopeFor(ctx);
   if (scope === "shared") {
-    // 코드포인트로 센다 — length 는 UTF-16 코드유닛이라 이모지가 2로 세어진다(이 파일의
-    // truncateChars 가 같은 이유로 스프레드를 쓴다).
+    // 코드포인트로 센다 — length 는 UTF-16 코드유닛이라 이모지가 2로 세어진다.
     // Important 1(최종 전체 브랜치 리뷰) — 예전엔 이 상한 검사가 content 에만 걸려 title 은
     // 무제한이었다(12,000자 제목 저장이 실측으로 성공했다). title 은 recall 뿐 아니라
     // turnPrep 프롬프트에도 매 서버 턴마다 실리므로, content 와 같은 이유로(자르면 사실 손상,
@@ -99,30 +97,6 @@ export async function rememberHandler(ctx: ToolCtx, args: { title: string; conte
   }
   await ctx.repos.memories.insert({ userId: ctx.userId, scope, title: args.title, content: args.content, sourceConversationId: ctx.conversationId });
   return scope === "shared" ? `동아리 공용으로 기억했어요: "${args.title}"` : `기억했어요: "${args.title}"`;
-}
-
-// 캐릭터 설정 1건의 최대 길이. 신상 한 줄에는 충분하고, 프롬프트 무한 증식을 막는다.
-export const CHARACTER_FACT_MAX_LEN = 200;
-// 제목 상한. 제목은 "짧은 제목"으로 쓰도록 안내하지만, 손님이 쓸 수 있는 전역 저장소라 실제로 강제한다.
-export const CHARACTER_FACT_TITLE_MAX_LEN = 40;
-
-// 코드포인트 단위로 자른다. slice() 는 UTF-16 코드유닛 기준이라 이모지가 경계에 걸리면 서로게이트 쌍이 쪼개진다.
-const truncateChars = (s: string, max: number): string => [...(s ?? "")].slice(0, max).join("");
-
-// 캐릭터가 대화 중 지어낸 자기 신상을 확정 설정으로 고정한다. 항상 scope='character' —
-// 실제 기억(user/shared)과 물리적으로 분리해, 지어낸 설정이 recall 결과에 섞이지 않게 한다.
-export async function characterFactHandler(ctx: ToolCtx, args: { title: string; content: string }): Promise<string> {
-  // 상한에 도달하면 저장하지 않고 그 사실을 그대로 알린다. 저장은 됐지만 주입되지 않는 행을 만들면
-  // 도구가 "고정했다"고 거짓 보고하게 되고, 모델은 그걸 사실로 사용자에게 전달한다 — 이 기능이
-  // 막으려는 실패(도구 결과 조작) 그 자체다.
-  const existing = await ctx.repos.memories.characterFacts(CHARACTER_FACT_LIMIT);
-  if (existing.length >= CHARACTER_FACT_LIMIT) {
-    return `설정이 가득 차서(${CHARACTER_FACT_LIMIT}개) 고정하지 못했어. 이미 정해진 설정 안에서 답해.`;
-  }
-  const title = truncateChars(args.title, CHARACTER_FACT_TITLE_MAX_LEN);
-  const content = truncateChars(args.content, CHARACTER_FACT_MAX_LEN);
-  await ctx.repos.memories.insert({ userId: ctx.userId, scope: "character", title, content, sourceConversationId: ctx.conversationId });
-  return `설정 고정: "${title}"`;
 }
 
 export async function recallHandler(ctx: ToolCtx, args: { query: string }): Promise<string> {
@@ -371,8 +345,8 @@ export async function runtimeInfoHandler(ctx: ToolCtx): Promise<string> {
 export type AllowedToolsOptions = {
   workerConnected?: boolean;
   webToolsEnabled?: boolean;
-  // memories 테이블에 행을 넣거나 지우는 도구(remember·forget·character_fact) 셋을 한꺼번에
-  // 열고 닫는 축. false 여도 recall(읽기)은 이 값과 무관하게 항상 그대로다 — 정기 게시
+  // memories 테이블에 행을 넣거나 지우는 도구(remember·forget) 둘을 한꺼번에 열고 닫는 축.
+  // false 여도 recall(읽기)은 이 값과 무관하게 항상 그대로다 — 정기 게시
   // (digest.ts)·요약(core.ts 의 writeSummary)처럼 사람이 안 보는 채로 돌며 신뢰할 수 없는
   // 텍스트(웹 검색 결과·손님이 쓴 대화)를 이어받는 턴이 기억을 바꾸는 것만 막고, 공용 기억은
   // 어차피 전 부원이 읽을 수 있으므로 recall 까지 막을 이유는 없다.
@@ -380,13 +354,8 @@ export type AllowedToolsOptions = {
   // Important 2(리뷰 후속): 예전엔 이 축이 remember 만 닫고 forget 은 소유자 분기에서 따로
   // 열려 있었다. 기억을 지우는 것도 기억 쓰기다 — "기억을 쓰면 안 되는 턴"이라고 이름 붙인
   // 축이 삭제 도구를 열어 두면, 이 옵션을 믿고 쓰는 다음 호출부가 조용히 당한다(게다가 오염보다
-  // 삭제가 더 되돌리기 어렵다). 두 도구를 한 축에 묶는다.
-  //
-  // Important 2(최종 전체 브랜치 리뷰): 같은 이유로 character_fact 도 이 축에 묶는다. 그
-  // 도구도 memories 행(scope='character')을 넣고, 그 행은 유저·대화 스코프가 없어 소유자 방을
-  // 포함한 모든 방의 컨텍스트 블록에 실린다 — 오염 범위가 remember 보다 넓다. 손님 DM 이 유휴
-  // 스윕으로 닫힐 때 도는 요약 턴의 도구셋이 실측으로 [recall, character_fact] 였다: 그 세션에
-  // 인젝션이 심겨 있으면 지어낸 신상이 아무도 보지 않는 타이머 위에서 전역 canon 이 된다.
+  // 삭제가 더 되돌리기 어렵다). 두 도구를 한 축에 묶는다 — memories 행을 만들거나 지우는
+  // 도구가 새로 생기면 그것도 같은 이유로 여기에 묶는다.
   memoryWriteEnabled?: boolean;
 };
 
@@ -431,13 +400,10 @@ export function allowedToolsFor(
   // Important 2(리뷰 후속) — forget 도 같은 축에 묶는다. 소유자 두 분기에만 들어가므로 배열을
   // 따로 두는 이유는 자리다: remember 와 forget 이 각 분기에서 서로 다른 위치에 놓인다.
   const forgetTools = memoryWriteEnabled ? [t("forget")] : [];
-  // Important 2(최종 전체 브랜치 리뷰) — character_fact 도 같은 축이다(위 옵션 주석). 배열을
-  // 따로 두는 이유는 forget 과 같다: DM 두 분기에서 놓이는 자리가 서로 다르다.
-  const characterFactTools = memoryWriteEnabled ? [t("character_fact")] : [];
   if (isOwner && isPrivate) {
     return [
       ...remote,
-      ...memoryTools, t("recall"), ...characterFactTools, t("manage_access"), ...forgetTools,
+      ...memoryTools, t("recall"), t("manage_access"), ...forgetTools,
       ...dirTools,
       t("db_schema"), t("db_query"), t("runtime_info"),
       ...webTools,
@@ -455,7 +421,7 @@ export function allowedToolsFor(
   if (isOwner) return [...remote, ...memoryTools, t("recall"), ...forgetTools, ...dirTools, t("runtime_info"), ...webTools];
   // 손님: DM 이든 서버든 공유 기계로 간다. 폴더 관리는 주지 않는다.
   if (isPrivate && (role === "owner" || role === "allowed")) {
-    return [...remote, ...memoryTools, t("recall"), ...characterFactTools, ...webTools];
+    return [...remote, ...memoryTools, t("recall"), ...webTools];
   }
   // Minor(최종 전체 브랜치 리뷰) — 이 마지막 catch-all 은 role 을 보지 않아
   // allowedToolsFor("blocked", ...) 도 remember·recall 을 돌려줬다(실측). 위 손님 DM 분기는
@@ -465,7 +431,7 @@ export function allowedToolsFor(
   // 지금은 쓰기(remember)까지 있으므로 이 함수 자신도 role 을 봐야 심층 방어가 유지된다.
   if (!(role === "owner" || role === "allowed")) return [];
   // 손님 서버: 동아리 공용 기억은 누구나 쌓을 수 있다(스펙 §2.1). 개인 기억 저장은 DM 에서만
-  // 되므로 여기서 remember 를 부르면 반드시 공용이 된다 — character_fact 는 주지 않는다.
+  // 되므로 여기서 remember 를 부르면 반드시 공용이 된다.
   return [...remote, ...memoryTools, t("recall"), ...webTools];
 }
 
@@ -515,12 +481,6 @@ export function buildToolDefinitions(ctx: ToolCtx) {
         id: z.number().optional().describe("여러 개가 걸렸을 때 그 목록에서 본 번호로 하나를 정확히 지정합니다"),
       },
       async (args) => textResult(await forgetHandler(ctx, args)),
-    ),
-    tool(
-      "character_fact",
-      "대화 중 즉흥으로 지어낸 너 자신의 신상 설정을 확정해 고정합니다. 처음 말한 그 턴에만 저장하세요. 이미 저장된 설정과 충돌하는 내용은 저장하지 마세요.",
-      { title: z.string().max(CHARACTER_FACT_TITLE_MAX_LEN).describe("짧은 제목(예: 학년, 동아리부장)"), content: z.string().max(CHARACTER_FACT_MAX_LEN).describe("확정할 설정 내용") },
-      async (args) => textResult(await characterFactHandler(ctx, args)),
     ),
     tool(
       "manage_access",

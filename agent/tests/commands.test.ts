@@ -104,14 +104,13 @@ describe("renderCommandHelp — 안내문이 실제 예약어와 어긋나지 �
     }
   });
 
-  // Minor 4(최종 전체 브랜치 리뷰) — /새세션 이 지우는 캐릭터 설정은 전역이다(scope='character'
-  // 는 유저·대화 스코프가 없다). 손님이 자기 DM 에서 /새세션 을 치면 소유자 방의 캐릭터
-  // canon 까지 함께 사라지는데, 안내문도 확인 문구도 그 사실을 한 글자도 말하지 않았다.
-  // 권한 모델 자체는 그대로 둔다(쓰기가 이미 전역이라 비우기만 막는 것이 앞뒤가 안 맞는다) —
-  // 말해주지 않는 것만 고친다.
-  it("/새세션 안내가 캐릭터 설정 삭제의 범위(모든 방)를 밝힌다", () => {
+  // /새세션 은 세션을 끊고 바닥선을 그을 뿐 기억에는 손대지 않는다. 이 명령을 치는 사람이
+  // 실제로 걱정하는 것이 그것이므로, 안내문이 그 사실을 말하는지 고정한다.
+  it("/새세션 안내가 기억은 남는다는 사실을 밝힌다", () => {
     const reset = COMMAND_HELP.find((g) => g.commands.includes("/새세션"));
-    expect(reset?.description).toMatch(/모든 방/);
+    // Important 3(최종 전체 브랜치 리뷰)로 안내문 전체를 존댓말로 옮기면서 어미만 바뀌었다 —
+    // 고정하려는 사실("기억은 남는다")은 그대로다.
+    expect(reset?.description).toMatch(/기억은 남습니다/);
   });
 });
 
@@ -238,6 +237,54 @@ describe("renderCommandHelp — 능력 안내는 워커 연결 여부로 갈린�
     const help = renderCommandHelp(true);
     expect(help).toMatch(/파일 만들어줘/);
     expect(help).toMatch(/명령 실행해줘/);
+  });
+});
+
+// Important 3(최종 전체 브랜치 리뷰) — 캐릭터를 걷어내며 "사용자 대면 문자열은 전부 담백한
+// 존댓말"을 받아들였는데 /help 만 통째로 반말로 남아 있었다. 답변 다음으로 가장 많이 읽히는
+// 텍스트이고, 손님이 받는 유일한 능력 안내다.
+//
+// 예시로 든 사용자 발화("파일 만들어줘" 등)는 그대로 둔다 — 그건 봇의 말투가 아니라 사용자가
+// 봇에게 하는 말의 예시라서, 존댓말로 바꾸면 "이렇게 말해야 한다"는 없는 규칙을 만든다.
+// 여기서 고정하는 것은 봇 자신의 목소리로 나가는 문장들이다.
+describe("renderCommandHelp — 봇 목소리는 존댓말이다(Important 3)", () => {
+  it("워커 연결 여부와 무관하게 옛 반말 문장이 남아 있지 않다", () => {
+    for (const connected of [true, false]) {
+      const help = renderCommandHelp(connected);
+      expect(help).not.toContain("쓸 수 있는 명령어야");
+      expect(help).not.toContain("말 걸면 돼");
+    }
+  });
+
+  it("첫 줄과 마지막 줄이 존댓말이다", () => {
+    for (const connected of [true, false]) {
+      const help = renderCommandHelp(connected);
+      expect(help).toContain("쓸 수 있는 명령어입니다");
+      expect(help).toMatch(/말 걸어 주세요/);
+    }
+  });
+
+  it("손님 능력 안내(워커 연결)의 봇 목소리가 존댓말이다", () => {
+    const help = renderCommandHelp(true);
+    expect(help).not.toContain("말로 시키면 돼");
+    expect(help).not.toContain("네 작업 폴더");
+    expect(help).toContain("말로 시키면 됩니다");
+    expect(help).toContain("본인 작업 폴더");
+  });
+
+  it("워커 미연결 안내도 존댓말이다", () => {
+    const help = renderCommandHelp(false);
+    expect(help).not.toContain("못 해");
+    expect(help).not.toContain("시킬 수 있어.");
+    expect(help).toMatch(/할 수 없습니다/);
+    expect(help).toMatch(/시키실 수 있습니다/);
+  });
+
+  it("예약어 설명도 존댓말이다", () => {
+    const help = renderCommandHelp(true);
+    expect(help).not.toContain("새로 시작한다");
+    expect(help).not.toContain("보여준다");
+    expect(help).toContain("새로 시작합니다");
   });
 });
 
