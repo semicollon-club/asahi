@@ -17,6 +17,18 @@ function capabilitySection(fullPrompt: string): string {
   return fullPrompt.slice(i);
 }
 
+// 프롬프트가 갈리는 신원 네 가지. "이 문구가 없어야 한다"류 가드는 예외 없이 이 넷 × 워커
+// 연결 두 값(여덟 조합)을 전부 돌아야 한다 — Important 2(최종 전체 브랜치 리뷰)가 잡은 결함이
+// 정확히 "가드가 미연결 프롬프트만 보고 있었다"였다. 목록을 세 곳에서 따로 적고 있던 것이
+// 그 누락의 원인이라, 한 곳에서 관리한다.
+const ALL_IDENTITIES = [
+  { name: "소유자 DM", ctx: { role: "owner" as const, isPrivate: true, isOwner: true } },
+  { name: "소유자 서버", ctx: { role: "owner" as const, isPrivate: false, isOwner: true } },
+  { name: "손님 DM", ctx: { role: "allowed" as const, isPrivate: true, isOwner: false } },
+  { name: "손님 서버", ctx: { role: "allowed" as const, isPrivate: false, isOwner: false } },
+];
+const WORKER_STATES = [true, false];
+
 describe("buildSystemPrompt", () => {
   it("이모지·이모티콘 사용 금지 지침을 항상 포함한다", () => {
     const p = buildSystemPrompt({ role: "owner", isPrivate: true, isOwner: true });
@@ -39,14 +51,9 @@ describe("buildSystemPrompt", () => {
     // 도구가 사라졌으므로 안내가 남으면 모델에게 없는 도구를 쓰라고 지시하는 것이 된다.
     // 리뷰 후속 — workerConnected 를 생략(기본 false)한 네 신원만 돌고 있었다.
     // buildCapabilityBlock 은 이 값으로도 갈리고 연결 분기가 텍스트도 가장 많은데, 그 분기는
-    // 한 번도 검사되지 않았다 — 여덟 조합(신원 4 × workerConnected 2) 전부를 돌게 넓힌다.
-    for (const ctx of [
-      { role: "owner" as const, isPrivate: true, isOwner: true },
-      { role: "owner" as const, isPrivate: false, isOwner: true },
-      { role: "allowed" as const, isPrivate: true, isOwner: false },
-      { role: "allowed" as const, isPrivate: false, isOwner: false },
-    ]) {
-      for (const workerConnected of [true, false]) {
+    // 한 번도 검사되지 않았다 — 여덟 조합(신원 4 × workerConnected 2) 전부를 돌게 넓혔다.
+    for (const { ctx } of ALL_IDENTITIES) {
+      for (const workerConnected of WORKER_STATES) {
         expect(buildSystemPrompt({ ...ctx, workerConnected })).not.toContain("character_fact");
       }
     }
@@ -454,14 +461,14 @@ describe("buildSystemPrompt — persona 가 forget 을 안내한다(Important 5,
 // 한다"는 단정은 그대로 유효하므로 이 케이스만 남긴다.
 describe("buildSystemPrompt — 연기 지시 회귀 가드", () => {
   it("성적 연기 지시가 없다(회귀 가드)", () => {
-    const ALL = [
-      { role: "owner", isPrivate: true, isOwner: true },
-      { role: "allowed", isPrivate: true, isOwner: false },
-      { role: "allowed", isPrivate: false, isOwner: false },
-    ] as const;
-    for (const ctx of ALL) {
-      const p = buildSystemPrompt(ctx);
-      expect(p).not.toMatch(/음란|성적인 대화|성적 대화 방식|사정|노골적|야한|신체 접촉/);
+    // Important 2(최종 전체 브랜치 리뷰) — 예전엔 세 신원을 workerConnected 없이(기본 false)
+    // 돌았다. 연결 분기가 텍스트를 가장 많이 지는데 이 가드는 그 분기를 한 번도 보지 못했다.
+    // 위 character_fact 케이스(:38)가 이미 여덟 조합으로 넓혀 둔 것과 같은 형태로 맞춘다.
+    for (const { ctx } of ALL_IDENTITIES) {
+      for (const workerConnected of WORKER_STATES) {
+        const p = buildSystemPrompt({ ...ctx, workerConnected });
+        expect(p).not.toMatch(/음란|성적인 대화|성적 대화 방식|사정|노골적|야한|신체 접촉/);
+      }
     }
   });
 });
@@ -512,12 +519,17 @@ describe("buildSystemPrompt — 장기 실행 프로세스 도구를 안내한�
 // 전부에서 고정해 둔다 — 분기별로 프롬프트가 다르게 조립되므로 한 분기만 확인하면 나머지가
 // 조용히 빠져도 모른다.
 describe("buildSystemPrompt — 캐릭터 제거 후 남아야 할 것", () => {
-  const CONTEXTS = [
-    { name: "소유자 DM", ctx: { role: "owner" as const, isPrivate: true, isOwner: true } },
-    { name: "소유자 서버", ctx: { role: "owner" as const, isPrivate: false, isOwner: true } },
-    { name: "손님 DM", ctx: { role: "allowed" as const, isPrivate: true, isOwner: false } },
-    { name: "손님 서버", ctx: { role: "allowed" as const, isPrivate: false, isOwner: false } },
-  ];
+  // Important 2(최종 전체 브랜치 리뷰) — 신원 넷만 돌고 workerConnected 를 생략(기본 false)해,
+  // 이 파일에서 가장 중요한 회귀 가드("캐릭터 흔적이 없다")가 미연결 프롬프트만 보고 있었다.
+  // 연결 분기가 텍스트를 가장 많이 지고, 이 브랜치가 능력 블록에서 실제로 고친 한 줄도 그쪽에만
+  // 있다. 리뷰가 재현한 대로 연결 분기에만 실리는 문자열(guestPcLine)에 캐릭터 지시를 심으면
+  // 전체 스위트가 그대로 초록이었다 — 신원 4 × 워커 2 여덟 조합 전부로 넓힌다.
+  const CONTEXTS = ALL_IDENTITIES.flatMap(({ name, ctx }) =>
+    WORKER_STATES.map((workerConnected) => ({
+      name: `${name}·워커 ${workerConnected ? "연결" : "미연결"}`,
+      ctx: { ...ctx, workerConnected },
+    })),
+  );
 
   for (const { name, ctx } of CONTEXTS) {
     it(`${name}: 프롬프트 인젝션 가드가 있다`, () => {
