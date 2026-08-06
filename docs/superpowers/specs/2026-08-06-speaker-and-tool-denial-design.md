@@ -59,7 +59,7 @@ Claude requested permissions to use mcp__asahi__runtime_info, but you haven't gr
 형식은 기존 `사용자 메시지:` 관례를 따른다.
 
 ```
-사용자 메시지(우성현): 현재 서버 상태확인해봐
+사용자(우성현) 메시지: 현재 서버 상태확인해봐
 ```
 
 이름을 모르면 지금과 같은 `사용자 메시지:` 로 떨어진다.
@@ -89,7 +89,7 @@ Claude requested permissions to use mcp__asahi__runtime_info, but you haven't gr
 **새 모듈 `agent/src/core/speaker.ts` 를 만든다.**
 
 ```ts
-export function speakerLabel(userId: string | null, names: Record<string, string>): string
+export function speakerLabel(name: string | undefined): string
 ```
 
 - 이름이 없으면 `"사용자"`
