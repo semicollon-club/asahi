@@ -6,7 +6,7 @@ import type { UsersRepo } from "../src/store/usersRepo.js";
 import type { ConversationsRepo } from "../src/store/conversationsRepo.js";
 
 // 이 리포는 어댑터 테스트마다 Config 를 각자 만든다(discordChannelAccess.test.ts·
-// expressionSend.test.ts 모두 자기 makeConfig 를 갖는다). 그 관례를 그대로 따른다.
+// discordSend.test.ts 모두 자기 makeConfig 를 갖는다). 그 관례를 그대로 따른다.
 function makeConfig(): Config {
   return {
     discordToken: "test-token",

@@ -9,8 +9,8 @@
 // package.json 의 register-worker 스크립트는 발견용으로만 남겨 뒀고, 인자 없이 부르면 아래
 // USAGE 가 올바른 형태를 알려준다.
 //
-// sync-images.mjs 와 달리 .mjs 가 아니라 TS 인 이유는 WorkersRepo·스키마를 그대로 가져다 쓰기
-// 위해서다 — 해시 방식이나 컬럼 이름을 스크립트가 따로 적어 두면 본체와 갈린다.
+// 이 스크립트가 .mjs 가 아니라 TS 인 이유는 WorkersRepo·스키마를 그대로 가져다 쓰기 위해서다 —
+// 해시 방식이나 컬럼 이름을 스크립트가 따로 적어 두면 본체와 갈린다.
 import dotenv from "dotenv";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
