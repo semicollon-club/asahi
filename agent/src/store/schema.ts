@@ -210,7 +210,9 @@ CREATE TABLE IF NOT EXISTS allowed_dirs (
 
 -- character_images 테이블은 2026-08-05 에 정의를 지웠다(표정 이미지 기능 제거). 이미 만들어진
 -- DB 의 테이블과 행은 그대로 둔다 — 읽는 코드가 없어 무해하고, 여기에 DROP 을 넣으면 부팅마다
--- 돈다. 필요하면 소유자가 db_query 로 직접 지운다.
+-- 돈다. 소유자는 db_query 로 이 행들을 볼 수만 있다 — 그 도구는 SELECT/WITH 로 시작하지 않는
+-- 문장을 거부하고(sqlGuard.ts 의 assertReadOnlySql) 트랜잭션도 READ ONLY 로 열기 때문에
+-- 봇으로는 지울 수 없다. 실제로 지우려면 봇 밖에서 DB 에 직접 접속해야 한다.
 
 -- 워커 신원의 정본. 워커는 hello 프레임에 자기 id 와 토큰을 실어 보내고, 허브가 여기서 행을
 -- 찾아 token_hash 를 대조한다(remote/hub.ts). 평문 토큰은 저장하지 않는다 — 발급 시점에
