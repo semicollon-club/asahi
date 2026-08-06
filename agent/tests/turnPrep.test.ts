@@ -154,6 +154,75 @@ describe("buildContextBlock — 공용 기억의 개행으로 섹션 구조를 �
   });
 });
 
+// Important 1(최종 전체 브랜치 리뷰) — 마커를 떼는 일은 어댑터에서만 했고 코어는 모델 원문을
+// 그대로 저장했다(core.ts 의 messages.insert). 그래서 마커를 달고 나갔던 과거 답변이 DB 에
+// 마커째 남아 있고, 이 블록이 그 20건을 매 새 세션에 그대로 다시 실어 준다 — 이 브랜치가 없앤
+// 출력 형식을 문맥 예시로 학습시키는 셈이다. 게다가 마커를 떼던 파서는 이제 없으므로, 모델이
+// 그 형식을 따라 하면 어댑터가 문자열을 디스코드로 그대로 내보낸다.
+describe("buildContextBlock — 과거 데이터에 남은 표정 마커를 싣지 않는다(Important 1)", () => {
+  let db: Db;
+  let repos: { memories: MemoriesRepo; summaries: SummariesRepo; messages: MessagesRepo; users: UsersRepo };
+  let convs: ConversationsRepo;
+
+  beforeEach(async () => {
+    db = await openTestDb();
+    repos = { memories: new MemoriesRepo(db), summaries: new SummariesRepo(db), messages: new MessagesRepo(db), users: new UsersRepo(db) };
+    convs = new ConversationsRepo(db);
+    await convs.create({ kind: "dm", discordChannelId: "c", primaryUserId: "u1", isPrivate: true, lastActiveTs: 1 });
+  });
+
+  const conv = async () => (await convs.getByChannelId("c"))!;
+
+  it("마커가 붙은 채 저장된 과거 답변을 최근 대화 기록에 실을 때 마커를 뗀다", async () => {
+    const c = await conv();
+    await repos.messages.insert({ conversationId: c.id, role: "assistant", content: "알겠어. [표정:부끄러움]", ts: 100, processed: true });
+    const block = await buildContextBlock(repos, c, -1);
+    expect(block).not.toContain("[표정:부끄러움]");
+    expect(block).not.toMatch(/\[표정:/);
+    expect(block).toContain("알겠어."); // 본문은 그대로 남는다
+  });
+
+  it("사용자 메시지에 들어 있는 마커 문자열도 같이 뗀다", async () => {
+    // 역할로 가르지 않는다 — 사용자가 붙여 넣은 마커도 모델에게는 똑같은 형식 예시다.
+    const c = await conv();
+    await repos.messages.insert({ conversationId: c.id, role: "user", content: "[표정:웃음] 이거 뭐야", ts: 100, processed: true });
+    expect(await buildContextBlock(repos, c, -1)).not.toMatch(/\[표정:/);
+  });
+
+  it("한 줄에 마커가 여러 개여도 전부 뗀다", async () => {
+    const c = await conv();
+    await repos.messages.insert({ conversationId: c.id, role: "assistant", content: "[표정:웃음] 그래. [표정:화남] 아니 됐어.", ts: 100, processed: true });
+    const block = await buildContextBlock(repos, c, -1);
+    expect(block).not.toMatch(/\[표정:/);
+    expect(block).toContain("그래.");
+    expect(block).toContain("아니 됐어.");
+  });
+
+  it("빈 이름·공백 포함 이름 마커도 뗀다(옛 파서와 같은 패턴)", async () => {
+    // 옛 마커 문법은 이름에 공백을 허용했고(기본 무표정·빤히 응시), 빈 이름도 매칭됐다.
+    const c = await conv();
+    await repos.messages.insert({ conversationId: c.id, role: "assistant", content: "음. [표정:] 그리고 [표정:기본 무표정]", ts: 100, processed: true });
+    expect(await buildContextBlock(repos, c, -1)).not.toMatch(/\[표정:/);
+  });
+
+  it("콜론이 없는 [표정] 은 마커가 아니므로 건드리지 않는다", async () => {
+    // 옛 파서와 같은 판정이다 — 마커가 아닌 일반 텍스트까지 지우면 과거 대화의 뜻이 바뀐다.
+    const c = await conv();
+    await repos.messages.insert({ conversationId: c.id, role: "user", content: "[표정] 이건 그냥 텍스트야", ts: 100, processed: true });
+    expect(await buildContextBlock(repos, c, -1)).toContain("[표정] 이건 그냥 텍스트야");
+  });
+
+  it("요약에 남은 마커도 뗀다 — 요약은 모델 원문이 어댑터를 거치지 않고 그대로 저장된다", async () => {
+    // writeSummary(core.ts)가 요약 턴의 결과 텍스트를 conversation_summaries 에 그대로 넣는다.
+    // 메시지와 달리 어댑터 전송 경로를 아예 지나지 않으므로, 옛 세션의 요약도 같은 잔재를 진다.
+    const c = await conv();
+    await repos.summaries.insert({ conversationId: c.id, fromMessageId: 0, toMessageId: 1, content: "회비 얘기를 했다. [표정:멍함]", createdTs: 100 });
+    const block = await buildContextBlock(repos, c, -1);
+    expect(block).not.toMatch(/\[표정:/);
+    expect(block).toContain("회비 얘기를 했다.");
+  });
+});
+
 describe("buildContextBlock — 컨텍스트 바닥선", () => {
   let db: Db;
   let repos: { memories: MemoriesRepo; summaries: SummariesRepo; messages: MessagesRepo; users: UsersRepo };
