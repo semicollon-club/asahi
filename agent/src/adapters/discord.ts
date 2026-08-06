@@ -256,8 +256,12 @@ export class DiscordAdapter {
     // 실패를 삼키는 이유: 이름은 표시용 부가 정보다. 이름 갱신이 안 됐다고 메시지 처리를
     // 멈추면 부가 기능이 본 기능을 인질로 잡는다. upsert 는 COALESCE 라 빈 값으로 기존 이름을
     // 지우지도 않는다.
+    //
+    // 값을 try 밖에서 한 번만 구한다 — 아래 resolveHint 가 같은 이름을 힌트에 실어 코어의 프롬프트
+    // 화자 표기에 쓴다(bus.ts 의 displayName). 두 번 계산하면 두 자리가 따로 흘러갈 수 있고,
+    // upsert 가 실패한 턴에도 프롬프트에는 이름이 실려야 한다(저장 실패와 표기는 별개다).
+    const displayName = message.author.displayName || message.author.username;
     try {
-      const displayName = message.author.displayName || message.author.username;
       if (displayName) await this.users.upsert(incoming.userId, { displayName });
     } catch {
       /* 위 주석 참고 — 이름 갱신 실패는 메시지 처리를 막지 않는다 */
@@ -268,7 +272,7 @@ export class DiscordAdapter {
       void message.channel.sendTyping().catch(() => {});
     }
 
-    const hint = await this.resolveHint(decision, incoming, role, message, existing?.primaryUserId);
+    const hint = await this.resolveHint(decision, incoming, role, message, displayName, existing?.primaryUserId);
     if (!hint) return; // 폴백조차 불가하면 조용히 종료(로그는 resolveHint 내부에서)
 
     this.beginTurn(hint.discordChannelId, message);
@@ -292,9 +296,10 @@ export class DiscordAdapter {
     i: Incoming,
     role: "owner" | "allowed",
     message: Message,
+    displayName: string,
     existingPrimaryUserId?: string,
   ): Promise<ConversationHint | null> {
-    const common = { guildId: i.guildId, parentChannelId: i.parentChannelId, userId: i.userId, role, discordMessageId: i.messageId };
+    const common = { guildId: i.guildId, parentChannelId: i.parentChannelId, userId: i.userId, role, discordMessageId: i.messageId, displayName };
     switch (decision.kind) {
       case "dm":
         return { ...common, kind: "dm", discordChannelId: i.channelId, isPrivate: true, primaryUserId: i.userId };
@@ -315,7 +320,7 @@ export class DiscordAdapter {
 
   private async createThreadHint(
     i: Incoming,
-    common: { guildId?: string; parentChannelId?: string; userId: string; role: "owner" | "allowed"; discordMessageId: string },
+    common: { guildId?: string; parentChannelId?: string; userId: string; role: "owner" | "allowed"; discordMessageId: string; displayName: string },
   ): Promise<ConversationHint | null> {
     // 멱등: 이 트리거 메시지로 이미 만든 대화가 있으면 그 스레드 재사용(스레드 재생성 금지).
     const already = await this.conversations.getByOriginMessageId(i.messageId);

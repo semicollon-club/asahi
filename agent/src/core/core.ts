@@ -20,6 +20,7 @@ import type { WorkerKind } from "../store/workersRepo.js";
 import { scopeDirs } from "./workerSelect.js";
 import { pathFlavorOf } from "./paths.js";
 import { buildContextBlock, isSessionNotFound } from "./turnPrep.js";
+import { speakerLabel } from "./speaker.js";
 import { buildImageMarker, downloadImages, type ImageRef, type ImageInput } from "./images.js";
 import { buildFileMarker, uploadDirFor, type FileRef } from "./attachments.js";
 
@@ -333,7 +334,7 @@ export class AgentCore {
       conversationId: conv.id, ts, role: "user", userId: hint.userId,
       discordMessageId: hint.discordMessageId, content: buildImageMarker(text, images), processed: false,
     });
-    this.enqueue(this.turnChains, hint.discordChannelId, () => this.runConversationTurn(conv.id, hint.userId, hint.role as "owner" | "allowed", text, messageId, images, files, rejectedFiles));
+    this.enqueue(this.turnChains, hint.discordChannelId, () => this.runConversationTurn(conv.id, hint.userId, hint.role as "owner" | "allowed", text, messageId, images, files, rejectedFiles, hint.displayName));
   }
 
   // 정기 게시 예약어(/대회·/개발뉴스)를 즉시 실행한다. 스케줄의 lastRun 은 건드리지 않는다 —
@@ -465,7 +466,7 @@ export class AgentCore {
     }
   }
 
-  private async runConversationTurn(convId: number, userId: string, role: "owner" | "allowed", text: string, messageId: number, images: ImageRef[] = [], files: FileRef[] = [], rejectedFiles: string[] = []): Promise<void> {
+  private async runConversationTurn(convId: number, userId: string, role: "owner" | "allowed", text: string, messageId: number, images: ImageRef[] = [], files: FileRef[] = [], rejectedFiles: string[] = [], displayName?: string): Promise<void> {
     try {
       const conv = await this.repos.conversations.getById(convId);
       if (!conv) return;
@@ -487,13 +488,18 @@ export class AgentCore {
         }
       }
 
+      // 2026-08-06: 화자를 프롬프트에 싣는다. 공유 스레드에서 사람이 바뀌어도 모델이 알 수
+      // 없어, 앞사람에게 한 거절을 다음 사람에게 그대로 반복한 사건이 있었다. 아래 세 조립
+      // 지점이 전부 이 값을 써야 한다 — 하나만 빠뜨리면 그 경로에서만 증상이 남는다.
+      const who = speakerLabel(displayName);
+
       // 세션: 열린 세션이 유휴 이내면 resume(새 메시지만), 아니면 새 세션(기억 컨텍스트 주입).
       let resume: string | undefined;
-      let prompt = text;
+      let prompt = `${who} 메시지: ${text}`;
       if (conv.sessionId && this.now() - conv.lastActiveTs < this.idleMs()) {
         resume = conv.sessionId;
       } else {
-        prompt = `${await buildContextBlock(this.repos, conv, messageId)}\n\n---\n\n사용자 메시지: ${text}`;
+        prompt = `${await buildContextBlock(this.repos, conv, messageId)}\n\n---\n\n${who} 메시지: ${text}`;
         // 이 메시지가 새 세션 윈도우의 시작 → 요약 범위(from_message_id) 기준점으로 기록한다.
         await this.repos.conversations.setFirstMessageId(conv.id, messageId);
         if (conv.isPrivate && conv.primaryUserId === this.ownerId) {
@@ -612,7 +618,7 @@ export class AgentCore {
           // 재시도 쪽 prompt 에서만 마커가 조용히 사라진다. savedFiles/failedFiles 는 위에서 이미
           // 받아오기가 끝난 값이라 재조회 없이 그대로 재사용한다(파일을 다시 받아오지 않는다).
           const retryPrompt = buildFileMarker(
-            `${await buildContextBlock(this.repos, fresh, messageId)}\n\n---\n\n사용자 메시지: ${text}`,
+            `${await buildContextBlock(this.repos, fresh, messageId)}\n\n---\n\n${who} 메시지: ${text}`,
             savedFiles, failedFiles,
           );
           await this.repos.conversations.setFirstMessageId(conv.id, messageId);
