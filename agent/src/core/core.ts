@@ -578,7 +578,7 @@ export class AgentCore {
       // 건드리지 않는다 — 그 시점엔 아직 받아오기 전이라 저장 경로가 없고, 파일명만 적으면 사실이
       // 아닌 것을 기록하게 된다.
       prompt = buildFileMarker(prompt, savedFiles, failedFiles);
-      const systemPrompt = buildSystemPrompt({ role, isPrivate: conv.isPrivate, isOwner, deployTarget: this.config.deployTarget, workerConnected, workspaceDirs });
+      const systemPrompt = buildSystemPrompt({ role, isPrivate: conv.isPrivate, isOwner, deployTarget: this.config.deployTarget, workerConnected, workspaceDirs, githubReady: this.config.github !== null });
       const onProgress = (u: ProgressUpdate) => {
         this.bus.publish({ type: "progress", channel: "discord", channelRef: conv.discordChannelId, text: formatProgress(u, workspaceDirs), ts: this.now() });
         // 기록은 도구 호출이 끝난 시점에만 남긴다(tool 이벤트는 짝이 맞춰져 이 한 행에 흡수된다).

@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { buildSystemPrompt } from "../src/core/persona.js";
+import { allowedToolsFor } from "../src/core/tools.js";
 
 // 능력 안내에 대한 단정(특히 "이 이름은 없어야 한다")은 검사 범위를 "## 능력" 절로 좁힌다 —
 // 능력 안내 밖의 절도 도구 이름이나 능력 관련 낱말을 쓰기 때문이다(기억 블록의
@@ -630,4 +631,37 @@ describe("buildSystemPrompt — 시간에 따라 변하는 값은 다시 조회�
       expect(buildSystemPrompt(ctx)).toContain("새로 조회한다");
     });
   }
+});
+
+describe("깃허브 발행 안내", () => {
+  const base = { role: "allowed" as const, isPrivate: true, isOwner: true };
+
+  it("워커가 붙고 설정이 있으면 발행을 안내한다", () => {
+    const p = buildSystemPrompt({ ...base, workerConnected: true, githubReady: true });
+    expect(p).toContain("publish_project");
+    expect(p).toContain("restore_project");
+  });
+
+  // 없는 도구를 쓰라고 안내하면 모델이 시도했다가 실패를 사용자에게 전달한다.
+  it("깃허브 설정이 없으면 안내하지 않는다", () => {
+    const p = buildSystemPrompt({ ...base, workerConnected: true, githubReady: false });
+    expect(p).not.toContain("publish_project");
+  });
+
+  it("워커가 없으면 안내하지 않는다", () => {
+    const p = buildSystemPrompt({ ...base, workerConnected: false, githubReady: true });
+    expect(p).not.toContain("publish_project");
+  });
+
+  // 안내가 나오는 조합은 도구가 열리는 조합과 정확히 같아야 한다(tools.ts 의 publishTools).
+  // 어긋나면 "도구는 있는데 안내가 없다"거나 그 반대가 된다 — 이 저장소가 결함 유형으로 다루는 것이다.
+  it("네 신원 모두에서 도구 노출과 안내가 일치한다", () => {
+    for (const [isPrivate, isOwner] of [[true, true], [false, true], [true, false], [false, false]] as const) {
+      for (const githubReady of [true, false]) {
+        const prompt = buildSystemPrompt({ role: "allowed", isPrivate, isOwner, workerConnected: true, githubReady });
+        const tools = allowedToolsFor("allowed", isPrivate, isOwner, "local", { workerConnected: true, githubReady });
+        expect(prompt.includes("publish_project")).toBe(tools.includes("mcp__asahi__publish_project"));
+      }
+    }
+  });
 });
