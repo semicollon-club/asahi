@@ -238,6 +238,42 @@ describe("buildSystemPrompt — 능력 안내가 실제 도구 보유와 어긋�
   });
 });
 
+// Important 1(최종 전체 브랜치 리뷰) — 손님 분기의 제한 안내가 "…는 여전히 이 채널에서 할 수
+// 없습니다 — 소유자 DM 전용입니다" 였다. 2026-08-06 사건에서 모델이 지어낸 거짓 설명("이
+// 채널에서는 안 되니 소유자 DM 에서 다시 해보라")과 글자 그대로 같은 형태이고, 하필 모델의
+// 시스템 프롬프트 안에서 가장 가까운 템플릿이었다. 그 턴에 못 쓰는 도구를 아예 등록하지 않게
+// 된 지금(3b37dea)은 SDK 거절 문자열조차 오지 않으므로, 손님이 모델·버전을 물으면 모델이
+// 근거를 찾을 곳은 이 프롬프트뿐이다 — 여기 채널 기준 문장이 남아 있으면 사건의 답변이 그대로
+// 재생산된다. deploy/smoke-test.md 는 채널 기준 설명이 나오면 그 회차를 실패로 판정한다.
+// 두 번째 결함: 손님에게 "소유자 DM" 은 애초에 들어갈 수 없는 장소다. 제한의 축은 위치가
+// 아니라 신원이다(tools.ts 의 allowedToolsFor — runtime_info 는 isOwner, db_* 는 isOwner &&
+// isPrivate. 손님은 채널을 어디로 옮겨도 얻지 못한다).
+describe("buildSystemPrompt — 손님 제한 안내는 채널이 아니라 신원 기준이다(Important 1)", () => {
+  for (const isPrivate of [true, false]) {
+    const where = isPrivate ? "DM" : "서버";
+    const guest = { role: "allowed" as const, isOwner: false, isPrivate };
+
+    for (const workerConnected of WORKER_STATES) {
+      const label = `손님(${where}, 워커 ${workerConnected ? "연결" : "미연결"})`;
+
+      it(`${label}: 채널 기준 제한 문구가 없다`, () => {
+        const cap = capabilitySection(buildSystemPrompt({ ...guest, workerConnected }));
+        expect(cap).not.toMatch(/소유자 DM/);
+        expect(cap).not.toMatch(/이 채널에서(는)? ?[^\n]{0,15}(할 수 없|안 됩니다|불가)/);
+      });
+
+      it(`${label}: 모델·버전 확인이 소유자만 가능하다고 안내한다`, () => {
+        // 거절할 근거를 프롬프트가 직접 준다 — 도구가 안 보이는 것만으로는 모델이 이유를
+        // 지어내는 것을 막지 못한다(2026-08-06 사건의 요지).
+        const cap = capabilitySection(buildSystemPrompt({ ...guest, workerConnected }));
+        const line = cap.split("\n").find((l) => l.includes("버전"));
+        expect(line).toBeDefined();
+        expect(line).toMatch(/소유자만/);
+      });
+    }
+  }
+});
+
 // 실배포 점검(2026-07-28)에서 드러난 결함 — 셸이 실제로 열리는 네 분기(소유자 DM·소유자 서버·
 // 손님 DM·손님 서버) 중 손님 분기만 sh_exec 주의사항이 없었고, 그 자리에 "접근은 네 몫의 폴더
 // 안으로만 제한된다"고 fs_* 와 sh_exec 를 한 문장에 묶어 단언하고 있었다. 실측으로 반증됐다:
@@ -579,6 +615,19 @@ describe("buildSystemPrompt — 캐릭터 제거 후 남아야 할 것", () => {
 
     it(`${name}: AI 임을 숨기지 않는다`, () => {
       expect(buildSystemPrompt(ctx)).toContain("AI 어시스턴트다");
+    });
+  }
+});
+
+// Task 5 — persona.ts 의 "## 사실성" 절 끝에 더한 보조 지침(상태·버전·목록처럼 시간에 따라
+// 변하는 값은 다시 조회하라)이 네 신원 분기 모두에서 빠짐없이 실리는지 고정한다. IDENTITY 는
+// ctx 로 갈리지 않는 상수라 네 분기 전부 동일하게 나와야 정상이다 — 이 지침은 보조일 뿐,
+// 화자 표기(speaker.ts)와 턴별 도구 등록(tools.ts 의 allowedToolDefinitions)이 하는 구조적
+// 수정을 대신하지 않는다.
+describe("buildSystemPrompt — 시간에 따라 변하는 값은 다시 조회하라는 지침(Task 5)", () => {
+  for (const { name, ctx } of ALL_IDENTITIES) {
+    it(`${name}: 시간에 따라 변하는 것은 다시 조회하라는 지침이 있다`, () => {
+      expect(buildSystemPrompt(ctx)).toContain("새로 조회한다");
     });
   }
 });

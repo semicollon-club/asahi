@@ -11,7 +11,7 @@ import {
   rememberHandler, recallHandler, forgetHandler, manageAccessHandler,
   allowDirHandler, revokeDirHandler, listDirsHandler,
   dbSchemaHandler, dbQueryHandler, runtimeInfoHandler,
-  allowedToolsFor, buildToolDefinitions, type ToolCtx,
+  allowedToolsFor, buildToolDefinitions, allowedToolDefinitions, type ToolCtx,
 } from "../src/core/tools.js";
 import { SHARED_MEMORY_MAX_LEN, SHARED_MEMORY_TITLE_MAX_LEN } from "../src/core/memoryScope.js";
 
@@ -1035,5 +1035,46 @@ describe("sh_exec 도구 설명 — proc_start 유도", () => {
     expect(shExec!.description).toContain("proc_start");
     // 한정어가 있어야 한다 — 없으면 모델이 일회성 명령까지 sh_exec 를 피한다.
     expect(shExec!.description).toContain("계속 도는");
+  });
+});
+
+// 노출(등록)과 허용(allowedTools)이 같은 값에서 나오는지를 본다. 두 값이 갈리면 모델은 부를 수
+// 있다고 믿는 도구를 부르고 SDK 가 만든 영문 거부를 받는데, 그 문자열에는 이유가 없어 모델이
+// 이유를 지어낸다(2026-08-06 실제 발생). 여기서는 allowedToolsFor 의 결과를 그대로 먹여
+// "그 턴에 실제로 등록되는 이름"만 확인한다 — 계층 판정 자체는 allowedToolsFor 의 몫이다.
+describe("allowedToolDefinitions — 그 턴에 못 쓰는 도구는 등록하지 않는다", () => {
+  const names = async (role: "owner" | "allowed", isPrivate: boolean, isOwner: boolean, workerConnected: boolean) => {
+    const c = await ctx();
+    const allowed = allowedToolsFor(role, isPrivate, isOwner, "local", {
+      workerConnected, webToolsEnabled: false, memoryWriteEnabled: true,
+    });
+    return allowedToolDefinitions(c, allowed).map((d) => d.name);
+  };
+
+  it("손님 서버 턴에는 runtime_info 가 없다", async () => {
+    // 2026-08-06 에 부원이 이걸 불러 영문 거부를 받았고, 모델이 "이 채널에서는 안 된다"는
+    // 없는 규칙을 지어내 소유자에게까지 반복했다.
+    expect(await names("allowed", false, false, false)).not.toContain("runtime_info");
+  });
+
+  it("소유자 서버 턴에는 runtime_info 가 있다", async () => {
+    const got = await names("owner", false, true, false);
+    expect(got).toContain("runtime_info");
+    expect(got).toContain("recall");
+  });
+
+  it("워커가 없으면 소유자 DM 이라도 파일·폴더 도구가 없다", async () => {
+    // 2026-08-01·08-02 의 fs_tree·list_dirs 영문 거부 5건이 정확히 이 상태였다 — 소유자였지만
+    // 새벽이라 워커가 안 붙어 있었다.
+    const got = await names("owner", true, true, false);
+    expect(got).not.toContain("fs_tree");
+    expect(got).not.toContain("list_dirs");
+    expect(got).toContain("db_query");
+  });
+
+  it("워커가 붙으면 소유자 DM 에 파일·폴더 도구가 생긴다", async () => {
+    const got = await names("owner", true, true, true);
+    expect(got).toContain("fs_tree");
+    expect(got).toContain("list_dirs");
   });
 });

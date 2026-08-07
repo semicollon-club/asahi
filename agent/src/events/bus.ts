@@ -16,6 +16,10 @@ export type ConversationHint = {
   userId: string;              // 이번 발화자
   role: "owner" | "allowed";   // blocked/미등록은 애초에 이벤트를 발행하지 않음
   discordMessageId: string;    // 사용자 메시지 id (저장·중복방지)
+  // 이번 발화자의 디스코드 표시 이름. 프롬프트에 "누가 말했는가"를 싣는 데만 쓴다(core.ts).
+  // 어댑터가 이미 알고 있는 값이라(discord.ts 의 users.upsert) 코어가 매 턴 DB 를 다시 조회하지
+  // 않게 하려고 힌트로 나른다. 복구 경로(recoverPending)에는 힌트가 없어 이름 없이 간다.
+  displayName?: string;
   // 일반 채널에서 멘션 없이 들어온 예약어(isChannelCommand). 코어는 이 힌트로 conversations 행을
   // 조회하지도 만들지도 않는다 — 만들면 그 채널이 봇 대화로 굳어(decideRoute 의 hasConversation)
   // 이후 그 채널의 모든 메시지에 답하게 된다. 명령 하나를 처리하고 끝나므로 메시지 저장·LLM

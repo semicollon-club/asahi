@@ -611,10 +611,25 @@ export function buildToolDefinitions(ctx: ToolCtx) {
 ];
 }
 
-export function buildTools(ctx: ToolCtx) {
+// allowed 는 allowedToolsFor 의 결과다(mcp__asahi__ 접두사가 붙은 전체 이름 + WebSearch·Skill
+// 같은 비-MCP 항목). 여기서는 이 서버가 등록할 MCP 도구만 걸러 쓴다.
+//
+// 2026-08-06: 예전에는 전부 등록하고 allowedTools 로만 걸렀다. 그래서 모델이 쓸 수 없는 도구를
+// 보고, 부르고, SDK 가 만든 영문 거부("...but you haven't granted it yet")를 받았다. 그 문자열엔
+// 이유가 없어서 모델이 그럴듯한 이유를 지어냈다 — 실제로 "이 채널에서는 안 된다"는 없는 규칙을
+// 만들어 소유자에게까지 반복했다. 안 보여주면 그 경로 자체가 없다.
+//
+// 서버 생성과 분리해 둔 이유는 테스트다. createSdkMcpServer 반환값 내부 모양에 기대는 테스트는
+// SDK 버전이 오를 때 조용히 깨진다 — 선언 배열은 이 저장소가 이미 쓰는 모양이다(:1033).
+export function allowedToolDefinitions(ctx: ToolCtx, allowed: string[]) {
+  const allowedSet = new Set(allowed);
+  return buildToolDefinitions(ctx).filter((def) => allowedSet.has(t(def.name)));
+}
+
+export function buildTools(ctx: ToolCtx, allowed: string[]) {
   return createSdkMcpServer({
     name: TOOL_SERVER,
     version: "1.0.0",
-    tools: buildToolDefinitions(ctx),
+    tools: allowedToolDefinitions(ctx, allowed),
   });
 }

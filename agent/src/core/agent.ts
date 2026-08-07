@@ -311,7 +311,6 @@ export function makeRunAgentTurn(
   return async (req) => {
     const runtime: RuntimeInfo = { model, sdkVersion: SDK_VERSION, deployTarget, maxTurns: 30, botCommit: process.env.RAILWAY_GIT_COMMIT_SHA, workers: hub?.workersInfo() ?? [] };
     const ctx: ToolCtx = buildToolCtx(repos, req.context, runtime);
-    const server = buildTools(ctx);
 
     // Task 7: "어느 기계를, 그것이 있기는 한가"를 여기 한 곳에서만 정한다 — resolveTurnWorker 가
     // resolveWorkerSelector(위치 기반 선택)로 개인/공유를 가르고, registry 로 실제 workerId 를
@@ -341,6 +340,13 @@ export function makeRunAgentTurn(
     const allowedTools = allowedToolsFor(req.context.role, req.context.isPrivate, req.context.isOwner, deployTarget, {
       workerConnected, webToolsEnabled, memoryWriteEnabled,
     });
+    // 서버 생성이 allowedTools 뒤로 내려온 이유: 그 턴에 못 쓰는 도구는 아예 등록하지 않는다
+    // (allowedToolDefinitions). 위 :320 주석이 이름 붙인 "도구는 보이는데 실행하면 거부"를
+    // 값 계산이 아니라 노출 자체에서 막는 쪽이다 — 모델이 SDK 의 영문 거부를 받고 이유를
+    // 지어내는 경로가 사라진다.
+    // 순서를 바꿔도 안전하다 — 핸들러는 ctx 클로저로 ctx.remote 를 호출 시점에 읽는다. 오히려
+    // ctx 가 완전히 채워진 뒤에 만들어진다.
+    const server = buildTools(ctx, allowedTools);
     // 원격 도구는 전부 mcp__asahi__* 이므로 bare 사전승인으로 두고, 내장 파일/Bash 도구는 아예 열지 않는다
     // (builtinTools=[] 이 SDK 내장 도구를 전부 닫는다). 경로 검사는 이제 워커(remote/roots.ts)가 최종
     // 권한을 갖는다 — 이 프로세스는 내장 도구를 안 여니 canUseTool 로 판정할 대상 자체가 없다.

@@ -331,6 +331,49 @@ describe("AgentCore — 멀티유저/멀티대화", () => {
     expect(t.published.find((e) => e.type === "system_notice" && e.text.includes("오류"))).toBeUndefined();
   });
 
+  it("이어지는 세션의 프롬프트에도 화자가 실린다", async () => {
+    const t = await setup();
+    // 첫 턴에서 세션이 열리고, 두 번째 턴이 resume 경로로 간다 — 그 경로가 이번 수정 대상이다.
+    pub(t.bus, { ...dmHint("owner", "owner"), displayName: "우성현" }, "안녕", 1);
+    await t.core.drain();
+    pub(t.bus, { ...dmHint("owner", "owner"), displayName: "우성현" }, "두 번째", 2);
+    await t.core.drain();
+
+    expect(t.calls).toHaveLength(2);
+    expect(t.calls[1].prompt).toContain("사용자(우성현) 메시지: 두 번째");
+  });
+
+  it("이름이 없으면 지금처럼 라벨만 붙는다", async () => {
+    const t = await setup();
+    pub(t.bus, dmHint("owner", "owner"), "안녕", 1);
+    await t.core.drain();
+    pub(t.bus, dmHint("owner", "owner"), "두 번째", 2);
+    await t.core.drain();
+    expect(t.calls[1].prompt).toContain("사용자 메시지: 두 번째");
+  });
+
+  it("새 세션 프롬프트에도 화자가 실린다", async () => {
+    const t = await setup();
+    pub(t.bus, { ...dmHint("owner", "owner"), displayName: "우성현" }, "안녕", 1);
+    await t.core.drain();
+    expect(t.calls[0].prompt).toContain("사용자(우성현) 메시지: 안녕");
+  });
+
+  it("resume 실패 후 재시도 프롬프트에도 화자가 실린다", async () => {
+    // 조립 지점 셋 중 가장 빠뜨리기 쉬운 자리다 — 2026-08-02 파일 마커 작업에서 실제로
+    // 여기만 빠졌다가 구현자가 잡았다.
+    const t = await setup({ mode: "resume-fails" });
+    pub(t.bus, { ...dmHint("owner", "owner"), displayName: "우성현" }, "안녕", 1);
+    await t.core.drain();
+    pub(t.bus, { ...dmHint("owner", "owner"), displayName: "우성현" }, "두 번째", 2);
+    await t.core.drain();
+
+    // 마지막 호출이 재시도(resume 없이 컨텍스트 블록 재조립)다.
+    const retry = t.calls[t.calls.length - 1];
+    expect(retry.resume).toBeUndefined();
+    expect(retry.prompt).toContain("사용자(우성현) 메시지: 두 번째");
+  });
+
   it("유휴 이내면 resume, 유휴가 지나면 새 세션으로 시작한다", async () => {
     const t = await setup();
     pub(t.bus, dmHint("owner", "owner"), "1", t.now());
