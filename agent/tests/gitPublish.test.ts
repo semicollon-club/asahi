@@ -269,3 +269,55 @@ describe("committer 신원", () => {
     }
   });
 });
+
+describe("자격증명 헬퍼 체인", () => {
+  // -c credential.helper=X 는 체인에 *추가*된다. 시스템 설정에 이미 헬퍼가 있으면(Git for
+  // Windows 기본 credential.helper=manager) git 이 그쪽에 먼저 묻고 그 결과를 쓴다 — 우리
+  // 토큰은 쓰이지도 않고, 비공개 리포는 404 "Repository not found" 를 준다. 2026-08-08
+  // 실사용에서 리포가 멀쩡히 있는데도 그 메시지가 나왔다. 빈 값이 먼저 와야 체인이 비워진다.
+  const chainIsReset = (args: string[]) => {
+    const i = args.indexOf("credential.helper=");
+    const j = args.findIndex((a) => a.startsWith("credential.helper=!"));
+    return i >= 0 && j >= 0 && i < j;
+  };
+
+  it("push 는 빈 헬퍼로 체인을 비운 뒤 우리 헬퍼를 얹는다", async () => {
+    const seen: string[][] = [];
+    const runGit: RunGit = async (args) => { seen.push(args); return { ok: true, stdout: "" }; };
+    await runPublish(base, { runGit, writeFile: async () => {}, sizeOf: async () => 1 });
+    const push = seen.find((a) => a.includes("push"));
+    expect(push).toBeDefined();
+    expect(chainIsReset(push!)).toBe(true);
+  });
+
+  it("clone 도 체인을 비운다", async () => {
+    const seen: string[][] = [];
+    const runGit: RunGit = async (args) => { seen.push(args); return { ok: true, stdout: "" }; };
+    await runRestore(
+      { dir: "/ws/x", cloneUrl: "https://g/x.git", token: "t", discardLocal: false },
+      { runGit, exists: async () => false, rmrf: async () => {} },
+    );
+    const clone = seen.find((a) => a[0] === "clone");
+    expect(clone).toBeDefined();
+    expect(chainIsReset(clone!)).toBe(true);
+  });
+
+  it("pull 도 체인을 비운다", async () => {
+    const seen: string[][] = [];
+    const runGit: RunGit = async (args) => { seen.push(args); return { ok: true, stdout: "" }; };
+    await runRestore(
+      { dir: "/ws/x", cloneUrl: "https://g/x.git", token: "t", discardLocal: false },
+      { runGit, exists: async () => true, rmrf: async () => {} },
+    );
+    const pull = seen.find((a) => a.includes("pull"));
+    expect(pull).toBeDefined();
+    expect(chainIsReset(pull!)).toBe(true);
+  });
+
+  it("체인을 비우는 인자에도 토큰은 없다", async () => {
+    const seen: string[][] = [];
+    const runGit: RunGit = async (args) => { seen.push(args); return { ok: true, stdout: "" }; };
+    await runPublish(base, { runGit, writeFile: async () => {}, sizeOf: async () => 1 });
+    expect(seen.flat().join(" ")).not.toContain("ghs_secret");
+  });
+});
