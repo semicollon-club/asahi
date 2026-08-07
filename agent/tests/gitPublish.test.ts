@@ -236,3 +236,36 @@ describe("runRestore", () => {
     expect(seen.some((s) => s.cmd.includes("status") && s.env !== undefined)).toBe(false);
   });
 });
+
+describe("committer 신원", () => {
+  // git 은 author 와 committer 를 따로 요구한다. --author 만 주면 전역 설정이 없는 워커에서
+  // "Committer identity unknown" 으로 커밋이 통째로 실패한다 — 2026-08-07 첫 실사용이 이걸로
+  // 막혔고, 그때 모델이 sh_exec 로 공유 미니PC 의 전역 git 설정을 바꿔서 우회했다.
+  it("commit 호출에 committer 신원을 -c 로 실어 준다", async () => {
+    const seen: string[][] = [];
+    const runGit: RunGit = async (args) => { seen.push(args); return { ok: true, stdout: "" }; };
+    await runPublish(base, { runGit, writeFile: async () => {}, sizeOf: async () => 1 });
+
+    const commit = seen.find((a) => a.includes("commit"));
+    expect(commit).toBeDefined();
+    expect(commit!.join(" ")).toContain("user.name=");
+    expect(commit!.join(" ")).toContain("user.email=");
+  });
+
+  // 발행이 공유 기계의 전역 설정에 기대면, 그 설정이 없는 워커에서 조용히 실패하고 누군가
+  // 또 전역을 바꿔 우회하게 된다.
+  it("전역 git 설정을 바꾸는 명령은 하나도 실행하지 않는다", async () => {
+    const seen: string[][] = [];
+    const runGit: RunGit = async (args) => { seen.push(args); return { ok: true, stdout: "" }; };
+    await runPublish(base, { runGit, writeFile: async () => {}, sizeOf: async () => 1 });
+    expect(seen.some((a) => a.includes("config") || a.includes("--global"))).toBe(false);
+  });
+
+  // publishArgv 의 계약: 0번째는 항상 서브커맨드다. -c 를 그 앞에 끼우면 runPublish 의 단계
+  // 판정(add·push·commit·remote remove)이 통째로 깨진다 — Task 4 에서 실제로 났던 결함이다.
+  it("publishArgv 는 여전히 0번째가 서브커맨드다", () => {
+    for (const cmd of publishArgv(base)) {
+      expect(cmd[0].startsWith("-")).toBe(false);
+    }
+  });
+});

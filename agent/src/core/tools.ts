@@ -537,6 +537,19 @@ export async function publishHandler(ctx: ToolCtx, args: { name: string; message
   if (!t.ok) return { ok: false, content: t.content };
   const github = ctx.github!;
 
+  // 폴더가 없으면 **토큰을 발급하기도 전에** 멈춘다. 순서가 중요하다 — 뒤에 두면 폴더가 없는데도
+  // 빈 깃허브 리포가 먼저 만들어지고 그 이름이 projects 표에 박힌다(테스트가 이 순서를 잡았다).
+  // 그냥 넘기면 워커에서 `git -C <없는 폴더> init` 이 실패해 영문 git 오류가 그대로 올라오고
+  // 사용자는 "왜 안 되는지" 를 모른다. 실제로 잘 나는 상황이라 문구를 따로 둔다 — 모델이
+  // 프로젝트 폴더를 안 만들고 작업 폴더에 파일을 흩어 놓은 경우다(예방은 PUBLISH_LINES 의 몫).
+  const there = await ctx.remote!.call("fs_tree", { path: t.dir, depth: 1 });
+  if (!there.ok) {
+    return {
+      ok: false,
+      content: `「${t.repoName}」 폴더를 찾지 못했어요. 발행은 작업 폴더 바로 밑의 프로젝트 폴더 하나를 올립니다 — 그 이름으로 폴더를 먼저 만들고 그 안에 파일을 두세요.`,
+    };
+  }
+
   if (t.existing === null) {
     // 리포 생성에만 administration 을 쓰고, 실제 푸시 토큰은 아래에서 contents 로만 새로
     // 발급한다 — 권한이 넓은 토큰이 워커까지 가지 않게 한다.
