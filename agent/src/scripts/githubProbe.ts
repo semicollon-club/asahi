@@ -136,7 +136,35 @@ async function main(): Promise<void> {
     process.exit(1);
   }
   console.log(`[probe] 5. 리포 생성 성공 — ${String(pick(created.body, "full_name"))} (private=${String(pick(created.body, "private"))})`);
-  console.log("[probe]    확인이 끝나면 직접 지우세요.");
+
+  // 6. repositories 스코핑. 설계 §3 은 권한 스코핑과 리포 스코핑 둘 다에 기대는데, 리포가
+  //    하나도 없으면 이 파라미터를 시험할 수 없어 5단계 뒤로 미뤄 뒀다. 방금 만든 리포
+  //    하나로 좁힌 토큰을 발급해, 그 토큰이 실제로 그 하나만 보는지 확인한다.
+  //    "좁혀 달라고 했다"가 아니라 "좁혀졌다"를 봐야 한다 — 요청은 무시될 수도 있다.
+  const scoped = await gh(`https://api.github.com/app/installations/${installationId}/access_tokens`, jwt, {
+    method: "POST",
+    body: JSON.stringify({ repositories: [repoName], permissions: { contents: "write" } }),
+  });
+  if (scoped.status !== 201) {
+    console.error(`[probe] 6. 좁힌 토큰 발급 실패 (HTTP ${scoped.status}) — ${String(pick(scoped.body, "message"))}`);
+    process.exit(1);
+  }
+  const scopedToken = String(pick(scoped.body, "token"));
+  console.log(`[probe] 6. 단일 리포 토큰 발급 — selection=${String(pick(scoped.body, "repository_selection"))} 권한=${JSON.stringify(pick(scoped.body, "permissions"))}`);
+
+  const visible = await gh("https://api.github.com/installation/repositories", scopedToken);
+  const names = Array.isArray(pick(visible.body, "repositories"))
+    ? (pick(visible.body, "repositories") as Array<Record<string, unknown>>).map((r) => String(r.full_name))
+    : [];
+  console.log(`[probe]    그 토큰이 실제로 보는 리포: ${names.length}개 — ${names.join(", ") || "(없음)"}`);
+  if (names.length === 1 && names[0].endsWith(`/${repoName}`)) {
+    console.log("[probe]    스코핑이 실제로 좁힌다 — 설계 §3 의 전제가 확인됐다.");
+  } else {
+    console.error("[probe]    기대와 다르다: 정확히 그 리포 하나만 보여야 한다. 설계 §3 을 다시 봐야 한다.");
+    process.exitCode = 1;
+  }
+
+  console.log(`[probe] 확인이 끝나면 리포를 직접 지우세요: https://github.com/${org}/${repoName}/settings`);
 }
 
 await main();
