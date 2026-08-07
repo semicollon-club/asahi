@@ -148,10 +148,14 @@ lastReviewed: 2026-08-07
 캐릭터 페르소나·표정 이미지 제거(2026-08-05~08-06)로 그 기능의 테스트 파일 다수가 지워지고 남은
 파일들의 케이스도 줄었지만, 그 뒤 복원된 커버리지가 더 많다.
 
-이 수치는 이제 손으로 적지 않아도 된다 — **CI(`.github/workflows/agent.yml`)가 `agent/` 가 바뀐
-모든 푸시·PR 에서 `npm run typecheck` 와 `npm test` 를 리눅스·윈도우 양쪽에서 돌린다**(2026-08-07
-추가). 그전까지 CI 에는 문서 가드(`.github/workflows/docs.yml`)뿐이라 테스트가 자동으로 실행된
-적이 없고, 이 문단의 수치도 사람이 손으로 잰 값이라 실제와 39개 어긋나 있었다.
+이 수치는 사람이 손으로 잰 값이라 실제와 39개 어긋나 있었다. CI 에는 문서 가드
+(`.github/workflows/docs.yml`)뿐이라 테스트가 자동으로 실행된 적이 없다.
+
+**`.github/workflows/agent.yml` 을 추가하면 이 수치를 손으로 적지 않아도 된다** — `agent/` 가
+바뀐 모든 푸시·PR 에서 `npm run typecheck` 와 `npm test` 를 리눅스·윈도우 양쪽에서 돌리는
+워크플로우다. 내용은 `deploy/ci-워크플로우.md` 에 있고 **아직 리포에 없다**: OAuth 토큰으로는
+`workflow` 스코프 없이 워크플로우 파일을 푸시할 수 없어(GitHub 제약), 사람이 웹 UI 로 넣거나
+`gh auth refresh -h github.com -s workflow && gh auth setup-git` 뒤에 푸시해야 한다.
 
 skip 3건의 성격은 서로 다르다. 1건은 Postgres READ ONLY 트랜잭션의 실제 쓰기 거부 동작으로,
 테스트용 인메모리 Postgres 구현(pg-mem)의 한계상 유닛 테스트로 재현할 수 없어 실 Supabase
