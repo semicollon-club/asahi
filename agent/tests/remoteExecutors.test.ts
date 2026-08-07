@@ -1027,7 +1027,11 @@ describe("proc_* 실행기 — PM2 위임", () => {
   // 위 중복 거절 메시지 테스트와 같은 이유로, jlist 가 실제로 보고할 형태(cmd.exe 셸 래퍼 뒤에
   // 스크립트 경로)를 그대로 흉내내 "표에 보이는 값이 그 raw 경로가 아니라 스크립트 파일에서
   // 되찾은 원래 명령"이라는 것을 직접 증명한다.
-  it("proc_list 는 스크립트 경로가 아니라 되찾은 원래 명령을 보여준다(UX 회귀)", async () => {
+  // 2026-08-07 CI: 위 "중복 거절 메시지" 케이스와 같은 이유로 윈도우에서만 돌린다 — 가짜 jlist 가
+  // 윈도우 고유 형태(`cmd.exe /c <경로>.bat`)를 흉내내는데, 실제 스크립트 확장자는
+  // shellFlavorOf(roots) 가 정하므로 리눅스 호스트에서는 `.sh` 다. 흉내낸 데이터가 그 호스트와
+  // 안 맞는 것이지 구현 결함이 아니다.
+  it.skipIf(process.platform !== "win32")("proc_list 는 스크립트 경로가 아니라 되찾은 원래 명령을 보여준다(UX 회귀)", async () => {
     const trapCommand = 'npm run dev -- --title="hi there"';
     const scriptPath = path.join(scriptDir, "asahi-111.bat");
     const runningWithScriptPath = JSON.stringify([
