@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { openTestDb } from "../src/store/db.js";
+import { ProjectsRepo } from "../src/store/projectsRepo.js";
 import { IntrospectRepo } from "../src/store/introspectRepo.js";
 import { MemoriesRepo } from "../src/store/memoriesRepo.js";
 import { UsersRepo } from "../src/store/usersRepo.js";
@@ -12,6 +13,7 @@ import {
   allowDirHandler, revokeDirHandler, listDirsHandler,
   dbSchemaHandler, dbQueryHandler, runtimeInfoHandler,
   allowedToolsFor, buildToolDefinitions, allowedToolDefinitions, type ToolCtx,
+  publishHandler, restoreHandler,
 } from "../src/core/tools.js";
 import { SHARED_MEMORY_MAX_LEN, SHARED_MEMORY_TITLE_MAX_LEN } from "../src/core/memoryScope.js";
 
@@ -26,9 +28,12 @@ async function ctx(over: CtxOver = {}): Promise<ToolCtx> {
   const db = await openTestDb();
   const { remote, ...rest } = over;
   return {
-    repos: { memories: new MemoriesRepo(db), users: new UsersRepo(db), allowedDirs: new AllowedDirsRepo(db), introspect: new IntrospectRepo(db) },
+    repos: { memories: new MemoriesRepo(db), users: new UsersRepo(db), allowedDirs: new AllowedDirsRepo(db), introspect: new IntrospectRepo(db), projects: new ProjectsRepo(db) },
     role: "allowed", isPrivate: true, isOwner: false, userId: "guest", conversationId: 1,
     runtime: { model: "claude-opus-4-8", sdkVersion: "0.3.207", deployTarget: "local", maxTurns: 30, workers: [] },
+    // 발행 미설정이 기본이다 — 발행을 시험하는 케이스만 over.github 로 채운다.
+    github: null,
+    now: () => 1_000_000,
     ...rest,
     ...(remote
       ? {
@@ -45,7 +50,7 @@ async function ctx(over: CtxOver = {}): Promise<ToolCtx> {
 async function ownerCtx(over = {}) {
   const db = await openTestDb();
   return {
-    repos: { memories: new MemoriesRepo(db), users: new UsersRepo(db), allowedDirs: new AllowedDirsRepo(db), introspect: new IntrospectRepo(db) },
+    repos: { memories: new MemoriesRepo(db), users: new UsersRepo(db), allowedDirs: new AllowedDirsRepo(db), introspect: new IntrospectRepo(db), projects: new ProjectsRepo(db) },
     role: "owner", isPrivate: true, isOwner: true, userId: "owner", conversationId: 1,
     runtime: { model: "claude-opus-4-8", sdkVersion: "0.3.207", deployTarget: "local", maxTurns: 30, workers: [] },
     ...over,
@@ -1076,5 +1081,101 @@ describe("allowedToolDefinitions — 그 턴에 못 쓰는 도구는 등록하�
     const got = await names("owner", true, true, true);
     expect(got).toContain("fs_tree");
     expect(got).toContain("list_dirs");
+  });
+});
+
+describe("발행 도구 게이팅", () => {
+  const has = (tools: string[]) =>
+    tools.includes("mcp__asahi__publish_project") && tools.includes("mcp__asahi__restore_project");
+
+  it("워커가 붙어 있고 깃허브 설정이 있으면 네 신원 모두에게 열린다", () => {
+    for (const [isPrivate, isOwner] of [[true, true], [false, true], [true, false], [false, false]] as const) {
+      const tools = allowedToolsFor("allowed", isPrivate, isOwner, "local", { workerConnected: true, githubReady: true });
+      expect(has(tools)).toBe(true);
+    }
+  });
+
+  // 노출해 두고 부를 때 실패시키면 모델이 매번 시도했다가 실패를 사용자에게 전달한다.
+  it("깃허브 설정이 없으면 안 열린다", () => {
+    const tools = allowedToolsFor("owner", true, true, "local", { workerConnected: true, githubReady: false });
+    expect(has(tools)).toBe(false);
+  });
+
+  // 발행은 워커에서 git 을 돌리는 일이라 워커 없이는 할 것이 없다.
+  it("워커가 없으면 안 열린다", () => {
+    const tools = allowedToolsFor("owner", true, true, "local", { workerConnected: false, githubReady: true });
+    expect(has(tools)).toBe(false);
+  });
+
+  // 사람이 지켜보지 않는 턴(유휴 요약·정기 게시)은 noRemoteTools 로 워커 축을 끄므로, 그 턴에서
+  // 조직 리포에 푸시가 일어날 수 없다. 이 테스트가 그 연결을 고정한다 — 발행에 별도 축을 새로
+  // 만들면 그 축을 끄는 것을 잊은 새 무인 턴이 생겼을 때 조용히 열린다.
+  it("원격 도구가 닫힌 턴에서는 함께 닫힌다", () => {
+    const tools = allowedToolsFor("owner", true, true, "local", {
+      workerConnected: false, githubReady: true, webToolsEnabled: false, memoryWriteEnabled: false,
+    });
+    expect(has(tools)).toBe(false);
+    expect(tools).not.toContain("mcp__asahi__remember");
+  });
+});
+
+describe("publish_project 핸들러", () => {
+  const github = { org: "semicollon-club", appId: "1", installationId: "2", privateKeyPem: "PEM" };
+
+  it("깃허브 설정이 없으면 거절한다(노출 판정과 실행 판정을 따로 확인한다)", async () => {
+    const c = await ctx({ remote: { call: async () => ({ ok: true, content: "" }) } });
+    const r = await publishHandler(c, { name: "todo-app" });
+    expect(r.ok).toBe(false);
+    expect(r.content).toContain("설정");
+  });
+
+  it("워커가 없으면 거절한다", async () => {
+    const c = await ctx({ github });
+    const r = await publishHandler(c, { name: "todo-app" });
+    expect(r.ok).toBe(false);
+  });
+
+  it("이름이 규칙에 안 맞으면 워커를 부르지 않는다", async () => {
+    let called = false;
+    const c = await ctx({ github, remote: { call: async () => { called = true; return { ok: true, content: "" }; } } });
+    const r = await publishHandler(c, { name: "../etc" });
+    expect(r.ok).toBe(false);
+    expect(called).toBe(false);
+  });
+
+  // 남의 리포에 푸시하는 것을 막는 유일한 지점이다. 워커까지 도달하면 안 된다.
+  it("남이 쓰는 이름이면 워커를 부르지 않고 거절한다", async () => {
+    let called = false;
+    const c = await ctx({ github, userId: "guest2", remote: { call: async () => { called = true; return { ok: true, content: "" }; } } });
+    await c.repos.projects.claim({ repoName: "todo-app", ownerUserId: "someone-else", ts: 1 });
+    const r = await publishHandler(c, { name: "todo-app" });
+    expect(r.ok).toBe(false);
+    expect(called).toBe(false);
+    expect(r.content).not.toContain("someone-else");
+  });
+
+  it("실패하면 리포 주소를 알리지 않는다", async () => {
+    const c = await ctx({ github, remote: { call: async () => ({ ok: false, content: "git push 에 실패했어요" }) } });
+    await c.repos.projects.claim({ repoName: "todo-app", ownerUserId: "guest", ts: 1 });
+    await c.repos.allowedDirs.add(c.remote!.workerId, "/ws");
+    const r = await publishHandler(c, { name: "todo-app" });
+    expect(r.ok).toBe(false);
+    expect(r.content).not.toContain("github.com");
+  });
+});
+
+describe("restore_project 핸들러", () => {
+  const github = { org: "semicollon-club", appId: "1", installationId: "2", privateKeyPem: "PEM" };
+
+  // 없는 리포로 clone 하면 깃허브가 인증 오류를 내는데, 그 메시지는 "권한 문제" 로 읽혀
+  // 사용자가 엉뚱한 곳을 보게 된다.
+  it("발행한 적 없는 이름은 워커를 부르지 않고 안내한다", async () => {
+    let called = false;
+    const c = await ctx({ github, remote: { call: async () => { called = true; return { ok: true, content: "" }; } } });
+    await c.repos.allowedDirs.add(c.remote!.workerId, "/ws");
+    const r = await restoreHandler(c, { name: "never-published" });
+    expect(r.ok).toBe(false);
+    expect(called).toBe(false);
+    expect(r.content).toContain("발행");
   });
 });

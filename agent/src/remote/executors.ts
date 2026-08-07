@@ -16,6 +16,8 @@ import {
 import { pathFlavorOf, isPathWithinAny } from "../core/paths.js";
 import { parsePm2List, renderProcList, procNameFor, parseProcName, type ProcInfo } from "./proc.js";
 import { isDiscordCdnUrl } from "../core/attachments.js";
+import { defaultRunGit, type RunGit } from "./gitCommit.js";
+import { runPublish, runRestore } from "./gitPublish.js";
 
 export type ExecResult = { ok: boolean; content: string };
 export type Executors = Record<string, (args: Record<string, unknown>) => Promise<ExecResult>>;
@@ -410,7 +412,12 @@ function strMap(v: unknown): Record<string, string> {
 
 export function makeExecutors(
   roots: string[],
-  opts: { runPm2?: RunPm2; scriptDir?: string; fetchImpl?: typeof fetch; fileFetchTimeoutMs?: number } = {},
+  opts: {
+    runPm2?: RunPm2; scriptDir?: string; fetchImpl?: typeof fetch; fileFetchTimeoutMs?: number;
+    // git_publish·git_restore 가 쓰는 주입 지점. runPm2 와 같은 이유로 열어 둔다 — 테스트가
+    // 실제 git 프로세스를 띄우지 않고 명령 목록과 실패 경로를 검증한다.
+    runGit?: RunGit;
+  } = {},
 ): Executors {
   // proc_start 가 회원 명령을 적을 스크립트 파일 위치(DEFAULT_SCRIPT_DIR·writeStartScript 선언부
   // 참고) — 테스트가 실제 OS 임시폴더를 더럽히지 않고 파일 내용을 직접 들여다볼 수 있도록 주입
@@ -843,6 +850,63 @@ export function makeExecutors(
       } catch (err) {
         return { ok: false, content: `받아오지 못했어요: ${String(err)}` };
       }
+    },
+
+    // git_publish·git_restore 는 봇이 직접 부른다 — file_fetch 와 같이 REMOTE_TOOL_NAMES 에
+    // 없으므로 모델에게 도구로 노출되지 않는다. 모델이 cloneUrl 이나 token 을 정하게 하면 워커가
+    // 임의 원격으로 푸시하거나 임의 자격증명을 쓰는 표면이 열리는데, 그 표면 자체를 만들지 않는다.
+    // 발행 대상·소스 경로·토큰은 전부 봇이 계산해 넘긴다(설계 §5·§6).
+    async git_publish(args) {
+      const g = gate(args.dir);
+      if (!g.ok) return g.res;
+      return runPublish(
+        {
+          dir: g.path,
+          cloneUrl: str(args.cloneUrl) ?? "",
+          token: str(args.token) ?? "",
+          message: str(args.message) ?? "아사히를 통해 발행",
+          authorName: str(args.authorName) ?? "asahi",
+          authorEmail: str(args.authorEmail) ?? "asahi@users.noreply.github.com",
+        },
+        {
+          runGit: opts.runGit ?? defaultRunGit,
+          writeFile: async (p, body) => { await fs.writeFile(p, body, "utf8"); },
+          // 스테이징된 파일들의 실제 바이트를 합친다. 읽을 수 없는 항목(경합으로 사라진 파일 등)은
+          // 0 으로 세고 넘어간다 — 용량 상한은 방어선이지 정확한 회계가 아니고, 여기서 던지면
+          // 발행 전체가 그 파일 하나 때문에 멈춘다.
+          sizeOf: async (dir, rels) => {
+            let total = 0;
+            for (const rel of rels) {
+              try {
+                total += (await fs.stat(path.join(dir, rel))).size;
+              } catch {
+                // 무시하고 계속 — 위 주석 참고.
+              }
+            }
+            return total;
+          },
+        },
+      );
+    },
+
+    async git_restore(args) {
+      const g = gate(args.dir);
+      if (!g.ok) return g.res;
+      return runRestore(
+        {
+          dir: g.path,
+          cloneUrl: str(args.cloneUrl) ?? "",
+          token: str(args.token) ?? "",
+          // 기본은 false 다. 인자가 빠졌거나 문자열 "true" 로 왔을 때 파괴적인 쪽으로 기울면
+          // 안 된다 — 정확히 boolean true 일 때만 로컬을 지운다(설계 §7.1).
+          discardLocal: args.discardLocal === true,
+        },
+        {
+          runGit: opts.runGit ?? defaultRunGit,
+          exists: async (p) => { try { await fs.stat(p); return true; } catch { return false; } },
+          rmrf: async (p) => { await fs.rm(p, { recursive: true, force: true }); },
+        },
+      );
     },
 
     async proc_start(args) {

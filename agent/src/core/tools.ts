@@ -9,6 +9,11 @@ import type { WorkerKind } from "../store/workersRepo.js";
 import { assertReadOnlySql, formatQueryResult } from "./sqlGuard.js";
 import { REMOTE_TOOL_NAMES, remoteToolHandler } from "./remoteTools.js";
 import { isPathWithinAny, normalizeDir } from "./paths.js";
+import type { ProjectsRepo, ProjectRow } from "../store/projectsRepo.js";
+import type { GithubAppConfig } from "../github/appToken.js";
+import { mintInstallationToken, createOrgRepo } from "../github/appToken.js";
+import { normalizeRepoName, decideOwnership, publishSourceDir } from "./publish.js";
+import { scopeDirs } from "./workerSelect.js";
 import { memoryScopeFor, SHARED_MEMORY_MAX_LEN, SHARED_MEMORY_TITLE_MAX_LEN, renderMemories } from "./memoryScope.js";
 
 // 도구 서버 이름 → 모델에는 mcp__asahi__<tool> 로 노출된다.
@@ -32,13 +37,21 @@ export type RuntimeInfo = {
 
 // 현재 턴의 상대·대화 컨텍스트를 클로저로 받는다. 도구 handler 는 이걸로 스코프를 강제한다.
 export type ToolCtx = {
-  repos: { memories: MemoriesRepo; users: UsersRepo; allowedDirs: AllowedDirsRepo; introspect: IntrospectRepo };
+  repos: {
+    memories: MemoriesRepo; users: UsersRepo; allowedDirs: AllowedDirsRepo; introspect: IntrospectRepo;
+    projects: ProjectsRepo;
+  };
   role: Role;
   isPrivate: boolean;
   isOwner: boolean;
   userId: string;
   conversationId: number;
   runtime: RuntimeInfo;
+  // 깃허브 발행 설정. null 이면 발행 도구가 애초에 노출되지 않지만(allowedToolsFor 의
+  // githubReady), 핸들러도 다시 확인한다 — 노출 판정과 실행 판정이 갈리면 조용히 새는 자리다.
+  github: GithubAppConfig | null;
+  // 시각 주입. 토큰 발급의 JWT iat/exp 와 projects.last_push_ts 에 쓴다.
+  now: () => number;
   // 원격 워커 호출 통로. 워커가 연결돼 있을 때만 주입된다(index.ts 배선, agent.ts 의
   // buildRemoteCtx). roots 는 그 워커가 hello 프레임으로 알려온 실제 작업 폴더 목록 —
   // allowDirHandler(아래)가 이 값으로 등록 요청을 재검증한다(FIX2: 봇 프로세스 자신의
@@ -344,6 +357,9 @@ export async function runtimeInfoHandler(ctx: ToolCtx): Promise<string> {
 // 리터럴 타입이라 boolean 과 섞여도 타입 수준에서 구분된다.
 export type AllowedToolsOptions = {
   workerConnected?: boolean;
+  // 깃허브 발행 설정(config.github)이 갖춰졌는지. 없으면 도구를 아예 노출하지 않는다 —
+  // 노출해 두고 부를 때 실패시키면 모델이 매번 시도했다가 실패를 사용자에게 전달한다.
+  githubReady?: boolean;
   webToolsEnabled?: boolean;
   // memories 테이블에 행을 넣거나 지우는 도구(remember·forget) 둘을 한꺼번에 열고 닫는 축.
   // false 여도 recall(읽기)은 이 값과 무관하게 항상 그대로다 — 정기 게시
@@ -368,6 +384,7 @@ export function allowedToolsFor(
 ): string[] {
   const {
     workerConnected = false,
+    githubReady = false,
     // FIX3(중요, 최종 리뷰 3차): 웹 검색도 워커 원격 도구처럼 턴별로 열고 닫을 수 있어야 한다 —
     // 유휴 요약 턴(core.ts 의 summarizeAndClose)은 사람이 지켜보지 않는 타이머로 돌고 이전에
     // 심어졌을 수도 있는 프롬프트 인젝션을 담은 세션을 그대로 이어받는데, 요약은 검색이 필요
@@ -391,6 +408,12 @@ export function allowedToolsFor(
   // "그 분기가 애초에 안 쓴다"는 구조 자체다 — 실행 시점에는 canManagePc(아래 dir 핸들러들이
   // 다시 확인)가 같은 기준(isOwner)으로 한 번 더 막는다. 공유 기계의 허용 폴더 "목록 자체를
   // 바꾸는" 권한은 관리자(소유자)만 갖는다는 사실 자체는 그대로다.
+  // 발행 도구는 워커 연결과 깃허브 설정을 함께 요구한다. workerConnected 를 축으로 쓰는 것이
+  // 의미상 정확하다 — 발행은 워커에서 git 을 돌리는 일이라 워커 없이는 할 것이 없다. 그리고 그
+  // 덕에 사람이 지켜보지 않는 턴(요약·정기 게시)이 자동으로 닫힌다: 그 둘은 noRemoteTools 로
+  // 이 축을 이미 끄고 있다(core.ts 의 summarizeAndClose, digest.ts). 별도 축을 새로 만들면
+  // 그 축을 끄는 것을 잊은 새 무인 턴이 생겼을 때 조용히 열린다.
+  const publishTools = workerConnected && githubReady ? [t("publish_project"), t("restore_project")] : [];
   const dirTools = workerConnected ? [t("allow_dir"), t("revoke_dir"), t("list_dirs")] : [];
   const webTools = webToolsEnabled ? WEB_TOOLS : [];
   // Important 4 — remember 는 네 분기 모두 이 배열 하나로만 열고 닫는다. memoryWriteEnabled
@@ -402,7 +425,7 @@ export function allowedToolsFor(
   const forgetTools = memoryWriteEnabled ? [t("forget")] : [];
   if (isOwner && isPrivate) {
     return [
-      ...remote,
+      ...remote, ...publishTools,
       ...memoryTools, t("recall"), t("manage_access"), ...forgetTools,
       ...dirTools,
       t("db_schema"), t("db_query"), t("runtime_info"),
@@ -418,10 +441,10 @@ export function allowedToolsFor(
   // forget 도 같은 이유로 연다(2026-08-02, Task 3): 부원이 쌓는 공용 기억이 틀리거나 낡으면
   // 정리해야 하는데, 그 정리 대상도 그걸 할 수 있는 소유자도 전부 이 서버 분기에만 있다.
   // 단 remember 와 마찬가지로 memoryWriteEnabled 축이 닫히면 함께 닫힌다(위 forgetTools).
-  if (isOwner) return [...remote, ...memoryTools, t("recall"), ...forgetTools, ...dirTools, t("runtime_info"), ...webTools];
+  if (isOwner) return [...remote, ...publishTools, ...memoryTools, t("recall"), ...forgetTools, ...dirTools, t("runtime_info"), ...webTools];
   // 손님: DM 이든 서버든 공유 기계로 간다. 폴더 관리는 주지 않는다.
   if (isPrivate && (role === "owner" || role === "allowed")) {
-    return [...remote, ...memoryTools, t("recall"), ...webTools];
+    return [...remote, ...publishTools, ...memoryTools, t("recall"), ...webTools];
   }
   // Minor(최종 전체 브랜치 리뷰) — 이 마지막 catch-all 은 role 을 보지 않아
   // allowedToolsFor("blocked", ...) 도 remember·recall 을 돌려줬다(실측). 위 손님 DM 분기는
@@ -432,7 +455,9 @@ export function allowedToolsFor(
   if (!(role === "owner" || role === "allowed")) return [];
   // 손님 서버: 동아리 공용 기억은 누구나 쌓을 수 있다(스펙 §2.1). 개인 기억 저장은 DM 에서만
   // 되므로 여기서 remember 를 부르면 반드시 공용이 된다.
-  return [...remote, ...memoryTools, t("recall"), ...webTools];
+  // 발행도 여기서 연다 — 부원이 만든 것을 올리는 것이 이 기능의 목적이고, 손님은 어차피 자기
+  // 폴더·자기 리포에만 닿는다(publish.ts 의 decideOwnership, workerSelect.ts 의 scopeDirs).
+  return [...remote, ...publishTools, ...memoryTools, t("recall"), ...webTools];
 }
 
 // ── 인프로세스 MCP 서버(SDK) — handler 는 위 순수 함수를 감싼다 ──────────────
@@ -453,6 +478,131 @@ const remoteResult = async (ctx: ToolCtx, tool: string, args: Record<string, unk
   const r = await remoteToolHandler(ctx, tool, args);
   return textResult(r.content, !r.ok);
 };
+
+
+// ── 깃허브 발행 ──────────────────────────────────────────────────────────────
+// 이름 하나로 "무엇을·어디서·어디로" 를 전부 결정한다. 모델이 준 값이 그대로 경로나 리포로
+// 쓰이는 자리는 이 함수 안에 없다 — 이름은 normalizeRepoName 을 통과해야만 살아남고, 경로는
+// 그 사람의 작업 폴더에서 계산되며, 대상 리포는 projects 표가 정한다(설계 §5·§6).
+type Target =
+  | { ok: false; content: string }
+  | { ok: true; repoName: string; dir: string; existing: ProjectRow | null };
+
+async function resolveTarget(ctx: ToolCtx, rawName: string): Promise<Target> {
+  const remote = ctx.remote;
+  if (!remote) return { ok: false, content: "지금은 워커가 연결돼 있지 않아 할 수 없어요." };
+  if (!ctx.github) return { ok: false, content: "깃허브 발행이 아직 설정되지 않았어요. 관리자에게 알려주세요." };
+
+  const repoName = normalizeRepoName(rawName);
+  if (repoName === null) {
+    return { ok: false, content: "프로젝트 이름은 영문·숫자·하이픈·밑줄만 쓸 수 있어요(100자 이내)." };
+  }
+
+  // 작업 폴더는 remoteToolHandler 와 **같은 방식**으로 구한다 — 두 경로가 서로 다른 기준으로
+  // 폴더를 정하면, 파일 도구로는 못 건드리는 곳을 발행으로는 건드릴 수 있게 된다.
+  let dirs: string[];
+  try {
+    const listed = await ctx.repos.allowedDirs.list(remote.workerId);
+    dirs = scopeDirs(listed, { workerKind: remote.workerKind, isOwner: ctx.isOwner, userId: ctx.userId });
+  } catch (e) {
+    return { ok: false, content: `허용 폴더 확인 중 오류가 발생했어요: ${e instanceof Error ? e.message : String(e)}` };
+  }
+  const workspaceDir = dirs[0];
+  if (!workspaceDir) return { ok: false, content: "작업 폴더가 없어요. 먼저 폴더를 등록해 달라고 관리자에게 요청해 주세요." };
+
+  const existing = await ctx.repos.projects.byRepoName(repoName);
+  const decision = decideOwnership({ repoName, requesterUserId: ctx.userId, existing });
+  if (!decision.ok) return { ok: false, content: decision.reason };
+
+  return { ok: true, repoName, dir: publishSourceDir({ workspaceDir, repoName }), existing };
+}
+
+// 커밋 author 에 쓸 이름. 조회가 실패하거나 이름이 비어 있으면 userId 로 폴백한다 — 발행이
+// 표시 이름 하나 때문에 멈추면 안 된다(recall 의 "(작성자 미상)" 폴백과 같은 자리다).
+async function authorNameOf(ctx: ToolCtx): Promise<string> {
+  try {
+    const names = await ctx.repos.users.displayNames();
+    return names[ctx.userId] || ctx.userId;
+  } catch {
+    return ctx.userId;
+  }
+}
+
+function cloneUrlFor(org: string, repoName: string): string {
+  return `https://github.com/${org}/${repoName}.git`;
+}
+
+export async function publishHandler(ctx: ToolCtx, args: { name: string; message?: string }): Promise<{ ok: boolean; content: string }> {
+  const t = await resolveTarget(ctx, args.name);
+  if (!t.ok) return { ok: false, content: t.content };
+  const github = ctx.github!;
+
+  if (t.existing === null) {
+    // 리포 생성에만 administration 을 쓰고, 실제 푸시 토큰은 아래에서 contents 로만 새로
+    // 발급한다 — 권한이 넓은 토큰이 워커까지 가지 않게 한다.
+    try {
+      const admin = await mintInstallationToken({
+        config: github, repoNames: [], permissions: { administration: "write" }, nowMs: ctx.now(),
+      });
+      await createOrgRepo({ config: github, token: admin.token, repoName: t.repoName });
+    } catch (err) {
+      return { ok: false, content: err instanceof Error ? err.message : String(err) };
+    }
+    // 리포를 실제로 만든 뒤에 등록한다 — 만들기가 실패했는데 표에 남으면 그 이름이 영원히 막힌다.
+    await ctx.repos.projects.claim({ repoName: t.repoName, ownerUserId: ctx.userId, ts: ctx.now() });
+  }
+
+  let token: string;
+  try {
+    token = (await mintInstallationToken({
+      config: github, repoNames: [t.repoName], permissions: { contents: "write" }, nowMs: ctx.now(),
+    })).token;
+  } catch (err) {
+    return { ok: false, content: err instanceof Error ? err.message : String(err) };
+  }
+
+  const r = await ctx.remote!.call("git_publish", {
+    dir: t.dir,
+    cloneUrl: cloneUrlFor(github.org, t.repoName),
+    token,
+    message: args.message ?? "아사히를 통해 발행",
+    authorName: await authorNameOf(ctx),
+    authorEmail: `${ctx.userId}@users.noreply.github.com`,
+  });
+
+  if (!r.ok) return r;
+  await ctx.repos.projects.touchPush(t.repoName, ctx.now());
+  // 주소는 성공했을 때만 알린다 — 실패했는데 링크를 주면 없는 것을 열게 된다.
+  return { ok: true, content: `올렸어요: https://github.com/${github.org}/${t.repoName}` };
+}
+
+export async function restoreHandler(ctx: ToolCtx, args: { name: string; discard_local?: boolean }): Promise<{ ok: boolean; content: string }> {
+  const t = await resolveTarget(ctx, args.name);
+  if (!t.ok) return { ok: false, content: t.content };
+  const github = ctx.github!;
+
+  // 발행한 적 없는 이름은 되받을 것이 없다. 없는 리포로 clone 을 시도하면 깃허브가 인증
+  // 오류를 내는데, 그 메시지는 사용자에게 "권한 문제" 로 읽혀 엉뚱한 곳을 보게 한다.
+  if (t.existing === null) {
+    return { ok: false, content: `「${t.repoName}」 은 아직 깃허브에 올린 적이 없어요. 먼저 발행해 주세요.` };
+  }
+
+  let token: string;
+  try {
+    token = (await mintInstallationToken({
+      config: github, repoNames: [t.repoName], permissions: { contents: "write" }, nowMs: ctx.now(),
+    })).token;
+  } catch (err) {
+    return { ok: false, content: err instanceof Error ? err.message : String(err) };
+  }
+
+  return ctx.remote!.call("git_restore", {
+    dir: t.dir,
+    cloneUrl: cloneUrlFor(github.org, t.repoName),
+    token,
+    discardLocal: args.discard_local === true,
+  });
+}
 
 // 도구 선언 목록을 buildTools 에서 분리해 내보낸다. 이 배열 자체가 "핸들러의 반환을 MCP 결과로
 // 바꾸는" 이음매(seam)인데, createSdkMcpServer 안에 인라인으로 묻혀 있으면 그 변환을 테스트가
@@ -481,6 +631,24 @@ export function buildToolDefinitions(ctx: ToolCtx) {
         id: z.number().optional().describe("여러 개가 걸렸을 때 그 목록에서 본 번호로 하나를 정확히 지정합니다"),
       },
       async (args) => textResult(await forgetHandler(ctx, args)),
+    ),
+    tool(
+      "publish_project",
+      "만든 프로젝트를 동아리 깃허브에 올립니다. 프로젝트 이름만 주세요 — 어느 폴더를 올릴지, 어느 리포에 올릴지는 시스템이 정합니다.",
+      {
+        name: z.string().describe("프로젝트 이름(영문·숫자·하이픈·밑줄)"),
+        message: z.string().optional().describe("커밋 메시지"),
+      },
+      async (args) => { const r = await publishHandler(ctx, args); return textResult(r.content, !r.ok); },
+    ),
+    tool(
+      "restore_project",
+      "깃허브에서 프로젝트를 되받아 옵니다. 로컬이 없으면 받아오고, 최신이 아니면 갱신합니다. 저장하지 않은 변경이 있으면 거절합니다 — discard_local 은 사용자가 '버리고 새로 받아줘'라고 명시적으로 말했을 때만 켜세요.",
+      {
+        name: z.string().describe("프로젝트 이름"),
+        discard_local: z.boolean().optional().describe("로컬을 버리고 새로 받을지(사용자가 명시적으로 요청했을 때만)"),
+      },
+      async (args) => { const r = await restoreHandler(ctx, args); return textResult(r.content, !r.ok); },
     ),
     tool(
       "manage_access",

@@ -250,3 +250,44 @@ describe("봇 설정 — WORKER_TOKEN 제거", () => {
     expect("workerToken" in cfg).toBe(false);
   });
 });
+
+describe("깃허브 발행 설정", () => {
+  const key = "-----BEGIN RSA PRIVATE KEY-----\nabc\n-----END RSA PRIVATE KEY-----\n";
+  const b64 = Buffer.from(key, "utf8").toString("base64");
+  const withGithub = {
+    DISCORD_TOKEN: "t", DISCORD_OWNER_ID: "o", DATABASE_URL: "postgres://x",
+    GITHUB_ORG: "semicollon-club", GITHUB_APP_ID: "4514057",
+    GITHUB_APP_INSTALLATION_ID: "151876954", GITHUB_APP_PRIVATE_KEY_B64: b64,
+  };
+
+  it("넷이 다 있으면 설정을 만들고 개인키를 디코드한다", () => {
+    const g = loadConfig(withGithub as NodeJS.ProcessEnv).github;
+    expect(g).not.toBeNull();
+    expect(g!.org).toBe("semicollon-club");
+    expect(g!.appId).toBe("4514057");
+    expect(g!.installationId).toBe("151876954");
+    expect(g!.privateKeyPem).toBe(key);
+  });
+
+  // 부가 기능이 본 기능을 인질로 잡지 않는다 — 스킬 폴더가 없을 때 plugins 를 안 넘기는 것과
+  // 같은 원칙이다. 던지면 설정 하나 빠진 것으로 봇 전체가 못 뜬다.
+  it("하나라도 비면 null 이고 기동을 막지 않는다", () => {
+    for (const k of ["GITHUB_ORG", "GITHUB_APP_ID", "GITHUB_APP_INSTALLATION_ID", "GITHUB_APP_PRIVATE_KEY_B64"]) {
+      const without = { ...withGithub } as Record<string, string>;
+      delete without[k];
+      expect(loadConfig(without as NodeJS.ProcessEnv).github).toBeNull();
+    }
+  });
+
+  // base64 가 깨져도 Buffer.from 은 던지지 않고 쓰레기를 돌려준다. 그 쓰레기가 crypto.sign 까지
+  // 가면 OpenSSL 오류로 나타나고, 사람은 "키가 잘못됐다"가 아니라 "깃허브가 거부했다"로 읽는다.
+  it("base64 가 깨져 PEM 이 아니면 null 이다", () => {
+    const broken = { ...withGithub, GITHUB_APP_PRIVATE_KEY_B64: "!!!not-base64!!!" };
+    expect(loadConfig(broken as NodeJS.ProcessEnv).github).toBeNull();
+  });
+
+  it("공백만 든 값은 없는 것으로 본다", () => {
+    const blank = { ...withGithub, GITHUB_ORG: "   " };
+    expect(loadConfig(blank as NodeJS.ProcessEnv).github).toBeNull();
+  });
+});

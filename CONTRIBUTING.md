@@ -125,8 +125,12 @@ design-archive의 `specs/`·`plans/` 참고). 새 기능이나 버그 수정을 
 만든 커밋은 말미에 다음 줄을 정확히 그대로 붙인다:
 
 ```
-Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 ```
+
+모델 이름은 실제로 그 커밋을 만든 모델을 적는다 — 이 문서가 `Opus 4.8` 로 굳어 있던 동안
+실제 커밋은 이미 `Opus 5` 였다(2026-08-07 확인). 안내와 실제가 어긋나면 다음 사람이 문서를
+믿고 틀린 값을 적는다.
 
 ## 더 읽을거리
 
