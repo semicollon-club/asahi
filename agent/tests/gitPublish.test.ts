@@ -169,7 +169,7 @@ describe("runRestore", () => {
     const runGit: RunGit = async (args) => { calls.push(args); return { ok: true, stdout: "" }; };
     const r = await runRestore(a, { runGit, exists: async () => false, rmrf: never });
     expect(r.ok).toBe(true);
-    expect(calls.some((c) => c[0] === "clone")).toBe(true);
+    expect(calls.some((c) => c.includes("clone"))).toBe(true);
   });
 
   it("깨끗하면 pull --ff-only 한다", async () => {
@@ -192,7 +192,7 @@ describe("runRestore", () => {
     const r = await runRestore(a, { runGit, exists: async () => true, rmrf: never });
     expect(r.ok).toBe(false);
     expect(r.content).toContain("저장하지 않은 변경");
-    expect(calls.some((c) => c.includes("pull") || c[0] === "clone")).toBe(false);
+    expect(calls.some((c) => c.includes("pull") || c.includes("clone"))).toBe(false);
   });
 
   it("discardLocal 이면 더러워도 지우고 새로 clone 한다", async () => {
@@ -207,7 +207,7 @@ describe("runRestore", () => {
     });
     expect(r.ok).toBe(true);
     expect(removed).toEqual(["/ws/111/todo-app"]);
-    expect(calls.some((c) => c[0] === "clone")).toBe(true);
+    expect(calls.some((c) => c.includes("clone"))).toBe(true);
     expect(r.content).toContain("지우고");
   });
 
@@ -229,7 +229,8 @@ describe("runRestore", () => {
     await runRestore(a, { runGit, exists: async () => true, rmrf: never }); // pull 경로(깨끗함)
 
     const withToken = seen.filter((s) => s.env?.ASAHI_GH_TOKEN === "ghs_secret");
-    expect(withToken.some((s) => s.cmd[0] === "clone")).toBe(true);
+    // clone 은 인덱스 0 이 아니다 — -c 가 앞에 온다(그래야 새 저장소 config 에 안 남는다).
+    expect(withToken.some((s) => s.cmd.includes("clone"))).toBe(true);
     expect(withToken.some((s) => s.cmd.includes("pull"))).toBe(true);
     // 로컬 상태만 보는 status 호출에는 자격증명을 얹지 않는다 — push 가 add·init 같은 로컬
     // 명령에는 env 를 안 주는 것과 같은 이유다.
@@ -297,7 +298,7 @@ describe("자격증명 헬퍼 체인", () => {
       { dir: "/ws/x", cloneUrl: "https://g/x.git", token: "t", discardLocal: false },
       { runGit, exists: async () => false, rmrf: async () => {} },
     );
-    const clone = seen.find((a) => a[0] === "clone");
+    const clone = seen.find((a) => a.includes("clone"));
     expect(clone).toBeDefined();
     expect(chainIsReset(clone!)).toBe(true);
   });
@@ -319,5 +320,22 @@ describe("자격증명 헬퍼 체인", () => {
     const runGit: RunGit = async (args) => { seen.push(args); return { ok: true, stdout: "" }; };
     await runPublish(base, { runGit, writeFile: async () => {}, sizeOf: async () => 1 });
     expect(seen.flat().join(" ")).not.toContain("ghs_secret");
+  });
+});
+
+describe("clone 이 새 저장소 config 를 오염시키지 않는가", () => {
+  // `git clone -c k=v` (clone 자신의 옵션)는 그 값을 새 저장소의 .git/config 에 **영구 기록**
+  // 한다. 2026-08-08 실사용에서 되받은 저장소에 [credential] 두 줄이 남은 것을 확인했다.
+  // 토큰은 없지만, 부원의 저장소에 우리가 넣은 설정이 남으면 그 사람이 나중에 직접 git 을 쓸 때
+  // 헬퍼 체인이 조용히 달라진다. `git -c k=v clone` 은 이 호출에만 적용되고 남기지 않는다.
+  it("-c 가 clone 서브커맨드보다 앞에 온다", async () => {
+    const seen: string[][] = [];
+    const runGit: RunGit = async (args) => { seen.push(args); return { ok: true, stdout: "" }; };
+    await runRestore(
+      { dir: "/ws/x", cloneUrl: "https://g/x.git", token: "t", discardLocal: false },
+      { runGit, exists: async () => false, rmrf: async () => {} },
+    );
+    const cmd = seen.find((a) => a.includes("clone"))!;
+    expect(cmd.indexOf("-c")).toBeLessThan(cmd.indexOf("clone"));
   });
 });
