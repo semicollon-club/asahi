@@ -1,0 +1,136 @@
+import type { RunGit } from "./gitCommit.js";
+
+// 제외 규칙은 편의가 아니라 방어선이다 — 부원 폴더에 남은 비밀이 그대로 발행되는 것을 막는
+// 유일한 장치다(설계 §6). 목록 기반이라 완전하지 않다는 것은 설계 §11 에 적혀 있다.
+export const DEFAULT_EXCLUDES = [
+  "node_modules/", ".git/", ".env", ".env.*",
+  "dist/", "build/", ".next/", "out/",
+  "*.log", "*.pem", "*.key", "*.p12", "*.pfx",
+] as const;
+
+export function gitignoreBody(extra: readonly string[] = []): string {
+  return [...DEFAULT_EXCLUDES, ...extra].join("\n") + "\n";
+}
+
+export type PublishArgs = {
+  dir: string;
+  cloneUrl: string;
+  token: string;
+  message: string;
+  authorName: string;
+  authorEmail: string;
+};
+
+// 토큰을 URL 에도 명령줄 인자에도 넣지 않는다(설계 §9):
+//   - remote URL 에 박으면 .git/config 에 평문으로 남아 그 부원이 fs_read 로 바로 읽는다
+//   - 명령줄 인자로 주면 같은 계정의 프로세스 목록(Win32_Process 의 CommandLine)에 노출된다
+//
+// 대신 자격증명 헬퍼가 **환경변수를 읽게** 한다. 아래 문자열 자체에는 비밀이 없다 — `$ASAHI_GH_TOKEN`
+// 이라는 이름만 들어 있어 명령줄에 실려도 안전하다. git 은 `!` 로 시작하는 헬퍼를 셸로 실행하며,
+// Git for Windows 도 번들된 sh 로 같은 문법을 처리한다.
+export const CREDENTIAL_HELPER =
+  '!f() { echo "username=x-access-token"; echo "password=$ASAHI_GH_TOKEN"; }; f';
+
+export function pushEnv(token: string): Record<string, string> {
+  return {
+    ASAHI_GH_TOKEN: token,
+    // 대화형 프롬프트를 끈다 — 자격증명이 없을 때 워커가 입력을 기다리며 영원히 멈추면 안 된다.
+    GIT_TERMINAL_PROMPT: "0",
+  };
+}
+
+// git 서브커맨드 목록을 순서대로 돌려준다. 각 배열의 0번째는 항상 그 서브커맨드 이름
+// (init·branch·remote·add·commit·push)이다 — runPublish 가 "이게 add 단계인가·push 단계인가"를
+// 판정하고 실패 메시지에 이름을 넣을 때 이 위치를 그대로 믿는다.
+//
+// 실행에 필요한 "-C dir"(모든 명령)·"-c credential.helper=..."(push 만)는 여기 넣지 않고
+// runPublish 가 실제로 실행하기 직전에 얹는다. 여기서 같이 섞으면 두 가지가 깨진다:
+//   1) "-C" 가 0번째를 차지해 서브커맨드 이름으로 각 배열을 식별할 수 없게 된다 — 이 목록을
+//      순수 함수로 검증하는 이유 자체(위 설명)가 무색해진다.
+//   2) "-c" 의 값(credential.helper=...)은 "-" 로 시작하지 않는 일반 문자열이라, "이 배열이
+//      add 명령인가"를 부분 포함으로 판정하면 remote add 단계와 헷갈리고, 실패 메시지의
+//      명령 이름도 이 값을 잘못 주워 담을 수 있다.
+// 목록 자체(토큰 없음)를 순수 함수로 검증하는 목적은 그대로 남는다 — 실제 실행은 runPublish 가 한다.
+export function publishArgv(a: PublishArgs): string[][] {
+  return [
+    ["init"],
+    ["branch", "-M", "main"],
+    ["remote", "remove", "origin"],
+    ["remote", "add", "origin", a.cloneUrl],
+    ["add", "-A"],
+    ["commit", "-m", a.message, `--author=${a.authorName} <${a.authorEmail}>`, "--allow-empty"],
+    ["push", "-u", "origin", "main"],
+  ];
+}
+
+// 토큰이 어떤 경로로든 사용자 대면 문자열에 섞이지 않게 마지막에 한 번 더 가린다. git 이
+// 실패 메시지에 URL 을 통째로 실어 주는 경우가 있어, 상류에서 안 넣는 것만으로는 부족하다.
+function redact(text: string, token: string): string {
+  return token.length > 0 ? text.split(token).join("***") : text;
+}
+
+// 제외 후 총 용량 상한(설계 §6). 넘으면 발행하지 않고 무엇이 컸는지 알린다 — 조용히 자르면
+// 부원이 "올렸는데 왜 안 도나"로 오해한다.
+export const MAX_PUBLISH_BYTES = 50 * 1024 * 1024;
+
+export type PublishDeps = {
+  runGit: RunGit;
+  writeFile: (p: string, body: string) => Promise<void>;
+  sizeOf: (dir: string, rels: string[]) => Promise<number>;
+};
+
+export async function runPublish(a: PublishArgs, deps: PublishDeps): Promise<{ ok: boolean; content: string }> {
+  const argv = publishArgv(a);
+  const env = pushEnv(a.token);
+
+  for (const cmd of argv) {
+    // publishArgv 의 계약대로 0번째는 항상 서브커맨드 이름이다 — remote add 단계도 "add" 라는
+    // 토큰을 담고 있으므로, 부분 포함(includes)이 아니라 정확히 이 위치로만 add·push 단계를
+    // 구분한다(위 publishArgv 주석 참고).
+    const name = cmd[0];
+    const isAdd = name === "add";
+    const isPush = name === "push";
+
+    // `add -A` 직전에 .gitignore 를 쓴다. 이것이 제외 규칙이 실제로 집행되는 유일한 지점이다 —
+    // 목록만 만들어 두고 파일을 안 쓰면 node_modules 와 .env 가 그대로 커밋된다.
+    // init 뒤에 쓰는 이유는 폴더가 그때 확실히 존재하기 때문이고, add 앞에 쓰는 이유는
+    // .gitignore 자신도 함께 커밋되어야 다음 발행에서도 같은 규칙이 적용되기 때문이다.
+    if (isAdd) {
+      await deps.writeFile(`${a.dir}/.gitignore`, gitignoreBody());
+    }
+
+    // -C dir 는 모든 호출에 필요하다 — RunGit 은 cwd 를 받지 않으므로(gitCommit.ts), 어느
+    // 작업 폴더에서 도는지는 이 인자가 정한다. push 에만 자격증명 헬퍼(-c)를 더 얹는다 — 로컬
+    // 명령까지 붙이면 그 문자열이 이유 없이 여러 프로세스의 명령줄에 퍼진다.
+    const fullArgs = isPush
+      ? ["-C", a.dir, "-c", `credential.helper=${CREDENTIAL_HELPER}`, ...cmd]
+      : ["-C", a.dir, ...cmd];
+
+    // push 만 자격증명이 필요하다. 나머지에 env 를 주지 않는 것은 토큰이 닿는 프로세스 수를
+    // 최소로 두기 위해서다.
+    const r = isPush ? await deps.runGit(fullArgs, env) : await deps.runGit(fullArgs);
+
+    // remote remove 는 origin 이 없으면 실패한다 — 첫 발행에서는 정상이므로 넘어간다.
+    if (!r.ok && name === "remote" && cmd[1] === "remove") continue;
+    if (!r.ok) {
+      return { ok: false, content: redact(`git ${name} 에 실패했어요: ${r.stdout}`, a.token) };
+    }
+
+    // add 직후에 스테이징된 것의 총 용량을 잰다. commit·push 전에 멈춰야 되돌릴 것이 없다.
+    if (isAdd) {
+      const listed = await deps.runGit(["-C", a.dir, "ls-files", "--cached"]);
+      const rels = listed.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
+      const total = await deps.sizeOf(a.dir, rels);
+      if (total > MAX_PUBLISH_BYTES) {
+        const mb = (total / 1024 / 1024).toFixed(1);
+        return {
+          ok: false,
+          content:
+            `올릴 파일이 너무 커요(${mb}MB, 상한 50MB). 빌드 산출물이나 큰 파일이 섞여 있는지 ` +
+            `확인해 주세요 — node_modules·dist 같은 폴더는 자동으로 빠집니다.`,
+        };
+      }
+    }
+  }
+  return { ok: true, content: "발행했어요." };
+}
