@@ -33,7 +33,7 @@ describe("워커 실행기", () => {
   });
   afterEach(() => fs.rmSync(root, { recursive: true, force: true }));
 
-  it("도구 13개를 정확히 노출한다", () => {
+  it("도구 15개를 정확히 노출한다", () => {
     // Task 8: fs_mkdir 추가. 모델이 부르는 도구 목록(REMOTE_TOOL_NAMES)에는 안 들어가지만, 워커
     // 실행기 자체는 다른 fs_* 와 나란히 이 객체에 존재한다.
     // Task 4: fs_tree 추가 — 폴더 구조 전용 조회 도구(모델이 부르는 목록에도 들어간다).
@@ -41,8 +41,12 @@ describe("워커 실행기", () => {
     // 위임하는 실행기 넷(모델이 부르는 도구 목록에도 들어간다).
     // Task 2(파일 전달): file_fetch 추가 — fs_mkdir 과 같은 이유로 REMOTE_TOOL_NAMES 밖이다.
     // 봇이 hub.call 로 직접 부른다(모델이 URL 을 정하게 하지 않는다).
+    // 깃허브 발행 Task 6: git_publish·git_restore 추가 — file_fetch 와 같은 이유로
+    // REMOTE_TOOL_NAMES 밖이다. 모델이 cloneUrl·token 을 정하게 하면 워커가 임의 원격으로
+    // 푸시하는 표면이 열리므로, 봇이 계산해 hub.call 로 직접 부른다.
     expect(Object.keys(ex).sort()).toEqual([
       "file_fetch", "fs_edit", "fs_glob", "fs_grep", "fs_mkdir", "fs_read", "fs_tree", "fs_write",
+      "git_publish", "git_restore",
       "proc_list", "proc_logs", "proc_start", "proc_stop", "sh_exec",
     ]);
   });
@@ -1515,5 +1519,68 @@ describe("buildPm2CommandLine — 윈도우 큰따옴표 이스케이프(추가 
     // 공백 없이도 조용히 다른 방식으로 깨진다).
     const line = buildPm2CommandLine(['a\\"b'], "win32");
     expect(line).toBe('pm2 "a\\\\\\"b"');
+  });
+});
+
+describe("git_publish / git_restore — 봇 전용 실행기", () => {
+  let root: string;
+  beforeEach(() => {
+    root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "asahi-git-ex-")));
+  });
+  afterEach(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  // 모델에게 노출되지 않는다는 것이 이 두 도구의 전제다 — 노출되면 모델이 cloneUrl·token 을
+  // 정할 수 있게 되고, 워커가 임의 원격으로 푸시하는 표면이 열린다.
+  it("모델에게 노출되는 원격 도구 목록에 없다", async () => {
+    const { REMOTE_TOOL_NAMES } = await import("../src/core/remoteTools.js");
+    expect(REMOTE_TOOL_NAMES).not.toContain("git_publish");
+    expect(REMOTE_TOOL_NAMES).not.toContain("git_restore");
+  });
+
+  it("워커 루트 밖 경로는 경로 관문이 거절한다", async () => {
+    const ex = makeExecutors([root], { runGit: async () => ({ ok: true, stdout: "" }) });
+    const outside = path.join(root, "..", "asahi-git-ex-outside");
+    for (const tool of ["git_publish", "git_restore"] as const) {
+      const r = await ex[tool]!({ dir: outside, cloneUrl: "https://g/x.git", token: "t" });
+      expect(r.ok).toBe(false);
+      expect(r.content).toContain("폴더");
+    }
+  });
+
+  it("dir 인자가 없으면 거절한다", async () => {
+    const ex = makeExecutors([root], { runGit: async () => ({ ok: true, stdout: "" }) });
+    expect((await ex.git_publish!({ cloneUrl: "https://g/x.git" })).ok).toBe(false);
+    expect((await ex.git_restore!({ cloneUrl: "https://g/x.git" })).ok).toBe(false);
+  });
+
+  it("git_publish 는 .gitignore 를 실제로 쓰고 스테이징 용량을 잰다", async () => {
+    const proj = path.join(root, "proj");
+    fs.mkdirSync(proj);
+    fs.writeFileSync(path.join(proj, "big.txt"), "x".repeat(1234));
+    const ex = makeExecutors([root], {
+      runGit: async (args) => ({ ok: true, stdout: args.includes("ls-files") ? "big.txt\n" : "" }),
+    });
+    const r = await ex.git_publish!({ dir: proj, cloneUrl: "https://g/x.git", token: "t", authorName: "n", authorEmail: "e" });
+    expect(r.ok).toBe(true);
+    expect(fs.readFileSync(path.join(proj, ".gitignore"), "utf8")).toContain("node_modules/");
+  });
+
+  // 파괴적인 쪽으로 기울면 안 된다 — 문자열 "true" 나 1 은 true 가 아니다.
+  it("git_restore 의 discardLocal 은 정확히 boolean true 일 때만 지운다", async () => {
+    const proj = path.join(root, "proj");
+    fs.mkdirSync(proj);
+    fs.writeFileSync(path.join(proj, "mine.txt"), "작업중");
+    const dirty = async (args: string[]) => ({ ok: true, stdout: args.includes("status") ? " M mine.txt\n" : "" });
+
+    const ex = makeExecutors([root], { runGit: dirty });
+    for (const v of ["true", 1, undefined]) {
+      const r = await ex.git_restore!({ dir: proj, cloneUrl: "https://g/x.git", token: "t", discardLocal: v });
+      expect(r.ok).toBe(false);
+      expect(fs.existsSync(path.join(proj, "mine.txt"))).toBe(true);
+    }
+
+    const r = await ex.git_restore!({ dir: proj, cloneUrl: "https://g/x.git", token: "t", discardLocal: true });
+    expect(r.ok).toBe(true);
+    expect(fs.existsSync(proj)).toBe(false);
   });
 });
