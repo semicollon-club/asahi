@@ -123,6 +123,28 @@ const OWNER_SERVER_MEMORY_LINES =
   FORGET_DISAMBIGUATION_HINT +
   '\n- 개인 기억 저장·접근 권한 관리·DB 직접 조회는 여전히 이 채널에서 할 수 없습니다 — 소유자 DM 전용입니다.';
 
+// Important 1(최종 전체 브랜치 리뷰) — 손님이 못 하는 일을 알리는 줄. 예전엔 손님 서버 분기에만
+// 있었고 문장이 "…는 여전히 이 채널에서 할 수 없습니다 — 소유자 DM 전용입니다" 였다. 두 가지가
+// 틀렸다.
+// (1) 축이 틀렸다. 이 셋은 위치가 아니라 신원으로 갈린다(tools.ts 의 allowedToolsFor —
+//     runtime_info 는 isOwner, db_schema/db_query·manage_access 는 isOwner && isPrivate).
+//     손님은 채널을 어디로 옮겨도 얻지 못한다. 게다가 손님에게 "소유자 DM" 은 애초에 들어갈 수
+//     없는 장소라, 안내대로 따라 해 볼 수조차 없는 지시였다.
+// (2) 그 문장이 하필 2026-08-06 사건에서 모델이 지어낸 거짓 설명("이 채널에서는 안 되니 소유자
+//     DM 에서 다시 해보라")과 같은 형태였다. 그 턴에 못 쓰는 도구는 이제 아예 등록하지 않으므로
+//     (tools.ts 의 allowedToolDefinitions) SDK 거절 문자열조차 오지 않는다 — 모델이 이유를 찾을
+//     곳이 자기 시스템 프롬프트뿐인데, 가장 가까운 템플릿이 바로 이 문장이었다. 도구를 숨긴 것이
+//     사건의 절반이고, 나머지 절반은 "그럼 왜 안 되는가"에 대한 참인 근거를 프롬프트가 직접
+//     주는 것이다. deploy/smoke-test.md 는 채널 기준 설명이 나오면 그 회차를 실패로 판정한다.
+//
+// 모델·버전 확인(runtime_info)을 DB 조회와 나란히 명시하는 이유: 2026-08-06 에 손님이 실제로
+// 물어본 것이 그것이었다. 도구 이름은 쓰지 않는다 — 손님 도구셋에 없는 이름을 안내에 올리면
+// 이 파일이 반복해서 고쳐 온 "안내와 실제 도구가 어긋남"이 된다(위 FIX3/FIX4 주석).
+//
+// 손님 DM·서버 두 분기가 이 한 줄을 공유한다 — OWNER_SERVER_MEMORY_LINES 와 같은 이유다.
+const GUEST_OWNER_ONLY_LINE =
+  "\n- 접근 권한 관리, DB 직접 조회, 내가 어떤 모델·버전·커밋으로 도는지 확인은 소유자만 할 수 있습니다. 요청받으면 채널을 옮기면 된다는 식으로 안내하지 마세요 — 어디서 물었는지가 아니라 누가 물었는지로 갈리는 일입니다.";
+
 function buildCapabilityBlock(ctx: PersonaContext): string {
   const connected = ctx.workerConnected === true;
   if (ctx.isOwner && ctx.isPrivate) {
@@ -205,11 +227,14 @@ function buildCapabilityBlock(ctx: PersonaContext): string {
     "\n- 특정 작업(예: UI 디자인)에는 전용 스킬이 있을 수 있습니다. 먼저 쓸 수 있는 스킬이 있는지 살펴보고, 있으면 그 지침을 따르세요.";
   if (ctx.isPrivate) {
     return `## 능력
-- 대화와 본인 기억(remember/recall)만 사용할 수 있습니다. 접근 권한 변경은 할 수 없습니다.${guestPcLine}${guestSkillLine}`;
+- 대화와 본인 기억(remember/recall)만 사용할 수 있습니다.${GUEST_OWNER_ONLY_LINE}${guestPcLine}${guestSkillLine}`;
   }
+  // "개인 기억 저장" 은 이 제한 줄에서 뺐다 — 그건 신원이 아니라 위치가 정하는 축이고
+  // (memoryScope.ts 의 memoryScopeFor), 바로 위 첫 줄이 이미 "여기서 저장하면 공용이 된다"고
+  // 참인 형태로 말한다. 신원으로 갈리는 것과 위치로 갈리는 것을 한 문장에 묶어 두었던 것이
+  // 애초에 이 줄이 통째로 채널 기준으로 읽히게 된 원인이다.
   return `## 능력
-- 공개 채널(서버) 대화입니다. remember 로 저장하면 개인 기억이 아니라 동아리 공용 기억이 되어 모든 부원에게 보입니다 — recall 로 조회할 수 있습니다. 동아리 문서를 전달받으면 "회비"·"활동 시간"·"가입 절차"처럼 주제별로 나눠 저장하세요 — 한 건에 문서 전체를 넣으면 recall 이 매번 전문을 그대로 돌려줍니다.
-- 개인 기억 저장·접근 권한 관리·DB 직접 조회는 여전히 이 채널에서 할 수 없습니다 — 소유자 DM 전용입니다.${guestPcLine}
+- 공개 채널(서버) 대화입니다. remember 로 저장하면 개인 기억이 아니라 동아리 공용 기억이 되어 모든 부원에게 보입니다 — recall 로 조회할 수 있습니다. 동아리 문서를 전달받으면 "회비"·"활동 시간"·"가입 절차"처럼 주제별로 나눠 저장하세요 — 한 건에 문서 전체를 넣으면 recall 이 매번 전문을 그대로 돌려줍니다.${GUEST_OWNER_ONLY_LINE}${guestPcLine}
 - 다른 사람의 개인 정보를 다루거나 노출하지 마세요.${guestSkillLine}`;
 }
 
