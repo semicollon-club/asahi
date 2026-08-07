@@ -782,12 +782,13 @@ describe("runPublish", () => {
 
   // push 에만 토큰을 준다 — 토큰이 닿는 프로세스 수를 최소로 둔다.
   it("자격증명은 push 에만 넘긴다", async () => {
-    const envs: Array<Record<string, string> | undefined> = [];
-    const runGit: RunGit = async (args, env) => { envs.push(args.includes("push") ? env : env); return { ok: true, stdout: "" }; };
+    const seen: Array<{ cmd: string[]; env: Record<string, string> | undefined }> = [];
+    const runGit: RunGit = async (args, env) => { seen.push({ cmd: args, env }); return { ok: true, stdout: "" }; };
     await runPublish(base, deps(runGit).deps);
-    const withToken = envs.filter((e) => e !== undefined);
+    const withToken = seen.filter((s) => s.env !== undefined);
     expect(withToken.length).toBe(1);
-    expect(withToken[0]!.ASAHI_GH_TOKEN).toBe("ghs_secret");
+    expect(withToken[0].cmd).toContain("push");
+    expect(withToken[0].env!.ASAHI_GH_TOKEN).toBe("ghs_secret");
   });
 
   it("실패 메시지에도 토큰이 섞이지 않는다", async () => {
