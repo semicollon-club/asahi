@@ -31,6 +31,17 @@ export type PublishArgs = {
 export const CREDENTIAL_HELPER =
   '!f() { echo "username=x-access-token"; echo "password=$ASAHI_GH_TOKEN"; }; f';
 
+// **빈 값이 먼저 와야 한다.** `-c credential.helper=<우리 것>` 은 헬퍼 체인에 *추가*되는 것이지
+// 교체가 아니다 — 시스템·전역 설정에 이미 헬퍼가 있으면(Git for Windows 는 기본으로
+// credential.helper=manager 를 넣는다) git 이 그쪽에 먼저 묻고, 그것이 돌려준 자격증명을 쓴다.
+// 그러면 우리 토큰은 쓰이지도 않고, 비공개 리포는 권한 없는 접근에 404 를 주므로
+// "remote: Repository not found" 로만 보인다 — 리포가 실제로 없는 것처럼 읽혀 원인을 엉뚱한
+// 곳에서 찾게 된다(2026-08-08 실사용에서 리포가 멀쩡히 있는데도 이 메시지가 나왔다).
+//
+// 빈 값은 그 지점까지 쌓인 헬퍼 목록을 지운다. `gh auth setup-git` 도 같은 이유로 빈 줄을 먼저
+// 넣는다(이 리포 운영자의 ~/.gitconfig 에서 그 형태를 확인했다).
+export const CREDENTIAL_ARGS = ["-c", "credential.helper=", "-c", `credential.helper=${CREDENTIAL_HELPER}`];
+
 // 커밋의 committer 신원. author(발행한 부원)와 별개로 git 이 반드시 요구하는 값이고, 없으면
 // "Committer identity unknown" 으로 커밋 자체가 실패한다 — 2026-08-07 첫 실사용이 정확히
 // 이걸로 막혔다. 그때 모델이 sh_exec 로 `git config --global user.email` 을 실행해 **공유
@@ -116,7 +127,7 @@ export async function runPublish(a: PublishArgs, deps: PublishDeps): Promise<{ o
     // 같은 자리에서 같은 방식으로 붙이는 이유는 publishArgv 의 계약을 지키기 위해서다 —
     // 그 배열의 0번째는 항상 서브커맨드여야 하고, -c 를 거기 끼우면 위 name 판정이 깨진다.
     const fullArgs = isPush
-      ? ["-C", a.dir, "-c", `credential.helper=${CREDENTIAL_HELPER}`, ...cmd]
+      ? ["-C", a.dir, ...CREDENTIAL_ARGS, ...cmd]
       : isCommit
         ? ["-C", a.dir, "-c", `user.name=${COMMITTER_NAME}`, "-c", `user.email=${COMMITTER_EMAIL}`, ...cmd]
         : ["-C", a.dir, ...cmd];
@@ -206,8 +217,8 @@ export async function runRestore(
   // 최소로 두는 것은 push 와 같은 이유다.
   const env = pushEnv(a.token);
   const args = needsClone
-    ? ["clone", "-c", `credential.helper=${CREDENTIAL_HELPER}`, a.cloneUrl, a.dir]
-    : ["-C", a.dir, "-c", `credential.helper=${CREDENTIAL_HELPER}`, "pull", "--ff-only", "origin", "main"];
+    ? ["clone", ...CREDENTIAL_ARGS, a.cloneUrl, a.dir]
+    : ["-C", a.dir, ...CREDENTIAL_ARGS, "pull", "--ff-only", "origin", "main"];
 
   const r = await deps.runGit(args, env);
   if (!r.ok) return { ok: false, content: redact(`되받지 못했어요: ${r.stdout}`, a.token) };
