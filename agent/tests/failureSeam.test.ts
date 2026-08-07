@@ -12,6 +12,7 @@ import { SummariesRepo } from "../src/store/summariesRepo.js";
 import { MemoriesRepo } from "../src/store/memoriesRepo.js";
 import { TurnsRepo } from "../src/store/turnsRepo.js";
 import { AllowedDirsRepo } from "../src/store/allowedDirsRepo.js";
+import { ProjectsRepo } from "../src/store/projectsRepo.js";
 import { ActionsRepo } from "../src/store/actionsRepo.js";
 import { IntrospectRepo } from "../src/store/introspectRepo.js";
 import { AgentCore, formatProgress } from "../src/core/core.js";
@@ -183,12 +184,15 @@ async function coreSetup() {
     users: new UsersRepo(db), conversations: new ConversationsRepo(db), participants: new ParticipantsRepo(db),
     messages: new MessagesRepo(db), summaries: new SummariesRepo(db), memories: new MemoriesRepo(db),
     turns: new TurnsRepo(db), allowedDirs: new AllowedDirsRepo(db), actions: new ActionsRepo(db),
+    projects: new ProjectsRepo(db),
   };
   await repos.users.upsert("owner", { role: "owner" });
   const config: Config = {
     discordToken: "t", ownerId: "owner", databaseUrl: "postgres://test", dataDir: ":memory:", memoryDir: "x",
     sessionIdleMinutes: 30, maxTurnsPerHour: 30, maxTurnsPerHourPerUser: 20, maxTurnsPerHourGlobal: 40,
     ownerReserve: 10, deployTarget: "local", model: "claude-opus-4-8", httpPort: 3000, digestChannels: {},
+    // 깃허브 발행 미설정 — 이 테스트의 관심사가 아니다. 설정이 없으면 발행 도구가 안 열린다.
+    github: null,
   };
   const calls: TurnRequest[] = [];
   const runTurn = (req: TurnRequest): Promise<TurnResult> => {

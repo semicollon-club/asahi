@@ -9,6 +9,7 @@ import { SummariesRepo } from "../src/store/summariesRepo.js";
 import { MemoriesRepo } from "../src/store/memoriesRepo.js";
 import { TurnsRepo } from "../src/store/turnsRepo.js";
 import { AllowedDirsRepo } from "../src/store/allowedDirsRepo.js";
+import { ProjectsRepo } from "../src/store/projectsRepo.js";
 import { ActionsRepo } from "../src/store/actionsRepo.js";
 import { AgentCore } from "../src/core/core.js";
 import { filterFileAttachments, FILE_LIMITS } from "../src/core/attachments.js";
@@ -56,6 +57,7 @@ async function setup(over: {
     // 코어의 try/catch 가 삼켜 "경로 안내 없음"으로 조용히 degrade 한다.
     allowedDirs: new AllowedDirsRepo(db),
     actions: new ActionsRepo(db),
+    projects: new ProjectsRepo(db),
   };
   await repos.users.upsert("owner", { role: "owner" });
   await repos.users.upsert("guest", { role: "allowed" });
@@ -70,6 +72,8 @@ async function setup(over: {
     // 기본은 미설정(빈 객체) — 조사 결과가 명령을 친 곳으로 폴백하는 경로다.
     // 지정 채널로 보내는 경로는 over.config 로 덮어써 따로 검증한다.
     digestChannels: {},
+    // 깃허브 발행 미설정 — 이 테스트들의 관심사가 아니다. 설정이 없으면 발행 도구가 안 열린다.
+    github: null,
     ...over.config,
   };
   let clock = 1_000_000;

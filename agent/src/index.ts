@@ -13,6 +13,7 @@ import { ParticipantsRepo } from "./store/participantsRepo.js";
 import { MessagesRepo } from "./store/messagesRepo.js";
 import { SummariesRepo } from "./store/summariesRepo.js";
 import { MemoriesRepo } from "./store/memoriesRepo.js";
+import { ProjectsRepo } from "./store/projectsRepo.js";
 import { TurnsRepo } from "./store/turnsRepo.js";
 import { AllowedDirsRepo } from "./store/allowedDirsRepo.js";
 import { ActionsRepo } from "./store/actionsRepo.js";
@@ -53,6 +54,7 @@ async function main() {
     summaries: new SummariesRepo(db),
     memories: new MemoriesRepo(db),
     turns: new TurnsRepo(db),
+    projects: new ProjectsRepo(db),
     allowedDirs,
     introspect: new IntrospectRepo(db),
     workers: new WorkersRepo(db),

@@ -1,6 +1,7 @@
 import path from "node:path";
 import { isUnambiguousRoot } from "./remote/roots.js";
 import type { DigestChannels } from "./core/digest.js";
+import type { GithubAppConfig } from "./github/appToken.js";
 
 // 숫자 환경변수를 파싱·검증한다. 값이 없으면 기본값, 있으면 양의 유한수여야 하며
 // 아니면(오타·0 등) 시작 시점에 명확히 실패한다 — NaN 으로 봇이 조용히 먹통 되는 것을 막는다.
@@ -37,7 +38,31 @@ export type Config = {
   httpPort: number;      // 워커 허브 WS 를 붙일 HTTP 포트. Railway 는 PORT 를 주입한다.
   // 정기 게시 목적지. 주제별로 설정하며, 없는 주제는 스케줄에서 건너뛴다(예약어로는 실행 가능).
   digestChannels: DigestChannels;
+  // 깃허브 발행 설정. 없으면 null 이고, 그때는 발행 도구가 아예 노출되지 않는다.
+  github: GithubAppConfig | null;
 };
+
+// 깃허브 발행 설정. 개인키는 base64 한 줄로 받는다 — 줄바꿈이 든 PEM 은 .env 파서·배포
+// 플랫폼·셸마다 다르게 다뤄져 조용히 망가지고, 깨진 키는 "인증 실패" 한 줄로만 드러나 원인을
+// 엉뚱한 곳에서 찾게 된다(deploy/github-app-셋업.md §5).
+//
+// 넷 중 하나라도 없으면 null 이다 — 던지지 않는다. 발행은 부가 기능이므로 설정이 없다고 봇이
+// 못 뜨면 안 된다(스킬 폴더가 없을 때 plugins 를 안 넘기는 것과 같은 원칙). 호출측은 null 을
+// 보고 도구를 아예 노출하지 않는다.
+function loadGithubConfig(env: NodeJS.ProcessEnv): GithubAppConfig | null {
+  const org = env.GITHUB_ORG?.trim();
+  const appId = env.GITHUB_APP_ID?.trim();
+  const installationId = env.GITHUB_APP_INSTALLATION_ID?.trim();
+  const b64 = env.GITHUB_APP_PRIVATE_KEY_B64?.trim();
+  if (!org || !appId || !installationId || !b64) return null;
+
+  // base64 가 깨져도 Buffer.from 은 던지지 않고 쓰레기를 돌려준다 — PEM 헤더로 검증한다.
+  // 여기서 걸러내지 않으면 그 쓰레기가 crypto.sign 까지 가서 OpenSSL 오류로 나타나고, 사람은
+  // "키가 잘못됐다"가 아니라 "깃허브가 거부했다"로 읽는다.
+  const pem = Buffer.from(b64, "base64").toString("utf8");
+  if (!pem.includes("PRIVATE KEY")) return null;
+  return { org, appId, installationId, privateKeyPem: pem };
+}
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const missing = ["DISCORD_TOKEN", "DISCORD_OWNER_ID", "DATABASE_URL"].filter((k) => !env[k]);
@@ -65,6 +90,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       ...(env.DIGEST_CONTEST_CHANNEL_ID ? { contest: env.DIGEST_CONTEST_CHANNEL_ID } : {}),
       ...(env.DIGEST_DEVNEWS_CHANNEL_ID ? { devnews: env.DIGEST_DEVNEWS_CHANNEL_ID } : {}),
     },
+    github: loadGithubConfig(env),
   };
 }
 
