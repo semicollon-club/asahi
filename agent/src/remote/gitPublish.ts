@@ -134,3 +134,71 @@ export async function runPublish(a: PublishArgs, deps: PublishDeps): Promise<{ o
   }
   return { ok: true, content: "발행했어요." };
 }
+
+export type LocalState = "missing" | "clean" | "dirty";
+
+// 로컬이 어떤 상태인지. "폴더는 있는데 git 저장소가 아니다"는 dirty 로 본다 — 안전한 쪽이다.
+// clean 으로 보면 다음 단계가 pull 을 시도해 엉뚱한 오류를 내고, 사람이 원인을 엉뚱한 곳에서
+// 찾게 된다.
+export async function inspectLocal(
+  dir: string,
+  runGit: RunGit,
+  exists: (p: string) => Promise<boolean>,
+): Promise<LocalState> {
+  if (!(await exists(dir))) return "missing";
+  const r = await runGit(["-C", dir, "status", "--porcelain"]);
+  if (!r.ok) return "dirty";
+  return r.stdout.trim().length === 0 ? "clean" : "dirty";
+}
+
+export type RestoreArgs = { dir: string; cloneUrl: string; token: string; discardLocal: boolean };
+
+// 되받기. 로컬 상태로 셋으로 갈린다(설계 §7.1) — 없으면 clone, 깨끗하면 pull --ff-only,
+// 더러우면 **거절한다.** 더러울 때 미는 것을 막는 게 이 도구의 핵심이다: 복구하려다 방금 한
+// 작업을 조용히 없애면 안 된다. --ff-only 도 같은 이유로 갈라진 히스토리를 자동 병합하지 않는다.
+export async function runRestore(
+  a: RestoreArgs,
+  deps: { runGit: RunGit; exists: (p: string) => Promise<boolean>; rmrf: (p: string) => Promise<void> },
+): Promise<{ ok: boolean; content: string }> {
+  const state = await inspectLocal(a.dir, deps.runGit, deps.exists);
+
+  if (state === "dirty" && !a.discardLocal) {
+    return {
+      ok: false,
+      content:
+        "저장하지 않은 변경이 있어서 되받지 않았어요. 그대로 덮으면 그 작업이 사라져요. " +
+        "먼저 발행해서 올리시거나, 버려도 괜찮으면 버리고 새로 받겠다고 말씀해 주세요.",
+    };
+  }
+
+  let discarded = false;
+  if (state !== "missing" && a.discardLocal) {
+    await deps.rmrf(a.dir);
+    discarded = true;
+  }
+
+  const needsClone = state === "missing" || discarded;
+
+  // clone·pull 도 push 와 마찬가지로 네트워크로 나가 GitHub 인증이 필요하다(설계 §7.1: "토큰은
+  // 발행과 같다" — 이 태스크의 Interfaces 절이 pushEnv 를 소비 대상으로 적어 둔 이유이기도
+  // 하다). 여기서 credential.helper 를 안 얹으면, 리포는 기본이 비공개라(설계 §4) 이 명령이
+  // 매번 인증 실패로 끝난다 — "폴더가 없으면 clone" 이 실제로는 절대 안 되는 도구가 된다.
+  // clone 은 자신의 -c 옵션을 쓴다(git-clone(1): 원격 fetch 전에 적용된다) — 그 값 자체엔
+  // 비밀이 없으므로(CREDENTIAL_HELPER 는 환경변수 *이름* 만 담는다) 새 저장소의 .git/config 에
+  // 남아도 안전하다. pull 은 자체 -c 옵션이 없어 push 와 같은 전역 옵션 형태(-C dir 뒤,
+  // 서브커맨드 앞)를 쓴다. 실제 토큰 값은 이 인자들 어디에도 없다 — pushEnv 로 만든 환경변수로만
+  // 전달한다(§9). 위 상태 확인(status) 호출에는 얹지 않는다 — 토큰이 닿는 프로세스 수를
+  // 최소로 두는 것은 push 와 같은 이유다.
+  const env = pushEnv(a.token);
+  const args = needsClone
+    ? ["clone", "-c", `credential.helper=${CREDENTIAL_HELPER}`, a.cloneUrl, a.dir]
+    : ["-C", a.dir, "-c", `credential.helper=${CREDENTIAL_HELPER}`, "pull", "--ff-only", "origin", "main"];
+
+  const r = await deps.runGit(args, env);
+  if (!r.ok) return { ok: false, content: redact(`되받지 못했어요: ${r.stdout}`, a.token) };
+
+  return {
+    ok: true,
+    content: discarded ? "로컬을 지우고 새로 받았어요." : needsClone ? "새로 받았어요." : "최신으로 되받았어요.",
+  };
+}

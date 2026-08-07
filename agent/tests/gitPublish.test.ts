@@ -1,5 +1,8 @@
 import { describe, it, expect } from "vitest";
-import { DEFAULT_EXCLUDES, gitignoreBody, publishArgv, pushEnv, runPublish } from "../src/remote/gitPublish.js";
+import {
+  DEFAULT_EXCLUDES, gitignoreBody, publishArgv, pushEnv, runPublish,
+  inspectLocal, runRestore,
+} from "../src/remote/gitPublish.js";
 import type { RunGit } from "../src/remote/gitCommit.js";
 
 const base = {
@@ -129,5 +132,107 @@ describe("runPublish", () => {
     const runGit: RunGit = async () => ({ ok: false, stdout: "fatal: could not read Password for 'https://ghs_secret@github.com'" });
     const r = await runPublish(base, deps(runGit).deps);
     expect(r.content).not.toContain("ghs_secret");
+  });
+});
+
+describe("inspectLocal", () => {
+  const yes = async () => true;
+  const no = async () => false;
+
+  it("폴더가 없으면 missing", async () => {
+    expect(await inspectLocal("/ws/x", (async () => ({ ok: true, stdout: "" })) as RunGit, no)).toBe("missing");
+  });
+
+  it("status 가 비어 있으면 clean", async () => {
+    expect(await inspectLocal("/ws/x", (async () => ({ ok: true, stdout: "" })) as RunGit, yes)).toBe("clean");
+  });
+
+  it("status 에 내용이 있으면 dirty", async () => {
+    const runGit: RunGit = async () => ({ ok: true, stdout: " M src/a.ts\n?? b.txt\n" });
+    expect(await inspectLocal("/ws/x", runGit, yes)).toBe("dirty");
+  });
+
+  // git 저장소가 아니면 status 가 실패한다. 그것을 clean 으로 보면 다음 단계가 pull 을 시도해
+  // 엉뚱한 오류를 낸다 — 폴더는 있는데 저장소가 아닌 것은 "망가진" 쪽에 가깝다.
+  it("git 저장소가 아니면 dirty 로 본다(안전한 쪽)", async () => {
+    const runGit: RunGit = async () => ({ ok: false, stdout: "not a git repository" });
+    expect(await inspectLocal("/ws/x", runGit, yes)).toBe("dirty");
+  });
+});
+
+describe("runRestore", () => {
+  const a = { dir: "/ws/111/todo-app", cloneUrl: "https://github.com/semicollon-club/todo-app.git", token: "ghs_secret", discardLocal: false };
+  const never = async () => { throw new Error("불려서는 안 됩니다"); };
+
+  it("없으면 clone 한다", async () => {
+    const calls: string[][] = [];
+    const runGit: RunGit = async (args) => { calls.push(args); return { ok: true, stdout: "" }; };
+    const r = await runRestore(a, { runGit, exists: async () => false, rmrf: never });
+    expect(r.ok).toBe(true);
+    expect(calls.some((c) => c[0] === "clone")).toBe(true);
+  });
+
+  it("깨끗하면 pull --ff-only 한다", async () => {
+    const calls: string[][] = [];
+    const runGit: RunGit = async (args) => { calls.push(args); return { ok: true, stdout: "" }; };
+    const r = await runRestore(a, { runGit, exists: async () => true, rmrf: never });
+    expect(r.ok).toBe(true);
+    const pull = calls.find((c) => c.includes("pull"));
+    expect(pull).toBeDefined();
+    expect(pull!).toContain("--ff-only");
+  });
+
+  // 이 케이스가 이 도구의 핵심이다 — 복구하려다 방금 한 작업을 없애면 안 된다(설계 §7.1).
+  it("더러우면 아무것도 하지 않고 거절한다", async () => {
+    const calls: string[][] = [];
+    const runGit: RunGit = async (args) => {
+      calls.push(args);
+      return args.includes("status") ? { ok: true, stdout: " M a.ts\n" } : { ok: true, stdout: "" };
+    };
+    const r = await runRestore(a, { runGit, exists: async () => true, rmrf: never });
+    expect(r.ok).toBe(false);
+    expect(r.content).toContain("저장하지 않은 변경");
+    expect(calls.some((c) => c.includes("pull") || c[0] === "clone")).toBe(false);
+  });
+
+  it("discardLocal 이면 더러워도 지우고 새로 clone 한다", async () => {
+    const removed: string[] = [];
+    const calls: string[][] = [];
+    const runGit: RunGit = async (args) => {
+      calls.push(args);
+      return args.includes("status") ? { ok: true, stdout: " M a.ts\n" } : { ok: true, stdout: "" };
+    };
+    const r = await runRestore({ ...a, discardLocal: true }, {
+      runGit, exists: async () => true, rmrf: async (p) => { removed.push(p); },
+    });
+    expect(r.ok).toBe(true);
+    expect(removed).toEqual(["/ws/111/todo-app"]);
+    expect(calls.some((c) => c[0] === "clone")).toBe(true);
+    expect(r.content).toContain("지우고");
+  });
+
+  it("clone URL 과 실패 메시지에 토큰이 없다", async () => {
+    const runGit: RunGit = async () => ({ ok: false, stdout: "fatal: https://ghs_secret@github.com denied" });
+    const r = await runRestore(a, { runGit, exists: async () => false, rmrf: never });
+    expect(r.content).not.toContain("ghs_secret");
+  });
+
+  // 브리프의 Interfaces 절은 이 태스크가 pushEnv 를 소비한다고 적어 두었지만, 브리프 Step 3
+  // 예시 코드는 clone·pull 호출에 env 를 넘기지 않는다 — 그대로 옮기면 리포가 기본값대로
+  // 비공개일 때(설계 §4) 되받기가 인증 실패로 항상 막힌다. 위 테스트들은 "인자에 토큰 문자열이
+  // 없다"만 확인하고 "애초에 인증 자체를 시도했다"는 별개다 — 이 테스트가 그 회귀를 잡는다.
+  it("clone·pull 에도 자격증명을 넘긴다 — 비공개 리포 인증(설계 §7.1 · §9)", async () => {
+    const seen: Array<{ cmd: string[]; env: Record<string, string> | undefined }> = [];
+    const runGit: RunGit = async (args, env) => { seen.push({ cmd: args, env }); return { ok: true, stdout: "" }; };
+
+    await runRestore(a, { runGit, exists: async () => false, rmrf: never }); // clone 경로
+    await runRestore(a, { runGit, exists: async () => true, rmrf: never }); // pull 경로(깨끗함)
+
+    const withToken = seen.filter((s) => s.env?.ASAHI_GH_TOKEN === "ghs_secret");
+    expect(withToken.some((s) => s.cmd[0] === "clone")).toBe(true);
+    expect(withToken.some((s) => s.cmd.includes("pull"))).toBe(true);
+    // 로컬 상태만 보는 status 호출에는 자격증명을 얹지 않는다 — push 가 add·init 같은 로컬
+    // 명령에는 env 를 안 주는 것과 같은 이유다.
+    expect(seen.some((s) => s.cmd.includes("status") && s.env !== undefined)).toBe(false);
   });
 });
