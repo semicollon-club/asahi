@@ -471,6 +471,12 @@ describe("fs_tree 실행기", () => {
     expect(r.content).not.toContain("잘렸");
   });
 
+  // 타임아웃을 명시하는 이유: 이 테스트는 TREE_MAX_ENTRIES + 5 = 505 개의 실제 파일을 만든다.
+  // 상한을 넘겼을 때의 안내를 확인하는 것이 목적이라 파일 수를 줄일 수 없고, 505 번의 파일 생성은
+  // 본질적으로 I/O 바운드다. 로컬(윈도우)에서는 1초 안에 끝나지만 GitHub Actions 의 윈도우
+  // 러너에서는 훨씬 느려, 2026-08-07 CI 에서 5,032ms 로 기본 타임아웃(5,000ms)을 32ms 차이로
+  // 넘겨 실패했다 — 같은 커밋의 다른 실행에서는 통과했다(플레이키). 느린 것이 결함이 아니라
+  // 기본 타임아웃이 이 테스트에 안 맞는 것이므로, 이 테스트에만 여유를 준다.
   it("항목 수 상한을 넘는 트리는 잘렸다고 안내한다", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "asahi-tree-entries-"));
     for (let i = 0; i < TREE_MAX_ENTRIES + 5; i++) {
@@ -481,7 +487,7 @@ describe("fs_tree 실행기", () => {
     const r = await ex.fs_tree!({ path: root });
     expect(r.ok).toBe(true);
     expect(r.content).toContain("항목이 많아");
-  });
+  }, 30_000);
 
   // 리뷰 지적(Minor 1): roots.ts 의 경로 판정은 대상이 없어도(가장 가까운 상위로 올라가) 통과한다
   // — 오타 난 경로·지워진 폴더가 readdir 실패 → 조용히 건너뜀 → renderTree([]) 를 거쳐 "비어
