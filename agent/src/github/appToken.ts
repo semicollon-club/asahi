@@ -42,6 +42,40 @@ function headers(auth: string, hasBody: boolean): Record<string, string> {
   };
 }
 
+// 리뷰 지적(Important): mintInstallationToken·createOrgRepo 의 fetch 에 타임아웃이 없으면
+// 깃허브 API 가 멈췄을 때(장애·레이트리밋 지연 등) 호출이 무한정 매달리고, 리포 발행 흐름
+// 전체가 그 한 호출에 묶인다. executors.ts 의 file_fetch, core/images.ts 의 downloadImages 가
+// 이미 같은 문제(외부 HTTP 호출 무제한 대기)를 10초 AbortController 로 풀어 뒀으므로 값과
+// 방식을 그대로 맞춘다 — 세 곳이 다른 타임아웃을 쓰면 왜 다른지 설명할 이유가 없다.
+const GITHUB_FETCH_TIMEOUT_MS = 10_000;
+
+// mintInstallationToken·createOrgRepo 가 공유하는 "타임아웃 있는 fetch" 한 겹(headers·messageOf
+// 와 같은 이유로 두 곳이 나눠 쓴다 — 로직이 갈라지면 한쪽만 고쳐질 위험이 생긴다). 타이머 해제를
+// finally 로 강제하는 이유는 file_fetch·downloadImages 와 같다 — 응답이 타임아웃 전에 와도
+// 타이머를 지우지 않으면 그 타이머가 이벤트 루프에 남아 프로세스 종료를 늦춘다.
+//
+// abort 로 인한 실패만 알아볼 수 있는 한국어 문장으로 바꾼다 — 그러지 않으면 AbortError 가
+// (raw DOMException 그대로, 영문 이름으로) 호출자에게 던져지고 회원에게는 원인 모를 오류로
+// 보인다. 그 외의 fetch 실패(DNS 실패·연결 거부 등)는 이 함수가 임의로 재해석하지 않고 원래
+// 오류를 그대로 던진다 — 이 결함이 다루는 범위는 "타임아웃이 없다"이지 "모든 네트워크 오류
+// 메시지를 통일한다"가 아니다.
+async function fetchWithTimeout(fetchImpl: FetchLike, url: string, init: RequestInit): Promise<Response> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), GITHUB_FETCH_TIMEOUT_MS);
+  try {
+    return await fetchImpl(url, { ...init, signal: ctrl.signal });
+  } catch (err) {
+    if (err instanceof Error && err.name === "AbortError") {
+      throw new Error(
+        `깃허브 API 응답이 ${GITHUB_FETCH_TIMEOUT_MS / 1000}초 안에 오지 않아 요청을 중단했어요. 네트워크 상태를 확인한 뒤 다시 시도해 주세요.`,
+      );
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // 요청마다 새로 발급한다. 캐시하지 않는다 — 만료를 관리하는 상태가 생기는 순간 그 상태가
 // 틀렸을 때의 실패 모드가 따라오고, 발급 자체는 왕복 한 번이라 아낄 이유가 없다(설계 §3.1).
 export async function mintInstallationToken(o: {
@@ -52,7 +86,8 @@ export async function mintInstallationToken(o: {
   fetchImpl?: FetchLike;
 }): Promise<{ token: string; expiresAt: string }> {
   const jwt = buildAppJwt({ appId: o.config.appId, privateKeyPem: o.config.privateKeyPem, nowMs: o.nowMs });
-  const res = await (o.fetchImpl ?? fetch)(
+  const res = await fetchWithTimeout(
+    o.fetchImpl ?? fetch,
     `https://api.github.com/app/installations/${o.config.installationId}/access_tokens`,
     {
       method: "POST",
@@ -72,7 +107,7 @@ export async function createOrgRepo(o: {
   repoName: string;
   fetchImpl?: FetchLike;
 }): Promise<{ cloneUrl: string }> {
-  const res = await (o.fetchImpl ?? fetch)(`https://api.github.com/orgs/${o.config.org}/repos`, {
+  const res = await fetchWithTimeout(o.fetchImpl ?? fetch, `https://api.github.com/orgs/${o.config.org}/repos`, {
     method: "POST",
     headers: headers(o.token, true),
     body: JSON.stringify({ name: o.repoName, private: true, auto_init: false }),

@@ -35,6 +35,33 @@ describe("buildAppJwt", () => {
     const [h, p, s] = jwt.split(".");
     expect(crypto.verify("RSA-SHA256", Buffer.from(`${h}.${p}`), privateKey, Buffer.from(s, "base64url"))).toBe(true);
   });
+
+  // Finding 2(Minor, 리뷰): crypto.sign 이 손상된 PEM 에 던지는 OpenSSL 오류
+  // (실측: `error:1E08010C:DECODER routines::unsupported`)는 오늘은 키 원문을 담지 않는다 —
+  // 그런데 그건 Node/OpenSSL 자체 동작일 뿐, 이 리포의 어떤 테스트도 그 경로를 직접 태워
+  // 확인한 적이 없었다. 나중에 누군가 "어떤 키로 실패했는지 보여주면 디버깅이 편하겠다"며
+  // 오류 메시지에 PEM 원문을 보간하도록 "개선"해도, 그 회귀를 잡을 테스트가 없으면 조용히
+  // 병합된다. messageOf 는 fetch 응답만 다루므로 이 실패는 messageOf 를 거치지도 않는다
+  // (buildAppJwt 는 HTTP 호출 전에 던진다) — 그 우회 경로를 정확히 겨냥해야 한다.
+  //
+  // 손상된 PEM 안에 이 테스트만의 고유한 캐너리 문자열을 심고, 실제 crypto.sign 경로를 그대로
+  // 태워 오류 메시지에 그 캐너리가 없는지 확인한다. 문구 자체가 나중에 바뀌어도("손상된 키"
+  // 대신 "키 형식 오류" 등) 캐너리 부재만 확인하면 되므로 문구 변경에는 흔들리지 않는다.
+  it("crypto.sign 이 손상된 PEM 으로 실패해도 오류 메시지에 키 조각이 섞이지 않는다", () => {
+    const canary = "CANARY-DO-NOT-LEAK-8f3a1c9e";
+    const malformedPem = `-----BEGIN RSA PRIVATE KEY-----\n${canary}\n-----END RSA PRIVATE KEY-----`;
+
+    let thrown: unknown;
+    try {
+      buildAppJwt({ appId: "4514057", privateKeyPem: malformedPem, nowMs: 1_700_000_000_000 });
+    } catch (err) {
+      thrown = err;
+    }
+
+    expect(thrown).toBeInstanceOf(Error);
+    const message = thrown instanceof Error ? thrown.message : String(thrown);
+    expect(message).not.toContain(canary);
+  });
 });
 
 describe("mintInstallationToken", () => {
