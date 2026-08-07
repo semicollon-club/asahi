@@ -228,4 +228,17 @@ CREATE TABLE IF NOT EXISTS workers (
   last_seen_ts BIGINT
 );
 CREATE INDEX IF NOT EXISTS idx_workers_user ON workers(user_id);
+
+-- 깃허브 발행의 소유권 정본(docs/superpowers/specs/2026-08-07-github-publish-design.md §5).
+-- 모델이 리포를 고르지 못하게 하는 장치다 — 봇이 프로젝트 이름을 이 표에 대조해 대상을 정한다.
+-- repo_name 이 UNIQUE 인 것이 핵심이다: 같은 이름을 다른 사람이 주장하면 INSERT 가 실패하고,
+-- 그 실패가 곧 "남의 리포에 푸시하려 했다"는 판정이 된다(경합 상태에서도 성립한다).
+CREATE TABLE IF NOT EXISTS projects (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  repo_name TEXT NOT NULL UNIQUE,
+  owner_user_id TEXT NOT NULL,
+  created_ts BIGINT NOT NULL,
+  last_push_ts BIGINT
+);
+CREATE INDEX IF NOT EXISTS idx_projects_owner ON projects(owner_user_id);
 `;
