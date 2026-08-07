@@ -209,9 +209,19 @@ describe("정기 게시 채널 설정", () => {
 // Task 4(배선): 워커 신원이 WORKER_USER_ID(디스코드 사용자 ID 공유)에서 WORKER_ID(레지스트리에
 // 등록된 워커 자신의 id)로 바뀐다 — register-worker 가 발급한 id 를 그대로 쓴다.
 describe("워커 설정 — WORKER_ID", () => {
+  // WORKER_ROOTS 는 이 테스트가 도는 플랫폼의 절대경로여야 한다. loadWorkerConfig 의 검증
+  // (isUnambiguousRoot, remote/roots.ts)은 문자열 생김새가 아니라 **host 의 process.platform**
+  // 을 보는데, 그건 이 함수가 워커 자신의 설정을 읽는 자리이기 때문이다 — 워커는 자기가 도는
+  // 그 기계의 경로만 다루므로 host 기준이 맞다(봇 쪽 normalizeDir·pathFlavorOf 가 문자열
+  // 생김새를 따르는 것과 정반대이고, 그 차이가 의도된 것이다).
+  //
+  // 그래서 `C:\ws` 를 하드코딩하면 리눅스에서 "절대경로가 아닌 항목" 으로 거부돼 테스트가
+  // 깨진다(2026-08-07 CI 첫 실행에서 실제로 깨졌다). 이 파일 위쪽 ROOT_A/ROOT_B 가 이미 같은
+  // 이유로 플랫폼을 가리고 있다 — 같은 관례를 여기에도 적용한다.
+  const WORKER_ROOT = process.platform === "win32" ? "C:\\ws" : "/ws";
   const base = {
     DISCORD_OWNER_ID: "owner", WORKER_ID: "semicolon-shared",
-    WORKER_TOKEN: "x".repeat(40), HUB_URL: "wss://h/worker", WORKER_ROOTS: "C:\\ws",
+    WORKER_TOKEN: "x".repeat(40), HUB_URL: "wss://h/worker", WORKER_ROOTS: WORKER_ROOT,
   };
 
   it("WORKER_ID 를 읽는다", () => {

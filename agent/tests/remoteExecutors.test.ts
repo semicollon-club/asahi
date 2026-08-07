@@ -722,7 +722,14 @@ describe("proc_* 실행기 — PM2 위임", () => {
   // Finding 2 이후 recoverCommands 가 이 경로를 신뢰하려면 실제로 필요한 형태이기도 하다)를
   // 그대로 흉내내, "메시지에 보이는 명령이 그 raw 경로가 아니라 스크립트 파일에서 되찾은 값"
   // 이라는 것을 직접 증명한다.
-  it("중복 거절 메시지는 스크립트 경로가 아니라 되찾은 원래 명령을 보여준다(UX 회귀)", async () => {
+  // 2026-08-07 CI: 이 케이스는 윈도우에서만 돌린다. 아래 가짜 jlist 가 흉내내는 것이 윈도우
+  // 고유의 형태(`cmd.exe /c <경로>.bat`)이고, 실제로 파일을 쓰는 쪽인 writeStartScript 는
+  // shellFlavorOf(roots) 로 확장자를 정한다(win32→.bat, posix→.sh, executors.ts 의
+  // scriptPathFor). 리눅스 호스트에서는 root/scriptDir 이 POSIX 라 실제 스크립트가 `.sh` 로
+  // 쓰이는데 이 테스트는 `.bat` 을 하드코딩하므로, recoverCommands 가 그 파일을 못 찾아
+  // 되찾기에 실패하고 raw 경로가 그대로 노출된다 — **구현 결함이 아니라 흉내낸 데이터가
+  // 그 호스트와 안 맞는 것이다.** 같은 파일의 shellFor() 케이스가 이미 쓰는 관례를 따른다.
+  it.skipIf(process.platform !== "win32")("중복 거절 메시지는 스크립트 경로가 아니라 되찾은 원래 명령을 보여준다(UX 회귀)", async () => {
     const trapCommand = 'npm run dev -- --title="hi there"';
     const scriptPath = path.join(scriptDir, "asahi-111.bat");
     const runningWithScriptPath = JSON.stringify([

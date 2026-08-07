@@ -63,8 +63,8 @@ describe("isPathWithinAny", () => {
 
 describe("normalizeDir", () => {
   it("절대경로로 정규화한다(후행 슬래시 제거)", () => {
-    expect(normalizeDir("C:\\a\\b\\")).toBe(path.resolve("C:\\a\\b"));
-    expect(normalizeDir("C:\\a\\b")).toBe(path.resolve("C:\\a\\b"));
+    expect(normalizeDir("C:\\a\\b\\")).toBe(path.win32.resolve("C:\\a\\b"));
+    expect(normalizeDir("C:\\a\\b")).toBe(path.win32.resolve("C:\\a\\b"));
   });
 
   // [Task 6 검토 필요] 이 입력("some\relative\dir")은 드라이브 문자·UNC 접두가 없어
@@ -74,9 +74,14 @@ describe("normalizeDir", () => {
   // 플랫폼 인식으로 바꾼 목적 자체가 앞의 것을 없애는 것이라, 두 기준은 이제 근본적으로
   // 양립할 수 없다. 실제 호출부(tools.ts allowDirHandler, allowedDirsRepo.ts)는 항상
   // isPathWithinAny 로 이미 절대경로임이 확인된 값만 normalizeDir 에 넘기므로, 드라이브
-  // 문자 없는 상대경로가 실제로 들어오는 경로는 없다(grep 으로 확인). 다른 두 케이스
-  // (드라이브 문자 있는 절대경로)는 현재 이 리포에 Linux 에서 테스트를 돌리는 CI 가 없어
-  // 이 변경 없이도 그대로 통과하므로 손대지 않았다.
+  // 문자 없는 상대경로가 실제로 들어오는 경로는 없다(grep 으로 확인).
+  //
+  // **위 두 케이스(드라이브 문자 있는 절대경로)는 2026-08-07 에 고쳤다.** 원래 이 자리에는
+  // "현재 이 리포에 Linux 에서 테스트를 돌리는 CI 가 없어 이 변경 없이도 그대로 통과하므로
+  // 손대지 않았다"고 적혀 있었다 — 그날 CI 가 붙으며 그 전제가 사라졌고, 첫 실행에서 곧바로
+  // 깨졌다. host `path.resolve` 로 만든 기대값이 리눅스에서 `C:\a\b` 를 상대경로로 봐 cwd 를
+  // 붙였기 때문이다. **구현은 멀쩡했고 기대값이 틀렸다.** 기대값은 host 가 아니라 그 문자열의
+  // 플레이버로 계산한다(win32 리터럴 → `path.win32`).
   it("상대경로도 절대경로로 변환한다(드라이브 문자가 없으면 POSIX 규칙)", () => {
     expect(normalizeDir("some\\relative\\dir")).toBe(path.posix.resolve("some\\relative\\dir"));
   });
