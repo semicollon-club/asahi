@@ -52,6 +52,19 @@ describe("extractCandidatePaths — canUseTool 입력에서 경로 추출", () =
     expect(extractCandidatePaths("mcp__asahi__remember", { title: "t", content: "c" })).toEqual([]);
   });
 
+  // 기대값을 host `path` 가 아니라 `path.win32` 로 만든다. 이 블록 아래의 base 는 전부
+  // `C:\proj\a` 같은 윈도우 경로이고, 구현(pathPermission.ts 의 resolveAgainstBase)은
+  // process.platform 이 아니라 **문자열 자신의 생김새**로 win32/posix 를 고른다 — 리눅스 봇이
+  // 윈도우 워커의 경로를 다뤄야 해서 일부러 그렇게 만든 것이다(paths.ts 의 pathFlavorOf).
+  //
+  // 기대값을 host `path.resolve` 로 만들면 그 계약을 검증하지 못하고 **테스트가 도는 플랫폼을
+  // 따라간다**: 윈도우에서는 우연히 맞고, 리눅스에서는 `C:\proj\a` 를 상대경로로 봐서
+  // `/home/runner/.../agent/C:\proj\a/sub` 를 기대하게 되어 실패한다. 2026-08-07 CI 를 처음
+  // 붙였을 때 이 파일에서만 27건이 그 이유로 깨졌다(윈도우 잡은 통과, 리눅스 잡만 실패).
+  // 구현은 멀쩡했고 기대값이 틀렸던 것이다.
+  //
+  // 아래 §"실제 경로 문자열" 블록이 같은 이유로 이미 기대값을 리터럴로 적고 있다 — 그 블록만
+  // 고쳐졌고 이 블록들이 남아 있었다.
   describe("Glob pattern 경로 집행(보안리뷰 #1) — pattern 도 검사 후보에 넣는다", () => {
     it("path 없이 pattern 이 절대경로면 그 리터럴 접두를 후보로 뽑는다", () => {
       expect(extractCandidatePaths("Glob", { pattern: "C:\\other\\**" })).toEqual(["C:\\other"]);
@@ -60,17 +73,17 @@ describe("extractCandidatePaths — canUseTool 입력에서 경로 추출", () =
     it("path 있고 pattern 이 ../ 로 상위 탈출하면 결합·정규화된 경로가 후보에 포함된다", () => {
       const result = extractCandidatePaths("Glob", { path: "C:\\proj\\a", pattern: "../../x/**" });
       expect(result).toContain("C:\\proj\\a");
-      expect(result).toContain(path.resolve("C:\\proj\\a", "../../x"));
+      expect(result).toContain(path.win32.resolve("C:\\proj\\a", "../../x"));
     });
 
     it("path 있고 pattern 이 하위 상대경로면 결합한 경로가 후보에 포함된다", () => {
       const result = extractCandidatePaths("Glob", { path: "C:\\proj\\a", pattern: "sub/**" });
-      expect(result).toContain(path.resolve("C:\\proj\\a", "sub"));
+      expect(result).toContain(path.win32.resolve("C:\\proj\\a", "sub"));
     });
 
     it("path 없고 pattern 이 상대경로면 cwd 기준으로 resolve 한다", () => {
       const result = extractCandidatePaths("Glob", { pattern: "sub/**" }, undefined, "C:\\proj\\a");
-      expect(result).toContain(path.resolve("C:\\proj\\a", "sub"));
+      expect(result).toContain(path.win32.resolve("C:\\proj\\a", "sub"));
     });
 
     it("pattern 이 메타문자로 시작해 리터럴 접두가 없으면 pattern 후보를 추가하지 않는다(중복 방지)", () => {
@@ -96,17 +109,17 @@ describe("extractCandidatePaths — canUseTool 입력에서 경로 추출", () =
     it("path 있고 glob 이 ../ 로 상위 탈출하면 결합·정규화된 경로가 후보에 포함된다", () => {
       const result = extractCandidatePaths("Grep", { pattern: "foo", path: "C:\\proj\\a", glob: "../../x/**" });
       expect(result).toContain("C:\\proj\\a");
-      expect(result).toContain(path.resolve("C:\\proj\\a", "../../x"));
+      expect(result).toContain(path.win32.resolve("C:\\proj\\a", "../../x"));
     });
 
     it("path 있고 glob 이 하위 상대경로면 결합한 경로가 후보에 포함된다", () => {
       const result = extractCandidatePaths("Grep", { pattern: "foo", path: "C:\\proj\\a", glob: "sub/**" });
-      expect(result).toContain(path.resolve("C:\\proj\\a", "sub"));
+      expect(result).toContain(path.win32.resolve("C:\\proj\\a", "sub"));
     });
 
     it("path 없고 glob 이 상대경로면 cwd 기준으로 resolve 한다", () => {
       const result = extractCandidatePaths("Grep", { pattern: "foo", glob: "sub/**" }, undefined, "C:\\proj\\a");
-      expect(result).toContain(path.resolve("C:\\proj\\a", "sub"));
+      expect(result).toContain(path.win32.resolve("C:\\proj\\a", "sub"));
     });
 
     it("glob 이 메타문자로 시작해 리터럴 접두가 없으면 glob 후보를 추가하지 않는다(중복 방지)", () => {
@@ -128,52 +141,52 @@ describe("extractCandidatePaths — canUseTool 입력에서 경로 추출", () =
 
     it("Glob: '**/../x' — 메타문자(**)로 시작해도 벗어난 후보를 만든다", () => {
       const result = extractCandidatePaths("Glob", { path: base, pattern: "**/../x" });
-      expect(result).toContain(path.resolve(base, ".."));
+      expect(result).toContain(path.win32.resolve(base, ".."));
     });
 
     it("Glob: '*/../x' — 단일 메타문자(*)로 시작해도 벗어난 후보를 만든다", () => {
       const result = extractCandidatePaths("Glob", { path: base, pattern: "*/../x" });
-      expect(result).toContain(path.resolve(base, ".."));
+      expect(result).toContain(path.win32.resolve(base, ".."));
     });
 
     it("Glob: '[a]/../x' — 문자 클래스로 시작해도 벗어난 후보를 만든다", () => {
       const result = extractCandidatePaths("Glob", { path: base, pattern: "[a]/../x" });
-      expect(result).toContain(path.resolve(base, ".."));
+      expect(result).toContain(path.win32.resolve(base, ".."));
     });
 
     it("Glob: '{a,b}/../x' — 브레이스로 시작해도 벗어난 후보를 만든다", () => {
       const result = extractCandidatePaths("Glob", { path: base, pattern: "{a,b}/../x" });
-      expect(result).toContain(path.resolve(base, ".."));
+      expect(result).toContain(path.win32.resolve(base, ".."));
     });
 
     it("Glob: 선행 '..'(메타문자 없음) — 기존에도 리터럴 접두로 잡혔지만 회귀로 다시 확인", () => {
       const result = extractCandidatePaths("Glob", { path: base, pattern: "../x" });
-      expect(result).toContain(path.resolve(base, "../x"));
+      expect(result).toContain(path.win32.resolve(base, "../x"));
     });
 
     it("Grep: glob='**/../x' — 메타문자로 시작해도 벗어난 후보를 만든다", () => {
       const result = extractCandidatePaths("Grep", { pattern: "foo", path: base, glob: "**/../x" });
-      expect(result).toContain(path.resolve(base, ".."));
+      expect(result).toContain(path.win32.resolve(base, ".."));
     });
 
     it("Grep: glob='*/../x' — 단일 메타문자로 시작해도 벗어난 후보를 만든다", () => {
       const result = extractCandidatePaths("Grep", { pattern: "foo", path: base, glob: "*/../x" });
-      expect(result).toContain(path.resolve(base, ".."));
+      expect(result).toContain(path.win32.resolve(base, ".."));
     });
 
     it("Grep: glob='[a]/../x' — 문자 클래스로 시작해도 벗어난 후보를 만든다", () => {
       const result = extractCandidatePaths("Grep", { pattern: "foo", path: base, glob: "[a]/../x" });
-      expect(result).toContain(path.resolve(base, ".."));
+      expect(result).toContain(path.win32.resolve(base, ".."));
     });
 
     it("Grep: glob='{a,b}/../x' — 브레이스로 시작해도 벗어난 후보를 만든다", () => {
       const result = extractCandidatePaths("Grep", { pattern: "foo", path: base, glob: "{a,b}/../x" });
-      expect(result).toContain(path.resolve(base, ".."));
+      expect(result).toContain(path.win32.resolve(base, ".."));
     });
 
     it("Grep: 선행 '..'(메타문자 없음) — 기존에도 리터럴 접두로 잡혔지만 회귀로 다시 확인", () => {
       const result = extractCandidatePaths("Grep", { pattern: "foo", path: base, glob: "../x" });
-      expect(result).toContain(path.resolve(base, "../x"));
+      expect(result).toContain(path.win32.resolve(base, "../x"));
     });
 
     // decidePathPermission 삭제(최종 pre-merge 리뷰 FIX6)로, "이 후보가 실제로 허용 폴더 판정에서
@@ -195,7 +208,7 @@ describe("extractCandidatePaths — canUseTool 입력에서 경로 추출", () =
     it("'..' 를 포함하지 않는 일반 문자열(예: '..hidden')은 오탐하지 않는다", () => {
       // 세그먼트 경계 밖의 '..'(리터럴 디렉토리 이름의 일부)는 상위 탈출로 취급하지 않는다.
       const result = extractCandidatePaths("Glob", { path: base, pattern: "*/foo..bar/x" });
-      expect(result).not.toContain(path.resolve(base, ".."));
+      expect(result).not.toContain(path.win32.resolve(base, ".."));
     });
   });
 
@@ -256,7 +269,7 @@ describe("extractCandidatePaths — canUseTool 입력에서 경로 추출", () =
   // 플레이버를 고른다(paths.ts 의 pathFlavorOf 재사용, isPathWithin 이 이미 쓰는 것과 같은 원칙).
   // 이전에는 node:path 의 기본 export(host 프로세스의 process.platform 을 따름)를 그대로 썼다 —
   // 봇은 리눅스(Railway)에서 돌고 base(허용 폴더·워커 루트)는 윈도우 워커의 경로일 수 있어,
-  // 리눅스 host 에서 `path.resolve("C:\\ws\\111", "src")` 를 부르면 역슬래시가 구분자로 인식되지
+  // 리눅스 host 에서 `path.win32.resolve("C:\\ws\\111", "src")` 를 부르면 역슬래시가 구분자로 인식되지
   // 않아 완전히 엉뚱한 값이 나왔다(리뷰 재현: fs_glob(path=손님 루트, pattern='src/**/*.ts') 가
   // 정상 호출인데도 "허용된 폴더 밖"으로 거부됐다). 아래 기대값은 host `path.resolve` 로 만들지
   // 않고 문자열 리터럴로 직접 적는다 — host `path.resolve` 로 기대값을 만들면 이 테스트를 도는

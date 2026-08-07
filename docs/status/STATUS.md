@@ -148,14 +148,17 @@ lastReviewed: 2026-08-07
 캐릭터 페르소나·표정 이미지 제거(2026-08-05~08-06)로 그 기능의 테스트 파일 다수가 지워지고 남은
 파일들의 케이스도 줄었지만, 그 뒤 복원된 커버리지가 더 많다.
 
-이 수치는 사람이 손으로 잰 값이라 실제와 39개 어긋나 있었다. CI 에는 문서 가드
-(`.github/workflows/docs.yml`)뿐이라 테스트가 자동으로 실행된 적이 없다.
+이 수치는 이제 손으로 적지 않아도 된다 — **CI(`.github/workflows/agent.yml`)가 `agent/` 가 바뀐
+모든 푸시·PR 에서 `npm run typecheck` 와 `npm test` 를 리눅스·윈도우 양쪽에서 돌린다**(2026-08-07
+추가). 그전까지 CI 에는 문서 가드(`.github/workflows/docs.yml`)뿐이라 테스트가 자동으로 실행된
+적이 없었고, 이 문단의 수치도 사람이 손으로 잰 값이라 실제와 39개 어긋나 있었다.
 
-**`.github/workflows/agent.yml` 을 추가하면 이 수치를 손으로 적지 않아도 된다** — `agent/` 가
-바뀐 모든 푸시·PR 에서 `npm run typecheck` 와 `npm test` 를 리눅스·윈도우 양쪽에서 돌리는
-워크플로우다. 내용은 `deploy/ci-워크플로우.md` 에 있고 **아직 리포에 없다**: OAuth 토큰으로는
-`workflow` 스코프 없이 워크플로우 파일을 푸시할 수 없어(GitHub 제약), 사람이 웹 UI 로 넣거나
-`gh auth refresh -h github.com -s workflow && gh auth setup-git` 뒤에 푸시해야 한다.
+**첫 실행이 곧바로 결함을 잡았다.** 윈도우 잡은 통과했는데 리눅스 잡에서 27건이 깨졌다 —
+`pathPermission.test.ts` 의 기대값이 host `path.resolve` 로 계산돼, 윈도우에서만 우연히 맞고
+리눅스에서는 `C:\proj\a` 를 상대경로로 봤다. **구현은 멀쩡했고 기대값이 틀렸다**(구현은
+`pathFlavorOf` 로 문자열 생김새를 보므로 host 와 무관하다). 즉 그 보안 코드의 리눅스 동작은
+지금까지 한 번도 검증된 적이 없었다 — 봇이 도는 플랫폼이 리눅스인데도. 매트릭스를 두 OS 로
+잡은 근거가 첫 실행에서 그대로 증명됐다.
 
 skip 3건의 성격은 서로 다르다. 1건은 Postgres READ ONLY 트랜잭션의 실제 쓰기 거부 동작으로,
 테스트용 인메모리 Postgres 구현(pg-mem)의 한계상 유닛 테스트로 재현할 수 없어 실 Supabase
