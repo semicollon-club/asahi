@@ -55,5 +55,6 @@ lastReviewed: 2026-07-30
 - [다른 PC 셋업](../deploy/다른-PC-셋업.md) — 다른 PC로 운영을 옮기는 절차·주의사항
 - [PM2 명령어](../deploy/PM2-명령어.md) — 로컬 PM2 폴백 운영 명령어
 - [로컬 워커 셋업](../deploy/worker-셋업.md) — 소유자 PC 전용 워커(파일·Bash 작업 위임 처리)
+- [GitHub App 셋업](../deploy/github-app-셋업.md) — 깃허브 발행용 자격증명(봇 전용, 미니PC 금지)
 - [장애 대응 런북](../deploy/incident-runbook.md) — 증상 → 원인 → 조치
 - [배포 후 스모크 테스트](../deploy/smoke-test.md) — 배포 직후 확인 체크리스트

@@ -252,18 +252,23 @@ projects(
 
 코드로 대신할 수 없는 부분이다. 조직(`semicollon-club`)에서 사람이 한 번 한다.
 
-1. 조직 Settings → Developer settings → GitHub Apps → **New GitHub App**
-2. **Webhook 을 끈다.** 봇은 웹훅을 받지 않는다 — 켜두면 쓰지도 않는 공개 표면이 생긴다
-3. 권한: Repository → `Contents: Read and write`, `Administration: Read and write`
-   (Administration 은 리포 자동 생성에만 쓰인다 — §4.1)
-4. 설치 범위는 **Only on this account**
-5. Private key 를 생성해 `.pem` 을 받는다
-6. 조직에 App 을 설치한다. 설치 후 URL 의 `/settings/installations/<숫자>` 가 Installation ID 다
-7. Railway 환경변수에 등록한다(§15)
+**클릭 단위 절차의 정본은 [deploy/github-app-셋업.md](../../../deploy/github-app-셋업.md) 다.**
+여기 옮겨 적지 않는다 — 두 벌이 되면 반드시 갈리고, 이 저장소는 "안내와 실제가 어긋남"을
+결함 유형으로 다룬다.
 
-**개인키 취급.** `.pem` 은 **리포에 커밋하지 않고, 미니PC 에 두지 않는다.** 미니PC 에 두는
-순간 §3 의 근거가 통째로 무너진다 — 부원이 `sh_exec` 로 읽어 조직 전체 권한을 영구히 가져간다.
-Railway 환경변수에만 둔다.
+이 문서가 책임지는 것은 그 절차가 **왜 그 모양인가**뿐이다.
+
+- **권한은 `Contents: write` + `Administration: write` 둘뿐이다.** Administration 은 리포 자동
+  생성에만 쓰인다(§4.1). 자동 생성을 포기하면 `Contents` 하나로 줄어든다
+- **Webhook 은 끈다.** 봇은 웹훅을 받지 않으므로, 켜두면 쓰지도 않는 공개 수신 표면이 생긴다
+- **설치 범위는 조직 하나(`Only on this account`)** — 키가 새더라도 피해가 그 조직에 갇힌다
+- **개인키는 Railway 에만 둔다.** 리포에 커밋하지 않고 미니PC 에 두지 않는다. 미니PC 에 두는
+  순간 §3 의 근거가 통째로 무너진다 — 부원이 `sh_exec` 로 읽어 조직 전체 권한을 영구히 가져간다
+
+**GitHub 공식 문서는 개인키를 환경변수가 아니라 키 볼트에 두라고 권한다.** 이 설계는 그 권고를
+따르지 않는다 — 동아리 규모에서 키 볼트 도입 비용이 얻는 것보다 크다고 봤다. **의식적인
+선택이지 모르고 지나친 것이 아니며**, 유출 시 복구 경로(키 삭제 → 재발급)를 셋업 문서에
+적어 두는 것으로 대신한다.
 
 ## 15. 환경변수
 
