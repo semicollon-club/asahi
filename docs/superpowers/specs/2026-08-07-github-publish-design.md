@@ -86,8 +86,31 @@ lastReviewed: 2026-08-07
 **대가를 적어 둔다**: 무료 조직은 비공개 리포에서 GitHub Pages 를 쓸 수 없다. 배포는
 Vercel·Netlify 처럼 비공개 리포를 무료로 받는 곳을 쓴다. 이 선택은 CI/CD 단계에서 다시 본다.
 
-**선행 과제**: 동아리 조직이 아직 없다. 현재 리포(`wwoosshh/asahi`)는 개인 계정 소유이고
-공개다. 조직 생성과 App 설치는 사람이 한 번 해야 하는 수동 절차다.
+### 4.1 조직이 필수인 이유 — 개인 계정으로는 자동 생성이 안 된다
+
+리포 자동 생성은 **조직에서만 된다.** 설치 액세스 토큰(IAT)으로 부를 수 있는 엔드포인트가
+갈린다([permissions-required-for-github-apps](https://docs.github.com/en/rest/authentication/permissions-required-for-github-apps),
+2026-08-07 확인).
+
+| 엔드포인트 | IAT 로 가능? | 권한 |
+|---|---|---|
+| `POST /orgs/{org}/repos` | **가능** | Administration (write) |
+| `POST /user/repos` | **불가** — 사용자 액세스 토큰(UAT)만 | — |
+| `Contents` (git push) | 가능 | Contents (write) |
+
+즉 개인 계정에 발행하려면 사용자 액세스 토큰이 필요한데, 그건 사람의 OAuth 동의를 거쳐야
+하고 만료·갱신 모델이 달라 §3 의 "요청마다 짧은 토큰" 구조가 성립하지 않는다. **조직을 쓰는
+것이 이 설계의 전제다.**
+
+### 4.2 확정된 대상
+
+**조직: `semicollon-club`**(2026-08-07 생성, Free 플랜). 소유자는 `semicollon-git`(동아리 계정)과
+`wwoosshh`(운영자) 둘이다 — 소유자가 하나뿐이면 그 계정을 잃었을 때 조직 전체가 잠긴다.
+
+기존 `semicollon-git` 개인 계정의 리포 3개(`semicollon_backend`·`semicollon_db`·
+`semicollon_frontend`)는 이 설계의 대상이 아니다. 조직으로 옮길지는 별개 판단이다.
+
+**남은 수동 절차**: GitHub App 생성·설치는 사람이 한 번 해야 한다(§14).
 
 ## 5. 소유권 — 누가 어느 리포를 발행할 수 있는가
 
@@ -224,3 +247,39 @@ projects(
 - **브랜치·PR 흐름** — 첫 판은 기본 브랜치에 직접 푸시한다. 부원이 협업하기 시작하면 그때 본다
 - **발행 취소·리포 삭제** — §11
 - **비밀 스캔** — §6
+
+## 14. 수동 절차 — GitHub App 생성·설치
+
+코드로 대신할 수 없는 부분이다. 조직(`semicollon-club`)에서 사람이 한 번 한다.
+
+1. 조직 Settings → Developer settings → GitHub Apps → **New GitHub App**
+2. **Webhook 을 끈다.** 봇은 웹훅을 받지 않는다 — 켜두면 쓰지도 않는 공개 표면이 생긴다
+3. 권한: Repository → `Contents: Read and write`, `Administration: Read and write`
+   (Administration 은 리포 자동 생성에만 쓰인다 — §4.1)
+4. 설치 범위는 **Only on this account**
+5. Private key 를 생성해 `.pem` 을 받는다
+6. 조직에 App 을 설치한다. 설치 후 URL 의 `/settings/installations/<숫자>` 가 Installation ID 다
+7. Railway 환경변수에 등록한다(§15)
+
+**개인키 취급.** `.pem` 은 **리포에 커밋하지 않고, 미니PC 에 두지 않는다.** 미니PC 에 두는
+순간 §3 의 근거가 통째로 무너진다 — 부원이 `sh_exec` 로 읽어 조직 전체 권한을 영구히 가져간다.
+Railway 환경변수에만 둔다.
+
+## 15. 환경변수
+
+봇 쪽에만 추가된다. 워커 `.env` 는 **한 줄도 바뀌지 않는다** — 그것이 이 설계의 요점이다.
+
+| 변수 | 값 |
+|---|---|
+| `GITHUB_ORG` | `semicollon-club` |
+| `GITHUB_APP_ID` | App 설정 페이지의 숫자 |
+| `GITHUB_APP_INSTALLATION_ID` | 설치 URL 의 숫자(§14-6) |
+| `GITHUB_APP_PRIVATE_KEY_B64` | `.pem` 전체를 base64 로 인코딩한 한 줄 |
+
+**개인키를 base64 한 줄로 넣는 이유**: PEM 은 여러 줄이고 `-----BEGIN...` 헤더를 갖는다.
+줄바꿈이 든 값은 환경변수 경로마다 다르게 다뤄져(`.env` 파서·배포 플랫폼·셸) 조용히 망가지기
+쉽다 — 깨진 키는 "인증 실패" 한 줄로만 드러나 원인을 엉뚱한 곳에서 찾게 된다. base64 는 한
+줄이라 그 변수가 사라진다. 봇이 읽을 때 디코드한다.
+
+넷 중 하나라도 비어 있으면 발행 도구를 아예 노출하지 않는다 — 스킬 폴더가 없을 때 `plugins`
+를 넘기지 않는 것과 같은 원칙이다(부가 능력이 본 기능을 인질로 잡지 않는다).
