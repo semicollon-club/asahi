@@ -77,10 +77,12 @@ async function toolCtxWithRealWorker(o: { roots: string[]; allowed: string[] }):
   const db = await openTestDb();
   const executors = makeExecutors(o.roots);
   return {
+    github: null,
+    now: () => 1_000_000,
     repos: {
       memories: new MemoriesRepo(db), users: new UsersRepo(db),
       allowedDirs: { list: async () => o.allowed } as unknown as AllowedDirsRepo,
-      introspect: new IntrospectRepo(db),
+      introspect: new IntrospectRepo(db), projects: new ProjectsRepo(db),
     },
     role: "owner", isPrivate: true, isOwner: true, userId: "owner", conversationId: 1,
     runtime: { model: "claude-opus-4-8", sdkVersion: "0.3.207", deployTarget: "local", maxTurns: 30, workers: [] },

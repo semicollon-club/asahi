@@ -4,6 +4,8 @@ import type { Role } from "../store/usersRepo.js";
 import type { UsersRepo } from "../store/usersRepo.js";
 import type { MemoriesRepo } from "../store/memoriesRepo.js";
 import type { AllowedDirsRepo } from "../store/allowedDirsRepo.js";
+import type { GithubAppConfig } from "../github/appToken.js";
+import type { ProjectsRepo } from "../store/projectsRepo.js";
 import type { IntrospectRepo } from "../store/introspectRepo.js";
 import type { WorkerKind } from "../store/workersRepo.js";
 import fs from "node:fs";
@@ -89,7 +91,10 @@ export type TurnRequest = {
 export type TurnResult = { text: string; sessionId?: string; ok: boolean };
 export type TurnRunner = (req: TurnRequest) => Promise<TurnResult>;
 
-export type ToolRepos = { memories: MemoriesRepo; users: UsersRepo; allowedDirs: AllowedDirsRepo; introspect: IntrospectRepo };
+export type ToolRepos = {
+  memories: MemoriesRepo; users: UsersRepo; allowedDirs: AllowedDirsRepo; introspect: IntrospectRepo;
+  projects: ProjectsRepo;
+};
 
 // mcp__asahi__recall → recall 처럼 인프로세스 MCP 접두어를 벗겨 짧게 만든다. 접두어가 없으면 그대로.
 export function shortToolName(name: string): string {
@@ -201,11 +206,19 @@ export function progressFromMessage(
 // 그대로 넘기기만 하면 introspect 도 함께 옮겨진다(ToolRepos 에 introspect 가 포함돼 있으므로).
 // ctx.remote 는 이 함수가 다루지 않는다 — makeRunAgentTurn 이 buildRemoteCtx 로 별도로 채운다
 // (어느 워커를 쓸지 정하는 resolveTurnWorker 판정이 끝난 뒤에야 알 수 있는 값이라 여기서 계산할 수 없다).
-export function buildToolCtx(repos: ToolRepos, context: TurnContext, runtime: RuntimeInfo): ToolCtx {
+export function buildToolCtx(
+  repos: ToolRepos,
+  context: TurnContext,
+  runtime: RuntimeInfo,
+  // 깃허브 발행 설정과 시각. 둘 다 턴마다 바뀌지 않는 값이라 makeRunAgentTurn 이 들고 있다가
+  // 그대로 내려준다. github 이 null 이면 발행 도구는 애초에 노출되지 않는다(allowedToolsFor).
+  github: GithubAppConfig | null = null,
+  now: () => number = Date.now,
+): ToolCtx {
   return {
     repos, role: context.role, isPrivate: context.isPrivate,
     isOwner: context.isOwner, userId: context.userId, conversationId: context.conversationId,
-    runtime,
+    runtime, github, now,
   };
 }
 
@@ -307,10 +320,12 @@ export function makeRunAgentTurn(
     rootsOf(workerId: string): string[];
     workersInfo(): Array<{ workerId: string; commit?: string; connectedAt: number }>;
   },
+  github: GithubAppConfig | null = null,
+  now: () => number = Date.now,
 ): TurnRunner {
   return async (req) => {
     const runtime: RuntimeInfo = { model, sdkVersion: SDK_VERSION, deployTarget, maxTurns: 30, botCommit: process.env.RAILWAY_GIT_COMMIT_SHA, workers: hub?.workersInfo() ?? [] };
-    const ctx: ToolCtx = buildToolCtx(repos, req.context, runtime);
+    const ctx: ToolCtx = buildToolCtx(repos, req.context, runtime, github, now);
 
     // Task 7: "어느 기계를, 그것이 있기는 한가"를 여기 한 곳에서만 정한다 — resolveTurnWorker 가
     // resolveWorkerSelector(위치 기반 선택)로 개인/공유를 가르고, registry 로 실제 workerId 를

@@ -122,7 +122,7 @@ async function main() {
   // 에이전트 cwd 는 소스가 아닌 데이터 영역에 둔다 — 에이전트가 소스 트리를 훑지 않도록(1단계 점검 지적).
   const agentCwd = path.resolve(config.dataDir, "..", "agent-cwd");
   fs.mkdirSync(agentCwd, { recursive: true });
-  const runTurn = makeRunAgentTurn({ memories: repos.memories, users: repos.users, allowedDirs: repos.allowedDirs, introspect: repos.introspect }, config.deployTarget, config.model, repos.workers, hub);
+  const runTurn = makeRunAgentTurn({ memories: repos.memories, users: repos.users, allowedDirs: repos.allowedDirs, introspect: repos.introspect, projects: repos.projects }, config.deployTarget, config.model, repos.workers, hub, config.github);
 
   // 정기 게시(조사) 실행기. runTurn·agentCwd 는 core 와 동일한 것을 공유한다 —
   // 별도 프로세스가 아니라 같은 봇 안에서 같은 방식으로 LLM 턴을 돌리는 또 하나의 진입점이다.
