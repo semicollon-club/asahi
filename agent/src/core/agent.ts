@@ -352,8 +352,13 @@ export function makeRunAgentTurn(
     // ctx.remote 구성(호출 통로 + workerId/workerKind + 워커 roots) 자체도 buildRemoteCtx 로
     // 뽑아 테스트한다(agent.test.ts).
     ctx.remote = buildRemoteCtx(worker, hub);
+    // githubReady 도 반드시 여기로 넘긴다. 안 넘기면 기본값 false 로 떨어져 도구가 노출되지
+    // 않는데, persona 의 능력 안내는 core.ts 가 config.github 을 직접 보고 만들어 실려 버린다 —
+    // 실제로 2026-08-07 첫 실사용이 이 상태였다: 아사히가 "네, 올릴 수 있습니다" 라고 안내한 뒤
+    // 같은 턴에서 "제게 주어진 도구 목록에는 publish_project 가 없습니다" 로 끝났다. 위
+    // webToolsEnabled 주석이 말하는 "양쪽에 같은 값을 넘겨야 한다" 가 이 축에도 그대로 적용된다.
     const allowedTools = allowedToolsFor(req.context.role, req.context.isPrivate, req.context.isOwner, deployTarget, {
-      workerConnected, webToolsEnabled, memoryWriteEnabled,
+      workerConnected, webToolsEnabled, memoryWriteEnabled, githubReady: github !== null,
     });
     // 서버 생성이 allowedTools 뒤로 내려온 이유: 그 턴에 못 쓰는 도구는 아예 등록하지 않는다
     // (allowedToolDefinitions). 위 :320 주석이 이름 붙인 "도구는 보이는데 실행하면 거부"를

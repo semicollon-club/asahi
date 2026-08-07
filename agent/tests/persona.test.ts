@@ -665,3 +665,22 @@ describe("깃허브 발행 안내", () => {
     }
   });
 });
+
+// 2026-08-07 실사용 회귀 가드. 같은 소유자가 같은 서버 채널에서 runtime_info 를 두 번 요청했는데
+// 첫 번째는 거절당했다 — 그것도 존재하지 않는 규칙을 지어내면서("소유자 전용이라 공개 채널에서는
+// 안 되고 DM 에서만"). 도구는 두 턴 모두 있었고, 직전 턴에 다른 사람이 같은 것을 묻고 거절당한
+// 기록이 대화에 남아 있었다. 모델이 그 거절을 사후 정당화한 것이다.
+describe("자기 거절을 정당화하지 못하게 하는 규칙", () => {
+  it("모든 신원에서 '지금 턴의 도구 목록으로만 판단한다'가 실린다", () => {
+    for (const [isPrivate, isOwner] of [[true, true], [false, true], [true, false], [false, false]] as const) {
+      const p = buildSystemPrompt({ role: "allowed", isPrivate, isOwner, workerConnected: true });
+      expect(p).toContain("지금 이 턴에 주어진 도구 목록으로만 판단");
+      expect(p).toContain("지어내지 마세요");
+    }
+  });
+
+  it("이전 턴의 거절이 지금의 이유가 되지 않는다는 규칙이 실린다", () => {
+    const p = buildSystemPrompt({ role: "owner", isPrivate: false, isOwner: true, workerConnected: true });
+    expect(p).toContain("이전 턴에서 거절했다는 사실은 지금 거절할 이유가 되지 않습니다");
+  });
+});

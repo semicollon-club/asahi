@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { openTestDb } from "../src/store/db.js";
 import { MemoriesRepo } from "../src/store/memoriesRepo.js";
 import { UsersRepo } from "../src/store/usersRepo.js";
@@ -410,5 +411,35 @@ describe("progressFromMessage — tool_result.content 가 배열이어도 summar
     const [u] = progressFromMessage(
       toolResult("t1", { content: [{ type: "text", text: "가".repeat(500) }] }), pending, () => 10);
     expect((u as { summary?: string }).summary!.length).toBeLessThanOrEqual(200);
+  });
+});
+
+// 2026-08-07 실사용에서 드러난 결함의 회귀 가드. 아사히가 "네, 올릴 수 있습니다" 라고 안내한
+// 뒤 같은 턴에서 "제게 주어진 도구 목록에는 publish_project 가 없습니다" 로 끝났다.
+// 원인: core.ts 는 config.github 을 보고 persona 에 githubReady 를 넘겼는데, agent.ts 가
+// allowedToolsFor 에는 그 축을 안 넘겨 기본값 false 로 떨어졌다.
+//
+// Task 9 의 일관성 테스트는 이걸 못 잡았다 — 두 함수에 같은 값을 **직접 넣고** 비교했기
+// 때문이다. 호출자가 양쪽에 같은 값을 넘기는지는 검증하지 않았다. 그래서 여기서는 agent.ts 의
+// 실제 호출 지점을 소스로 확인한다.
+describe("githubReady 가 allowedToolsFor 까지 실제로 전달되는가", () => {
+  const agentSource = fs.readFileSync(
+    path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "core", "agent.ts"),
+    "utf8",
+  );
+
+  it("allowedToolsFor 호출에 githubReady 가 들어 있다", () => {
+    const call = agentSource.slice(agentSource.indexOf("const allowedTools = allowedToolsFor("));
+    const args = call.slice(0, call.indexOf("});") + 3);
+    expect(args).toContain("githubReady");
+  });
+
+  // 축이 하나 더 생겼는데 넘기는 것을 잊는 것이 이 결함의 형태다. 네 축을 모두 고정한다.
+  it("네 축을 모두 넘긴다(하나라도 빠지면 그 축이 기본값으로 조용히 떨어진다)", () => {
+    const call = agentSource.slice(agentSource.indexOf("const allowedTools = allowedToolsFor("));
+    const args = call.slice(0, call.indexOf("});") + 3);
+    for (const axis of ["workerConnected", "webToolsEnabled", "memoryWriteEnabled", "githubReady"]) {
+      expect(args).toContain(axis);
+    }
   });
 });
