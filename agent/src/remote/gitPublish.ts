@@ -31,6 +31,15 @@ export type PublishArgs = {
 export const CREDENTIAL_HELPER =
   '!f() { echo "username=x-access-token"; echo "password=$ASAHI_GH_TOKEN"; }; f';
 
+// 커밋의 committer 신원. author(발행한 부원)와 별개로 git 이 반드시 요구하는 값이고, 없으면
+// "Committer identity unknown" 으로 커밋 자체가 실패한다 — 2026-08-07 첫 실사용이 정확히
+// 이걸로 막혔다. 그때 모델이 sh_exec 로 `git config --global user.email` 을 실행해 **공유
+// 미니PC 의 전역 설정을 바꿔서** 우회했는데, 발행 기능이 공유 기계의 설정을 오염시키면 안 된다.
+// 그래서 전역 설정에 기대지 않고 -c 로 그 호출 하나에만 준다(runPublish 참고) — 전역 설정이
+// 없는 깨끗한 워커에서도 그대로 돌아야 한다는 뜻이기도 하다.
+export const COMMITTER_NAME = "Asahi";
+export const COMMITTER_EMAIL = "asahi@users.noreply.github.com";
+
 export function pushEnv(token: string): Record<string, string> {
   return {
     ASAHI_GH_TOKEN: token,
@@ -90,6 +99,7 @@ export async function runPublish(a: PublishArgs, deps: PublishDeps): Promise<{ o
     const name = cmd[0];
     const isAdd = name === "add";
     const isPush = name === "push";
+    const isCommit = name === "commit";
 
     // `add -A` 직전에 .gitignore 를 쓴다. 이것이 제외 규칙이 실제로 집행되는 유일한 지점이다 —
     // 목록만 만들어 두고 파일을 안 쓰면 node_modules 와 .env 가 그대로 커밋된다.
@@ -102,9 +112,14 @@ export async function runPublish(a: PublishArgs, deps: PublishDeps): Promise<{ o
     // -C dir 는 모든 호출에 필요하다 — RunGit 은 cwd 를 받지 않으므로(gitCommit.ts), 어느
     // 작업 폴더에서 도는지는 이 인자가 정한다. push 에만 자격증명 헬퍼(-c)를 더 얹는다 — 로컬
     // 명령까지 붙이면 그 문자열이 이유 없이 여러 프로세스의 명령줄에 퍼진다.
+    // committer 신원은 commit 에만 얹는다(위 COMMITTER_NAME 선언부 참고). 자격증명 헬퍼와
+    // 같은 자리에서 같은 방식으로 붙이는 이유는 publishArgv 의 계약을 지키기 위해서다 —
+    // 그 배열의 0번째는 항상 서브커맨드여야 하고, -c 를 거기 끼우면 위 name 판정이 깨진다.
     const fullArgs = isPush
       ? ["-C", a.dir, "-c", `credential.helper=${CREDENTIAL_HELPER}`, ...cmd]
-      : ["-C", a.dir, ...cmd];
+      : isCommit
+        ? ["-C", a.dir, "-c", `user.name=${COMMITTER_NAME}`, "-c", `user.email=${COMMITTER_EMAIL}`, ...cmd]
+        : ["-C", a.dir, ...cmd];
 
     // push 만 자격증명이 필요하다. 나머지에 env 를 주지 않는 것은 토큰이 닿는 프로세스 수를
     // 최소로 두기 위해서다.

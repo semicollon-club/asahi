@@ -1179,3 +1179,29 @@ describe("restore_project 핸들러", () => {
     expect(r.content).toContain("발행");
   });
 });
+
+describe("발행 대상 폴더가 없을 때", () => {
+  const github = { org: "semicollon-club", appId: "1", installationId: "2", privateKeyPem: "PEM" };
+
+  // 그냥 넘기면 워커에서 `git -C <없는 폴더> init` 이 실패해 영문 git 오류가 그대로 올라온다.
+  // 모델이 프로젝트 폴더를 안 만들고 작업 폴더에 파일을 흩어 놓았을 때 실제로 나는 상황이다.
+  it("git_publish 를 부르지 않고 폴더를 만들라고 안내한다", async () => {
+    const calls: string[] = [];
+    const c = await ctx({
+      github,
+      remote: {
+        call: async (tool) => {
+          calls.push(tool);
+          return tool === "fs_tree" ? { ok: false, content: "읽지 못했어요" } : { ok: true, content: "" };
+        },
+      },
+    });
+    await c.repos.projects.claim({ repoName: "todo-app", ownerUserId: "guest", ts: 1 });
+    await c.repos.allowedDirs.add(c.remote!.workerId, "/ws");
+
+    const r = await publishHandler(c, { name: "todo-app" });
+    expect(r.ok).toBe(false);
+    expect(r.content).toContain("폴더를 먼저 만들고");
+    expect(calls).not.toContain("git_publish");
+  });
+});
