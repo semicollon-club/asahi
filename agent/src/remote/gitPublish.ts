@@ -209,15 +209,22 @@ export async function runRestore(
   // 발행과 같다" — 이 태스크의 Interfaces 절이 pushEnv 를 소비 대상으로 적어 둔 이유이기도
   // 하다). 여기서 credential.helper 를 안 얹으면, 리포는 기본이 비공개라(설계 §4) 이 명령이
   // 매번 인증 실패로 끝난다 — "폴더가 없으면 clone" 이 실제로는 절대 안 되는 도구가 된다.
-  // clone 은 자신의 -c 옵션을 쓴다(git-clone(1): 원격 fetch 전에 적용된다) — 그 값 자체엔
-  // 비밀이 없으므로(CREDENTIAL_HELPER 는 환경변수 *이름* 만 담는다) 새 저장소의 .git/config 에
-  // 남아도 안전하다. pull 은 자체 -c 옵션이 없어 push 와 같은 전역 옵션 형태(-C dir 뒤,
-  // 서브커맨드 앞)를 쓴다. 실제 토큰 값은 이 인자들 어디에도 없다 — pushEnv 로 만든 환경변수로만
-  // 전달한다(§9). 위 상태 확인(status) 호출에는 얹지 않는다 — 토큰이 닿는 프로세스 수를
-  // 최소로 두는 것은 push 와 같은 이유다.
+  // clone·pull 모두 **서브커맨드 앞**에 -c 를 둔다(아래 args 선언부에 그 이유를 적었다).
+  // 실제 토큰 값은 이 인자들 어디에도 없다 — pushEnv 로 만든 환경변수로만 전달한다(§9).
+  // 위 상태 확인(status) 호출에는 얹지 않는다 — 토큰이 닿는 프로세스 수를 최소로 두는 것은
+  // push 와 같은 이유다.
   const env = pushEnv(a.token);
+  // **-c 는 서브커맨드 앞에 온다.** `git clone -c k=v` (clone 자신의 옵션)는 그 값을 **새
+  // 저장소의 .git/config 에 영구 기록한다** — git-clone 의 의도된 동작이다. 반면 `git -c k=v
+  // clone` 은 이 호출에만 적용되고 아무것도 남기지 않는다. 둘 다 원격 fetch 전에 적용되므로
+  // 인증에는 차이가 없다.
+  //
+  // 2026-08-08 실사용에서 되받은 저장소의 .git/config 에 [credential] 두 줄이 그대로 남은 것을
+  // 확인했다. 토큰은 없지만(헬퍼 문자열은 환경변수 *이름* 만 담는다) 남길 이유가 없다 — 부원의
+  // 저장소에 우리가 넣은 설정이 남아 있으면 나중에 그 사람이 직접 git 을 쓸 때 헬퍼 체인이
+  // 조용히 달라지고, 원인을 찾기 어려운 자리가 하나 늘어난다.
   const args = needsClone
-    ? ["clone", ...CREDENTIAL_ARGS, a.cloneUrl, a.dir]
+    ? [...CREDENTIAL_ARGS, "clone", a.cloneUrl, a.dir]
     : ["-C", a.dir, ...CREDENTIAL_ARGS, "pull", "--ff-only", "origin", "main"];
 
   const r = await deps.runGit(args, env);
