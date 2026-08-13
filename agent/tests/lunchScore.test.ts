@@ -14,11 +14,15 @@ describe("scoreCandidates", () => {
     expect(r[0].score).toBe(r[1].score);
   });
 
-  // 자주 간 곳 = 좋아하는 곳.
+  // 자주 간 곳 = 좋아하는 곳. 기대 승자("a")를 입력 배열 첫 자리가 아니라 둘째 자리에 둔다 —
+  // 첫 자리에 두면 방문 채점 블록을 통째로 꺼도(둘 다 0점 동점) 안정 정렬이 입력 순서를
+  // 그대로 유지해서 이 테스트가 우연히 통과해 버린다(실제로 블록을 꺼서 확인함). 아래
+  // "최근에 간 곳은…", "최근에 먹은 카테고리는…", "점수 내림차순으로…" 세 테스트도 같은
+  // 이유로 기대 승자를 입력 배열 첫 자리에 두지 않는다.
   it("방문이 많을수록 점수가 높다", () => {
     const r = scoreCandidates(
-      [c("a"), c("b")],
-      hist([{ placeId: "a", visits: 5 }, { placeId: "b", visits: 1 }]),
+      [c("b"), c("a")],
+      hist([{ placeId: "b", visits: 1 }, { placeId: "a", visits: 5 }]),
       { nowMs: NOW },
     );
     expect(r[0].placeId).toBe("a");
@@ -57,6 +61,22 @@ describe("scoreCandidates", () => {
     );
     expect(r.map((x) => x.placeId)).toEqual(["a", "b", "d"]);
     expect(r[2].score).toBeLessThan(0);
+  });
+
+  // 방문 보너스를 안 끊으면 방문이 아주 많을 때(200회 → 2*log1p(200)-10 ≈ +0.6067) 리뷰어가
+  // 실측으로 확인한 대로 dislikedPenalty(-10) 를 뚫고 총점이 양수로 뒤집힌다 — reasons 는
+  // "별로였다고 하신 곳이에요" 인데 순위는 위로 올라가는 모순이었다. 문턱은 148회
+  // (e^5-1≈147.4, 즉 2*log1p(visits)>10)라서 200회로 넉넉히 넘겨 고정한다. score 를
+  // dislikedPenalty 값 그대로(-10)로 확인해 방문 보너스가 부분적으로도 안 붙는다는 것까지
+  // 못박는다 — "음수이기만 하면 된다"면 보너스를 절반만 깎는 식의 회귀도 통과해 버린다.
+  it("liked=false 는 방문이 아주 많아도 점수가 음수로 남는다", () => {
+    const [r] = scoreCandidates(
+      [c("a")],
+      hist([{ placeId: "a", visits: 200, liked: false }]),
+      { nowMs: NOW },
+    );
+    expect(r.score).toBeLessThan(0);
+    expect(r.score).toBe(-10);
   });
 
   // 한식만 사흘 연속 나오는 것을 막는다.
