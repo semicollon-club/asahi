@@ -241,4 +241,29 @@ CREATE TABLE IF NOT EXISTS projects (
   last_push_ts BIGINT
 );
 CREATE INDEX IF NOT EXISTS idx_projects_owner ON projects(owner_user_id);
+
+-- 점심 추천(docs/superpowers/specs/2026-08-10-lunch-recommend-design.md).
+-- lunch_places 는 캐시가 아니라 참조 대상이다 — 방문 기록이 place_id 만 들고 있으면 나중에
+-- 그 가게가 카카오에서 사라졌을 때 이름조차 보여줄 수 없다.
+CREATE TABLE IF NOT EXISTS lunch_places (
+  place_id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  category TEXT,
+  category_group TEXT,
+  address TEXT,
+  url TEXT,
+  updated_ts BIGINT NOT NULL
+);
+
+-- scope 컬럼을 두지 않는다: 지금은 소유자만 쓰므로 모든 행이 같은 값을 갖고, 값이 하나뿐인
+-- 컬럼은 아무것도 구분하지 못하면서 그 축이 이미 동작한다는 인상만 준다(설계 §4).
+CREATE TABLE IF NOT EXISTS lunch_visits (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  place_id TEXT NOT NULL,
+  ts BIGINT NOT NULL,
+  liked BOOLEAN
+);
+CREATE INDEX IF NOT EXISTS idx_lunch_visits_user_ts ON lunch_visits(user_id, ts);
+CREATE INDEX IF NOT EXISTS idx_lunch_visits_place ON lunch_visits(place_id);
 `;
