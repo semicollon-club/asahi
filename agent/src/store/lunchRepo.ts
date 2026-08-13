@@ -57,7 +57,7 @@ export class LunchRepo {
     }
   }
 
-  // FTS5 대체: 대소문자 무시 부분 문자열 검색. messagesRepo/memoriesRepo 와 같은 이유로 LIKE
+  // 대소문자 무시 부분 문자열 검색. messagesRepo/memoriesRepo 와 같은 이유로 LIKE
   // 대신 strpos(lower(x), lower(y)) > 0 을 쓴다 — ILIKE 는 검색어의 %,_ 를 이스케이프하지
   // 않으면 와일드카드로 오해하는데, LIKE ... ESCAPE 는 pg-mem 이 파싱하지 못한다(db.ts
   // 46~47행). 대소문자 무시는 forget 의 선례를 그대로 따른다(설계 §6.1) — 카카오 장소명은

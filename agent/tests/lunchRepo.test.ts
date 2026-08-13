@@ -106,6 +106,16 @@ describe("LunchRepo", () => {
     expect((await repo.historyOf("u1")).get("1")!.liked).toBe(true);
   });
 
+  // ts 가 같으면 Postgres 는 순서를 보장하지 않는다. 디스코드 버튼을 두 번 누르면 같은
+  // 밀리초에 두 행이 들어갈 수 있고, 그때 어느 liked 를 쓸지가 정렬에 달린다 — id DESC 가
+  // 그 전순서를 만든다. 이 테스트가 없으면 나중에 id DESC 를 지워도 아무것도 안 깨진다.
+  it("같은 ts 에 기록된 두 방문은 나중에 들어온 쪽의 liked 를 쓴다", async () => {
+    await repo.upsertPlaces([place("1", "국밥집")], 1000);
+    await repo.recordVisit({ userId: "u1", placeId: "1", ts: 5000, liked: true });
+    await repo.recordVisit({ userId: "u1", placeId: "1", ts: 5000, liked: false });
+    expect((await repo.historyOf("u1")).get("1")!.liked).toBe(false);
+  });
+
   it("최근 카테고리를 최신순으로 돌려준다", async () => {
     await repo.upsertPlaces([place("1", "국밥집", "한식"), place("2", "스시집", "일식")], 1000);
     await repo.recordVisit({ userId: "u1", placeId: "1", ts: 1000 });
