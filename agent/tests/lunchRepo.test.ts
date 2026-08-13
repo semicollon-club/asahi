@@ -31,6 +31,34 @@ describe("LunchRepo", () => {
     expect((await repo.findPlacesByName("김밥")).length).toBe(2);
   });
 
+  // 빈 문자열/공백뿐인 이름을 그대로 넘기면 테이블 전체가 걸린다 — lunch_places 는 검색할
+  // 때마다 쌓이는 표라 캐시처럼 작지 않고(설계 §4), 그 전부를 디스코드 메시지 하나(2000자
+  // 한도)에 욱여넣게 된다(§6.1 "여러 개" 분기).
+  it("빈 문자열이나 공백뿐인 이름으로는 찾지 않는다", async () => {
+    await repo.upsertPlaces([place("1", "국밥집"), place("2", "김밥나라")], 1000);
+    expect(await repo.findPlacesByName("")).toEqual([]);
+    expect(await repo.findPlacesByName("   ")).toEqual([]);
+  });
+
+  it("검색어 앞뒤 공백을 트림해서 찾는다", async () => {
+    await repo.upsertPlaces([place("1", "국밥집")], 1000);
+    expect((await repo.findPlacesByName("국밥집 ")).length).toBe(1);
+  });
+
+  // forget 의 선례를 그대로 따른다(설계 §6.1) — 대소문자 무시. 카카오 장소명은
+  // CU·GS25·Starbucks 처럼 라틴 문자를 흔히 섞어 쓴다.
+  it("대소문자를 가리지 않고 찾는다", async () => {
+    await repo.upsertPlaces([place("1", "Starbucks 청운대점")], 1000);
+    expect((await repo.findPlacesByName("star")).length).toBe(1);
+    expect((await repo.findPlacesByName("STAR")).length).toBe(1);
+  });
+
+  it("이름 검색 결과가 무한정 늘지 않는다", async () => {
+    const many = Array.from({ length: 60 }, (_, i) => place(String(i), `테스트가게${i}`));
+    await repo.upsertPlaces(many, 1000);
+    expect((await repo.findPlacesByName("테스트가게")).length).toBeLessThanOrEqual(50);
+  });
+
   it("방문을 기록하고 집계한다", async () => {
     await repo.upsertPlaces([place("1", "국밥집")], 1000);
     await repo.recordVisit({ userId: "u1", placeId: "1", ts: 1000 });
@@ -55,6 +83,26 @@ describe("LunchRepo", () => {
     await repo.upsertPlaces([place("1", "국밥집")], 1000);
     await repo.recordVisit({ userId: "u1", placeId: "1", ts: 1000, liked: false });
     await repo.recordVisit({ userId: "u1", placeId: "1", ts: 9000, liked: true });
+    expect((await repo.historyOf("u1")).get("1")!.liked).toBe(true);
+  });
+
+  // NULL 은 "평가 안 함"이지 새 판단이 아니다(설계 §4) — 가장 최근 방문에 평가가 없다고
+  // 예전의 명시적 판단이 사라지면 안 된다. 사라지면 score.ts 의 liked!==false 게이트가 안
+  // 걸려 dislikedPenalty(-10)가 빠지고 방문 보너스(+visitLog)가 되살아난다(score.ts 44~48행).
+  it("가장 최근 방문에 평가가 없어도 그 전의 liked:false 가 사라지지 않는다", async () => {
+    await repo.upsertPlaces([place("1", "국밥집")], 1000);
+    await repo.recordVisit({ userId: "u1", placeId: "1", ts: 1000, liked: false });
+    await repo.recordVisit({ userId: "u1", placeId: "1", ts: 9000 }); // 평가 없이 재방문
+    const h = await repo.historyOf("u1");
+    expect(h.get("1")!.liked).toBe(false);
+    expect(h.get("1")!.visits).toBe(2);
+    expect(h.get("1")!.lastVisitTs).toBe(9000);
+  });
+
+  it("liked:true 도 같은 방식으로 평가 없는 재방문에 사라지지 않는다", async () => {
+    await repo.upsertPlaces([place("1", "국밥집")], 1000);
+    await repo.recordVisit({ userId: "u1", placeId: "1", ts: 1000, liked: true });
+    await repo.recordVisit({ userId: "u1", placeId: "1", ts: 9000 });
     expect((await repo.historyOf("u1")).get("1")!.liked).toBe(true);
   });
 
