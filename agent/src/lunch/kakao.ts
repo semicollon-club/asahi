@@ -9,6 +9,15 @@ const KAKAO_SEARCH_URL = "https://dapi.kakao.com/v2/local/search/keyword.json";
 const KAKAO_MAX_SIZE = 15;      // 카카오 제약(설계 §2.1)
 const FETCH_TIMEOUT_MS = 10_000;
 
+// 이미 한국어 존댓말로 다듬어져 있어 그대로 사용자에게 보여줘도 되는 오류라는 표시다
+// (core/lunch.ts 의 failMessage 가 이 타입만 감싸지 않고 그대로 통과시킨다). 이 파일이
+// 직접 던지는 오류(타임아웃·비정상 상태 코드)만 이 타입을 쓴다 — 원인과 문구를 이 파일이
+// 완전히 통제하므로 사용자에게 그대로 보여도 안전함을 보장할 수 있다. fetch 자체가
+// 실패하거나(DNS·네트워크 순단) 응답 본문이 JSON 이 아니어서 파싱이 깨지는 경우는 원문이
+// 영어이거나 제3자 응답 본문 조각을 담을 수 있어 여기 속하지 않는다 — 그런 오류는 평범한
+// Error 로 그대로 흘려보내 호출측이 감싸게 한다.
+export class KakaoUserError extends Error {}
+
 const str = (v: unknown): string | undefined =>
   typeof v === "string" && v.trim().length > 0 ? v.trim() : undefined;
 
@@ -41,7 +50,7 @@ async function fetchWithTimeout(fetchImpl: typeof fetch, url: string, init: Requ
     return await fetchImpl(url, { ...init, signal: ctrl.signal });
   } catch (err) {
     if (err instanceof Error && err.name === "AbortError") {
-      throw new Error(`지도 API 응답이 ${FETCH_TIMEOUT_MS / 1000}초 안에 오지 않아 요청을 중단했어요.`);
+      throw new KakaoUserError(`지도 API 응답이 ${FETCH_TIMEOUT_MS / 1000}초 안에 오지 않아 요청을 중단했어요.`);
     }
     throw err;
   } finally {
@@ -73,7 +82,15 @@ export async function searchNearby(o: {
 
   if (!res.ok) {
     // 응답 본문도 상태 코드도 키를 담지 않는다 — 여기서 키를 문자열에 섞지 않는 것이 핵심이다.
-    throw new Error(`근처 식당을 찾지 못했어요(지도 API 오류 ${res.status}).`);
+    // "근처 식당을 찾지 못했다"고 하지 않는다(Item 1, 리뷰) — 이 오류는 검색 결과가 비었다는
+    // 뜻이 아니라 요청 자체가 실패했다는 뜻이다. 그렇게 말하면 401(키 문제)에도 소유자가
+    // "동네가 비었나 보다"로 읽어 정작 원인(인증)을 못 본다. 401·403 은 인증 실패라고
+    // 원인을 짚어 주고, 그 외 상태 코드는 일시적 실패로 안내한다 — 어느 쪽이든 키 값 자체는
+    // 절대 문자열에 담지 않는다.
+    if (res.status === 401 || res.status === 403) {
+      throw new KakaoUserError(`지도 API 인증에 실패했어요(오류 ${res.status}). 설정을 확인해 주세요.`);
+    }
+    throw new KakaoUserError(`지도 API 요청이 실패했어요(오류 ${res.status}). 잠시 뒤에 다시 시도해 주세요.`);
   }
 
   const body = (await res.json()) as { documents?: unknown[] };
