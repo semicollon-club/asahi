@@ -1,6 +1,6 @@
 import type { LunchConfig } from "../config.js";
 import type { LunchRepo, PlaceRow } from "../store/lunchRepo.js";
-import { searchNearby, type KakaoPlace } from "../lunch/kakao.js";
+import { searchNearby, KakaoUserError, type KakaoPlace } from "../lunch/kakao.js";
 import { scoreCandidates, type Candidate } from "../lunch/score.js";
 
 export type LunchCtx = {
@@ -31,18 +31,26 @@ async function searchAndStore(ctx: LunchCtx, query: string): Promise<KakaoPlace[
   return places;
 }
 
-// kakao.ts 가 스스로 던지는 오류(401 안내, 타임아웃)는 이미 한국어 문장이지만, 그 밖의
-// 오류는 아니다 — fetch 자체가 실패하면(DNS·ECONNREFUSED·Railway 네트워크 순단) 영어 원문이
-// 그대로 오고, 카카오나 그 앞단 프록시가 200 과 함께 HTML 을 돌려주면 res.json() 파싱이
-// 깨지면서 그 응답 본문 일부가 오류 메시지에 그대로 실린다. 어느 쪽이든 원문을 그대로
-// 사용자에게 보내지 않는다 — tools.ts 의 이웃 핸들러들(allowDirHandler 등, :224·:244·:259·
-// :284)과 같은 방식으로 한국어 문장 안에 감싸고, 진단용 원문은 콘솔에 남긴다(recallHandler,
-// tools.ts:130 의 선례). 카카오 키는 이 원문에 섞이지 않는다 — kakao.ts 가 응답 본문·상태
-// 코드 어디에도 키를 싣지 않음을 이미 보장한다(lunchKakao.test.ts).
+// kakao.ts 가 스스로 던지는 오류(KakaoUserError — 401/403 안내, 타임아웃)는 이미 한국어
+// 존댓말로 다듬어져 있어 그대로 보여줘도 된다는 표시다 — 그 타입만 감싸지 않고 그대로
+// 통과시킨다. 예전엔 이 구분 없이 모든 오류를 "카카오 지도 API 호출 중 문제가 생겼어요:
+// ${detail}" 로 한 번 더 감쌌는데, 그러면 KakaoUserError 의 이미 한국어인 문장 앞에 "문제가
+// 생겼어요" 가 덧붙어 스스로 모순되는 문장이 되고(예: "문제가 생겼어요: …인증에
+// 실패했어요"), 그 밖의 오류(fetch 자체 실패 — DNS·ECONNREFUSED·Railway 네트워크 순단, 또는
+// 카카오나 그 앞단 프록시가 200 과 함께 HTML 을 돌려줘 res.json() 파싱이 깨지는 경우)는
+// 영어 원문이나 제3자 응답 본문 조각이 ${detail} 로 그대로 사용자에게 노출됐다(Item 1,
+// 리뷰: "<html>Acce" 같은 카카오/프록시 응답 조각이 실제로 샜다). 이제 그 경우엔 detail 을
+// 아예 쓰지 않고 고정 문구 하나로 감싼다 — 상태 코드·타임아웃처럼 사람이 실제로 쓸 수 있는
+// 정보는 KakaoUserError 의 메시지 안에만 있고, 그 밖의 원문은 사용자에게 줄 유용한 정보가
+// 없으므로 버려도 손해가 없다. 진단용 원문은 여전히 콘솔에 남긴다 — tools.ts 의 이웃
+// 핸들러들(allowDirHandler 등, :224·:244·:259·:284)과 recallHandler(tools.ts:130)의 선례와
+// 같은 방식이다. 카카오 키는 이 경로 어디에도 섞이지 않는다 — KakaoUserError 의 메시지는
+// kakao.ts 가 직접 조립해 키를 담지 않고(lunchKakao.test.ts), 그 밖의 오류는 detail 자체를
+// 쓰지 않으므로 응답 본문에 키가 섞여 왔다 해도 사용자에게는 전달될 길이 없다.
 function failMessage(err: unknown): string {
   console.error("[lunch] 카카오 검색 실패:", err);
-  const detail = err instanceof Error ? err.message : String(err);
-  return `카카오 지도 API 호출 중 문제가 생겼어요: ${detail}`;
+  if (err instanceof KakaoUserError) return err.message; // 이미 안전한 한국어 문장 — 감싸지 않는다.
+  return "지도 API 를 부르는 중 문제가 생겼어요. 잠시 뒤에 다시 시도해 주세요.";
 }
 
 export async function lunchSearchHandler(ctx: LunchCtx, args: { query?: string }): Promise<{ ok: boolean; content: string }> {
@@ -120,8 +128,13 @@ export async function lunchVisitHandler(
   // 뜻이라, 다시 이름으로 찾으면 같은 모호함을 되풀이할 뿐이다. lunch_places 에 없는 id 는
   // 새로 만들지 않는다 — §2 의 안정적 식별자는 "카카오가 실제로 준 place_id" 만을 뜻하므로,
   // 모르는 id 는 그냥 실패다.
-  const placeId = args.placeId?.trim();
-  if (placeId) {
+  // placeId 인자가 왔는지(정의됐는지)와 그 값이 공백뿐인지를 구분한다 — 공백뿐인 placeId 를
+  // "인자를 아예 안 줬다"는 뜻의 "어느 가게인지 알려주세요" 로 답하면, 실제로는 placeId 를
+  // 보냈다는 사실 자체가 사라진다(Item 6, 리뷰). 아래에서 place 로도 넘어가지 않도록 여기서
+  // 바로 끝낸다.
+  if (args.placeId !== undefined) {
+    const placeId = args.placeId.trim();
+    if (!placeId) return { ok: false, content: "ID가 비어 있어요. 정확한 place ID를 다시 알려주세요." };
     const place = await ctx.repo.findPlaceById(placeId);
     if (!place) {
       return { ok: false, content: `ID ${placeId} 에 해당하는 가게를 찾지 못했어요. 다시 검색해서 확인해 주세요.` };
@@ -148,15 +161,28 @@ export async function lunchVisitHandler(
   // address 도 함께 보여준다: findPlacesByName 이 이미 돌려주는 필드라 비용이 없고, 체인
   // 지점처럼 이름이 완전히 같은 두 곳을 실제로 구분해 주는 것은 이름이 아니라 주소다.
   if (found.length > 1) {
+    // placeId 도 name 과 같은 제3자 데이터(카카오 문서의 id)다 — kakao.ts 의 str() 는 끝만
+    // trim 하고 안쪽 개행은 그대로 둔다(Item 5, 리뷰). 여기를 안 감싸면 후보 하나가 두 줄로
+    // 보여 "줄 수 = 후보 수" 전제가 깨진다. 막는 비용이 0 이라는 위 singleLine 주석의 논리가
+    // placeId 에도 그대로 적용된다.
     const list = found
-      .map((p) => `- (ID ${p.placeId}) ${singleLine(p.name)}${p.address ? ` · ${singleLine(p.address)}` : ""}`)
+      .map((p) => `- (ID ${singleLine(p.placeId)}) ${singleLine(p.name)}${p.address ? ` · ${singleLine(p.address)}` : ""}`)
       .join("\n");
-    // 이름이 전부 같으면 "정확한 상호명으로 다시 말씀해 주세요" 라는 안내가 거짓말이 된다 —
-    // 무엇을 다시 말해도 이름이 같은 한 결과가 똑같아서, 사용자가 같은 응답을 무한히 받는다
-    // (Important 1). 그 경우에만 이름이 같다는 사실 자체를 밝히고 ID·주소로 안내를 좁힌다.
-    const allSameName = found.every((p) => p.name === found[0].name);
-    const lead = allSameName
-      ? `「${name}」 이라는 이름의 가게가 ${found.length}곳이라 이름만으로는 구분할 수 없어요. ID나 주소로 다시 말씀해 주세요:`
+    // "정확한 상호명으로 다시 말씀해 주세요" 가 실행 가능하려면, 그 이름을 다시 말했을 때
+    // 결과가 지금과 달라질 수 있어야 한다. 그런데 검색 자체가 부분 문자열 일치라서
+    // (store/lunchRepo.ts 의 findPlacesByName), 한 후보의 이름이 다른 후보 이름의 부분
+    // 문자열이면(예: "김밥천국"/"김밥천국 인천점") 짧은 쪽을 매칭시키는 어떤 검색어도 반드시
+    // 긴 쪽까지 함께 매칭시킨다 — 무엇을 다시 말해도 같은 목록이 반복된다(Item 4, 리뷰).
+    // 완전히 같은 이름(체인 지점처럼)은 이 조건의 특수한 경우다 — 문자열은 언제나 자기
+    // 자신의 부분 문자열이다. 그래서 "전부 같다"보다 넓은 "부분 문자열 관계인 쌍이 있다"
+    // 하나로 두 경우를 함께 잡는다. 대소문자는 검색 자체가 가리지 않으므로(strpos(lower(...)))
+    // 여기서도 접어야 한다 — 안 그러면 "CU 학교점"/"cu 학교점"처럼 검색으로는 절대 못 가르는
+    // 쌍을 두고 "다시 말씀해 주세요" 라는 같은 거짓 안내를 하게 된다.
+    const nameCannotDisambiguate = found.some((p, i) =>
+      found.some((q, j) => i !== j && q.name.toLowerCase().includes(p.name.toLowerCase())),
+    );
+    const lead = nameCannotDisambiguate
+      ? `「${name}」 이라는 이름만으로는 ${found.length}곳을 구분할 수 없어요. ID나 주소로 다시 말씀해 주세요:`
       : `여러 곳이 걸려서 기록하지 않았어요. 정확한 상호명이나 ID로 다시 말씀해 주세요:`;
     return { ok: false, content: `${lead}\n${list}` };
   }

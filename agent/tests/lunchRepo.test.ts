@@ -75,6 +75,24 @@ describe("LunchRepo", () => {
     expect(await repo.findPlaceById("없음")).toBeNull();
   });
 
+  // Item 2(리뷰) — findPlaceById 는 lunch_visit 의 placeId 인자가 기대는 유일한 탈출구다
+  // (이름이 완전히 같은 두 후보를 가르는 것도 이 메서드뿐이다). 위의 두 테스트는 둘 다
+  // id "1" 을 픽스처 한 행에만 대는 방식이라, WHERE place_id = $1 을
+  // strpos(place_id, $1) > 0 같은 부분 문자열 일치로 바꿔도 구분이 안 된다 — "1" 과 "1001"
+  // 을 함께 심어야 정확 일치와 부분 일치가 갈라진다. 이게 깨지면 placeId: "1" 로 부른
+  // lunch_visit 이 실제로 "1001" 행에 방문을 기록하는, 지난 라운드에 닫았던 바로 그 사고가
+  // 재발한다.
+  it("findPlaceById 는 부분 문자열이 아니라 정확히 일치하는 place_id 만 찾는다", async () => {
+    await repo.upsertPlaces([place("1", "국밥집"), place("1001", "다른가게")], 1000);
+    const exact = await repo.findPlaceById("1");
+    expect(exact).not.toBeNull();
+    expect(exact!.placeId).toBe("1");
+    expect(exact!.name).toBe("국밥집");
+    // "100" 은 어느 place_id 와도 완전히 같지 않다 — "1001" 의 접두사일 뿐이다. 부분 문자열
+    // 일치라면 여기서 "1001" 행이 걸린다.
+    expect(await repo.findPlaceById("100")).toBeNull();
+  });
+
   it("방문을 기록하고 집계한다", async () => {
     await repo.upsertPlaces([place("1", "국밥집")], 1000);
     await repo.recordVisit({ userId: "u1", placeId: "1", ts: 1000 });

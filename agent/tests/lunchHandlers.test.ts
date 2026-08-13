@@ -75,6 +75,21 @@ describe("점심 도구 핸들러", () => {
     expect(bulletLines.length).toBe(1);
   });
 
+  // Item 3(리뷰) — lunch_search 의 upsert 는 위 "검색은 결과를 돌려주고 장소를 저장한다" 가
+  // 이미 고정하지만, lunch_recommend 는 아직 아무 테스트도 저장 여부를 보지 않는다.
+  // lunchRecommendHandler 가 searchAndStore 대신 searchNearby 를 직접 불러 캐시(upsert)를
+  // 건너뛰어도 다른 모든 테스트는 통과한다 — "추천 → '거기 갔다왔어' → lunch_visit(placeId)"
+  // 흐름은 lunch_places 에 그 행이 실제로 있어야 성립한다(설계 §4, "캐시가 아니라 참조
+  // 대상"). findPlaceById 로 직접 확인해 이 upsert 를 못으로 박는다.
+  it("추천도 검색한 장소를 실제로 저장한다", async () => {
+    const r = await lunchRecommendHandler(ctx(), {});
+    expect(r.ok).toBe(true);
+    // 픽스처의 두 장소("국밥집" placeId 1, "스시집" placeId 2) 모두 저장돼야, 그 뒤에
+    // lunch_visit 을 placeId 로 불러도 찾을 수 있다.
+    expect(await repo.findPlaceById("1")).not.toBeNull();
+    expect(await repo.findPlaceById("2")).not.toBeNull();
+  });
+
   it("방문 기록은 이름으로 찾아 저장한다", async () => {
     await repo.upsertPlaces([{ placeId: "1", name: "국밥집" }], NOW);
     const r = await lunchVisitHandler(ctx(), { place: "국밥집", liked: true });
@@ -118,6 +133,13 @@ describe("점심 도구 핸들러", () => {
     // 리드 문장 한 줄 + 후보 2개 = 3줄. 이름의 개행이 그대로 남으면 줄이 하나 더 늘어난다.
     expect(r.content.split("\n").length).toBe(3);
     expect((await repo.historyOf("u1")).size).toBe(0);
+    // Item 4(리뷰) — "김밥천국"과 "김밥나라"는 서로의 부분 문자열이 아니라 실제로 다시 말하면
+    // 하나로 좁힐 수 있다. 이 경우엔 "구분할 수 없어요" 분기가 아니라 "정확한 상호명이나
+    // ID로" 분기를 써야 한다. 이 assertion 이 없으면 판정 로직을 아예 true 로 고정해도
+    // (모든 경우에 "구분할 수 없어요" 로 답해도) 위의 다른 assertion 들은 그대로 통과한다 —
+    // 리뷰가 지적한 "non-identical 분기가 테스트되지 않는다" 는 구멍이 바로 이것이다.
+    expect(r.content).toContain("정확한 상호명이나 ID로 다시 말씀해 주세요");
+    expect(r.content).not.toContain("구분할 수 없어요");
   });
 
   // Important 1(리뷰) 핵심 결함 — 같은 체인의 두 지점처럼 이름이 완전히 같은 후보가 걸리면
@@ -131,7 +153,10 @@ describe("점심 도구 핸들러", () => {
     ], NOW);
     const r = await lunchVisitHandler(ctx(), { place: "GS25 학교점" });
     expect(r.ok).toBe(false);
-    expect(r.content).toContain("이름만으로는 구분할 수 없어요");
+    // Item 4(리뷰) 이후 문구가 "「N」 이라는 이름만으로는 M곳을 구분할 수 없어요" 로
+    // 바뀌어 두 낱말 사이에 개수가 끼어든다 — 연속 문자열 대신 두 조각을 따로 확인한다.
+    expect(r.content).toContain("이름만으로는");
+    expect(r.content).toContain("구분할 수 없어요");
     expect(r.content).toContain("2001");
     expect(r.content).toContain("2002");
     expect(r.content).toContain("인천 A");
@@ -140,6 +165,57 @@ describe("점심 도구 핸들러", () => {
     // 목록만 보여줬을 뿐 그 무엇도 새로 만들거나 지우지 않았다.
     expect(await repo.findPlaceById("2001")).not.toBeNull();
     expect(await repo.findPlaceById("2002")).not.toBeNull();
+  });
+
+  // Item 4(리뷰) — "김밥천국"/"김밥천국 인천점"처럼 한 후보의 이름이 다른 후보 이름의 부분
+  // 문자열이면, 이름을 다시 말해도(검색 자체가 부분 문자열 일치라서, store/lunchRepo.ts 의
+  // findPlacesByName) 짧은 쪽을 매칭시키는 어떤 검색어든 반드시 긴 쪽도 함께 매칭시킨다 —
+  // "정확한 상호명으로 다시 말씀해 주세요" 는 실행 불가능한 안내다. 카카오 체인 데이터는
+  // "본점"/"인천점" 처럼 이 모양이 흔하다. 예전 판정("이름이 전부 완전히 같다")은 이 쌍을
+  // 못 잡는다 — 두 이름이 완전히 같지 않기 때문이다.
+  it("한 후보의 이름이 다른 후보 이름의 부분 문자열이면 이름만으로 구분할 수 없다고 밝힌다", async () => {
+    await repo.upsertPlaces([
+      { placeId: "3001", name: "김밥천국" },
+      { placeId: "3002", name: "김밥천국 인천점" },
+    ], NOW);
+    const r = await lunchVisitHandler(ctx(), { place: "김밥천국" });
+    expect(r.ok).toBe(false);
+    expect(r.content).toContain("이름만으로는");
+    expect(r.content).toContain("구분할 수 없어요");
+    expect(r.content).not.toContain("정확한 상호명이나 ID로 다시 말씀해 주세요");
+    expect(r.content).toContain("3001");
+    expect(r.content).toContain("3002");
+  });
+
+  // Item 4(리뷰) — 검색 자체가 대소문자를 가리지 않으므로(findPlacesByName 의
+  // strpos(lower(name), lower($1))) "구분할 수 없다" 판정도 대소문자를 접어야 한다. 안
+  // 접으면 "CU 학교점"/"cu 학교점"처럼 검색으로는 절대 못 가르는 쌍인데도 "정확한 상호명으로
+  // 다시 말씀해 주세요" 라고 실행 불가능한 안내를 하게 된다.
+  it("대소문자만 다른 이름도 이름만으로는 구분할 수 없다고 밝힌다", async () => {
+    await repo.upsertPlaces([
+      { placeId: "4001", name: "CU 학교점" },
+      { placeId: "4002", name: "cu 학교점" },
+    ], NOW);
+    const r = await lunchVisitHandler(ctx(), { place: "cu 학교점" });
+    expect(r.ok).toBe(false);
+    expect(r.content).toContain("이름만으로는");
+    expect(r.content).toContain("구분할 수 없어요");
+  });
+
+  // Item 5(리뷰) — placeId 도 name 과 같은 제3자 데이터(카카오 문서의 id)다. kakao.ts 의
+  // str() 는 끝만 trim 하고 안쪽 개행은 그대로 둔다 — "여러 개 걸림" 목록에서 placeId 에
+  // 개행이 섞이면 후보 하나가 두 줄로 보여 singleLine 이 지키려는 "줄 수 = 후보 수" 전제가
+  // 깨진다(위 개행 테스트들과 같은 종류지만, 그동안 name/address 만 감싸고 placeId 는
+  // 빠져 있었다).
+  it("placeId 에 개행이 섞여도 후보 목록의 줄 수가 늘지 않는다", async () => {
+    await repo.upsertPlaces([
+      { placeId: "300\n가짜행", name: "김밥천국" },
+      { placeId: "301", name: "김밥나라" },
+    ], NOW);
+    const r = await lunchVisitHandler(ctx(), { place: "김밥" });
+    expect(r.ok).toBe(false);
+    // 리드 문장 한 줄 + 후보 2개 = 3줄. placeId 의 개행이 그대로 남으면 4줄이 된다.
+    expect(r.content.split("\n").length).toBe(3);
   });
 
   // Important 1(리뷰) — placeId 가 오면 이름 해석을 완전히 건너뛰고 그 place 로 정확히
@@ -167,6 +243,25 @@ describe("점심 도구 핸들러", () => {
     expect(await repo.findPlaceById("없는id")).toBeNull();
   });
 
+  // Item 6(리뷰) — placeId 가 공백뿐이면 "어느 가게인지 알려주세요" 라고 답하면 안 된다 —
+  // 그 문구는 인자를 아예 안 보낸 것처럼 들리지만, 실제로는 placeId 를 보냈다는 사실 자체가
+  // 있다. 인자가 왔다는 사실을 알려주는 별도 안내가 필요하다.
+  it("placeId 가 공백뿐이면 인자를 아예 안 보낸 것과 다르게 안내한다", async () => {
+    const r = await lunchVisitHandler(ctx(), { placeId: "   " });
+    expect(r.ok).toBe(false);
+    expect(r.content).not.toBe("어느 가게인지 알려주세요.");
+    expect(r.content).toContain("ID");
+  });
+
+  // Item 6(리뷰) — placeId 의 trim 이 지금까지 테스트로 고정돼 있지 않았다(지워도 기존
+  // 스위트가 안 걸린다). forget 의 id 인자처럼, 모델이 앞뒤에 공백을 붙여 보내도 정확히
+  // 찾아야 한다.
+  it("placeId 앞뒤 공백을 트림해서 찾는다", async () => {
+    await repo.upsertPlaces([{ placeId: "2001", name: "국밥집" }], NOW);
+    const r = await lunchVisitHandler(ctx(), { placeId: "  2001  " });
+    expect(r.ok).toBe(true);
+  });
+
   // place_id 없는 행이 생기면 누적의 뼈대가 그 순간 깨진다(설계 §6.1) — 검색 없이 방문만
   // 부른 이름은 절대 새 lunch_places 행을 만들지 않는다.
   it("없는 가게는 새로 만들지 않고 먼저 검색하라고 한다", async () => {
@@ -182,6 +277,13 @@ describe("점심 도구 핸들러", () => {
     const r = await lunchSearchHandler({ ...ctx(), fetchImpl: failing }, {});
     expect(r.ok).toBe(false);
     expect(r.content).not.toContain("kk");
+    // Item 1(리뷰) — KakaoUserError 는 failMessage 가 다시 감싸지 않는다. 감쌌다면
+    // "카카오 지도 API 호출 중 문제가 생겼어요: 지도 API 인증에 실패했어요…" 처럼 두 문장이
+    // 겹쳤을 것이다. 겹치지 않는지, 그리고 "근처에 없다"는 그릇된 원인으로 안내하지 않는지
+    // 함께 고정한다.
+    expect(r.content).not.toContain("문제가 생겼어요");
+    expect(r.content).not.toContain("찾지 못했어요");
+    expect(r.content).toContain("인증");
   });
 
   // 뮤테이션 커버리지: 지도 API 가 실패했을 때 키를 노출하지 않는지는 지금까지 lunch_search
@@ -191,6 +293,11 @@ describe("점심 도구 핸들러", () => {
     const r = await lunchRecommendHandler({ ...ctx(), fetchImpl: failing }, {});
     expect(r.ok).toBe(false);
     expect(r.content).not.toContain("kk");
+    // Item 1(리뷰) — lunch_search 테스트와 같은 이유로, recommend 경로도 이중 감싸기가
+    // 없어야 한다.
+    expect(r.content).not.toContain("문제가 생겼어요");
+    expect(r.content).not.toContain("찾지 못했어요");
+    expect(r.content).toContain("인증");
   });
 
   // Important 2(리뷰) — fetch 자체가 실패하면(DNS·ECONNREFUSED·네트워크 순단) 영어 원문
@@ -204,6 +311,10 @@ describe("점심 도구 핸들러", () => {
     expect(r.ok).toBe(false);
     expect(r.content).toContain("문제가 생겼어요");
     expect(r.content).not.toBe("fetch failed");
+    // Item 1(리뷰) — "not.toBe('fetch failed')" 만으로는 "감싸긴 했지만 원문을 이어붙였다"
+    // (예: "…문제가 생겼어요: fetch failed")는 여전히 통과한다 — 실제로 리뷰 시점의 코드가
+    // 그랬다. 원문이 부분 문자열로도 전혀 남지 않아야 한다.
+    expect(r.content).not.toContain("fetch failed");
     expect(spy).toHaveBeenCalled();
     spy.mockRestore();
   });
@@ -216,5 +327,11 @@ describe("점심 도구 핸들러", () => {
     const r = await lunchRecommendHandler({ ...ctx(), fetchImpl: htmlBody }, {});
     expect(r.ok).toBe(false);
     expect(r.content).toContain("문제가 생겼어요");
+    // Item 1(리뷰) — 측정된 실제 누출 사례: "Unexpected token '<', \"<html>Acce\"…" 처럼
+    // JSON.parse 실패 메시지가 응답 본문 조각을 그대로 담아 새어 나갔다. 본문 조각도,
+    // 파싱 오류의 진단 문구도 사용자 응답에 남지 않아야 한다.
+    expect(r.content).not.toContain("<html");
+    expect(r.content).not.toContain("Access Denied");
+    expect(r.content).not.toContain("Unexpected token");
   });
 });
