@@ -751,6 +751,11 @@ type RawPlace = {
 
 const opt = (v: string | null): string | undefined => (v === null || v === "" ? undefined : v);
 
+// 이름 검색 결과 상한. lunch_places 는 검색할 때마다 쌓이는 표라 무제한으로 늘어나고(설계
+// §4), findPlacesByName 의 결과는 §6.1 "여러 개" 분기에서 디스코드 메시지 하나(2000자 한도)로
+// 그대로 나열된다 — messagesRepo.search 처럼 상한을 둔다.
+const MAX_NAME_MATCHES = 50;
+
 function toPlaceRow(r: RawPlace): PlaceRow {
   return {
     placeId: r.place_id,
@@ -781,10 +786,19 @@ export class LunchRepo {
     }
   }
 
+  // FTS5 대체: 대소문자 무시 부분 문자열 검색. messagesRepo/memoriesRepo 와 같은 이유로 LIKE
+  // 대신 strpos(lower(x), lower(y)) > 0 을 쓴다 — ILIKE 는 검색어의 %,_ 를 이스케이프하지
+  // 않으면 와일드카드로 오해하는데, LIKE ... ESCAPE 는 pg-mem 이 파싱하지 못한다(db.ts
+  // 46~47행). 대소문자 무시는 forget 의 선례를 그대로 따른다(설계 §6.1) — 카카오 장소명은
+  // CU·GS25·Starbucks 처럼 라틴 문자를 흔히 섞어 쓴다. trim + 빈 문자열 차단과 LIMIT 은
+  // lunch_places 가 무제한으로 쌓이는 표라서다(설계 §4) — 안 막으면 빈 검색어가 테이블
+  // 전체를 디스코드 2000자 한도로 밀어넣는다.
   async findPlacesByName(name: string): Promise<PlaceRow[]> {
+    const trimmed = name.trim();
+    if (trimmed.length === 0) return [];
     const r = await this.db.query(
-      "SELECT * FROM lunch_places WHERE name LIKE $1 ORDER BY name",
-      [`%${name}%`],
+      "SELECT * FROM lunch_places WHERE strpos(lower(name), lower($1)) > 0 ORDER BY name LIMIT $2",
+      [trimmed, MAX_NAME_MATCHES],
     );
     return (r.rows as RawPlace[]).map(toPlaceRow);
   }
@@ -796,12 +810,15 @@ export class LunchRepo {
     );
   }
 
-  // 방문 횟수·마지막 방문·평가를 place_id 별로 모은다. liked 는 **가장 최근 방문의 값**을
-  // 쓴다 — 예전에 별로였어도 최근에 좋았으면 그게 지금의 판단이다. 그래서 집계 대신 시간
-  // 역순으로 훑으며 처음 만난 값을 취한다.
+  // 방문 횟수·마지막 방문은 place_id 별로 시간 역순(ts DESC, 동률은 id DESC 로 전순서를
+  // 만든다)으로 훑으며 처음 만난 값을 취한다. liked 는 그 둘과 **따로** 접는다 — NULL 은
+  // "평가 안 함"이지 새 판단이 아니라서(설계 §4), 가장 최근 행의 liked 가 아니라 가장 최근의
+  // non-NULL liked 가 이겨야 한다. 둘을 같이 접으면 별로였던 곳을 평가 없이 재방문했을 때
+  // liked 가 통째로 사라지고, score.ts 의 liked!==false 게이트가 안 걸려서 dislikedPenalty
+  // 도 빠지고 방문 보너스가 되살아난다(score.ts 44~48행).
   async historyOf(userId: string): Promise<Map<string, History>> {
     const r = await this.db.query(
-      "SELECT place_id, ts, liked FROM lunch_visits WHERE user_id = $1 ORDER BY ts DESC",
+      "SELECT place_id, ts, liked FROM lunch_visits WHERE user_id = $1 ORDER BY ts DESC, id DESC",
       [userId],
     );
     const out = new Map<string, History>();
@@ -817,6 +834,7 @@ export class LunchRepo {
         });
       } else {
         cur.visits += 1;
+        if (cur.liked === undefined && raw.liked !== null) cur.liked = raw.liked;
       }
     }
     return out;
