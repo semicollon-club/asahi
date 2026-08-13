@@ -59,6 +59,22 @@ describe("LunchRepo", () => {
     expect((await repo.findPlacesByName("테스트가게")).length).toBeLessThanOrEqual(50);
   });
 
+  // lunch_visit 이 placeId 로 곧장 지정할 때 쓴다(설계 §6.1, forget 의 id 인자와 같은 자리) —
+  // 이름이 완전히 같은 두 후보처럼 이름 검색으로는 절대 하나로 못 좁히는 경우의 유일한 출구다.
+  it("place_id 로 정확히 하나를 찾는다", async () => {
+    await repo.upsertPlaces([place("1", "국밥집", "음식점")], 1000);
+    const found = await repo.findPlaceById("1");
+    expect(found).not.toBeNull();
+    expect(found!.name).toBe("국밥집");
+    expect(found!.categoryGroup).toBe("음식점");
+  });
+
+  // 모르는 id 로 새 행을 만들지 않는다(설계 §2) — 호출측이 null 을 보고 "찾지 못했다" 고만
+  // 답하게 한다.
+  it("없는 place_id 는 null 이다", async () => {
+    expect(await repo.findPlaceById("없음")).toBeNull();
+  });
+
   it("방문을 기록하고 집계한다", async () => {
     await repo.upsertPlaces([place("1", "국밥집")], 1000);
     await repo.recordVisit({ userId: "u1", placeId: "1", ts: 1000 });

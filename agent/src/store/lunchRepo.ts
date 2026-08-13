@@ -74,6 +74,16 @@ export class LunchRepo {
     return (r.rows as RawPlace[]).map(toPlaceRow);
   }
 
+  // lunch_visit 이 placeId 로 곧장 지정할 때 쓴다(설계 §6.1, forget 의 id 인자와 같은 자리) —
+  // 이름이 완전히 같은 두 후보처럼 이름 검색으로는 절대 하나로 못 좁히는 경우의 유일한
+  // 출구다. 없으면 null 이다 — 호출측이 그 값으로 새 행을 만들지 않고 "찾지 못했다" 고만
+  // 답하게 한다(설계 §2, 안정적 식별자는 카카오가 실제로 준 place_id 만을 뜻한다).
+  async findPlaceById(placeId: string): Promise<PlaceRow | null> {
+    const r = await this.db.query("SELECT * FROM lunch_places WHERE place_id = $1", [placeId]);
+    const rows = r.rows as RawPlace[];
+    return rows.length > 0 ? toPlaceRow(rows[0]) : null;
+  }
+
   async recordVisit(o: { userId: string; placeId: string; ts: number; liked?: boolean }): Promise<void> {
     await this.db.query(
       "INSERT INTO lunch_visits (user_id, place_id, ts, liked) VALUES ($1, $2, $3, $4)",
