@@ -195,6 +195,8 @@ async function coreSetup() {
     ownerReserve: 10, deployTarget: "local", model: "claude-opus-4-8", httpPort: 3000, digestChannels: {},
     // 깃허브 발행 미설정 — 이 테스트의 관심사가 아니다. 설정이 없으면 발행 도구가 안 열린다.
     github: null,
+    // 점심 추천 미설정 — 이 테스트의 관심사가 아니다.
+    lunch: null,
   };
   const calls: TurnRequest[] = [];
   const runTurn = (req: TurnRequest): Promise<TurnResult> => {

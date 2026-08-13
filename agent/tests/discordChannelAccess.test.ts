@@ -34,6 +34,8 @@ function makeConfig(): Config {
     digestChannels: {},
     // 깃허브 발행 미설정 — 이 테스트들의 관심사가 아니다. 설정이 없으면 발행 도구가 안 열린다.
     github: null,
+    // 점심 추천 미설정 — 이 테스트들의 관심사가 아니다.
+    lunch: null,
   };
 }
 

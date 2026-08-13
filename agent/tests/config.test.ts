@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { loadConfig, loadWorkerConfig } from "../src/config.js";
+import { loadConfig, loadWorkerConfig, parseOrigin } from "../src/config.js";
 
 const base = { DISCORD_TOKEN: "tok", DISCORD_OWNER_ID: "123", DATABASE_URL: "postgres://localhost/test" };
 
@@ -289,5 +289,54 @@ describe("깃허브 발행 설정", () => {
   it("공백만 든 값은 없는 것으로 본다", () => {
     const blank = { ...withGithub, GITHUB_ORG: "   " };
     expect(loadConfig(blank as NodeJS.ProcessEnv).github).toBeNull();
+  });
+});
+
+describe("점심 추천 설정", () => {
+  const base = {
+    DISCORD_TOKEN: "t", DISCORD_OWNER_ID: "o", DATABASE_URL: "postgres://x",
+    KAKAO_REST_API_KEY: "kk", LUNCH_ORIGIN: "37.4,126.6",
+  };
+
+  it("키와 좌표가 있으면 설정을 만든다(반경 기본 1000)", () => {
+    const l = loadConfig(base as NodeJS.ProcessEnv).lunch;
+    expect(l).not.toBeNull();
+    expect(l!.kakaoKey).toBe("kk");
+    expect(l!.lat).toBe(37.4);
+    expect(l!.lon).toBe(126.6);
+    expect(l!.radiusM).toBe(1000);
+  });
+
+  it("반경을 지정하면 그 값을 쓰고 카카오 상한(20000)을 넘지 않는다", () => {
+    expect(loadConfig({ ...base, LUNCH_RADIUS_M: "500" } as NodeJS.ProcessEnv).lunch!.radiusM).toBe(500);
+    expect(loadConfig({ ...base, LUNCH_RADIUS_M: "99999" } as NodeJS.ProcessEnv).lunch!.radiusM).toBe(20000);
+  });
+
+  // 부가 기능이 본 기능을 인질로 잡지 않는다 — 없으면 도구를 안 열 뿐 봇은 정상 기동한다.
+  it("키나 좌표가 없으면 null 이고 기동을 막지 않는다", () => {
+    for (const k of ["KAKAO_REST_API_KEY", "LUNCH_ORIGIN"]) {
+      const without = { ...base } as Record<string, string>;
+      delete without[k];
+      expect(loadConfig(without as NodeJS.ProcessEnv).lunch).toBeNull();
+    }
+  });
+});
+
+// 카카오는 x=경도·y=위도 순서라 흔히 뒤집는데, 뒤집혀도 API 는 오류 없이 엉뚱한 동네 결과를
+// 준다(설계 §3). 조용히 틀리느니 기능이 안 열리는 편이 낫다.
+describe("parseOrigin", () => {
+  it("한국 범위의 위도,경도를 읽는다", () => {
+    expect(parseOrigin("37.4,126.6")).toEqual({ lat: 37.4, lon: 126.6 });
+    expect(parseOrigin(" 35.1 , 129.0 ")).toEqual({ lat: 35.1, lon: 129.0 });
+  });
+
+  it("뒤집힌 좌표는 거절한다(경도가 위도 자리에 왔다)", () => {
+    expect(parseOrigin("126.6,37.4")).toBeNull();
+  });
+
+  it("형식이 어긋나거나 숫자가 아니면 거절한다", () => {
+    for (const bad of ["", "37.4", "37.4,126.6,1", "a,b", undefined]) {
+      expect(parseOrigin(bad)).toBeNull();
+    }
   });
 });

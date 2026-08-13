@@ -40,6 +40,8 @@ export type Config = {
   digestChannels: DigestChannels;
   // 깃허브 발행 설정. 없으면 null 이고, 그때는 발행 도구가 아예 노출되지 않는다.
   github: GithubAppConfig | null;
+  // 점심 추천 설정. 없으면 null 이고, 그때는 점심 도구가 아예 노출되지 않는다.
+  lunch: LunchConfig | null;
 };
 
 // 깃허브 발행 설정. 개인키는 base64 한 줄로 받는다 — 줄바꿈이 든 PEM 은 .env 파서·배포
@@ -62,6 +64,39 @@ function loadGithubConfig(env: NodeJS.ProcessEnv): GithubAppConfig | null {
   const pem = Buffer.from(b64, "base64").toString("utf8");
   if (!pem.includes("PRIVATE KEY")) return null;
   return { org, appId, installationId, privateKeyPem: pem };
+}
+
+export type LunchConfig = { kakaoKey: string; lat: number; lon: number; radiusM: number };
+
+const KAKAO_MAX_RADIUS_M = 20000; // 카카오 제약(설계 §2.1)
+const LUNCH_DEFAULT_RADIUS_M = 1000;
+
+// "위도,경도" 를 읽는다. 카카오 요청은 x=경도·y=위도 순서라 사람이 흔히 뒤집어 넣는데,
+// 뒤집혀도 API 는 오류 없이 **엉뚱한 동네 결과**를 돌려준다 — 조용히 틀리는 대신 여기서
+// 거절한다. 한국 범위(위도 33~39, 경도 124~132)를 벗어나면 null 이다.
+export function parseOrigin(raw: string | undefined): { lat: number; lon: number } | null {
+  const parts = (raw ?? "").split(",");
+  if (parts.length !== 2) return null;
+  const lat = Number(parts[0].trim());
+  const lon = Number(parts[1].trim());
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+  if (lat < 33 || lat > 39) return null;
+  if (lon < 124 || lon > 132) return null;
+  return { lat, lon };
+}
+
+// 키와 좌표가 없으면 null 이다 — 던지지 않는다. 점심 추천은 부가 기능이므로 설정이 빠졌다고
+// 봇이 못 뜨면 안 된다(github 설정과 같은 원칙). 호출측은 null 을 보고 도구를 아예 노출하지
+// 않는다. 반경만 없을 때 기본값을 쓰는 것도 같은 이유다 — 없어서 못 도는 값과 기본값이 있는
+// 값을 구분한다.
+function loadLunchConfig(env: NodeJS.ProcessEnv): LunchConfig | null {
+  const kakaoKey = env.KAKAO_REST_API_KEY?.trim();
+  const origin = parseOrigin(env.LUNCH_ORIGIN?.trim());
+  if (!kakaoKey || !origin) return null;
+
+  const raw = Number(env.LUNCH_RADIUS_M);
+  const radiusM = Number.isFinite(raw) && raw > 0 ? Math.min(raw, KAKAO_MAX_RADIUS_M) : LUNCH_DEFAULT_RADIUS_M;
+  return { kakaoKey, lat: origin.lat, lon: origin.lon, radiusM };
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -91,6 +126,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       ...(env.DIGEST_DEVNEWS_CHANNEL_ID ? { devnews: env.DIGEST_DEVNEWS_CHANNEL_ID } : {}),
     },
     github: loadGithubConfig(env),
+    lunch: loadLunchConfig(env),
   };
 }
 
