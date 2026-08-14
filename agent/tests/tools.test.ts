@@ -1330,6 +1330,13 @@ describe("lunch_search/lunch_recommend/lunch_visit 도구 선언", () => {
     // 언급하는 새 문구는 걸리지 않아야 한다).
     expect(desc).not.toContain("lunch_search·lunch_recommend 가 실제로 보여준 값만 유효합니다");
 
+    // 출처는 "(ID …) 가 있습니다" 를 꺼내는 그 문장 안에 달려 있어야 한다. 뒤쪽 문장에만
+    // 달아 두면, 목록을 손에 쥔 모델이 실제로 읽는 첫 문장이 다시 모호해진다 — 리드만 옛
+    // 문구로 되돌려도 이 파일의 테스트가 전부 통과했다(Task 6 재리뷰 nit 1).
+    const lead = desc.slice(0, desc.indexOf("(ID …) 가 있습니다"));
+    expect(lead).toMatch(/이 도구 자신/);
+    expect(lead).not.toMatch(/직전 호출/);
+
     // placeId 필드 자신의 설명도 같은 출처를 가리켜야 한다 — 도구 설명 본문만 고치고 필드
     // 설명을 옛 문구 그대로 두면 모델이 그쪽을 읽고 다시 같은 오판을 한다.
     const shape = (def as unknown as { inputSchema: Record<string, { description?: string }> }).inputSchema;
