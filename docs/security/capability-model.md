@@ -59,7 +59,7 @@ Asahi 비서는 대화·모델 호출·기억·세션을 전담하는 **봇** �
 
 | 계층 | 조건 | 워커 | 열리는 도구 |
 | --- | --- | --- | --- |
-| 소유자 DM | `isOwner && isPrivate`(local·cloud 동일) | 그 소유자의 **개인 워커** | `remember`/`recall`(전원) + `manage_access` + `forget`(공용 기억 삭제) + `db_schema`/`db_query`/`runtime_info` + `WebSearch`. **워커 연결 시**(`workerConnected`) `allow_dir`/`revoke_dir`/`list_dirs` 와 `fs_read`/`fs_write`/`fs_edit`/`fs_glob`/`fs_grep`/`fs_tree`/`sh_exec`/`proc_start`/`proc_stop`/`proc_list`/`proc_logs` 가 함께 추가된다(그 개인 워커의 `allowed_dirs` 전체 — 좁혀지지 않는다) — `deployTarget`(local/cloud)은 더 이상 이 계층의 도구 목록에 영향을 주지 않는다(최종 리뷰 FIX2). `proc_*`(장기 실행 프로세스 관리) 의 한계는 아래 "장기 실행 프로세스의 한계" 절 참고 |
+| 소유자 DM | `isOwner && isPrivate`(local·cloud 동일) | 그 소유자의 **개인 워커** | `remember`/`recall`(전원) + `manage_access` + `forget`(공용 기억 삭제) + `db_schema`/`db_query`/`runtime_info` + **점심 설정이 있으면**(`config.lunch`) `lunch_search`/`lunch_recommend`/`lunch_visit`(워커 연결과 무관 — 이 기능은 워커를 쓰지 않는다. 유휴 요약 턴은 `noLunchTools` 로 이 셋만 따로 닫힌다 — 아래 "가장 위험한 자리" 절 참고) + `WebSearch`. **워커 연결 시**(`workerConnected`) `allow_dir`/`revoke_dir`/`list_dirs` 와 `fs_read`/`fs_write`/`fs_edit`/`fs_glob`/`fs_grep`/`fs_tree`/`sh_exec`/`proc_start`/`proc_stop`/`proc_list`/`proc_logs` 가 함께 추가된다(그 개인 워커의 `allowed_dirs` 전체 — 좁혀지지 않는다) — `deployTarget`(local/cloud)은 더 이상 이 계층의 도구 목록에 영향을 주지 않는다(최종 리뷰 FIX2). `proc_*`(장기 실행 프로세스 관리) 의 한계는 아래 "장기 실행 프로세스의 한계" 절 참고 |
 | 소유자 서버/스레드 | `isOwner && !isPrivate` | **공유 워커**(동아리 미니PC), 관리자 스코프 | `remember`(공용 기억) + `recall`(공용) + `forget`(공용 기억 삭제) + `runtime_info` + `WebSearch`. **워커 연결 시** `allow_dir`/`revoke_dir`/`list_dirs` 와 `fs_*`/`sh_exec`/`proc_*`(4개) 가 추가된다 — `scopeDirs` 가 소유자는 좁히지 않으므로 손님 폴더를 포함한 그 기계의 `allowed_dirs` 전체에 접근한다(관리자). `proc_list` 도 필터 없이 전원이 보이고 `proc_stop`/`proc_logs` 는 이름을 지정해 남의 프로세스를 다룰 수 있다(아래 "장기 실행 프로세스의 한계" 참고). DB·접근관리(`db_query`/`manage_access`)는 주지 않는다 — 기계가 아니라 봇 자신에 대한 권한이라 공개 채널에서 열 이유가 없다 |
 | 손님 DM | `isPrivate && role in {allowed, owner}`, `isOwner` 는 아님 | **공유 워커**, 본인 폴더로 스코프 | `remember`/`recall`(본인 스코프만) + `WebSearch`. **워커 연결 시** `fs_*`/`sh_exec`/`proc_*`(4개) 가 추가된다 — `fs_*` 는 `scopeDirs` 가 `<루트>/<디스코드 userId>/` 하위로 좁히지만, **`sh_exec` 는 이 스코프의 대상이 아니다**(아래 "경로 게이팅" 참고). `proc_*` 는 경로가 아니라 이름으로 좁혀진다 — `proc_start` 의 이름·작업폴더, `proc_stop`/`proc_logs` 의 대상 이름, `proc_list` 의 필터가 전부 본인 것으로 강제 주입되고 모델이 준 값은 무시된다(아래 "장기 실행 프로세스의 한계" 참고). dir 관리 도구는 절대 받지 않는다 |
 | 손님 서버/스레드 | 그 외(`!isPrivate`, 손님) | **공유 워커**, 본인 폴더로 스코프 | `remember`(공용 기억)/`recall`(공용 스코프만) + `WebSearch`. **워커 연결 시** `fs_*`/`sh_exec`/`proc_*`(4개) 가 추가된다 — 손님 DM 행과 동일하게 `fs_*` 만 자기 폴더로 좁혀지고 `sh_exec` 는 좁혀지지 않으며, `proc_*` 는 이름으로 본인 것에 강제로 좁혀진다. `forget`(공용 기억 삭제)은 받지 않는다 — 보태는 것과 남의 기여를 지우는 것은 같은 권한이 아니다 |
@@ -178,6 +178,21 @@ Asahi 비서는 대화·모델 호출·기억·세션을 전담하는 **봇** �
 `builtinTools`·`allowedToolsFor` 양쪽에서 `WebSearch` 를 뺀다 — 아래 보안-핵심 파일 목록의
 `agent/src/core/agent.ts` 행 참고). 요약은 이미 끝난 대화를 요약할 뿐 검색이 필요 없으므로
 잃는 기능은 없다. 지금은 원격 도구와 웹 검색 둘 다 이 턴에서 구조적으로 닫혀 있다.
+
+**같은 자리에 세 번째 위험이 있었다(Important 1, 리뷰 후속 — 2026-08-14 확인, 같은 날 수정) —
+점심 추천 도구(`lunch_search`/`lunch_recommend`/`lunch_visit`, Task 6)다.** `lunch_search` 는
+모델이 정한 검색어를 그대로 `dapi.kakao.com` URL 에 실어 내보내는 외부 호출인데, 이 셋을
+여는 축(`lunchReady`, `agent/src/core/tools.ts`)은 "설정(`config.lunch`)이 있는가"만 보는
+축이라 `noRemoteTools`/`noWebTools` 와 무관하게 독립적으로 열려 있었다. 소유자 자신의 DM 이
+유휴 요약될 때는 그 요약 턴의 신원도 `isOwner && isPrivate` 를 실제로 만족하므로(위 능력
+계층표의 소유자 DM 행), `lunchReady` 하나만으로 세 도구가 그대로 열린 채 남았다 —
+`db_schema`/`db_query` 로 소유자 DB 전체를 읽을 수 있는 턴에 또 다른 외부 전송 통로가 남아
+있었던 셈이며, FIX3 가 고친 것(위 문단)과 정확히 같은 유형의 결함이다. `lunch_visit` 은
+이 저장소에 되돌릴 도구가 없는 쓰기이기도 하다 — 스푸리어스 `liked:false` 하나가 방문
+보너스를 잃고 -10 감점까지 받는다(`agent/src/lunch/score.ts`). `writeSummary` 가
+`noLunchTools:true` 를 세워(`noRemoteTools`/`noWebTools`/`noMemoryWrite` 와 같은 자리) 이
+턴에서만 세 도구를 강제로 닫는다 — `config.lunch` 자체는 건드리지 않으므로 평상시 턴에는
+영향이 없다. 지금은 원격 도구·웹 검색·점심 도구 셋 다 이 턴에서 구조적으로 닫혀 있다.
 
 위험은 명시했고 판단은 이 기계의 소유자 몫이므로, 상호배타 설계는 철회한다. 결정 경위 전문은
 `docs/superpowers/specs/2026-07-26-web-digest-design.md` §2.1 참고.
