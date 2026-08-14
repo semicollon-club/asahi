@@ -1,6 +1,7 @@
 import type { Db } from "./db.js";
 import type { KakaoPlace } from "../lunch/kakao.js";
 import type { History } from "../lunch/score.js";
+import { deriveCuisine } from "../lunch/cuisine.js";
 
 export type PlaceRow = {
   placeId: string; name: string; category?: string; categoryGroup?: string;
@@ -121,16 +122,28 @@ export class LunchRepo {
     return out;
   }
 
-  // 최신순. score.ts 의 카테고리 감점이 "최근에 몇 번 먹었나"만 세므로 순서 자체는 쓰이지
-  // 않지만, 최신순으로 주는 편이 호출측이 상위 N 개만 잘라 쓰기 쉽다.
-  async recentCategoryGroups(userId: string, sinceTs: number): Promise<string[]> {
+  // 최근에 먹은 "요리 종류"(설계 §5 의 네 번째 축이 감점 대상을 세는 값). 최종 리뷰
+  // Critical 이전에는 이 메서드 이름이 recentCategoryGroups 였고 category_group(카카오의
+  // category_group_name — "음식점" 같은 18개 고정 라벨)을 그대로 돌려줬다. 그 값은 검색으로
+  // 돌아온 식당 전부가 똑같이 갖는 값이라 "한식이 사흘 연속 나왔다"를 절대 구분하지
+  // 못했다(옛 축이 상수 오프셋에 불과했던 원인) — 그래서 category(category_name)에서 뽑은
+  // 세부 분류로 바꾸고 이름도 그 값에 맞춘다.
+  //
+  // 파싱(deriveCuisine)은 SQL 이 아니라 여기서 한다 — 후보 쪽(core/lunch.ts)도 같은 함수를
+  // 그대로 쓴다. WHERE 절에 "category_group = '음식점'" 같은 필터를 SQL 로 따로 걸면, 그
+  // 판정 로직이 여기와 deriveCuisine 두 곳으로 갈라져 한쪽만 고쳐도 서로 어긋나는 재발
+  // 위험이 생긴다 — 정확히 이번에 고치는 결함의 모양이다. 그래서 두 컬럼을 그대로 읽어와
+  // JS 쪽에서 하나의 함수로만 판정한다.
+  async recentCuisines(userId: string, sinceTs: number): Promise<string[]> {
     const r = await this.db.query(
-      `SELECT p.category_group AS g FROM lunch_visits v
+      `SELECT p.category AS category, p.category_group AS category_group FROM lunch_visits v
          JOIN lunch_places p ON p.place_id = v.place_id
-        WHERE v.user_id = $1 AND v.ts >= $2 AND p.category_group IS NOT NULL
+        WHERE v.user_id = $1 AND v.ts >= $2
         ORDER BY v.ts DESC`,
       [userId, sinceTs],
     );
-    return (r.rows as Array<{ g: string }>).map((x) => x.g);
+    return (r.rows as Array<{ category: string | null; category_group: string | null }>)
+      .map((row) => deriveCuisine({ category: opt(row.category), categoryGroup: opt(row.category_group) }))
+      .filter((cuisine): cuisine is string => cuisine !== undefined);
   }
 }

@@ -339,4 +339,24 @@ describe("parseOrigin", () => {
       expect(parseOrigin(bad)).toBeNull();
     }
   });
+
+  // M7(최종 리뷰) — 위도 33~39·경도 124~132 의 경계값 자체가 여태 테스트된 적이 없었다.
+  // config.ts 의 실제 조건은 `lat < 33 || lat > 39`(그 반대인 `<=`/`>=` 가 아니다) 이므로,
+  // 코드를 읽어서 확인한 그대로 경계값 33·39·124·132 는 **포함**이다 — 짐작이 아니라 그
+  // 조건문을 직접 읽고 세운 기대값이다.
+  it("위도·경도 경계값 자체(33·39·124·132)는 포함이다", () => {
+    expect(parseOrigin("33,124")).toEqual({ lat: 33, lon: 124 });
+    expect(parseOrigin("39,132")).toEqual({ lat: 39, lon: 132 });
+    expect(parseOrigin("33,132")).toEqual({ lat: 33, lon: 132 });
+    expect(parseOrigin("39,124")).toEqual({ lat: 39, lon: 124 });
+  });
+
+  // 경계 바로 밖(0.001 차이)은 네 경계 모두에서 거절해야 한다 — 하나라도 새면 그 축의 범위
+  // 검증이 사실상 없는 것과 같다.
+  it("위도·경도 경계 바로 밖은 네 방향 모두 거절한다", () => {
+    expect(parseOrigin("32.999,126.6")).toBeNull(); // 위도 하한 바로 아래
+    expect(parseOrigin("39.001,126.6")).toBeNull(); // 위도 상한 바로 위
+    expect(parseOrigin("37.4,123.999")).toBeNull(); // 경도 하한 바로 아래
+    expect(parseOrigin("37.4,132.001")).toBeNull(); // 경도 상한 바로 위
+  });
 });

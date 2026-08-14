@@ -708,9 +708,16 @@ describe("발행 안내가 폴더 구조를 못박는가", () => {
   });
 });
 
-// 점심 추천 안내 — 위 "깃허브 발행 안내"와 같은 구조다: 도구가 실제로 열리는 조건과 정확히
-// 같은 조건에서만 안내한다(tools.ts 의 lunchTools). 발행과 다른 점은 워커 연결과 무관하다는
-// 것이다(이 기능은 워커를 쓰지 않는다) — 그래서 연결·미연결 두 분기 모두 lunchReady 하나로만 갈린다.
+// 점심 추천 안내 — 위 "깃허브 발행 안내"와 겉모양은 비슷하지만 정확히 같지는 않다. 발행은
+// connected && githubReady 를 그대로 곱하지만, 이 줄(persona.ts 의 lunchLine)은 lunchReady
+// 하나만 본다 — tools.ts 의 실제 게이트(lunchTools = lunchReady && lunchToolsEnabled)가 보는
+// lunchToolsEnabled 축은 PersonaContext 에 대응하는 필드가 아예 없다. M6(최종 리뷰) 이전에는
+// 이 파일도 "정확히 같다"고 적어 persona.ts 의 잘못된 주석을 그대로 반복하고 있었다 — 지금
+// 어긋나지 않는 이유(writeSummary 가 buildSystemPrompt 에 lunchReady 를 아예 안 넘긴다,
+// core.ts 의 writeSummary)와 나중에 그 누락이 고쳐지면 재발할 위험은 persona.ts:190 부근의
+// 주석에 적어 뒀다. 아래 "점심 안내와 도구 노출이 일치하는가" 블록도 workerConnected:true 와
+// lunchReady 만 바꿔가며 확인할 뿐, lunchToolsEnabled(noLunchTools)가 꺼진 상태는 다루지
+// 않는다 — 그 축은 커버리지 밖이다.
 describe("점심 추천 안내", () => {
   it("소유자 DM + 설정이 있으면 안내한다(워커 연결·미연결 무관)", () => {
     for (const workerConnected of [true, false]) {

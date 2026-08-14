@@ -187,9 +187,26 @@ function buildCapabilityBlock(ctx: PersonaContext): string {
   const connected = ctx.workerConnected === true;
   // 발행 도구가 실제로 열리는 조건과 정확히 같다(tools.ts 의 publishTools).
   const publish = connected && ctx.githubReady === true ? PUBLISH_LINES : "";
-  // 점심 도구가 실제로 열리는 조건과 정확히 같다(tools.ts 의 lunchTools) — publish 와 달리
-  // connected 를 곱하지 않는다. 워커 연결과 무관한 축이라, 아래 소유자 DM 두 분기(연결/미연결)
-  // 모두에 그대로 얹는다.
+  // M6(최종 리뷰) — 예전 주석은 "점심 도구가 실제로 열리는 조건과 정확히 같다(tools.ts 의
+  // lunchTools)"라고 적혀 있었는데, 그 조건(tools.ts:453)은 `lunchReady && lunchToolsEnabled`
+  // 이고 이 줄은 lunchReady 하나만 본다 — PersonaContext 에는 lunchToolsEnabled 에 대응하는
+  // 필드 자체가 없다. 그러니 "정확히 같다"는 사실이 아니다.
+  //
+  // 지금 어긋나지 않는 이유는 이 함수가 두 조건을 맞춰 줘서가 아니라, lunchToolsEnabled 를
+  // false 로 세우는 유일한 호출부(core.ts 의 writeSummary, noLunchTools:true)가
+  // buildSystemPrompt 를 부를 때 lunchReady 자체를 아예 안 넘기기 때문이다(core.ts :960) —
+  // ctx.lunchReady 가 undefined 로 떨어져 이 줄이 결과적으로 빈 문자열이 될 뿐이다.
+  //
+  // 다음에 누군가 githubReady 때와 같은 이유로("이 값도 항상 넘겨야 githubReady 결함이
+  // 재발하지 않는다", core.ts :586~589 주석) writeSummary 호출에 lunchReady 를 채워 넣으면,
+  // 이 줄은 곧바로 LUNCH_LINE 을 내보내는데 tools.ts 는 noLunchTools:true 때문에 여전히 세
+  // 도구를 안 연다 — "안내와 실제 도구가 어긋남"이, FIX3/FIX4 가 이미 두 번 고친 바로 그
+  // 결함이 반대 방향(있다고 말했는데 없음)으로 재발한다. 그때 고치려면 lunchToolsEnabled 에
+  // 대응하는 필드를 PersonaContext 에 추가하고 이 조건에 함께 곱해야 한다 — writeSummary 의
+  // 누락에 기대는 지금 상태로 "복원"하면 안 된다.
+  //
+  // connected 를 곱하지 않는 것은 여전히 맞다 — 점심 기능은 워커 연결과 무관한 축이라(설계
+  // §6), 아래 소유자 DM 두 분기(연결/미연결) 모두에 그대로 얹는다.
   const lunchLine = ctx.lunchReady === true ? LUNCH_LINE : "";
   if (ctx.isOwner && ctx.isPrivate) {
     return connected

@@ -1,7 +1,8 @@
 import type { LunchConfig } from "../config.js";
 import type { LunchRepo, PlaceRow } from "../store/lunchRepo.js";
 import { searchNearby, KakaoUserError, type KakaoPlace } from "../lunch/kakao.js";
-import { scoreCandidates, type Candidate } from "../lunch/score.js";
+import { scoreCandidates, type Candidate, type History } from "../lunch/score.js";
+import { deriveCuisine } from "../lunch/cuisine.js";
 
 export type LunchCtx = {
   config: LunchConfig;
@@ -23,11 +24,28 @@ const RECENT_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
 // 개행이 실제로 나온 적은 없지만, 막는 비용이 0 이라 막아 둔다.
 const singleLine = (s: string): string => s.replace(/[\r\n]+/g, " ");
 
+// M2(최종 리뷰) — upsertPlaces 실패를 searchNearby(카카오 호출) 실패와 구분해서 던지는 표시.
+// 예전엔 upsertPlaces 가 searchNearby 와 같은 try 안에 있어서, Postgres 오류(연결 끊김 등)가
+// failMessage 를 거쳐 "지도 API 를 부르는 중 문제가 생겼어요"로 나가고 콘솔에도 "카카오 검색
+// 실패"로 남았다 — 카카오는 멀쩡한데 DB 가 잠깐 흔들린 것뿐인데 소유자가 애먼 카카오 키를
+// 의심하게 된다(deploy/smoke-test.md 의 "키가 틀리면 인증 문제라고 알려주는가" 항목이 바로
+// 이 오인 유형을 겨냥한다). cause 는 콘솔에만 남기고 사용자에게는 절대 노출하지 않는다 —
+// Postgres 오류 원문이 그대로 실릴 수 있어서다(KakaoUserError 를 따로 둔 것과 같은 이유).
+class LunchDbError extends Error {
+  constructor(public readonly cause: unknown) { super("lunch db error"); }
+}
+
 // 검색은 항상 저장을 동반한다 — 저장하지 않으면 방문 기록이 참조할 대상이 없다(설계 §4).
 async function searchAndStore(ctx: LunchCtx, query: string): Promise<KakaoPlace[]> {
   const places = await searchNearby({ config: ctx.config, query, fetchImpl: ctx.fetchImpl });
   // places 가 비어 있으면 리포가 루프를 그냥 안 돈다 — 여기서 다시 길이를 확인할 이유가 없다.
-  await ctx.repo.upsertPlaces(places, ctx.now());
+  // M2: 이 호출만 따로 감싸 실패를 LunchDbError 로 다시 던진다 — 위 searchNearby 가 던지는
+  // 오류(KakaoUserError·fetch 실패)와 절대 같은 갈래로 섞이면 안 된다.
+  try {
+    await ctx.repo.upsertPlaces(places, ctx.now());
+  } catch (err) {
+    throw new LunchDbError(err);
+  }
   return places;
 }
 
@@ -48,9 +66,29 @@ async function searchAndStore(ctx: LunchCtx, query: string): Promise<KakaoPlace[
 // kakao.ts 가 직접 조립해 키를 담지 않고(lunchKakao.test.ts), 그 밖의 오류는 detail 자체를
 // 쓰지 않으므로 응답 본문에 키가 섞여 왔다 해도 사용자에게는 전달될 길이 없다.
 function failMessage(err: unknown): string {
+  // M2: LunchDbError 는 searchNearby(카카오 호출)가 아니라 그 뒤의 upsertPlaces(DB 저장)가
+  // 던진 것이다 — 아래 "카카오 검색 실패" 로그·문구로 섞이면 정확히 M2 가 잡은 오인이
+  // 재발한다. dbFailMessage 로 위임해 이 파일의 모든 DB 실패가 한 곳(그 함수)에서만 문구·
+  // 로그 태그를 관리하게 한다(M3, 아래).
+  if (err instanceof LunchDbError) return dbFailMessage(err.cause);
   console.error("[lunch] 카카오 검색 실패:", err);
   if (err instanceof KakaoUserError) return err.message; // 이미 안전한 한국어 문장 — 감싸지 않는다.
   return "지도 API 를 부르는 중 문제가 생겼어요. 잠시 뒤에 다시 시도해 주세요.";
+}
+
+// M3(최종 리뷰) — historyOf·recentCuisines·recordVisit·findPlaceById·findPlacesByName 은
+// 이 파일에서 어떤 try 로도 감싸지 않은 채 호출되고 있었다. MCP SDK 는 핸들러가 밖으로 던진
+// 오류를 그대로 {isError:true, text: err.message} 로 사용자에게 돌려주므로(tools.ts 의
+// recallHandler·forgetHandler 와 같은 경로), 감싸지 않으면 raw Postgres 오류 문자열(예:
+// "getaddrinfo ENOTFOUND db.<ref>.supabase.co")이 그대로 소유자에게 간다. recall·forget 이
+// 이미 그렇게 동작하고 있어 이것 자체는 새 회귀가 아니지만, 이 파일은 M2 로 검색 경로의 DB
+// 오류를 이미 안전하게 감쌌다 — 같은 파일 안에서 어떤 DB 호출은 안전하고 어떤 것은 아닌
+// 비대칭을 남기지 않는다. 아래 모든 repo 호출이 이 함수 하나로 실패를 안전한 문구로 바꾼다 —
+// LunchDbError 의 cause 로깅과 문구를 여기 한 곳에만 둬서, 나중에 문구를 바꿀 때 두 곳을
+// 따로 고치다 어긋나는 일이 없게 한다.
+function dbFailMessage(err: unknown): string {
+  console.error("[lunch] DB 처리 실패:", err);
+  return "저장된 정보를 처리하는 중 문제가 생겼어요. 잠시 뒤에 다시 시도해 주세요.";
 }
 
 export async function lunchSearchHandler(ctx: LunchCtx, args: { query?: string }): Promise<{ ok: boolean; content: string }> {
@@ -78,17 +116,32 @@ export async function lunchRecommendHandler(ctx: LunchCtx, args: { count?: numbe
   }
   if (places.length === 0) return { ok: true, content: "근처에서 찾지 못했어요." };
 
-  const history = await ctx.repo.historyOf(ctx.userId);
-  const recentCategoryGroups = await ctx.repo.recentCategoryGroups(ctx.userId, ctx.now() - RECENT_WINDOW_MS);
+  // M3: historyOf·recentCuisines 는 둘 다 repo(DB) 호출이다 — 위 searchAndStore 의 카카오
+  // 실패와 다시 섞이지 않도록 별도 try 로 감싸 dbFailMessage 로 안내한다.
+  let history: Map<string, History>;
+  let recentCuisines: string[];
+  try {
+    history = await ctx.repo.historyOf(ctx.userId);
+    recentCuisines = await ctx.repo.recentCuisines(ctx.userId, ctx.now() - RECENT_WINDOW_MS);
+  } catch (err) {
+    return { ok: false, content: dbFailMessage(err) };
+  }
 
-  const candidates: Candidate[] = places.map((p) => ({
-    placeId: p.placeId,
-    name: p.name,
-    ...(p.categoryGroup ? { categoryGroup: p.categoryGroup } : {}),
-    ...(p.distanceM === undefined ? {} : { distanceM: p.distanceM }),
-  }));
+  // 최종 리뷰 Critical — cuisine 은 category_name 에서 뽑은 세부 분류다(cuisine.ts 의
+  // deriveCuisine). categoryGroup(category_group_name)은 "음식점" 같은 18개 고정 라벨 중
+  // 하나라 검색 결과 전부가 같은 값을 가지므로 다시는 여기에 싣지 않는다 — recentCuisines
+  // (위, store/lunchRepo.ts)도 반드시 같은 deriveCuisine 을 거쳐야 두 값이 비교 가능하다.
+  const candidates: Candidate[] = places.map((p) => {
+    const cuisine = deriveCuisine(p);
+    return {
+      placeId: p.placeId,
+      name: p.name,
+      ...(cuisine ? { cuisine } : {}),
+      ...(p.distanceM === undefined ? {} : { distanceM: p.distanceM }),
+    };
+  });
 
-  const top = scoreCandidates(candidates, history, { nowMs: ctx.now(), recentCategoryGroups })
+  const top = scoreCandidates(candidates, history, { nowMs: ctx.now(), recentCuisines })
     .slice(0, Math.max(1, args.count ?? DEFAULT_COUNT));
 
   // 이유를 그대로 싣는다 — 모델이 추천 근거를 지어내지 않고 옮길 수 있어야 한다(설계 §5).
@@ -104,10 +157,16 @@ async function recordAndReport(
   place: PlaceRow,
   liked: boolean | undefined,
 ): Promise<{ ok: boolean; content: string }> {
-  await ctx.repo.recordVisit({
-    userId: ctx.userId, placeId: place.placeId, ts: ctx.now(),
-    ...(liked === undefined ? {} : { liked }),
-  });
+  // M3: recordVisit 은 이 파일에서 어떤 try 로도 감싸지 않던 다섯 repo 호출 중 하나였다 —
+  // 감싸지 않으면 raw Postgres 오류가 MCP 결과에 그대로 실려 나간다.
+  try {
+    await ctx.repo.recordVisit({
+      userId: ctx.userId, placeId: place.placeId, ts: ctx.now(),
+      ...(liked === undefined ? {} : { liked }),
+    });
+  } catch (err) {
+    return { ok: false, content: dbFailMessage(err) };
+  }
   const note = liked === true ? " 좋으셨다니 다음에 더 자주 추천할게요." : liked === false ? " 다음엔 덜 추천할게요." : "";
   return { ok: true, content: `${place.name} 방문을 기록했어요.${note}` };
 }
@@ -135,7 +194,13 @@ export async function lunchVisitHandler(
   if (args.placeId !== undefined) {
     const placeId = args.placeId.trim();
     if (!placeId) return { ok: false, content: "ID가 비어 있어요. 정확한 place ID를 다시 알려주세요." };
-    const place = await ctx.repo.findPlaceById(placeId);
+    // M3: findPlaceById 도 감싸지 않은 다섯 repo 호출 중 하나였다.
+    let place: PlaceRow | null;
+    try {
+      place = await ctx.repo.findPlaceById(placeId);
+    } catch (err) {
+      return { ok: false, content: dbFailMessage(err) };
+    }
     if (!place) {
       return { ok: false, content: `ID ${placeId} 에 해당하는 가게를 찾지 못했어요. 다시 검색해서 확인해 주세요.` };
     }
@@ -146,8 +211,13 @@ export async function lunchVisitHandler(
   if (!name) return { ok: false, content: "어느 가게인지 알려주세요." };
 
   // findPlacesByName 이 트림·대소문자 무시·상한을 이미 다 한다(store/lunchRepo.ts) — 그
-  // 위에 같은 일을 다시 하지 않는다.
-  const found = await ctx.repo.findPlacesByName(name);
+  // 위에 같은 일을 다시 하지 않는다. M3: 이 호출도 감싸지 않은 다섯 repo 호출 중 하나였다.
+  let found: PlaceRow[];
+  try {
+    found = await ctx.repo.findPlacesByName(name);
+  } catch (err) {
+    return { ok: false, content: dbFailMessage(err) };
+  }
 
   // 없는 가게를 새로 만들지 않는다. place_id 없는 행이 생기면 이 기능의 뼈대(안정적 식별자,
   // 설계 §2)가 그 순간 깨지고, 그 뒤의 방문 기록은 같은 가게를 못 알아본다.

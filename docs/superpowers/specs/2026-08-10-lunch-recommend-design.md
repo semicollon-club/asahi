@@ -1,5 +1,5 @@
 ---
-lastReviewed: 2026-08-10
+lastReviewed: 2026-08-14
 ---
 
 # 점심 추천 — 설계
@@ -64,8 +64,16 @@ secret 두 개). 키가 적을수록 잘못 넣을 자리도 적다. 응답의 `
 CREATE TABLE IF NOT EXISTS lunch_places (
   place_id TEXT PRIMARY KEY,        -- 카카오 문서의 id. 이 표 전체가 그것에 매달린다
   name TEXT NOT NULL,
-  category TEXT,                    -- category_name (예: "음식점 > 한식 > 국밥")
-  category_group TEXT,              -- category_group_name (예: "음식점")
+  -- category_name (예: "음식점 > 한식 > 국밥"). §5 "최근 카테고리 반복" 축이 실제로 읽는
+  -- 값(요리 종류)이 여기 있다 — 두 번째 조각을 lunch/cuisine.ts 의 deriveCuisine 이 뽑는다.
+  category TEXT,
+  -- category_group_name (예: "음식점"). 카카오의 18개 **고정 라벨**(음식점·카페·편의점·
+  -- 약국…) 중 하나일 뿐이다 — 검색으로 돌아온 식당은 사실상 전부 "음식점" 하나로 같으므로
+  -- "한식이 사흘 연속 나왔다" 같은 세부 반복은 이 필드로 절대 구분할 수 없다(최종 리뷰
+  -- Critical: 이 필드를 세부 분류인 것처럼 §5 축에 넣었던 것이 그 결함이었다). 이 필드는
+  -- deriveCuisine 안에서 "진짜 음식점이 맞는가"를 가르는 게이트로만 쓴다 — 카페·편의점
+  -- 방문이 세부 분류 축을 건드리지 않게 막는 것이 이 필드의 실제 역할이다.
+  category_group TEXT,
   address TEXT,
   url TEXT,
   updated_ts BIGINT NOT NULL
@@ -96,15 +104,29 @@ CREATE INDEX IF NOT EXISTS idx_lunch_visits_place ON lunch_visits(place_id);
 
 이 기능에서 정확성을 확보할 수 있는 유일한 부분이다(API 응답도 DB 도 없이 테스트한다).
 
+**2026-08-14 문서 정합(최종 리뷰 Critical):** 아래 타입은 원래 `categoryGroup?: string` /
+`recentCategoryGroups: string[]` 였다. 최종 리뷰가 실측으로 확인한 대로, `category_group_name`
+은 §4 가 이미 적어 둔 대로 "음식점" 같은 18개 **고정 라벨** 중 하나라 검색 결과 거의 전부가
+같은 값을 갖는다 — 그 값으로는 "최근 카테고리 반복" 축이 막으려는 세부 반복(한식이 사흘
+연속 나오는 것)을 절대 구분할 수 없었다(축이 사실상 상수 오프셋이 되어, 방문 이력이 전혀
+없는 후보까지 "최근에 음식점을(를) N번 드셨어요" 라는 뜻 없는 이유를 받고 순위도 안 바뀌는
+결함으로 실측됐다). 코드가 이미 고쳐졌으므로(`lunch/cuisine.ts` 의 `deriveCuisine`, `score.ts`,
+`store/lunchRepo.ts` 의 `recentCuisines`) 이 표를 그 코드에 맞춘다:
+
 ```ts
-type Candidate = { placeId: string; name: string; categoryGroup?: string; distanceM?: number };
+type Candidate = { placeId: string; name: string; cuisine?: string; distanceM?: number };
 type History = { placeId: string; visits: number; lastVisitTs?: number; liked?: boolean };
 function scoreCandidates(
   candidates: Candidate[],
   history: Map<string, History>,
-  o: { nowMs: number; recentCategoryGroups: string[] },
+  o: { nowMs: number; recentCuisines: string[] },
 ): Array<{ placeId: string; score: number; reasons: string[] }>;
 ```
+
+`cuisine`/`recentCuisines` 는 `category_name`(예: "음식점 > 한식 > 국밥")에서 뽑은 세부
+분류("한식")다 — `category_group_name` 이 아니다. 후보 쪽(오늘 검색된 곳)과 이력 쪽(과거
+방문한 곳) 양쪽이 반드시 같은 함수(`deriveCuisine`)로 이 값을 뽑아야 한다 — 한쪽만 고치거나
+한쪽만 파싱을 놓치면 두 값이 영원히 다른 문자열이 되어 축이 다시 조용히 죽는다.
 
 네 축을 곱셈이 아니라 **가산**으로 쌓는다 — 곱셈은 한 축이 0 이면 나머지를 통째로 지워서,
 "왜 이게 추천됐나" 를 설명할 수 없게 된다.
@@ -114,11 +136,12 @@ function scoreCandidates(
 | 방문 횟수 | + (로그) | 자주 간 곳 = 좋아하는 곳. 선형이면 한 곳이 목록을 독점한다 |
 | 최근 방문 | **−** | 어제 간 데를 오늘 또 추천하면 쓸모가 없다. 3일 이내는 크게 깎는다 |
 | `liked` | + / −− | 명시적 평가는 추측(횟수)보다 세게 반영한다. `false` 면 방문 횟수 축(위 행)을 아예 적용하지 않는다 — 몇 번 갔는지는 좋아함의 대리 지표일 뿐이라, "별로였다"는 명시적 평가가 있으면 그 대리 지표는 더 이상 근거가 못 된다 |
-| 최근 카테고리 반복 | − | 한식만 사흘 연속 나오는 것을 막는다 |
+| 최근 카테고리 반복 | − | 한식만 사흘 연속 나오는 것을 막는다. **`category_name` 에서 뽑은 세부 분류(`cuisine`)를 읽는다 — `category_group_name`(§4)은 18개 고정 라벨 중 하나라 검색 결과 거의 전부가 "음식점"으로 같으므로 이 목적에 못 쓴다.** |
 
 **`reasons` 를 함께 돌려준다.** 모델이 "왜 이걸 추천했는지" 를 지어내지 않고 그대로 옮길 수
 있어야 한다 — 이 저장소는 작업 사실 조작을 금지하고 있고(persona 의 IDENTITY), 추천 이유도
-같은 범주다.
+같은 범주다. 카테고리 반복처럼 감점인 축은 문장에 방향(왜 덜 추천됐는지)까지 담는다 — 감점을
+중립적 사실처럼("최근에 한식을 3번 드셨어요") 말하면 오히려 긍정 신호로 읽힐 수 있다.
 
 ## 6. 도구 셋
 

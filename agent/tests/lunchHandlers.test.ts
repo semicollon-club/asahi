@@ -12,6 +12,16 @@ const kakaoDoc = (id: string, name: string, group = "음식점") => ({
 const fakeFetch = (docs: unknown[]) =>
   (async () => new Response(JSON.stringify({ documents: docs }), { status: 200 })) as unknown as typeof fetch;
 
+// 최종 리뷰 Critical 전용 픽스처 — 위 kakaoDoc() 는 category_name 을 아예 안 채운다(그동안의
+// 다른 테스트는 그 축을 안 건드렸으므로 괜찮았다). "최근 카테고리 반복" 축은 category_group_name
+// 이 아니라 category_name 의 세부 분류를 읽어야 하므로, 이 축을 검증하려면 카카오가 실제로
+// 함께 주는 두 필드를 다 채운 문서가 필요하다.
+const cuisineDoc = (id: string, name: string, cuisine: string, distance: string) => ({
+  id, place_name: name, category_group_name: "음식점", category_name: `음식점 > ${cuisine}`,
+  place_url: `http://p/${id}`, distance,
+});
+const DAY = 24 * 3600_000;
+
 describe("점심 도구 핸들러", () => {
   let repo: LunchRepo;
   const ctx = () => ({ config, repo, userId: "u1", now: () => NOW, fetchImpl: fakeFetch([kakaoDoc("1", "국밥집"), kakaoDoc("2", "스시집")]) });
@@ -88,6 +98,48 @@ describe("점심 도구 핸들러", () => {
     // lunch_visit 을 placeId 로 불러도 찾을 수 있다.
     expect(await repo.findPlaceById("1")).not.toBeNull();
     expect(await repo.findPlaceById("2")).not.toBeNull();
+  });
+
+  // 최종 리뷰 Critical — "최근 카테고리 반복" 축(설계 §5, "한식만 사흘 연속 나오는 것을
+  // 막는다")이 실제로 살아있는지를 핸들러 전체를 통해 확인한다. 옛 구현은 이 축이
+  // category_group_name(카카오의 18개 고정 라벨 중 하나 — 검색으로 돌아온 식당은 거의 전부
+  // "음식점" 하나로 같다)을 읽어서, 축이 사실상 상수 오프셋이 되어 (1) 방문 이력이 전혀 없는
+  // 곳까지 "최근에 음식점을(를) N번 드셨어요" 라는 뜻 없는 이유를 받고 (2) 세 후보 모두
+  // 균등하게 깎여 순위가 전혀 안 바뀌었다. 이 테스트는 category_name(예: "음식점 > 한식")의
+  // 세부 분류로 갈아탄 뒤 실제로 순위가 뒤집히는지까지 본다 — reasons 문자열만 바뀌고 순서는
+  // 그대로인 "절반짜리 고침"도 잡아낸다.
+  it("최근 카테고리 반복 축이 category_name 의 세부 분류로 실제 순위를 바꾼다(최종 리뷰 Critical)", async () => {
+    const fetchImpl = fakeFetch([
+      cuisineDoc("1", "청운국밥", "한식", "100"),
+      cuisineDoc("2", "스시로", "일식", "150"),
+      cuisineDoc("3", "파스타공방", "양식", "200"),
+    ]);
+    // "청운국밥" 을 10일 전에 한 번 갔다 — 사흘(최근 방문 감점 축)보다는 훨씬 이전이라 그
+    // 축은 안 건드리고, 14일(RECENT_WINDOW_MS, 최근 카테고리 축이 보는 창) 안에는 든다. 이
+    // place_id 는 오늘 검색 결과에도 다시 나오므로(searchAndStore 가 매번 upsert 한다) 미리
+    // 저장해 두지 않아도 된다.
+    await repo.recordVisit({ userId: "u1", placeId: "1", ts: NOW - 10 * DAY });
+
+    const r = await lunchRecommendHandler({ ...ctx(), fetchImpl }, { count: 3 });
+    expect(r.ok).toBe(true);
+
+    const lines = r.content.split("\n").filter((l) => l.startsWith("- "));
+    const order = lines.map((l) => l.match(/^- (\S+)/)![1]);
+
+    // 옛 축(category_group_name)이라면 세 곳 다 "음식점" 하나로 같아 균등하게 깎이고, 방문
+    // 이력이 있는 청운국밥이 그 균등 감점을 딛고도 여전히 1등이었다 — 세 곳의 순서는 전혀
+    // 안 바뀐다. 고친 축은 "한식" 만 정확히 감점하고 "일식"·"양식" 은 전혀 건드리지 않으므로,
+    // 방문·좋아요 이력이 전혀 없는 두 곳이 방문 이력이 있는 청운국밥보다 앞선다 — 리뷰가 지적한
+    // "ranking inversion" 을 그대로 재현해서 고쳤는지 확인한다.
+    expect(order).toEqual(["스시로", "파스타공방", "청운국밥"]);
+
+    // reasons 문장 자체도 못박는다 — score.ts 가 만든 문장 그대로 나가야 한다(설계 §5).
+    // 스시로·파스타공방은 "음식점"을 언급하는 옛 뜻 없는 문장을 절대 받으면 안 되고(M4 의 거리
+    // 이유로 대체된다), 청운국밥은 자기 자신의 방문이 "한식" 반복으로 정확히 잡혀야 한다.
+    const line = (name: string) => lines.find((l) => l.includes(name))!;
+    expect(line("청운국밥")).toBe("- 청운국밥 — 1번 가보신 곳이에요. 최근에 한식을 1번 드셔서 이번엔 덜 추천했어요.");
+    expect(line("스시로")).toBe("- 스시로 — 150m 거리예요.");
+    expect(line("파스타공방")).toBe("- 파스타공방 — 200m 거리예요.");
   });
 
   it("방문 기록은 이름으로 찾아 저장한다", async () => {
@@ -333,5 +385,117 @@ describe("점심 도구 핸들러", () => {
     expect(r.content).not.toContain("<html");
     expect(r.content).not.toContain("Access Denied");
     expect(r.content).not.toContain("Unexpected token");
+  });
+
+  // M2(최종 리뷰) — repo.upsertPlaces 는 카카오 호출과 같은 try 안에 있었다. 그러면
+  // Postgres 오류(예: 연결 끊김)가 failMessage 를 거쳐 "지도 API 를 부르는 중 문제가
+  // 생겼어요"로 나가고 콘솔에도 "[lunch] 카카오 검색 실패"로 남는다 — 카카오는 멀쩡한데
+  // DB 가 잠깐 흔들린 것뿐인데 소유자가 애먼 카카오 키를 의심하게 된다(deploy/smoke-test.md
+  // 의 "키가 틀리면 인증 문제라고 알려주는가" 항목이 바로 이 오인 유형을 겨냥한다). DB 오류는
+  // 검색 자체(카카오 호출)와 다른 문구·다른 로그 태그로 갈라야 한다.
+  // repo 는 LunchRepo 클래스 인스턴스라 메서드가 프로토타입에 있다 — 객체 스프레드(`{...repo,
+  // x: ...}`)는 own-enumerable 속성(생성자의 db 필드)만 복사하고 프로토타입 메서드는 전부
+  // 떨어뜨린다. 그렇게 만든 가짜 repo 는 override 하지 않은 다른 메서드가 전부
+  // "함수가 아닙니다" 로 죽어서, 핸들러가 그 앞단(예: upsertPlaces·findPlacesByName)에서
+  // 먼저 실패해 "의도한 메서드가 실제로 실패하는지"를 전혀 검증하지 못한 채로도 통과해
+  // 버린다(뮤테이션 검증 중 직접 겪었다 — 처음 버전은 그렇게 거짓으로 통과했다). 실제
+  // 인스턴스의 메서드 하나만 직접 덮어써 나머지는 진짜 구현이 그대로 돌게 한다
+  // (coreMulti.test.ts 의 `t.repos.conversations.setContextFloor = async () => {...}` 와
+  // 같은 패턴). repo 는 매 테스트 beforeEach 에서 새로 만들어지므로 복원할 필요가 없다.
+  it("장소 저장(DB) 실패는 카카오 실패와 다른 문구로 안내하고 다른 태그로 로그를 남긴다(M2)", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const dbErr = new Error("connection terminated unexpectedly");
+    repo.upsertPlaces = async () => { throw dbErr; };
+    const r = await lunchSearchHandler(ctx(), {});
+    expect(r.ok).toBe(false);
+    // 카카오 실패 문구("지도 API")가 아니어야 한다 — 원인이 다르면 안내도 달라야 오인하지
+    // 않는다.
+    expect(r.content).not.toContain("지도 API");
+    // Postgres 원문이 그대로 새면 안 된다(recallHandler·forgetHandler 의 선례와 달리, 이
+    // 저장소는 카카오 쪽에 이미 KakaoUserError 로 원문 노출을 막아 뒀다 — DB 쪽만 예외로 둘
+    // 이유가 없다).
+    expect(r.content).not.toContain("connection terminated");
+    // 로그 태그가 "카카오 검색 실패"가 아니어야 한다 — 로그를 보는 사람도 원인을 오판하면
+    // 안 된다.
+    const tags = spy.mock.calls.map((args) => String(args[0]));
+    expect(tags.some((t) => t.includes("카카오"))).toBe(false);
+    spy.mockRestore();
+  });
+
+  // M2 — 같은 결함이 lunch_recommend 에도 있다(searchAndStore 를 공유한다).
+  it("추천에서도 장소 저장(DB) 실패는 카카오 문구로 안내하지 않는다(M2)", async () => {
+    repo.upsertPlaces = async () => { throw new Error("connection terminated unexpectedly"); };
+    const r = await lunchRecommendHandler(ctx(), {});
+    expect(r.ok).toBe(false);
+    expect(r.content).not.toContain("지도 API");
+    expect(r.content).not.toContain("connection terminated");
+  });
+
+  // M3(최종 리뷰) — historyOf·recentCuisines(recommend)·recordVisit·findPlaceById·
+  // findPlacesByName(visit) 은 어떤 try 안에도 없었다. MCP SDK 는 핸들러가 던진 오류를 그대로
+  // {isError:true, text: err.message} 로 바꾸므로, 감싸지 않으면 raw Postgres 오류 문자열
+  // (예: "getaddrinfo ENOTFOUND db.<ref>.supabase.co")이 소유자에게 그대로 간다. M2 가 검색
+  // 경로에서 이미 갈라놓은 카카오/DB 구분을 이 파일의 나머지 DB 호출에도 똑같이 적용해야,
+  // 한 파일 안에서 "이 실패는 안전하고 저 실패는 아니다"라는 비대칭이 없어진다. 다섯 지점을
+  // 하나씩 실패시켜 전부 안전한 한국어 문구로 바뀌는지 확인한다.
+  describe("repo 호출 실패가 원문 그대로 새지 않는다(M3)", () => {
+    const rawDbError = new Error("getaddrinfo ENOTFOUND db.abc123.supabase.co");
+
+    it("historyOf 실패(추천)", async () => {
+      repo.historyOf = async () => { throw rawDbError; };
+      const r = await lunchRecommendHandler(ctx(), {});
+      expect(r.ok).toBe(false);
+      expect(r.content).not.toContain("ENOTFOUND");
+      expect(r.content).not.toContain("supabase.co");
+    });
+
+    it("recentCuisines 실패(추천)", async () => {
+      repo.recentCuisines = async () => { throw rawDbError; };
+      const r = await lunchRecommendHandler(ctx(), {});
+      expect(r.ok).toBe(false);
+      expect(r.content).not.toContain("ENOTFOUND");
+      expect(r.content).not.toContain("supabase.co");
+    });
+
+    it("recordVisit 실패(방문 기록, 이름으로 하나로 좁혀진 경우)", async () => {
+      await repo.upsertPlaces([{ placeId: "1", name: "국밥집" }], NOW);
+      repo.recordVisit = async () => { throw rawDbError; };
+      const r = await lunchVisitHandler(ctx(), { place: "국밥집" });
+      expect(r.ok).toBe(false);
+      expect(r.content).not.toContain("ENOTFOUND");
+      expect(r.content).not.toContain("supabase.co");
+    });
+
+    it("findPlaceById 실패(방문 기록, placeId 경로)", async () => {
+      repo.findPlaceById = async () => { throw rawDbError; };
+      const r = await lunchVisitHandler(ctx(), { placeId: "1" });
+      expect(r.ok).toBe(false);
+      expect(r.content).not.toContain("ENOTFOUND");
+      expect(r.content).not.toContain("supabase.co");
+    });
+
+    it("findPlacesByName 실패(방문 기록, place 경로)", async () => {
+      repo.findPlacesByName = async () => { throw rawDbError; };
+      const r = await lunchVisitHandler(ctx(), { place: "아무거나" });
+      expect(r.ok).toBe(false);
+      expect(r.content).not.toContain("ENOTFOUND");
+      expect(r.content).not.toContain("supabase.co");
+    });
+  });
+
+  // M4(최종 리뷰) — 방문 기록이 전혀 없는 사용자는 네 축이 전부 침묵해 이유 없는 벌거벗은
+  // 목록("- 가게이름")을 받았다. score.ts 가 이제 다른 이유가 없을 때 거리를 이유로 채우므로
+  // (M4), 핸들러를 실제로 거친 결과에서도 모든 줄이 이유를 달고 나오는지 확인한다 — 픽스처의
+  // ctx() 는 거리(distance:"100")를 채운 문서를 쓰므로, 이 사용자가 이력이 전혀 없어도 두
+  // 줄 다 "—" 뒤에 참인 이유(거리)가 붙어야 한다.
+  it("방문 기록이 전혀 없어도 추천 목록의 모든 줄에 이유가 붙는다(M4)", async () => {
+    const r = await lunchRecommendHandler(ctx(), {});
+    expect(r.ok).toBe(true);
+    const bulletLines = r.content.split("\n").filter((l) => l.startsWith("- "));
+    expect(bulletLines.length).toBeGreaterThan(0);
+    for (const line of bulletLines) {
+      expect(line).toContain("—");
+      expect(line).toMatch(/\d+m 거리예요\.$/);
+    }
   });
 });

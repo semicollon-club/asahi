@@ -150,16 +150,51 @@ describe("LunchRepo", () => {
     expect((await repo.historyOf("u1")).get("1")!.liked).toBe(false);
   });
 
-  it("최근 카테고리를 최신순으로 돌려준다", async () => {
-    await repo.upsertPlaces([place("1", "국밥집", "한식"), place("2", "스시집", "일식")], 1000);
+  // 최종 리뷰 Critical — category_group 은 카카오의 18개 고정 라벨(예: "음식점") 중 하나라
+  // 모든 식당이 똑같은 값을 갖는다. "한식"/"일식"처럼 실제로 갈리는 세부 분류는
+  // category(category_name, 예: "음식점 > 한식")에서 나온다(lunch/cuisine.ts 의
+  // deriveCuisine). 옛 테스트는 place() 헬퍼의 세 번째 인자(categoryGroup)에 "한식"을 넣고
+  // 있었는데, 그 필드는 프로덕션에서 "한식"이라는 값을 절대 가질 수 없다 — 이 파일의 다른
+  // 테스트들(위 12·17·65·69행)이 같은 필드에 이미 "음식점"이라는 올바른 값을 쓰고 있는 것과
+  // 스스로 모순됐다. category 와 categoryGroup 을 둘 다 실제 카카오 모양대로 채운다.
+  it("최근에 먹은 카테고리(요리 종류)를 최신순으로 돌려준다", async () => {
+    await repo.upsertPlaces([
+      { placeId: "1", name: "국밥집", category: "음식점 > 한식", categoryGroup: "음식점" },
+      { placeId: "2", name: "스시집", category: "음식점 > 일식", categoryGroup: "음식점" },
+    ], 1000);
     await repo.recordVisit({ userId: "u1", placeId: "1", ts: 1000 });
     await repo.recordVisit({ userId: "u1", placeId: "2", ts: 2000 });
-    expect(await repo.recentCategoryGroups("u1", 0)).toEqual(["일식", "한식"]);
+    expect(await repo.recentCuisines("u1", 0)).toEqual(["일식", "한식"]);
   });
 
   it("sinceTs 이전 방문은 최근 카테고리에서 빠진다", async () => {
-    await repo.upsertPlaces([place("1", "국밥집", "한식")], 1000);
+    await repo.upsertPlaces([{ placeId: "1", name: "국밥집", category: "음식점 > 한식", categoryGroup: "음식점" }], 1000);
     await repo.recordVisit({ userId: "u1", placeId: "1", ts: 1000 });
-    expect(await repo.recentCategoryGroups("u1", 5000)).toEqual([]);
+    expect(await repo.recentCuisines("u1", 5000)).toEqual([]);
+  });
+
+  // 최종 리뷰 Critical(M2 "비식당 카테고리") — 카페·편의점 방문은 이 축이 막으려는 "같은
+  // 요리 반복"의 대상이 아니다. category_group 이 "음식점"이 아니면(카페 방문 등)
+  // deriveCuisine 이 undefined 를 돌려주므로, 그 방문은 목록에 아예 안 들어가야 한다 —
+  // 들어가면 카페 방문이 엉뚱하게 한식 후보를 감점시킬 길이 열린다.
+  it("음식점이 아닌 곳(카페 등)의 방문은 최근 카테고리에 들어가지 않는다", async () => {
+    await repo.upsertPlaces([
+      { placeId: "1", name: "동네카페", category: "음식점 > 카페 > 커피전문점", categoryGroup: "카페" },
+    ], 1000);
+    await repo.recordVisit({ userId: "u1", placeId: "1", ts: 1000 });
+    expect(await repo.recentCuisines("u1", 0)).toEqual([]);
+  });
+
+  // 세부 분류가 없는 행(category 가 "음식점" 하나뿐이거나 아예 없음)도 목록에서 조용히
+  // 빠져야 한다 — undefined 를 빈 문자열 같은 값으로 몰아넣어 서로 무관한 가게들을 같은
+  // 카테고리로 묶으면 안 된다(cuisine.ts 의 "빈 문자열 버킷" 경고와 같은 이유).
+  it("세부 분류를 알 수 없는 방문은 최근 카테고리에서 빠진다", async () => {
+    await repo.upsertPlaces([
+      { placeId: "1", name: "이름만아는집", category: "음식점", categoryGroup: "음식점" },
+      { placeId: "2", name: "분류없는집", categoryGroup: "음식점" },
+    ], 1000);
+    await repo.recordVisit({ userId: "u1", placeId: "1", ts: 1000 });
+    await repo.recordVisit({ userId: "u1", placeId: "2", ts: 1000 });
+    expect(await repo.recentCuisines("u1", 0)).toEqual([]);
   });
 });
