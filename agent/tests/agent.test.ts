@@ -13,7 +13,7 @@ import { LunchRepo } from "../src/store/lunchRepo.js";
 import type { LunchConfig } from "../src/config.js";
 import {
   buildToolCtx, buildMultimodalMessage, buildRemoteCtx, resolveTurnWorker,
-  resolveWebToolsEnabled, resolveMemoryWriteEnabled, progressFromMessage,
+  resolveWebToolsEnabled, resolveMemoryWriteEnabled, resolveLunchToolsEnabled, progressFromMessage,
   type TurnContext, type ToolRepos, type PendingTool,
 } from "../src/core/agent.js";
 import { allowDirHandler, allowedToolsFor, type RuntimeInfo } from "../src/core/tools.js";
@@ -303,6 +303,49 @@ describe("resolveMemoryWriteEnabled — noMemoryWrite 는 remember 만 별도로
   });
 });
 
+// Important 1(리뷰 후속, Task 6 배선 리뷰) — noRemoteTools/noWebTools/noMemoryWrite 와 같은
+// 방식으로 req.noLunchTools 를 뽑아, 이번 턴에 점심 도구 세 개(lunch_search/lunch_recommend/
+// lunch_visit)를 열지 판정한다. tools.ts 의 lunchReady 는 "설정(config.lunch)이 있는가"만
+// 보므로, 유휴 요약 턴(core.ts 의 writeSummary)이 소유자 자신의 DM 을 요약할 때는
+// isOwner && isPrivate 를 실제로 만족해 lunchReady 하나만으로는 이 세 도구가 그대로 열려
+// 있었다 — db_query 로 소유자 DB 전체를 읽을 수 있는 턴에, 모델이 정한 검색어를 그대로
+// dapi.kakao.com URL 에 실어 내보내는 통로까지 함께 열려 있었던 셈이다(noWebTools 가 막던
+// 것과 같은 유형의 위험).
+describe("resolveLunchToolsEnabled — noLunchTools 는 점심 도구만 별도로 강제로 닫는다(Important 1)", () => {
+  it("noLunchTools 가 없으면(기본) 점심 도구가 열려 있다(회귀 없음)", () => {
+    expect(resolveLunchToolsEnabled({})).toBe(true);
+  });
+
+  it("noLunchTools=true 면 점심 도구가 닫힌다(유휴 요약 턴)", () => {
+    expect(resolveLunchToolsEnabled({ noLunchTools: true })).toBe(false);
+  });
+
+  it("noLunchTools=false 를 명시해도 열려 있다(회귀 없음)", () => {
+    expect(resolveLunchToolsEnabled({ noLunchTools: false })).toBe(true);
+  });
+
+  it("noLunchTools 인 요청은 allowedToolsFor 에 점심 도구를 하나도 넘기지 않는다(유휴 요약 턴이 실제로 받는 도구 목록)", () => {
+    const lunchToolsEnabled = resolveLunchToolsEnabled({ noLunchTools: true });
+    const tools = allowedToolsFor("owner", true, true, "local", { lunchReady: true, lunchToolsEnabled });
+    expect(tools).not.toContain("mcp__asahi__lunch_search");
+    expect(tools).not.toContain("mcp__asahi__lunch_recommend");
+    expect(tools).not.toContain("mcp__asahi__lunch_visit");
+    // 이 축이 닫는 것은 점심뿐이다 — db_query 등 무관한 도구는 그대로 남는다.
+    expect(tools).toContain("mcp__asahi__db_query");
+  });
+
+  // 대조군 — noLunchTools 가 없는 평상시 owner-DM 요청(설정이 있는 경우)은 세 도구를 그대로
+  // 받는다. 이 테스트를 위 테스트와 나란히 둬야 "무인 턴만 닫힘"과 "평상시엔 열림" 둘 다
+  // 실제로 검증된다.
+  it("noLunchTools 가 없는 평상시 owner-DM 요청은 세 도구를 모두 받는다(대조군)", () => {
+    const lunchToolsEnabled = resolveLunchToolsEnabled({});
+    const tools = allowedToolsFor("owner", true, true, "local", { lunchReady: true, lunchToolsEnabled });
+    expect(tools).toContain("mcp__asahi__lunch_search");
+    expect(tools).toContain("mcp__asahi__lunch_recommend");
+    expect(tools).toContain("mcp__asahi__lunch_visit");
+  });
+});
+
 describe("buildMultimodalMessage", () => {
   const img = { mediaType: "image/png", base64: "AAA", name: "a.png" };
   it("텍스트+이미지를 content 블록으로 만든다", () => {
@@ -469,26 +512,41 @@ describe("githubReady 가 allowedToolsFor 까지 실제로 전달되는가", () 
 // 텍스트 확인)으로 agent.ts 의 실제 호출 지점을 본다 — tools.test.ts 의 게이팅 테스트는
 // allowedToolsFor 를 직접 불러 이 배선(makeRunAgentTurn 안의 호출문) 자체를 우회하므로
 // 이 결함의 형태(호출부에서 인자가 빠짐)를 잡지 못한다.
+//
+// Minor 3(리뷰, Task 6 후속) — toContain(축 이름) 은 값이 하드코딩돼도(식별자는 그대로 두고
+// 값만 바꿔도) 계속 통과한다: 실측 — `lunchReady: lunch !== null` 을 `lunchReady: true` 로
+// 바꿔도 문자열 "lunchReady" 자체는 여전히 소스에 남아 typecheck 도 397개 테스트도 그대로
+// 통과했다. 축이 빠지는 것(예전 결함의 형태)과 축은 있는데 값이 하드코딩되는 것(새로 드러난
+// 형태)은 서로 다른 실패 모드이고, toContain 은 후자를 못 잡는다 — 실제로 넘기는 표현식까지
+// 고정해야 한다.
 describe("lunchReady 가 allowedToolsFor 까지 실제로 전달되는가", () => {
   const agentSource = fs.readFileSync(
     path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "core", "agent.ts"),
     "utf8",
   );
 
-  it("allowedToolsFor 호출에 lunchReady 가 들어 있다", () => {
+  it("allowedToolsFor 호출에 lunchReady 가 config.lunch 유무(lunch !== null)로 들어 있다(값 하드코딩 회귀 가드)", () => {
     const call = agentSource.slice(agentSource.indexOf("const allowedTools = allowedToolsFor("));
     const args = call.slice(0, call.indexOf("});") + 3);
-    expect(args).toContain("lunchReady");
+    expect(args).toMatch(/lunchReady:\s*lunch !== null/);
   });
 
-  // 다섯 축(githubReady 결함 당시의 넷 + 이번 lunchReady) 전부를 다시 함께 고정한다 — 이후
-  // 누군가 이 호출을 손대다 어느 하나를 빠뜨려도(가장 흔한 실수 형태) 여기서 잡힌다.
-  it("다섯 축을 모두 넘긴다(하나라도 빠지면 그 축이 기본값으로 조용히 떨어진다)", () => {
+  // 여섯 축(githubReady 결함 당시의 넷 + lunchReady + Important 1 의 lunchToolsEnabled) 전부를
+  // 다시 함께 고정한다 — 이후 누군가 이 호출을 손대다 어느 하나를 빠뜨려도(축 자체가 사라지는
+  // 실패 모드) 여기서 잡힌다. workerConnected/webToolsEnabled/memoryWriteEnabled/
+  // lunchToolsEnabled 는 위에서 계산한 지역변수를 그대로 넘기는 shorthand 라 "값이
+  // 하드코딩됐다"는 뮤테이션은 `이름: 다른값` 형태로 콜론이 뒤따르게 바뀐다 — 콜론이 뒤따르지
+  // 않는 자리에서만 그 식별자를 찾아야 그 뮤테이션도 잡는다. githubReady/lunchReady 는 이미
+  // 콜론을 쓰는 자리라 실제 표현식(`xxx !== null`)까지 고정한다.
+  it("여섯 축을 모두, 식별자가 아니라 실제로 넘기는 표현식으로 고정한다(값 하드코딩 회귀 가드)", () => {
     const call = agentSource.slice(agentSource.indexOf("const allowedTools = allowedToolsFor("));
     const args = call.slice(0, call.indexOf("});") + 3);
-    for (const axis of ["workerConnected", "webToolsEnabled", "memoryWriteEnabled", "githubReady", "lunchReady"]) {
-      expect(args).toContain(axis);
-    }
+    expect(args).toMatch(/\bworkerConnected\b(?!\s*:)/);
+    expect(args).toMatch(/\bwebToolsEnabled\b(?!\s*:)/);
+    expect(args).toMatch(/\bmemoryWriteEnabled\b(?!\s*:)/);
+    expect(args).toMatch(/githubReady:\s*github !== null/);
+    expect(args).toMatch(/lunchReady:\s*lunch !== null/);
+    expect(args).toMatch(/\blunchToolsEnabled\b(?!\s*:)/);
   });
 });
 
@@ -497,15 +555,19 @@ describe("lunchReady 가 allowedToolsFor 까지 실제로 전달되는가", () =
 // 되어, lunchCtxOf(tools.ts)가 매번 "설정되지 않았어요" 로 거부하는 반대쪽 결함이 생긴다 —
 // "도구는 보이는데 부르면 실패"는 githubReady 결함("안내는 하는데 도구가 없음")과 증상은
 // 다르지만 원인은 같다: 노출 판정과 실행 판정이 서로 다른 곳에서 계산된다.
+//
+// Minor 3(리뷰, Task 6 후속) — toContain("lunch") 는 인자 목록 어딘가에 그 글자만 남아 있으면
+// 통과하는 약한 검사다(예: 다른 인자 이름의 일부로 우연히 섞여도 못 가른다). 실제 위치 인자
+// 여섯 개의 순서·이름을 통째로 고정한다.
 describe("lunch 설정이 buildToolCtx 호출까지 실제로 전달되는가", () => {
-  it("makeRunAgentTurn 안의 buildToolCtx 호출에 lunch 가 들어 있다", () => {
+  it("makeRunAgentTurn 안의 buildToolCtx 호출이 (repos, req.context, runtime, github, lunch, now) 순서 그대로다(하드코딩·순서바꿈 회귀 가드)", () => {
     const agentSource = fs.readFileSync(
       path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "core", "agent.ts"),
       "utf8",
     );
     const call = agentSource.slice(agentSource.indexOf("const ctx: ToolCtx = buildToolCtx("));
     const args = call.slice(0, call.indexOf(");") + 2);
-    expect(args).toContain("lunch");
+    expect(args).toMatch(/buildToolCtx\(repos, req\.context, runtime, github, lunch, now\)/);
   });
 });
 
@@ -513,17 +575,22 @@ describe("lunch 설정이 buildToolCtx 호출까지 실제로 전달되는가", 
 // agent.ts 쪽 배선이 전부 맞아도 여기서 안 넘기면 lunch 는 항상 undefined(기본값 null)로
 // 떨어져 위의 모든 배선이 무의미해진다. index.ts 는 main() 진입점이라 실행 테스트가 없으므로
 // (기존 github 배선도 실행 테스트가 없다 — 같은 처지), 소스 확인이 유일한 회귀 가드다.
+//
+// Minor 3(리뷰, Task 6 후속) — toContain("repos.lunch")/toContain("config.lunch") 는 그 문자열이
+// 인자 목록 어딘가에 있기만 하면 통과한다(잘못된 자리에 넘겨도 못 잡는다). ToolRepos 리터럴의
+// lunch 키와, 마지막 두 위치 인자(config.github, config.lunch)의 순서를 각각 그 자리에 고정한다.
 describe("config.lunch 가 index.ts 의 makeRunAgentTurn 호출까지 실제로 전달되는가", () => {
-  it("makeRunAgentTurn 호출에 config.lunch 와 repos.lunch 가 들어 있다", () => {
+  it("makeRunAgentTurn 호출에 config.lunch 와 repos.lunch 가 정확한 자리에 들어 있다(엉뚱한 자리·하드코딩 회귀 가드)", () => {
     const indexSource = fs.readFileSync(
       path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "index.ts"),
       "utf8",
     );
     const call = indexSource.slice(indexSource.indexOf("const runTurn = makeRunAgentTurn("));
     const args = call.slice(0, call.indexOf(");") + 2);
-    // ToolRepos 로 넘기는 축약 객체에 lunch 리포가 있어야 한다.
-    expect(args).toContain("repos.lunch");
-    // makeRunAgentTurn 자신에게도 점심 설정(config.lunch)을 넘겨야 lunchReady 축이 살아난다.
-    expect(args).toContain("config.lunch");
+    // ToolRepos 로 넘기는 축약 객체의 lunch 키.
+    expect(args).toMatch(/lunch:\s*repos\.lunch\s*\}/);
+    // makeRunAgentTurn 자신에게도 점심 설정(config.lunch)을 넘겨야 lunchReady 축이 살아난다 —
+    // config.github 바로 다음(마지막) 위치 인자다.
+    expect(args).toMatch(/config\.github,\s*config\.lunch\)/);
   });
 });

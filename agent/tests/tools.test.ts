@@ -1248,13 +1248,34 @@ describe("점심 도구 게이팅", () => {
   });
 
   // 사람이 지켜보지 않는 턴(정기 게시 — digest.ts 가 실제로 쓰는 신원)은 소유자 DM 이 아니므로
-  // 설정이 있어도 열리지 않는다. 유휴 요약(손님 대화)도 같은 신원 축으로 닫힌다 — 소유자 자신의
-  // DM 이 유휴 요약되는 경우는 이 축(isOwner && isPrivate)만으로는 걸러지지 않는다는 점은
-  // 리포트에 별도로 남긴다(core.ts 의 writeSummary 는 buildSystemPrompt 호출에 lunchReady 를
-  // 넘기지 않아 안내는 없지만, 그 턴의 lunchReady 자체는 config.lunch 고정값이라 도구는 남는다 —
-  // db_query/manage_access 가 이미 같은 처지다).
+  // 설정이 있어도 열리지 않는다 — 이 신원 축(isOwner && isPrivate) 하나로 충분하다. 유휴
+  // 요약(손님 대화)도 같은 신원 축으로 닫힌다. 소유자 자신의 DM 이 유휴 요약되는 경우는 이
+  // 신원 축만으로는 걸러지지 않는다 — 그 경우를 닫는 것은 아래 lunchToolsEnabled 축이다
+  // (Important 1, 리뷰 후속 — core.ts 의 writeSummary 가 noLunchTools:true 로 세운다).
   it("정기 게시와 같은 신원(손님·비공개 아님)에서는 설정이 있어도 안 열린다", () => {
     expect(has(allowedToolsFor("allowed", false, false, "local", { lunchReady: true }))).toBe(false);
+  });
+
+  // Important 1(리뷰, Task 6 후속) — lunchReady(설정 존재)만으로는 사람이 지켜보지 않는 턴에도
+  // 세 도구가 그대로 열린다: 소유자 자신의 DM 이 유휴 요약될 때는 isOwner && isPrivate 를
+  // 실제로 만족하므로 위 신원 축을 그대로 통과한다. lunchToolsEnabled(턴별 강제 폐쇄, core.ts
+  // 의 writeSummary 가 noLunchTools 로 닫는다)가 그 턴만 따로 닫는 두 번째 축이다 —
+  // noMemoryWrite/memoryWriteEnabled 와 완전히 같은 자리.
+  it("설정이 있어도 lunchToolsEnabled 가 꺼지면(유휴 요약 턴) 안 열린다", () => {
+    expect(has(allowedToolsFor("owner", true, true, "local", { lunchReady: true, lunchToolsEnabled: false }))).toBe(false);
+  });
+
+  it("lunchToolsEnabled 는 기본값이 true 다(회귀 없음 — 이 옵션을 생략하는 일반 대화·기존 호출부는 그대로 열린다)", () => {
+    expect(has(allowedToolsFor("owner", true, true, "local", { lunchReady: true }))).toBe(true);
+  });
+
+  it("세 도구 모두 lunchToolsEnabled 축 하나로 같이 열리고 같이 닫힌다(lunchReady 축과는 별개)", () => {
+    const on = allowedToolsFor("owner", true, true, "local", { lunchReady: true, lunchToolsEnabled: true });
+    const off = allowedToolsFor("owner", true, true, "local", { lunchReady: true, lunchToolsEnabled: false });
+    for (const name of ["lunch_search", "lunch_recommend", "lunch_visit"]) {
+      expect(on).toContain(`mcp__asahi__${name}`);
+      expect(off).not.toContain(`mcp__asahi__${name}`);
+    }
   });
 });
 
@@ -1284,6 +1305,35 @@ describe("lunch_search/lunch_recommend/lunch_visit 도구 선언", () => {
     // liked 를 기본값 false 로 채우면 이전 평가를 덮어쓴다는 경고.
     expect(desc).toContain("false");
     expect(desc).toMatch(/덮어/);
+  });
+
+  // Important 2(리뷰) — 예전 문구("placeId 는 lunch_search·lunch_recommend 가 실제로 보여준
+  // 값만 유효합니다")는 거짓이었다. lunchSearchHandler(core/lunch.ts)는 `- {name} ({distance}m)
+  // · {categoryGroup}` 만 출력하고, lunchRecommendHandler 는 `- {name} — {reasons}` 만
+  // 출력한다 — 둘 다 (ID …) 를 낸 적이 없다. (ID …) 가 실제로 나오는 유일한 자리는 lunch_visit
+  // 자신의 "여러 곳 걸림" 응답(found.length > 1 갈래)뿐이다. 흔한 실패 경로: "김밥천국
+  // 갔다왔어" → lunch_visit({place:"김밥천국"}) → "…이름만으로는 구분할 수 없어요: -
+  // (ID 1234567) …" 를 받은 모델이, 방금 자기가 받은 그 ID 를 "lunch_search·lunch_recommend
+  // 가 보여준 값"이 아니라는 이유로 유효하지 않다고 오판하면 되짚을 방법이 없어진다(다음
+  // 문장이 place 재시도까지 금지한다) — placeId 도입의 취지 자체를 무너뜨리는 무한루프다.
+  // 이 도구 자신을 출처로 명시하는지, 그리고 두 검색 도구를 출처로 지목하는 옛 문구가
+  // 되살아나지 않는지 고정한다.
+  it("lunch_visit 설명이 (ID …) 의 출처를 자기 자신의 응답으로 명시한다 — lunch_search·lunch_recommend 를 출처로 지목하지 않는다(리뷰 재현: 그 둘은 ID를 출력한 적이 없다)", async () => {
+    const def = buildToolDefinitions(await ctx()).find((d) => d.name === "lunch_visit");
+    expect(def).toBeDefined();
+    const desc = def!.description;
+    // placeId 되짚기의 유효한 출처는 이 도구 자신의 "여러 곳 걸림" 응답이다.
+    expect(desc).toMatch(/이 도구 자신/);
+    // 예전 문구("placeId 는 lunch_search·lunch_recommend 가 실제로 보여준 값만 유효합니다")가
+    // 그대로 되살아나면 안 된다 — 그 둘은 ID 를 보여준 적이 없다(정확한 옛 문구만 잡는다 —
+    // "lunch_search·lunch_recommend 가 아니라 이 도구 자신이" 처럼 두 도구 이름을 부정문 안에서
+    // 언급하는 새 문구는 걸리지 않아야 한다).
+    expect(desc).not.toContain("lunch_search·lunch_recommend 가 실제로 보여준 값만 유효합니다");
+
+    // placeId 필드 자신의 설명도 같은 출처를 가리켜야 한다 — 도구 설명 본문만 고치고 필드
+    // 설명을 옛 문구 그대로 두면 모델이 그쪽을 읽고 다시 같은 오판을 한다.
+    const shape = (def as unknown as { inputSchema: Record<string, { description?: string }> }).inputSchema;
+    expect(shape.placeId?.description ?? "").not.toContain("lunch_search/lunch_recommend 결과에 실제로 있던 값만 유효합니다");
   });
 
   it("lunch_visit 의 place·placeId·liked 스키마가 모두 optional 이다(인터페이스: 셋 다 선택)", async () => {

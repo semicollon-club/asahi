@@ -16,7 +16,7 @@ import { AgentCore } from "../src/core/core.js";
 import { filterFileAttachments, FILE_LIMITS } from "../src/core/attachments.js";
 import type { Config } from "../src/config.js";
 import type { TurnRequest, TurnResult } from "../src/core/agent.js";
-import { resolveMemoryWriteEnabled, resolveWebToolsEnabled, resolveTurnWorker } from "../src/core/agent.js";
+import { resolveMemoryWriteEnabled, resolveWebToolsEnabled, resolveTurnWorker, resolveLunchToolsEnabled } from "../src/core/agent.js";
 import { allowedToolsFor } from "../src/core/tools.js";
 import type { DigestRunner } from "../src/core/digest.js";
 
@@ -157,12 +157,21 @@ function pub(bus: EventBus, hint: ConversationHint, text: string, ts: number): v
 // 없으면 hub 를 주입하지 않으므로 agent.ts 도 이 테스트 환경에서 같은 이유로 null 을 얻는다
 // (요약 턴은 그 위에 noRemoteTools:true 가 있어 레지스트리·허브를 보기 전에 이미 끊긴다).
 // deployTarget "local" 은 setup() 의 config 기본값과 같은 값이다.
-async function toolsForTurn(req: TurnRequest): Promise<string[]> {
+//
+// Important 1(리뷰 후속, Task 6 배선 리뷰) — lunchReady(config.lunch 유무)는 noRemoteTools 등과
+// 달리 req 위의 축이 아니라 makeRunAgentTurn 의 클로저 값이라, req 하나만으로는 재현할 수
+// 없다(githubReady 도 원래 같은 처지라 이 헬퍼가 다루지 않았다). 두 번째 인자로 그 클로저
+// 값을 대신 받는다 — 기본값 false 는 allowedToolsFor 자신의 기본값과 같다(안전한 기본은
+// "닫힘"). lunchToolsEnabled(턴별 강제 폐쇄)는 noRemoteTools 등과 같은 req 축이므로 그대로
+// resolveLunchToolsEnabled(req)로 뽑는다.
+async function toolsForTurn(req: TurnRequest, opts: { lunchReady?: boolean } = {}): Promise<string[]> {
   const worker = await resolveTurnWorker(req);
   return allowedToolsFor(req.context.role, req.context.isPrivate, req.context.isOwner, "local", {
     workerConnected: worker !== null,
     webToolsEnabled: resolveWebToolsEnabled(req),
     memoryWriteEnabled: resolveMemoryWriteEnabled(req),
+    lunchReady: opts.lunchReady ?? false,
+    lunchToolsEnabled: resolveLunchToolsEnabled(req),
   });
 }
 
@@ -612,17 +621,25 @@ describe("AgentCore — 점심 추천 설정을 페르소나에 반영한다(Tas
   // core.ts 의 buildSystemPrompt 호출은 두 곳이다 — 평상시 턴(runConversationTurn)과 유휴 요약
   // 턴(writeSummary). githubReady 와 마찬가지로 lunchReady 는 앞쪽에만 넘긴다. 요약 턴은 사람이
   // 지켜보지 않는 타이머 위에서 돈다 — 대화 주인이 소유자 자신이라도(소유자 자신의 DM 이
-  // 유휴해지는 경우) 마찬가지다. 다만 이 턴의 실제 도구 노출(allowedToolsFor)은 config.lunch
-  // 고정값에서 그대로 나오는 축이라 — TurnRequest 에 실리는 축이 아니라 이 파일의 fake
-  // runTurn/toolsForTurn 으로는 재현되지 않는다(db_query/manage_access 가 이미 같은 처지 —
-  // core.ts 의 writeSummary 주석 참고) — 여기서 확인할 수 있는 건 "안내(프롬프트)는 하지
-  // 않는다"는 사실뿐이고, 실제 도구가 이 턴에서도 닫힌다는 뜻은 아니다. 이 구분을 태스크
-  // 리포트에도 명시해 둔다.
-  it("소유자 자신의 DM 이 유휴 요약될 때는 점심 추천을 안내하지 않는다(요약 턴은 lunchReady 를 받지 않는다)", async () => {
+  // 유휴해지는 경우) 마찬가지다.
+  //
+  // Important 1(리뷰 후속, Task 6 배선 리뷰) — 예전엔 이 턴의 실제 도구 노출(allowedToolsFor)이
+  // config.lunch 고정값에서만 나와, 안내(프롬프트)는 없어도 도구 자체는 그대로 남는 반대쪽
+  // 결함이 있었다(리포트에 "고치지 않고 남긴다"로 명시돼 있었다). 지금은 writeSummary 가
+  // noLunchTools:true 를 세워 이 턴에서만 세 도구를 강제로 닫는다 — 아래에서 안내뿐 아니라
+  // toolsForTurn(위, lunchReady:true 로 config.lunch 가 있다고 가정한 것과 같다)으로 실제
+  // allowedTools 도 함께 확인한다.
+  it("소유자 자신의 DM 이 유휴 요약될 때는 점심 추천 안내도 도구도 모두 잃는다(noLunchTools, Important 1)", async () => {
     const t = await setup({ config: { lunch: lunchConfig } });
     pub(t.bus, dmHint("owner", "owner"), "안녕", t.now());
     await t.core.drain();
-    expect(t.calls[0].systemPrompt).toContain("lunch_recommend"); // 평상시 턴은 안내한다(대조군)
+    // 평상시 턴(대조군): 안내도 있고, 세 도구 모두 실제로 받는다.
+    expect(t.calls[0].systemPrompt).toContain("lunch_recommend");
+    expect(t.calls[0].noLunchTools).toBeUndefined();
+    const ordinaryTools = await toolsForTurn(t.calls[0], { lunchReady: true });
+    expect(ordinaryTools).toContain("mcp__asahi__lunch_search");
+    expect(ordinaryTools).toContain("mcp__asahi__lunch_recommend");
+    expect(ordinaryTools).toContain("mcp__asahi__lunch_visit");
 
     t.setClock(1_000_000 + 31 * 60 * 1000);
     t.setResult({ text: "요약했다.", sessionId: "s1", ok: true });
@@ -632,6 +649,17 @@ describe("AgentCore — 점심 추천 설정을 페르소나에 반영한다(Tas
     const summaryCall = t.calls[t.calls.length - 1];
     expect(summaryCall.context).toMatchObject({ isOwner: true, isPrivate: true });
     expect(summaryCall.systemPrompt).not.toContain("lunch_recommend");
+    // 이 턴이 실제로 만드는 요청 자체에 noLunchTools:true 가 실리는지(writeSummary 가 빠뜨리지
+    // 않는지), 그리고 그 값이 allowedTools 에서 세 도구를 실제로 빼는지 — 안내가 아니라 도구
+    // 자체를 확인한다.
+    expect(summaryCall.noLunchTools).toBe(true);
+    const summaryTools = await toolsForTurn(summaryCall, { lunchReady: true });
+    expect(summaryTools).not.toContain("mcp__asahi__lunch_search");
+    expect(summaryTools).not.toContain("mcp__asahi__lunch_recommend");
+    expect(summaryTools).not.toContain("mcp__asahi__lunch_visit");
+    // 이 축이 닫는 것은 점심뿐이다 — 소유자 DM 전용의 다른 도구(db_query 등)는 그대로 남는다
+    // (core.ts 의 writeSummary 주석이 이미 밝히는 사실 — 회귀 가드로 여기서도 고정한다).
+    expect(summaryTools).toContain("mcp__asahi__db_query");
   });
 });
 

@@ -385,6 +385,14 @@ export type AllowedToolsOptions = {
   // 같은 이유). Task 6 의 핵심 축 — 이 값이 core.ts 의 persona 호출에만 실리고 여기에는 안
   // 실리면 2026-08-07 의 githubReady 결함과 정확히 같은 모양이 된다.
   lunchReady?: boolean;
+  // Important 1(리뷰, Task 6 후속) — noMemoryWrite/memoryWriteEnabled 와 완전히 같은 자리의
+  // 턴별 강제 폐쇄 축이다. lunchReady 는 "설정(config.lunch)이 있는가" 하나만 보므로, 사람이
+  // 지켜보지 않는 턴(유휴 요약)도 소유자 자신의 DM 이면 이 축만으로는 세 도구를 그대로 받는다
+  // — lunch_search 는 모델이 정한 검색어를 그대로 카카오 URL 에 실어 내보내는데, 같은 턴이
+  // db_query 로 소유자 DB 전체를 읽을 수 있다(noWebTools 가 막던 것과 같은 유형의 유출 경로).
+  // lunch_visit 은 되돌릴 도구가 없는 쓰기이기도 하다. 기본값 true — 일반 대화·기존 호출부는
+  // 이 옵션을 생략해 세 도구가 그대로 열린다.
+  lunchToolsEnabled?: boolean;
 };
 
 export function allowedToolsFor(
@@ -400,6 +408,12 @@ export function allowedToolsFor(
     // 기본값 false — 안전한 기본은 "닫힘"이다(githubReady 와 같은 이유). 호출부가 이 축을
     // 빠뜨리면 조용히 열리는 대신 조용히 닫힌다.
     lunchReady = false,
+    // Important 1 — noMemoryWrite 와 같은 자리의 턴별 강제 폐쇄 축. 기본값 true(안전한 기본이
+    // "닫힘"인 lunchReady 와는 반대다 — 이 축은 memoryWriteEnabled 처럼 "일반 턴은 그대로,
+    // 무인 턴만 닫는다"는 열림-기본 계열이다). 호출부가 이 옵션을 생략하면 세 도구가 그대로
+    // 열린다(회귀 없음) — noLunchTools:true 를 실제로 세우는 호출부(core.ts 의 writeSummary)만
+    // false 를 받는다.
+    lunchToolsEnabled = true,
     // FIX3(중요, 최종 리뷰 3차): 웹 검색도 워커 원격 도구처럼 턴별로 열고 닫을 수 있어야 한다 —
     // 유휴 요약 턴(core.ts 의 summarizeAndClose)은 사람이 지켜보지 않는 타이머로 돌고 이전에
     // 심어졌을 수도 있는 프롬프트 인젝션을 담은 세션을 그대로 이어받는데, 요약은 검색이 필요
@@ -433,7 +447,10 @@ export function allowedToolsFor(
   // 소유자 DM 전용이다(설계 §1.1, db_query·manage_access 와 같은 자리 — isOwner && isPrivate
   // 분기에만 스플라이스된다). 워커 연결과 무관하다 — 이 기능은 워커를 쓰지 않는다(publishTools
   // 와 달리 workerConnected 를 곱하지 않는다).
-  const lunchTools = lunchReady ? [t("lunch_search"), t("lunch_recommend"), t("lunch_visit")] : [];
+  // Important 1 — 두 축의 AND. lunchReady(설정 존재)만으로는 유휴 요약 턴(소유자 자신의 DM 이
+  // 유휴해질 때 isOwner && isPrivate 를 실제로 만족하는 경우)도 그대로 통과한다 —
+  // lunchToolsEnabled(턴별 강제 폐쇄)가 그 턴만 따로 닫는다.
+  const lunchTools = lunchReady && lunchToolsEnabled ? [t("lunch_search"), t("lunch_recommend"), t("lunch_visit")] : [];
   const webTools = webToolsEnabled ? WEB_TOOLS : [];
   // Important 4 — remember 는 네 분기 모두 이 배열 하나로만 열고 닫는다. memoryWriteEnabled
   // 가 기본값(true)인 한 아래 각 분기의 결과는 예전과 완전히 동일하다(회귀 없음) — false 를
@@ -759,13 +776,25 @@ export function buildToolDefinitions(ctx: ToolCtx) {
     // 목록 위치를 place 에 넣으면 부분 문자열 일치로 엉뚱한 가게에 방문이 기록됐다(핸들러의
     // Important 1 주석 참고). 설명 자체가 그 사용법을 명시해야 모델이 다시 같은 실수를
     // 반복하지 않는다 — 코드가 placeId 를 받아도 모델이 그 존재·용법을 모르면 소용없다.
+    //
+    // Important 2(리뷰) — (ID …) 의 출처를 "이 도구 자신"으로 명시한다. lunchSearchHandler·
+    // lunchRecommendHandler(core/lunch.ts)는 각각 `- {name} ({distance}m) · {categoryGroup}`
+    // 과 `- {name} — {reasons}` 만 출력한다 — 둘 다 ID를 낸 적이 없다. (ID …) 가 실제로 나오는
+    // 유일한 자리는 이 도구 자신이 여러 후보를 만났을 때(핸들러의 found.length > 1 갈래)의
+    // 응답뿐이다. 예전 문구("lunch_search·lunch_recommend 가 실제로 보여준 값만 유효합니다")는
+    // 이 사실과 반대였다 — "김밥천국 갔다왔어" 처럼 흔한 중복 이름 경로에서, 이 도구를 먼저
+    // 불러 방금 그 목록을 받은 모델이 자기가 받은 ID를 "그 두 도구가 보여준 게 아니니 무효"
+    // 라고 오판하면 되짚을 방법이 사라진다 — 다음 문장이 place 재시도까지 금지하므로, placeId
+    // 도입으로 끊으려던 무한루프가 설명 문구 자체 때문에 되살아난다.
     tool(
       "lunch_visit",
       "식당 방문을 기록합니다. place(가게 이름) 또는 placeId 중 하나로 대상을 지정하세요. " +
-        "직전 호출이 후보를 여러 곳 보여줬다면 각 줄에 (ID …) 가 있습니다 — 사용자에게 어느 곳인지 확인한 뒤 " +
-        "그 ID를 한 글자도 바꾸지 말고 placeId 에 그대로 넣어 다시 부르세요. place 에는 넣지 마세요. " +
+        "이 도구를 먼저 불렀는데 이름이 여러 곳과 겹쳐 후보 목록으로 답했다면(lunch_search·lunch_recommend 가 " +
+        "아니라 이 도구 자신이 낸 답입니다) 그 목록의 각 줄에 (ID …) 가 있습니다 — 사용자에게 어느 곳인지 " +
+        "확인한 뒤 그 ID를 한 글자도 바꾸지 말고 placeId 에 그대로 넣어 다시 부르세요. place 에는 넣지 마세요. " +
         "place 는 가게 이름만 받습니다 — 목록 번호(\"2번\"·\"두 번째\")나 ID 값을 넣으면 안 됩니다. " +
-        "placeId 는 lunch_search·lunch_recommend 가 실제로 보여준 값만 유효합니다 — 직접 만들어 내거나 추측하지 마세요. " +
+        "placeId 는 바로 위에서 말한, 이 도구 자신이 여러 후보를 보여준 응답의 (ID …) 값만 유효합니다 — " +
+        "직접 만들어 내거나 추측하지 마세요. " +
         "\"이름만으로는 구분할 수 없어요\" 라는 답을 받으면 같은 이름으로는 몇 번을 다시 불러도 항상 같은 결과이니, " +
         "place 로 재시도하지 말고 placeId 로만 다시 부르세요. " +
         "liked 는 사용자가 좋았다/별로였다고 실제로 말했을 때만 채우고, 말하지 않았으면 생략하세요 — " +
@@ -774,7 +803,7 @@ export function buildToolDefinitions(ctx: ToolCtx) {
         place: z.string().optional().describe("가게 이름(정확한 상호명)만. 목록 번호·ID는 넣지 마세요 — 그건 placeId 입니다"),
         // 카카오 place_id 는 숫자처럼 보이지만 불투명한 문자열이다 — z.number() 로 선언하면
         // 모델이 반올림·형변환할 여지가 생긴다. 절대 number 로 바꾸지 말 것.
-        placeId: z.string().optional().describe("직전 후보 목록의 (ID …) 값을 그대로. 직접 만들어 내지 마세요 — lunch_search/lunch_recommend 결과에 실제로 있던 값만 유효합니다"),
+        placeId: z.string().optional().describe("이 도구(lunch_visit)를 먼저 불러 여러 후보로 나온 응답의 (ID …) 값을 그대로. 직접 만들어 내지 마세요 — lunch_search·lunch_recommend 가 아니라 이 도구 자신이 보여준 값만 유효합니다"),
         liked: z.boolean().optional().describe("사용자가 좋았다/별로였다고 말했을 때만 채우세요. 말하지 않았으면 생략 — 기본값 false 를 보내지 마세요"),
       },
       async (args) => {

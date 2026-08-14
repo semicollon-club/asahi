@@ -932,8 +932,8 @@ export class AgentCore {
 
   // 이 대화의 지금 세션을 요약해 summaries 에 넣는다. 성공하면 true.
   // summarizeAndClose(유휴 스윕)와 compactSession(/기억정리)이 함께 쓴다 — 요약 턴의 안전 플래그
-  // (noRemoteTools·noWebTools·noSkills·noMemoryWrite)를 두 곳에서 따로 관리하면 한쪽만 빠뜨렸을 때
-  // 아무도 모른다.
+  // (noRemoteTools·noWebTools·noSkills·noMemoryWrite·noLunchTools)를 두 곳에서 따로 관리하면
+  // 한쪽만 빠뜨렸을 때 아무도 모른다.
   //
   // createdTs 를 인자로 받는 이유: /기억정리 는 요약의 created_ts 와 컨텍스트 바닥선에 반드시
   // 같은 값을 써야 한다. 요약 필터가 created_ts >= floor 라(summariesRepo.recent), 두 번 시각을
@@ -989,12 +989,23 @@ export class AgentCore {
         // 면이다. 요약 턴은 기억을 건드릴 일이 전혀 없으므로, 그 축을 통째로 닫는다(정기 게시
         // 턴과 같은 조치).
         //
-        // 이 플래그가 닫는 것은 기억뿐이다. 네 플래그를 다 세워도 이 턴이 "텍스트 요약만" 하는
+        // 이 플래그가 닫는 것은 기억뿐이다. 다섯 플래그를 다 세워도 이 턴이 "텍스트 요약만" 하는
         // 상태가 되지는 않는다 — 소유자 DM 에서는 manage_access·db_schema·db_query·runtime_info
         // 가 그대로 남는다(어느 축도 그 넷을 닫지 않는다). 예전 주석은 여기서 "기억이 오염·삭제될
         // 여지 자체가 없다"까지만이 아니라 그 이상을 말했는데, 안전 주석이 실제보다 넓게 적히면
         // 다음 사람이 그 문장을 믿고 확인을 건너뛴다.
         noMemoryWrite: true,
+        // Important 1(리뷰 후속, Task 6 배선 리뷰) — 이 턴은 isOwner = conv.primaryUserId ===
+        // this.ownerId 로 서므로, 소유자 자신의 DM 이 유휴해지는 경우 isOwner && isPrivate 를
+        // 실제로 만족해 lunchReady(설정 존재) 하나만으로는 점심 도구 세 개가 그대로 열려
+        // 있었다. lunch_search 는 모델이 정한 검색어를 그대로 dapi.kakao.com URL 에 실어
+        // 내보내는 외부 호출인데, 이 턴은 동시에 db_query 로 소유자 DB 전체를 읽을 수 있다 —
+        // noWebTools 가 막던 것과 같은 유형의 유출 경로다(위 FIX3 주석 참고). lunch_visit 은
+        // 되돌릴 도구가 없는 쓰기이기도 하다: 스푸리어스 liked:false 하나가 방문 보너스를
+        // 잃고 -10 감점까지 받는다(lunch/score.ts). noRemoteTools/noWebTools/noMemoryWrite 와
+        // 같은 방식으로 세 도구를 강제로 닫는다 — config.lunch 자체는 그대로이므로 평상시
+        // 턴에는 영향이 없다.
+        noLunchTools: true,
       });
       if (result.ok && result.text.trim().length > 0) {
         await this.repos.summaries.insert({

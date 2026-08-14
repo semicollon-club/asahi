@@ -85,10 +85,21 @@ export const RESULT_SUMMARY_MAX = 200;
 // 되는 턴"이라는 축이 삭제 도구를 열어 두는 것은 다음 호출부를 향한 함정이라, 둘을 한 축으로
 // 묶었다(tools.ts 의 memoryWriteEnabled). memories 행을 만들거나 지우는 도구가 새로 생기면
 // 그것도 같은 이유로 이 축에 묶는다.
+//
+// noLunchTools(Important 1, 리뷰 후속 — Task 6 배선 리뷰): noRemoteTools/noWebTools/noSkills/
+// noMemoryWrite 와 같은 자리에 새로 추가하는 축이다. tools.ts 의 lunchReady 는 "설정
+// (config.lunch)이 있는가"만 보므로, 유휴 요약 턴(core.ts 의 writeSummary)이 소유자 자신의
+// DM 을 요약할 때는 isOwner && isPrivate 를 실제로 만족해 lunchReady 하나만으로는 점심 도구
+// 세 개가 그대로 열려 있었다 — noWebTools 가 막던 것과 같은 유형의 위험이다: lunch_search 는
+// 모델이 정한 검색어를 그대로 dapi.kakao.com URL 에 실어 내보내는 외부 호출인데, 같은 턴이
+// db_query 로 소유자 DB 전체를 읽을 수 있다(DB 전체 읽기 + 외부 전송 통로 조합). lunch_visit
+// 은 이 저장소에 되돌릴 도구가 없는 쓰기이기도 하다 — 스푸리어스 liked:false 하나가 방문
+// 보너스를 잃고 -10 감점까지 받는다(lunch/score.ts). true 면 세 도구를 전부 닫는다 —
+// config.lunch 자체는 건드리지 않으므로 평상시 턴에는 영향이 없다.
 export type TurnRequest = {
   prompt: string; systemPrompt: string; resume?: string; cwd: string; context: TurnContext;
   onProgress?: (u: ProgressUpdate) => void; images?: ImageInput[]; noRemoteTools?: boolean; noWebTools?: boolean;
-  noSkills?: boolean; noMemoryWrite?: boolean;
+  noSkills?: boolean; noMemoryWrite?: boolean; noLunchTools?: boolean;
 };
 export type TurnResult = { text: string; sessionId?: string; ok: boolean };
 export type TurnRunner = (req: TurnRequest) => Promise<TurnResult>;
@@ -278,6 +289,15 @@ export function resolveMemoryWriteEnabled(req: { noMemoryWrite?: boolean }): boo
   return !req.noMemoryWrite;
 }
 
+// Important 1(리뷰 후속, Task 6 배선 리뷰) — req.noLunchTools 를 뽑아내는 순수 함수. 위
+// resolveMemoryWriteEnabled 와 같은 이유로 순수 함수다 — SDK query() 전체를 목업하지 않고 이
+// 판정 하나만 검증하기 위해서다. core.ts 의 writeSummary 가 이 값을 true 로 세운다(사람이 안
+// 보는 채로 신뢰할 수 없는 세션을 이어받으면서, db_query 와 짝지으면 위험한 외부 호출 도구
+// 셋을 함께 들고 있는 턴이다).
+export function resolveLunchToolsEnabled(req: { noLunchTools?: boolean }): boolean {
+  return !req.noLunchTools;
+}
+
 // Task 7: ctx.remote(호출 통로 + workerId + workerKind + 워커의 실제 작업 폴더)를 구성하는
 // 순수 함수. resolveTurnWorker 가 이미 "어느 워커, 어느 종류(personal/shared)"까지 정했으므로
 // 이 함수는 그 결과를 hub.call/rootsOf 에 실제로 연결하기만 한다 — worker 가 null 이거나 hub 가
@@ -361,6 +381,10 @@ export function makeRunAgentTurn(
     // 로 memories 행을 넣거나 지우는 도구(remember·forget)를 닫는다(recall 은
     // 그대로) — noRemoteTools/noWebTools 와 같은 방식으로 뽑아 allowedToolsFor 에 넘긴다.
     const memoryWriteEnabled = resolveMemoryWriteEnabled(req);
+    // Important 1: 유휴 요약 턴(core.ts 의 writeSummary)이 req.noLunchTools:true 로 점심 도구
+    // 세 개(lunch_search/lunch_recommend/lunch_visit)를 닫는다 — noRemoteTools/noWebTools/
+    // noMemoryWrite 와 같은 방식으로 뽑아 allowedToolsFor 에 넘긴다.
+    const lunchToolsEnabled = resolveLunchToolsEnabled(req);
     // ctx.remote 구성(호출 통로 + workerId/workerKind + 워커 roots) 자체도 buildRemoteCtx 로
     // 뽑아 테스트한다(agent.test.ts).
     ctx.remote = buildRemoteCtx(worker, hub);
@@ -375,6 +399,7 @@ export function makeRunAgentTurn(
     // 같은 모양의 결함이 된다.
     const allowedTools = allowedToolsFor(req.context.role, req.context.isPrivate, req.context.isOwner, deployTarget, {
       workerConnected, webToolsEnabled, memoryWriteEnabled, githubReady: github !== null, lunchReady: lunch !== null,
+      lunchToolsEnabled,
     });
     // 서버 생성이 allowedTools 뒤로 내려온 이유: 그 턴에 못 쓰는 도구는 아예 등록하지 않는다
     // (allowedToolDefinitions). 위 :320 주석이 이름 붙인 "도구는 보이는데 실행하면 거부"를
