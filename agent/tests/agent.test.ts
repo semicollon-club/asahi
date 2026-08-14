@@ -9,6 +9,8 @@ import { UsersRepo } from "../src/store/usersRepo.js";
 import { AllowedDirsRepo } from "../src/store/allowedDirsRepo.js";
 import { ProjectsRepo } from "../src/store/projectsRepo.js";
 import { IntrospectRepo } from "../src/store/introspectRepo.js";
+import { LunchRepo } from "../src/store/lunchRepo.js";
+import type { LunchConfig } from "../src/config.js";
 import {
   buildToolCtx, buildMultimodalMessage, buildRemoteCtx, resolveTurnWorker,
   resolveWebToolsEnabled, resolveMemoryWriteEnabled, progressFromMessage,
@@ -24,7 +26,7 @@ const testRuntime: RuntimeInfo = { model: "claude-opus-4-8", sdkVersion: "0.3.20
 // 종료됐다 — tools.ts 의 canManagePc 주석 참고)를 이 테스트가 직접 잡아낸다.
 async function repos(): Promise<ToolRepos> {
   const db = await openTestDb();
-  return { memories: new MemoriesRepo(db), users: new UsersRepo(db), allowedDirs: new AllowedDirsRepo(db), introspect: new IntrospectRepo(db), projects: new ProjectsRepo(db) };
+  return { memories: new MemoriesRepo(db), users: new UsersRepo(db), allowedDirs: new AllowedDirsRepo(db), introspect: new IntrospectRepo(db), projects: new ProjectsRepo(db), lunch: new LunchRepo(db) };
 }
 
 describe("buildToolCtx — makeRunAgentTurn 의 ToolCtx 구성", () => {
@@ -37,11 +39,28 @@ describe("buildToolCtx — makeRunAgentTurn 의 ToolCtx 구성", () => {
 
   it("buildToolCtx 는 introspect 리포와 runtime 을 ctx 로 옮긴다", async () => {
     const db = await openTestDb();
-    const repos: ToolRepos = { memories: {} as any, users: {} as any, allowedDirs: {} as any, introspect: new IntrospectRepo(db), projects: new ProjectsRepo(db) };
+    const repos: ToolRepos = { memories: {} as any, users: {} as any, allowedDirs: {} as any, introspect: new IntrospectRepo(db), projects: new ProjectsRepo(db), lunch: {} as any };
     const runtime: RuntimeInfo = { model: "claude-opus-4-8", sdkVersion: "0.3.207", deployTarget: "local", maxTurns: 30, workers: [] };
     const ctx = buildToolCtx(repos, { role: "owner", isPrivate: true, isOwner: true, userId: "o", conversationId: 1 }, runtime);
     expect(ctx.repos.introspect).toBe(repos.introspect);
     expect(ctx.runtime.model).toBe("claude-opus-4-8");
+  });
+
+  // 점심 추천 설정(config.lunch)이 github 과 같은 자리(넷째 인자 다음)로 ctx.lunch 에 실린다.
+  // 여기가 끊기면 lunchCtxOf(tools.ts)가 항상 "설정되지 않았어요" 로 거부한다 — 도구는
+  // 노출됐는데(allowedToolsFor 쪽은 살아 있으므로) 실행만 항상 막히는 정반대 결함이 된다.
+  it("buildToolCtx 는 lunch 설정을 ctx.lunch 로 옮긴다(github 과 같은 자리)", async () => {
+    const r = await repos();
+    const lunch: LunchConfig = { kakaoKey: "kk", lat: 37.4, lon: 126.6, radiusM: 800 };
+    const ctx = buildToolCtx(r, { role: "owner", isPrivate: true, isOwner: true, userId: "o", conversationId: 1 }, testRuntime, null, lunch);
+    expect(ctx.lunch).toBe(lunch);
+    expect(ctx.repos.lunch).toBe(r.lunch);
+  });
+
+  it("lunch 인자를 생략하면 ctx.lunch 는 기본값 null 이다(github 과 같은 기본값 — 안전한 기본은 '닫힘')", async () => {
+    const r = await repos();
+    const ctx = buildToolCtx(r, { role: "owner", isPrivate: true, isOwner: true, userId: "o", conversationId: 1 }, testRuntime);
+    expect(ctx.lunch).toBeNull();
   });
 });
 
@@ -441,5 +460,70 @@ describe("githubReady 가 allowedToolsFor 까지 실제로 전달되는가", () 
     for (const axis of ["workerConnected", "webToolsEnabled", "memoryWriteEnabled", "githubReady"]) {
       expect(args).toContain(axis);
     }
+  });
+});
+
+// Task 6(점심 도구 배선) — 위 githubReady 결함과 정확히 같은 모양이다: lunchReady 가
+// persona(core.ts)에는 전달되고 allowedToolsFor(agent.ts)에는 안 전달되면, 능력 안내는
+// "점심 추천을 할 수 있습니다" 라고 말하고 실제로는 도구가 없다. 위 블록과 같은 방식(소스
+// 텍스트 확인)으로 agent.ts 의 실제 호출 지점을 본다 — tools.test.ts 의 게이팅 테스트는
+// allowedToolsFor 를 직접 불러 이 배선(makeRunAgentTurn 안의 호출문) 자체를 우회하므로
+// 이 결함의 형태(호출부에서 인자가 빠짐)를 잡지 못한다.
+describe("lunchReady 가 allowedToolsFor 까지 실제로 전달되는가", () => {
+  const agentSource = fs.readFileSync(
+    path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "core", "agent.ts"),
+    "utf8",
+  );
+
+  it("allowedToolsFor 호출에 lunchReady 가 들어 있다", () => {
+    const call = agentSource.slice(agentSource.indexOf("const allowedTools = allowedToolsFor("));
+    const args = call.slice(0, call.indexOf("});") + 3);
+    expect(args).toContain("lunchReady");
+  });
+
+  // 다섯 축(githubReady 결함 당시의 넷 + 이번 lunchReady) 전부를 다시 함께 고정한다 — 이후
+  // 누군가 이 호출을 손대다 어느 하나를 빠뜨려도(가장 흔한 실수 형태) 여기서 잡힌다.
+  it("다섯 축을 모두 넘긴다(하나라도 빠지면 그 축이 기본값으로 조용히 떨어진다)", () => {
+    const call = agentSource.slice(agentSource.indexOf("const allowedTools = allowedToolsFor("));
+    const args = call.slice(0, call.indexOf("});") + 3);
+    for (const axis of ["workerConnected", "webToolsEnabled", "memoryWriteEnabled", "githubReady", "lunchReady"]) {
+      expect(args).toContain(axis);
+    }
+  });
+});
+
+// buildToolCtx 호출에도 lunch 설정이 실제로 넘어가는지 소스로 다시 확인한다(위 단위 테스트와
+// 이중 확인) — 여기가 끊기면 도구 노출(allowedToolsFor)은 정상인데 ctx.lunch 만 항상 null 이
+// 되어, lunchCtxOf(tools.ts)가 매번 "설정되지 않았어요" 로 거부하는 반대쪽 결함이 생긴다 —
+// "도구는 보이는데 부르면 실패"는 githubReady 결함("안내는 하는데 도구가 없음")과 증상은
+// 다르지만 원인은 같다: 노출 판정과 실행 판정이 서로 다른 곳에서 계산된다.
+describe("lunch 설정이 buildToolCtx 호출까지 실제로 전달되는가", () => {
+  it("makeRunAgentTurn 안의 buildToolCtx 호출에 lunch 가 들어 있다", () => {
+    const agentSource = fs.readFileSync(
+      path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "core", "agent.ts"),
+      "utf8",
+    );
+    const call = agentSource.slice(agentSource.indexOf("const ctx: ToolCtx = buildToolCtx("));
+    const args = call.slice(0, call.indexOf(");") + 2);
+    expect(args).toContain("lunch");
+  });
+});
+
+// index.ts 가 config.lunch 를 makeRunAgentTurn 호출에 실제로 넘기는지 소스로 확인한다 —
+// agent.ts 쪽 배선이 전부 맞아도 여기서 안 넘기면 lunch 는 항상 undefined(기본값 null)로
+// 떨어져 위의 모든 배선이 무의미해진다. index.ts 는 main() 진입점이라 실행 테스트가 없으므로
+// (기존 github 배선도 실행 테스트가 없다 — 같은 처지), 소스 확인이 유일한 회귀 가드다.
+describe("config.lunch 가 index.ts 의 makeRunAgentTurn 호출까지 실제로 전달되는가", () => {
+  it("makeRunAgentTurn 호출에 config.lunch 와 repos.lunch 가 들어 있다", () => {
+    const indexSource = fs.readFileSync(
+      path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "index.ts"),
+      "utf8",
+    );
+    const call = indexSource.slice(indexSource.indexOf("const runTurn = makeRunAgentTurn("));
+    const args = call.slice(0, call.indexOf(");") + 2);
+    // ToolRepos 로 넘기는 축약 객체에 lunch 리포가 있어야 한다.
+    expect(args).toContain("repos.lunch");
+    // makeRunAgentTurn 자신에게도 점심 설정(config.lunch)을 넘겨야 lunchReady 축이 살아난다.
+    expect(args).toContain("config.lunch");
   });
 });

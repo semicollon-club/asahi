@@ -8,6 +8,8 @@ import type { GithubAppConfig } from "../github/appToken.js";
 import type { ProjectsRepo } from "../store/projectsRepo.js";
 import type { IntrospectRepo } from "../store/introspectRepo.js";
 import type { WorkerKind } from "../store/workersRepo.js";
+import type { LunchConfig } from "../config.js";
+import type { LunchRepo } from "../store/lunchRepo.js";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -93,7 +95,7 @@ export type TurnRunner = (req: TurnRequest) => Promise<TurnResult>;
 
 export type ToolRepos = {
   memories: MemoriesRepo; users: UsersRepo; allowedDirs: AllowedDirsRepo; introspect: IntrospectRepo;
-  projects: ProjectsRepo;
+  projects: ProjectsRepo; lunch: LunchRepo;
 };
 
 // mcp__asahi__recall → recall 처럼 인프로세스 MCP 접두어를 벗겨 짧게 만든다. 접두어가 없으면 그대로.
@@ -213,12 +215,17 @@ export function buildToolCtx(
   // 깃허브 발행 설정과 시각. 둘 다 턴마다 바뀌지 않는 값이라 makeRunAgentTurn 이 들고 있다가
   // 그대로 내려준다. github 이 null 이면 발행 도구는 애초에 노출되지 않는다(allowedToolsFor).
   github: GithubAppConfig | null = null,
+  // 점심 추천 설정. github 와 같은 자리 — null 이면 점심 도구는 애초에 노출되지 않는다
+  // (allowedToolsFor 의 lunchReady). 노출 판정(makeRunAgentTurn 의 allowedToolsFor 호출)과
+  // 이 값이 서로 다른 곳에서 계산되면, 도구는 보이는데 ctx.lunch 가 null 이라 tools.ts 의
+  // lunchCtxOf 가 매번 거부하는 반대쪽 결함이 생긴다.
+  lunch: LunchConfig | null = null,
   now: () => number = Date.now,
 ): ToolCtx {
   return {
     repos, role: context.role, isPrivate: context.isPrivate,
     isOwner: context.isOwner, userId: context.userId, conversationId: context.conversationId,
-    runtime, github, now,
+    runtime, github, lunch, now,
   };
 }
 
@@ -321,11 +328,16 @@ export function makeRunAgentTurn(
     workersInfo(): Array<{ workerId: string; commit?: string; connectedAt: number }>;
   },
   github: GithubAppConfig | null = null,
+  // 점심 추천 설정. Task 6 의 핵심 — allowedToolsFor 호출(아래)의 lunchReady 와 buildToolCtx
+  // 호출(아래)의 lunch 인자 양쪽에 반드시 같은 값을 넘겨야 한다. 한쪽만 넘기면 githubReady 가
+  // 2026-08-07 에 실제로 냈던 결함(persona 엔 실렸는데 도구 목록엔 안 실림)과 정확히 같은
+  // 모양이 된다.
+  lunch: LunchConfig | null = null,
   now: () => number = Date.now,
 ): TurnRunner {
   return async (req) => {
     const runtime: RuntimeInfo = { model, sdkVersion: SDK_VERSION, deployTarget, maxTurns: 30, botCommit: process.env.RAILWAY_GIT_COMMIT_SHA, workers: hub?.workersInfo() ?? [] };
-    const ctx: ToolCtx = buildToolCtx(repos, req.context, runtime, github, now);
+    const ctx: ToolCtx = buildToolCtx(repos, req.context, runtime, github, lunch, now);
 
     // Task 7: "어느 기계를, 그것이 있기는 한가"를 여기 한 곳에서만 정한다 — resolveTurnWorker 가
     // resolveWorkerSelector(위치 기반 선택)로 개인/공유를 가르고, registry 로 실제 workerId 를
@@ -357,8 +369,12 @@ export function makeRunAgentTurn(
     // 실제로 2026-08-07 첫 실사용이 이 상태였다: 아사히가 "네, 올릴 수 있습니다" 라고 안내한 뒤
     // 같은 턴에서 "제게 주어진 도구 목록에는 publish_project 가 없습니다" 로 끝났다. 위
     // webToolsEnabled 주석이 말하는 "양쪽에 같은 값을 넘겨야 한다" 가 이 축에도 그대로 적용된다.
+    // lunchReady(Task 6)도 같은 이유로 반드시 여기로 넘긴다 — core.ts 는 config.lunch 를 보고
+    // persona 에 lunchReady 를 싣지만, 도구 노출은 이 호출 하나가 전부 정한다. 여기서 빠지면
+    // "점심 추천을 할 수 있습니다" 라고 안내한 뒤 lunch_recommend 가 없다고 끝나는, 위와 완전히
+    // 같은 모양의 결함이 된다.
     const allowedTools = allowedToolsFor(req.context.role, req.context.isPrivate, req.context.isOwner, deployTarget, {
-      workerConnected, webToolsEnabled, memoryWriteEnabled, githubReady: github !== null,
+      workerConnected, webToolsEnabled, memoryWriteEnabled, githubReady: github !== null, lunchReady: lunch !== null,
     });
     // 서버 생성이 allowedTools 뒤로 내려온 이유: 그 턴에 못 쓰는 도구는 아예 등록하지 않는다
     // (allowedToolDefinitions). 위 :320 주석이 이름 붙인 "도구는 보이는데 실행하면 거부"를

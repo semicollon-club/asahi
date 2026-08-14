@@ -707,3 +707,61 @@ describe("발행 안내가 폴더 구조를 못박는가", () => {
     expect(p()).toContain("한글·공백");
   });
 });
+
+// 점심 추천 안내 — 위 "깃허브 발행 안내"와 같은 구조다: 도구가 실제로 열리는 조건과 정확히
+// 같은 조건에서만 안내한다(tools.ts 의 lunchTools). 발행과 다른 점은 워커 연결과 무관하다는
+// 것이다(이 기능은 워커를 쓰지 않는다) — 그래서 연결·미연결 두 분기 모두 lunchReady 하나로만 갈린다.
+describe("점심 추천 안내", () => {
+  it("소유자 DM + 설정이 있으면 안내한다(워커 연결·미연결 무관)", () => {
+    for (const workerConnected of [true, false]) {
+      const p = buildSystemPrompt({ role: "owner", isPrivate: true, isOwner: true, workerConnected, lunchReady: true });
+      expect(p).toContain("lunch_search");
+      expect(p).toContain("lunch_recommend");
+      expect(p).toContain("lunch_visit");
+    }
+  });
+
+  // 없는 도구를 쓰라고 안내하면 모델이 시도했다가 실패를 사용자에게 전달한다.
+  it("설정이 없으면 안내하지 않는다(워커 연결·미연결 무관)", () => {
+    for (const workerConnected of [true, false]) {
+      const p = buildSystemPrompt({ role: "owner", isPrivate: true, isOwner: true, workerConnected, lunchReady: false });
+      expect(p).not.toContain("lunch_recommend");
+    }
+  });
+
+  it("소유자 서버·손님(DM·서버)에는 설정이 있어도 안내하지 않는다(소유자 DM 전용, 설계 §1.1)", () => {
+    for (const [isPrivate, isOwner] of [[false, true], [true, false], [false, false]] as const) {
+      const p = buildSystemPrompt({ role: "allowed", isPrivate, isOwner, workerConnected: true, lunchReady: true });
+      expect(p).not.toContain("lunch_recommend");
+    }
+  });
+
+  // 추천 이유를 지어내지 말라는 지시가 없으면 모델이 "왜 이걸 추천했는지" 를 그럴듯하게
+  // 지어낼 수 있다 — scoreCandidates 의 reasons 를 그대로 옮기라는 요구가 이 기능의 정확성의
+  // 원천이다(설계 §5, IDENTITY 의 "## 사실성" 절과 같은 원칙).
+  it("추천 이유를 지어내지 말고 그대로 전하라고 안내한다", () => {
+    const p = buildSystemPrompt({ role: "owner", isPrivate: true, isOwner: true, lunchReady: true });
+    expect(capabilitySection(p)).toContain("지어내지");
+  });
+
+  // lunch_visit 으로 방문을 기록하라는 안내도 함께 실어야 한다 — 그래야 다음 추천이 나아진다는
+  // 순환을 모델이 알고 사용자에게도 그렇게 안내한다.
+  it("방문 기록(lunch_visit)이 다음 추천에 반영된다고 안내한다", () => {
+    const p = buildSystemPrompt({ role: "owner", isPrivate: true, isOwner: true, lunchReady: true });
+    expect(capabilitySection(p)).toContain("lunch_visit");
+  });
+});
+
+// 2026-08-07 에 githubReady 로 실제로 났던 결함의 재발 방지 — 안내가 나오는 조건과 도구가
+// 열리는 조건이 어긋나면 "네, 할 수 있습니다" 라고 해놓고 도구가 없는 상태가 된다.
+describe("점심 안내와 도구 노출이 일치하는가", () => {
+  it("네 신원 × 설정 유무에서 일치한다", () => {
+    for (const [isPrivate, isOwner] of [[true, true], [false, true], [true, false], [false, false]] as const) {
+      for (const lunchReady of [true, false]) {
+        const prompt = buildSystemPrompt({ role: "allowed", isPrivate, isOwner, workerConnected: true, lunchReady });
+        const tools = allowedToolsFor("allowed", isPrivate, isOwner, "local", { workerConnected: true, lunchReady });
+        expect(prompt.includes("lunch_recommend")).toBe(tools.includes("mcp__asahi__lunch_recommend"));
+      }
+    }
+  });
+});

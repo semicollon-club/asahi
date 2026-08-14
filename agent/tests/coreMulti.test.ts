@@ -11,6 +11,7 @@ import { TurnsRepo } from "../src/store/turnsRepo.js";
 import { AllowedDirsRepo } from "../src/store/allowedDirsRepo.js";
 import { ProjectsRepo } from "../src/store/projectsRepo.js";
 import { ActionsRepo } from "../src/store/actionsRepo.js";
+import { LunchRepo } from "../src/store/lunchRepo.js";
 import { AgentCore } from "../src/core/core.js";
 import { filterFileAttachments, FILE_LIMITS } from "../src/core/attachments.js";
 import type { Config } from "../src/config.js";
@@ -58,6 +59,7 @@ async function setup(over: {
     allowedDirs: new AllowedDirsRepo(db),
     actions: new ActionsRepo(db),
     projects: new ProjectsRepo(db),
+    lunch: new LunchRepo(db),
   };
   await repos.users.upsert("owner", { role: "owner" });
   await repos.users.upsert("guest", { role: "allowed" });
@@ -570,6 +572,66 @@ describe("AgentCore — 원격 워커 연결 상태를 페르소나에 반영한
     expect(t.calls[0].systemPrompt).toMatch(/fs_read/);
     expect(t.calls[0].systemPrompt).not.toMatch(/manage_access/);
     expect(t.calls[0].systemPrompt).not.toMatch(/allow_dir/);
+  });
+});
+
+// Task 6(점심 도구 배선) — 위 FIX3(원격 워커) 블록과 같은 구조다. core.ts 가 config.lunch 를
+// 보고 lunchReady 를 persona 에 실어야 소유자 DM 프롬프트가 실제 도구 보유와 일치한다 —
+// githubReady 가 2026-08-07 에 실제로 났던 결함(persona 엔 실렸는데 allowedToolsFor 엔 안 실려
+// "네, 할 수 있습니다" 라고 안내한 뒤 도구가 없다고 끝났다)과 같은 자리이므로, AgentCore 를
+// 거치는 end-to-end 경로에서 직접 확인해 둔다(이 자리는 github 축조차 이런 통합 테스트가
+// 없었다 — githubReady 배선보다 한 겹 더 확인한다).
+describe("AgentCore — 점심 추천 설정을 페르소나에 반영한다(Task 6)", () => {
+  const lunchConfig = { kakaoKey: "kk", lat: 37.4, lon: 126.6, radiusM: 800 };
+
+  it("config.lunch 가 있으면 소유자 DM 프롬프트가 점심 추천 능력을 안내한다", async () => {
+    const t = await setup({ config: { lunch: lunchConfig } });
+    pub(t.bus, dmHint("owner", "owner"), "점심 뭐 먹지", 1);
+    await t.core.drain();
+    expect(t.calls[0].systemPrompt).toContain("lunch_recommend");
+  });
+
+  it("config.lunch 가 없으면(기본값) 안내하지 않는다", async () => {
+    const t = await setup(); // 기본 config.lunch = null(setup() 의 config 기본값)
+    pub(t.bus, dmHint("owner", "owner"), "점심 뭐 먹지", 1);
+    await t.core.drain();
+    expect(t.calls[0].systemPrompt).not.toContain("lunch_recommend");
+  });
+
+  it("소유자 서버·손님 DM 에는 설정이 있어도 안내하지 않는다(소유자 DM 전용, 설계 §1.1)", async () => {
+    const t = await setup({ config: { lunch: lunchConfig } });
+    pub(t.bus, threadHint("owner", "ch-1", "owner", "o1"), "안녕", 1);
+    await t.core.drain();
+    expect(t.calls[0].systemPrompt).not.toContain("lunch_recommend");
+
+    pub(t.bus, dmHint("guest", "allowed"), "안녕", 2);
+    await t.core.drain();
+    expect(t.calls[1].systemPrompt).not.toContain("lunch_recommend");
+  });
+
+  // core.ts 의 buildSystemPrompt 호출은 두 곳이다 — 평상시 턴(runConversationTurn)과 유휴 요약
+  // 턴(writeSummary). githubReady 와 마찬가지로 lunchReady 는 앞쪽에만 넘긴다. 요약 턴은 사람이
+  // 지켜보지 않는 타이머 위에서 돈다 — 대화 주인이 소유자 자신이라도(소유자 자신의 DM 이
+  // 유휴해지는 경우) 마찬가지다. 다만 이 턴의 실제 도구 노출(allowedToolsFor)은 config.lunch
+  // 고정값에서 그대로 나오는 축이라 — TurnRequest 에 실리는 축이 아니라 이 파일의 fake
+  // runTurn/toolsForTurn 으로는 재현되지 않는다(db_query/manage_access 가 이미 같은 처지 —
+  // core.ts 의 writeSummary 주석 참고) — 여기서 확인할 수 있는 건 "안내(프롬프트)는 하지
+  // 않는다"는 사실뿐이고, 실제 도구가 이 턴에서도 닫힌다는 뜻은 아니다. 이 구분을 태스크
+  // 리포트에도 명시해 둔다.
+  it("소유자 자신의 DM 이 유휴 요약될 때는 점심 추천을 안내하지 않는다(요약 턴은 lunchReady 를 받지 않는다)", async () => {
+    const t = await setup({ config: { lunch: lunchConfig } });
+    pub(t.bus, dmHint("owner", "owner"), "안녕", t.now());
+    await t.core.drain();
+    expect(t.calls[0].systemPrompt).toContain("lunch_recommend"); // 평상시 턴은 안내한다(대조군)
+
+    t.setClock(1_000_000 + 31 * 60 * 1000);
+    t.setResult({ text: "요약했다.", sessionId: "s1", ok: true });
+    await t.core.closeIdleConversations();
+    await t.core.drain();
+
+    const summaryCall = t.calls[t.calls.length - 1];
+    expect(summaryCall.context).toMatchObject({ isOwner: true, isPrivate: true });
+    expect(summaryCall.systemPrompt).not.toContain("lunch_recommend");
   });
 });
 

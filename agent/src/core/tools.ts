@@ -15,6 +15,9 @@ import { mintInstallationToken, createOrgRepo } from "../github/appToken.js";
 import { normalizeRepoName, decideOwnership, publishSourceDir } from "./publish.js";
 import { scopeDirs } from "./workerSelect.js";
 import { memoryScopeFor, SHARED_MEMORY_MAX_LEN, SHARED_MEMORY_TITLE_MAX_LEN, renderMemories } from "./memoryScope.js";
+import type { LunchConfig } from "../config.js";
+import type { LunchRepo } from "../store/lunchRepo.js";
+import { lunchSearchHandler, lunchRecommendHandler, lunchVisitHandler, type LunchCtx } from "./lunch.js";
 
 // 도구 서버 이름 → 모델에는 mcp__asahi__<tool> 로 노출된다.
 export const TOOL_SERVER = "asahi";
@@ -39,7 +42,7 @@ export type RuntimeInfo = {
 export type ToolCtx = {
   repos: {
     memories: MemoriesRepo; users: UsersRepo; allowedDirs: AllowedDirsRepo; introspect: IntrospectRepo;
-    projects: ProjectsRepo;
+    projects: ProjectsRepo; lunch: LunchRepo;
   };
   role: Role;
   isPrivate: boolean;
@@ -50,6 +53,10 @@ export type ToolCtx = {
   // 깃허브 발행 설정. null 이면 발행 도구가 애초에 노출되지 않지만(allowedToolsFor 의
   // githubReady), 핸들러도 다시 확인한다 — 노출 판정과 실행 판정이 갈리면 조용히 새는 자리다.
   github: GithubAppConfig | null;
+  // 점심 추천 설정과 리포. config.lunch 가 null 이면 도구가 노출되지 않지만(allowedToolsFor 의
+  // lunchReady), 핸들러도 다시 확인한다(아래 lunchCtxOf) — 노출 판정과 실행 판정이 갈리면
+  // 조용히 새는 자리다(github 와 같은 이유).
+  lunch: LunchConfig | null;
   // 시각 주입. 토큰 발급의 JWT iat/exp 와 projects.last_push_ts 에 쓴다.
   now: () => number;
   // 원격 워커 호출 통로. 워커가 연결돼 있을 때만 주입된다(index.ts 배선, agent.ts 의
@@ -373,6 +380,11 @@ export type AllowedToolsOptions = {
   // 삭제가 더 되돌리기 어렵다). 두 도구를 한 축에 묶는다 — memories 행을 만들거나 지우는
   // 도구가 새로 생기면 그것도 같은 이유로 여기에 묶는다.
   memoryWriteEnabled?: boolean;
+  // 점심 추천 설정(config.lunch)이 갖춰졌는지. 없으면 도구를 아예 노출하지 않는다 — 노출해
+  // 두고 부를 때 실패시키면 모델이 매번 시도했다가 실패를 사용자에게 전달한다(githubReady 와
+  // 같은 이유). Task 6 의 핵심 축 — 이 값이 core.ts 의 persona 호출에만 실리고 여기에는 안
+  // 실리면 2026-08-07 의 githubReady 결함과 정확히 같은 모양이 된다.
+  lunchReady?: boolean;
 };
 
 export function allowedToolsFor(
@@ -385,6 +397,9 @@ export function allowedToolsFor(
   const {
     workerConnected = false,
     githubReady = false,
+    // 기본값 false — 안전한 기본은 "닫힘"이다(githubReady 와 같은 이유). 호출부가 이 축을
+    // 빠뜨리면 조용히 열리는 대신 조용히 닫힌다.
+    lunchReady = false,
     // FIX3(중요, 최종 리뷰 3차): 웹 검색도 워커 원격 도구처럼 턴별로 열고 닫을 수 있어야 한다 —
     // 유휴 요약 턴(core.ts 의 summarizeAndClose)은 사람이 지켜보지 않는 타이머로 돌고 이전에
     // 심어졌을 수도 있는 프롬프트 인젝션을 담은 세션을 그대로 이어받는데, 요약은 검색이 필요
@@ -415,6 +430,10 @@ export function allowedToolsFor(
   // 그 축을 끄는 것을 잊은 새 무인 턴이 생겼을 때 조용히 열린다.
   const publishTools = workerConnected && githubReady ? [t("publish_project"), t("restore_project")] : [];
   const dirTools = workerConnected ? [t("allow_dir"), t("revoke_dir"), t("list_dirs")] : [];
+  // 소유자 DM 전용이다(설계 §1.1, db_query·manage_access 와 같은 자리 — isOwner && isPrivate
+  // 분기에만 스플라이스된다). 워커 연결과 무관하다 — 이 기능은 워커를 쓰지 않는다(publishTools
+  // 와 달리 workerConnected 를 곱하지 않는다).
+  const lunchTools = lunchReady ? [t("lunch_search"), t("lunch_recommend"), t("lunch_visit")] : [];
   const webTools = webToolsEnabled ? WEB_TOOLS : [];
   // Important 4 — remember 는 네 분기 모두 이 배열 하나로만 열고 닫는다. memoryWriteEnabled
   // 가 기본값(true)인 한 아래 각 분기의 결과는 예전과 완전히 동일하다(회귀 없음) — false 를
@@ -429,6 +448,7 @@ export function allowedToolsFor(
       ...memoryTools, t("recall"), t("manage_access"), ...forgetTools,
       ...dirTools,
       t("db_schema"), t("db_query"), t("runtime_info"),
+      ...lunchTools,
       ...webTools,
     ];
   }
@@ -617,6 +637,15 @@ export async function restoreHandler(ctx: ToolCtx, args: { name: string; discard
   });
 }
 
+// 도구가 노출되는 조건(lunchReady)과 실행 조건이 갈리지 않게, 핸들러로 넘기기 직전에 한 번 더
+// 확인한다. 노출 판정과 실행 판정이 다른 곳에 있으면 한쪽만 바뀌어도 조용히 어긋난다 — 정상
+// 배선에서는 allowedToolsFor 의 lunchReady 와 여기의 ctx.lunch 가 항상 같은 config.lunch 값에서
+// 나오므로, 이 throw 는 실제로는 닿지 않는 방어선이다.
+function lunchCtxOf(ctx: ToolCtx): LunchCtx {
+  if (!ctx.lunch) throw new Error("점심 추천이 설정되지 않았어요.");
+  return { config: ctx.lunch, repo: ctx.repos.lunch, userId: ctx.userId, now: ctx.now };
+}
+
 // 도구 선언 목록을 buildTools 에서 분리해 내보낸다. 이 배열 자체가 "핸들러의 반환을 MCP 결과로
 // 바꾸는" 이음매(seam)인데, createSdkMcpServer 안에 인라인으로 묻혀 있으면 그 변환을 테스트가
 // 직접 실행할 방법이 없다 — 지금까지 성패 전달이 이 지점에서 끊긴 채로 여러 번의 리뷰를 통과한
@@ -704,6 +733,54 @@ export function buildToolDefinitions(ctx: ToolCtx) {
       "(소유자 전용) 내가 어떤 모델·SDK·배포 설정으로 동작 중인지, 그리고 지금 연결된 워커가 어느 커밋으로 도는지 보여줍니다.",
       {},
       async () => textResult(await runtimeInfoHandler(ctx)),
+    ),
+    // 점심 추천 셋(§설계 §6). 소유자 DM 전용이고 워커를 쓰지 않는다 — allowedToolsFor 의
+    // lunchTools 와 같은 자리에 둔다.
+    tool(
+      "lunch_search",
+      "근처 식당을 찾습니다. 검색어를 생략하면 일반적인 맛집을 찾습니다.",
+      { query: z.string().optional().describe("검색어(예: 국밥, 파스타)") },
+      async (args) => {
+        const r = await lunchSearchHandler(lunchCtxOf(ctx), args);
+        return textResult(r.content, !r.ok);
+      },
+    ),
+    tool(
+      "lunch_recommend",
+      "지금까지의 방문 기록과 선호를 반영해 점심을 추천합니다. 추천 이유가 함께 오니 그대로 전하세요 — 이유를 지어내지 마세요.",
+      { count: z.number().optional().describe("추천 개수(기본 3)") },
+      async (args) => {
+        const r = await lunchRecommendHandler(lunchCtxOf(ctx), args);
+        return textResult(r.content, !r.ok);
+      },
+    ),
+    // place/placeId 두 인자가 있는 이유(§설계 §6.1의 결함 재발 방지): place 만 있던 시절엔
+    // 이름이 완전히 같은 두 후보(체인 지점 등)를 영원히 구분하지 못했고, 모델이 "2번" 같은
+    // 목록 위치를 place 에 넣으면 부분 문자열 일치로 엉뚱한 가게에 방문이 기록됐다(핸들러의
+    // Important 1 주석 참고). 설명 자체가 그 사용법을 명시해야 모델이 다시 같은 실수를
+    // 반복하지 않는다 — 코드가 placeId 를 받아도 모델이 그 존재·용법을 모르면 소용없다.
+    tool(
+      "lunch_visit",
+      "식당 방문을 기록합니다. place(가게 이름) 또는 placeId 중 하나로 대상을 지정하세요. " +
+        "직전 호출이 후보를 여러 곳 보여줬다면 각 줄에 (ID …) 가 있습니다 — 사용자에게 어느 곳인지 확인한 뒤 " +
+        "그 ID를 한 글자도 바꾸지 말고 placeId 에 그대로 넣어 다시 부르세요. place 에는 넣지 마세요. " +
+        "place 는 가게 이름만 받습니다 — 목록 번호(\"2번\"·\"두 번째\")나 ID 값을 넣으면 안 됩니다. " +
+        "placeId 는 lunch_search·lunch_recommend 가 실제로 보여준 값만 유효합니다 — 직접 만들어 내거나 추측하지 마세요. " +
+        "\"이름만으로는 구분할 수 없어요\" 라는 답을 받으면 같은 이름으로는 몇 번을 다시 불러도 항상 같은 결과이니, " +
+        "place 로 재시도하지 말고 placeId 로만 다시 부르세요. " +
+        "liked 는 사용자가 좋았다/별로였다고 실제로 말했을 때만 채우고, 말하지 않았으면 생략하세요 — " +
+        "기본값으로 false 를 보내면 이전에 기록된 좋은 평가를 덮어씁니다.",
+      {
+        place: z.string().optional().describe("가게 이름(정확한 상호명)만. 목록 번호·ID는 넣지 마세요 — 그건 placeId 입니다"),
+        // 카카오 place_id 는 숫자처럼 보이지만 불투명한 문자열이다 — z.number() 로 선언하면
+        // 모델이 반올림·형변환할 여지가 생긴다. 절대 number 로 바꾸지 말 것.
+        placeId: z.string().optional().describe("직전 후보 목록의 (ID …) 값을 그대로. 직접 만들어 내지 마세요 — lunch_search/lunch_recommend 결과에 실제로 있던 값만 유효합니다"),
+        liked: z.boolean().optional().describe("사용자가 좋았다/별로였다고 말했을 때만 채우세요. 말하지 않았으면 생략 — 기본값 false 를 보내지 마세요"),
+      },
+      async (args) => {
+        const r = await lunchVisitHandler(lunchCtxOf(ctx), args);
+        return textResult(r.content, !r.ok);
+      },
     ),
     tool(
       "fs_read",

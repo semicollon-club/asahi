@@ -18,6 +18,7 @@ import type { AllowedDirsRepo } from "../store/allowedDirsRepo.js";
 import type { ProjectsRepo } from "../store/projectsRepo.js";
 import type { ActionsRepo } from "../store/actionsRepo.js";
 import type { WorkerKind } from "../store/workersRepo.js";
+import type { LunchRepo } from "../store/lunchRepo.js";
 import { scopeDirs } from "./workerSelect.js";
 import { pathFlavorOf } from "./paths.js";
 import { buildContextBlock, isSessionNotFound } from "./turnPrep.js";
@@ -142,6 +143,10 @@ export type CoreRepos = {
   // 깃허브 발행의 소유권 정본. 모델이 리포를 고르지 못하게 하는 장치라, 발행 경로는 반드시
   // 이 표를 거쳐 대상을 정한다(publish.ts 의 decideOwnership).
   projects: ProjectsRepo;
+  // 점심 추천(장소·방문 기록). 코어 자신은 이 리포를 직접 읽지 않는다 — makeRunAgentTurn 이
+  // 만드는 ToolCtx 로 흘러가 lunch_search/lunch_recommend/lunch_visit 핸들러가 쓴다. index.ts 가
+  // 하나의 repos 객체를 CoreRepos 와 ToolRepos 양쪽에 겹쳐 넘기므로 여기도 선언해 둔다.
+  lunch: LunchRepo;
 };
 
 // 대화(conversation)별 세션 + 대화 키별 직렬락으로 동작하는 코어.
@@ -578,7 +583,14 @@ export class AgentCore {
       // 건드리지 않는다 — 그 시점엔 아직 받아오기 전이라 저장 경로가 없고, 파일명만 적으면 사실이
       // 아닌 것을 기록하게 된다.
       prompt = buildFileMarker(prompt, savedFiles, failedFiles);
-      const systemPrompt = buildSystemPrompt({ role, isPrivate: conv.isPrivate, isOwner, deployTarget: this.config.deployTarget, workerConnected, workspaceDirs, githubReady: this.config.github !== null });
+      // lunchReady(Task 6)도 githubReady 와 나란히 넘긴다 — 이 값이 여기(persona)에만 실리고
+      // agent.ts 의 allowedToolsFor 호출에는 안 실리면(반대 방향으로 빠뜨려도 마찬가지) 2026-08-07
+      // 의 githubReady 결함과 정확히 같은 모양이 된다. 두 호출은 서로 다른 파일에 있어 한쪽만
+      // 고치고 잊기 쉽다 — agent.ts 의 makeRunAgentTurn 쪽 주석도 같은 경고를 남겨 둔다.
+      const systemPrompt = buildSystemPrompt({
+        role, isPrivate: conv.isPrivate, isOwner, deployTarget: this.config.deployTarget, workerConnected, workspaceDirs,
+        githubReady: this.config.github !== null, lunchReady: this.config.lunch !== null,
+      });
       const onProgress = (u: ProgressUpdate) => {
         this.bus.publish({ type: "progress", channel: "discord", channelRef: conv.discordChannelId, text: formatProgress(u, workspaceDirs), ts: this.now() });
         // 기록은 도구 호출이 끝난 시점에만 남긴다(tool 이벤트는 짝이 맞춰져 이 한 행에 흡수된다).

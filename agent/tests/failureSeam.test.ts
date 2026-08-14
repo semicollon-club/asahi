@@ -15,6 +15,7 @@ import { AllowedDirsRepo } from "../src/store/allowedDirsRepo.js";
 import { ProjectsRepo } from "../src/store/projectsRepo.js";
 import { ActionsRepo } from "../src/store/actionsRepo.js";
 import { IntrospectRepo } from "../src/store/introspectRepo.js";
+import { LunchRepo } from "../src/store/lunchRepo.js";
 import { AgentCore, formatProgress } from "../src/core/core.js";
 import { buildToolDefinitions, type ToolCtx } from "../src/core/tools.js";
 import { progressFromMessage, type PendingTool, type ProgressUpdate } from "../src/core/agent.js";
@@ -78,11 +79,12 @@ async function toolCtxWithRealWorker(o: { roots: string[]; allowed: string[] }):
   const executors = makeExecutors(o.roots);
   return {
     github: null,
+    lunch: null,
     now: () => 1_000_000,
     repos: {
       memories: new MemoriesRepo(db), users: new UsersRepo(db),
       allowedDirs: { list: async () => o.allowed } as unknown as AllowedDirsRepo,
-      introspect: new IntrospectRepo(db), projects: new ProjectsRepo(db),
+      introspect: new IntrospectRepo(db), projects: new ProjectsRepo(db), lunch: new LunchRepo(db),
     },
     role: "owner", isPrivate: true, isOwner: true, userId: "owner", conversationId: 1,
     runtime: { model: "claude-opus-4-8", sdkVersion: "0.3.207", deployTarget: "local", maxTurns: 30, workers: [] },
@@ -186,7 +188,7 @@ async function coreSetup() {
     users: new UsersRepo(db), conversations: new ConversationsRepo(db), participants: new ParticipantsRepo(db),
     messages: new MessagesRepo(db), summaries: new SummariesRepo(db), memories: new MemoriesRepo(db),
     turns: new TurnsRepo(db), allowedDirs: new AllowedDirsRepo(db), actions: new ActionsRepo(db),
-    projects: new ProjectsRepo(db),
+    projects: new ProjectsRepo(db), lunch: new LunchRepo(db),
   };
   await repos.users.upsert("owner", { role: "owner" });
   const config: Config = {

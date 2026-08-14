@@ -124,9 +124,25 @@ function scoreCandidates(
 
 | 도구 | 하는 일 |
 |---|---|
-| `lunch_search(query?, category?)` | 근처 조회. 결과를 `lunch_places` 에 upsert 하고 목록을 돌려준다 |
+| `lunch_search(query?)` | 근처 조회. 결과를 `lunch_places` 에 upsert 하고 목록을 돌려준다 |
 | `lunch_recommend(count?)` | 조회 + 기록 결합 → 점수순 상위 몇 곳을 이유와 함께 |
-| `lunch_visit(place, liked?)` | 방문 기록. 이름으로 찾아 `place_id` 로 저장한다 |
+| `lunch_visit(place?, placeId?, liked?)` | 방문 기록. `place` 는 이름으로 찾고, `placeId` 는 §6.1 의 후보 목록을 되짚을 때 쓴다 |
+
+**2026-08-14 문서 정합(Task 6):** 이 표는 원래 `lunch_search(query?, category?)` ·
+`lunch_visit(place, liked?)` 였다. Task 5 구현·리뷰를 거치며 코드가 이미 바뀌었는데 이 표만
+안 따라와 스펙과 코드가 어긋나 있었다(Task 5 원장에 이월된 항목). 둘 다 **표를 실제 코드에
+맞춘다** — 코드를 스펙에 맞추지 않는다:
+- `category` 는 구현하지 않는다. 지금 소비자가 소유자 한 명뿐이고 검색 반경도 캠퍼스 주변으로
+  고정돼 있어(§3), 카테고리로 좁힐 실익이 아직 뚜렷하지 않다. 카카오 API 자체는
+  `category_group_code` 를 받으므로, 필요해지면 그때 인자와 매핑을 함께 더한다 — 지금 인자만
+  받고 핸들러가 무시하면 "모델에게 안 되는 걸 된다고 알리는" 이 저장소가 가장 경계하는 결함
+  유형이 된다.
+- `lunch_visit` 은 `place?`/`placeId?` 로 갈라졌다(Task 5 1차 리뷰 결함): 이름이 완전히 같은
+  두 후보(체인 지점 등)는 `place` 만으로 영원히 구분할 수 없었고, 모델이 후보 목록의 "2번" 같은
+  표시를 `place` 에 그대로 보내면 부분 문자열 일치로 엉뚱한 가게에 방문이 기록됐다(되돌릴 수단
+  없음). §6.1 이 이미 말하던 "forget 과 같은 방식"을 절반만(번호 "표시"만) 따른 결과였다 — forget
+  이 `{title?, id?}` 로 되짚듯, 후보 목록에 실제 `place_id` 를 싣고 그 값을 `placeId` 로 그대로
+  돌려받게 고쳤다. `place` 는 여전히 상호명 전용이고, 둘 다 없으면(§6.1) 거절한다.
 
 **게이팅은 `isOwner && isPrivate` 하나다.** 워커 연결과 무관하다(워커를 안 쓴다). 카카오 키가
 없으면 셋 다 노출하지 않는다 — 깃허브 발행과 같은 원칙이고, 노출해 두고 부를 때 실패시키면

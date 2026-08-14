@@ -8,6 +8,7 @@ import { IntrospectRepo } from "../src/store/introspectRepo.js";
 import { MemoriesRepo } from "../src/store/memoriesRepo.js";
 import { UsersRepo } from "../src/store/usersRepo.js";
 import { AllowedDirsRepo } from "../src/store/allowedDirsRepo.js";
+import { LunchRepo } from "../src/store/lunchRepo.js";
 import {
   rememberHandler, recallHandler, forgetHandler, manageAccessHandler,
   allowDirHandler, revokeDirHandler, listDirsHandler,
@@ -28,11 +29,13 @@ async function ctx(over: CtxOver = {}): Promise<ToolCtx> {
   const db = await openTestDb();
   const { remote, ...rest } = over;
   return {
-    repos: { memories: new MemoriesRepo(db), users: new UsersRepo(db), allowedDirs: new AllowedDirsRepo(db), introspect: new IntrospectRepo(db), projects: new ProjectsRepo(db) },
+    repos: { memories: new MemoriesRepo(db), users: new UsersRepo(db), allowedDirs: new AllowedDirsRepo(db), introspect: new IntrospectRepo(db), projects: new ProjectsRepo(db), lunch: new LunchRepo(db) },
     role: "allowed", isPrivate: true, isOwner: false, userId: "guest", conversationId: 1,
     runtime: { model: "claude-opus-4-8", sdkVersion: "0.3.207", deployTarget: "local", maxTurns: 30, workers: [] },
     // 발행 미설정이 기본이다 — 발행을 시험하는 케이스만 over.github 로 채운다.
     github: null,
+    // 점심 추천 미설정이 기본이다 — 점심 도구를 시험하는 케이스만 over.lunch 로 채운다.
+    lunch: null,
     now: () => 1_000_000,
     ...rest,
     ...(remote
@@ -1203,5 +1206,123 @@ describe("발행 대상 폴더가 없을 때", () => {
     expect(r.ok).toBe(false);
     expect(r.content).toContain("폴더를 먼저 만들고");
     expect(calls).not.toContain("git_publish");
+  });
+});
+
+// 2026-08-07 에 githubReady 로 실제로 났던 결함과 같은 구조 — 능력 안내(persona.ts)에는
+// lunchReady 가 실려도 allowedToolsFor 에 안 실리면 "네, 할 수 있습니다" 라고 안내한 뒤
+// "도구가 없습니다" 로 끝난다. 이 블록은 allowedToolsFor 하나만 직접 불러 그 축을 고정한다 —
+// persona.ts 와의 일치는 persona.test.ts 의 별도 블록이 확인한다.
+describe("점심 도구 게이팅", () => {
+  const has = (tools: string[]) => tools.includes("mcp__asahi__lunch_recommend");
+
+  it("소유자 DM 에서 설정이 있으면 열린다", () => {
+    expect(has(allowedToolsFor("owner", true, true, "local", { lunchReady: true }))).toBe(true);
+  });
+
+  // 설정이 없으면 노출하지 않는다 — 노출해 두고 부를 때 실패시키면 모델이 매번 시도한다.
+  it("설정이 없으면 안 열린다", () => {
+    expect(has(allowedToolsFor("owner", true, true, "local", { lunchReady: false }))).toBe(false);
+  });
+
+  // 소유자 DM 전용이다(설계 §1.1). db_query 와 같은 자리.
+  it("소유자 서버·손님에게는 안 열린다", () => {
+    expect(has(allowedToolsFor("owner", false, true, "local", { lunchReady: true }))).toBe(false);
+    expect(has(allowedToolsFor("allowed", true, false, "local", { lunchReady: true }))).toBe(false);
+    expect(has(allowedToolsFor("allowed", false, false, "local", { lunchReady: true }))).toBe(false);
+  });
+
+  it("워커 연결과 무관하다(이 기능은 워커를 쓰지 않는다)", () => {
+    expect(has(allowedToolsFor("owner", true, true, "local", { lunchReady: true, workerConnected: false }))).toBe(true);
+  });
+
+  // lunch_recommend 하나만 보면 나머지 둘이 빠져도 못 잡는다 — 세 도구가 같은 축 하나로
+  // 묶여 있는지 직접 확인한다.
+  it("세 도구(lunch_search·lunch_recommend·lunch_visit)가 모두 같이 열리고 같이 닫힌다", () => {
+    const on = allowedToolsFor("owner", true, true, "local", { lunchReady: true });
+    const off = allowedToolsFor("owner", true, true, "local", { lunchReady: false });
+    for (const name of ["lunch_search", "lunch_recommend", "lunch_visit"]) {
+      expect(on).toContain(`mcp__asahi__${name}`);
+      expect(off).not.toContain(`mcp__asahi__${name}`);
+    }
+  });
+
+  // 사람이 지켜보지 않는 턴(정기 게시 — digest.ts 가 실제로 쓰는 신원)은 소유자 DM 이 아니므로
+  // 설정이 있어도 열리지 않는다. 유휴 요약(손님 대화)도 같은 신원 축으로 닫힌다 — 소유자 자신의
+  // DM 이 유휴 요약되는 경우는 이 축(isOwner && isPrivate)만으로는 걸러지지 않는다는 점은
+  // 리포트에 별도로 남긴다(core.ts 의 writeSummary 는 buildSystemPrompt 호출에 lunchReady 를
+  // 넘기지 않아 안내는 없지만, 그 턴의 lunchReady 자체는 config.lunch 고정값이라 도구는 남는다 —
+  // db_query/manage_access 가 이미 같은 처지다).
+  it("정기 게시와 같은 신원(손님·비공개 아님)에서는 설정이 있어도 안 열린다", () => {
+    expect(has(allowedToolsFor("allowed", false, false, "local", { lunchReady: true }))).toBe(false);
+  });
+});
+
+describe("lunch_search/lunch_recommend/lunch_visit 도구 선언", () => {
+  it("buildToolDefinitions 가 세 도구 모두를 만든다", async () => {
+    const names = buildToolDefinitions(await ctx()).map((d) => d.name);
+    expect(names).toContain("lunch_search");
+    expect(names).toContain("lunch_recommend");
+    expect(names).toContain("lunch_visit");
+  });
+
+  // 설계 §6.1 결함(place 에 번호·ID 를 넣어 엉뚱한 가게에 방문이 기록됨)의 재발 방지는 코드
+  // 구조(placeId 우선)만으로는 부족하다 — 모델이 그 사용법을 모르면 다시 place 에 "2번" 같은
+  // 값을 넣는다. 도구 설명 자체가 이 사용법을 명시하는지 고정한다.
+  it("lunch_visit 설명이 placeId 되짚기·place 오용 금지·liked 기본값 금지를 모두 명시한다", async () => {
+    const def = buildToolDefinitions(await ctx()).find((d) => d.name === "lunch_visit");
+    expect(def).toBeDefined();
+    const desc = def!.description;
+    // 후보 목록의 ID를 placeId 로 그대로 되짚으라는 지시.
+    expect(desc).toContain("placeId");
+    // 목록 번호·서수를 place 에 넣지 말라는 금지(설계 §6.1 결함의 직접 원인).
+    expect(desc).toContain("번호");
+    // placeId 를 직접 지어내거나 추측하지 말라는 금지.
+    expect(desc).toContain("추측");
+    // "이름만으로는 구분할 수 없어요" 뒤에 place 로 재시도하지 말라는 안내.
+    expect(desc).toContain("구분할 수 없어요");
+    // liked 를 기본값 false 로 채우면 이전 평가를 덮어쓴다는 경고.
+    expect(desc).toContain("false");
+    expect(desc).toMatch(/덮어/);
+  });
+
+  it("lunch_visit 의 place·placeId·liked 스키마가 모두 optional 이다(인터페이스: 셋 다 선택)", async () => {
+    const def = buildToolDefinitions(await ctx()).find((d) => d.name === "lunch_visit")!;
+    // tool() 이 돌려주는 inputSchema 는 z.object(...) 가 아니라 넘긴 raw shape 그대로다 —
+    // 필드 하나하나가 곧 zod 스키마라 바로 safeParse 할 수 있다(SDK 타입: AnyZodRawShape).
+    const shape = (def as unknown as { inputSchema: Record<string, { safeParse(v: unknown): { success: boolean } }> }).inputSchema;
+    expect(shape.place!.safeParse(undefined).success).toBe(true);
+    expect(shape.placeId!.safeParse(undefined).success).toBe(true);
+    expect(shape.liked!.safeParse(undefined).success).toBe(true);
+  });
+
+  it("place·placeId 를 둘 다 생략하면 핸들러가 '어느 가게인지' 로 답한다(둘 다 없을 때의 기본 분기, 회귀 가드)", async () => {
+    const lunchConfig = { kakaoKey: "k", lat: 37.4, lon: 126.6, radiusM: 800 };
+    const def = buildToolDefinitions(await ctx({ lunch: lunchConfig })).find((d) => d.name === "lunch_visit")!;
+    const r = (await def.handler({} as never, undefined)) as { content: Array<{ text: string }>; isError?: boolean };
+    expect(r.isError).toBe(true);
+    expect(r.content[0]!.text).toContain("어느 가게인지");
+  });
+
+  // Kakao 의 place_id 는 숫자처럼 보이지만 opaque 한 문자열로 다뤄야 한다(반올림·타입 변환 금지).
+  // zod 스키마가 z.string() 인지(= number 로 선언되지 않았는지) 실제 파싱으로 확인한다.
+  it("placeId 는 숫자가 아니라 불투명한 문자열로 선언된다", async () => {
+    const def = buildToolDefinitions(await ctx()).find((d) => d.name === "lunch_visit")!;
+    // tool() 이 돌려주는 inputSchema 는 z.object(...) 가 아니라 넘긴 raw shape 그대로다 —
+    // 필드 하나하나가 곧 zod 스키마라 바로 safeParse 할 수 있다(SDK 타입: AnyZodRawShape).
+    const shape = (def as unknown as { inputSchema: Record<string, { safeParse(v: unknown): { success: boolean } }> }).inputSchema;
+    expect(shape.placeId.safeParse("12345").success).toBe(true);
+    // 숫자 리터럴은(설계상 place_id 가 숫자로 넘어오면 안 되므로) 문자열 스키마에서 거부돼야 한다.
+    expect(shape.placeId.safeParse(12345).success).toBe(false);
+  });
+});
+
+// 노출 판정(allowedToolsFor)과 실행 판정(핸들러로 넘기기 직전의 lunchCtxOf)이 갈리는 사고가
+// 나도 조용히 엉뚱한 값으로 실행되지 않고 분명한 오류로 멈춘다 — 정상 배선에서는 둘 다 같은
+// config.lunch 에서 나오므로 실제로는 닿지 않는 방어선이다.
+describe("lunchCtxOf 방어 — ctx.lunch 가 없으면 핸들러 실행 전에 막는다", () => {
+  it("ctx.lunch 가 null 이면 lunch_search 핸들러 호출이 거부된다", async () => {
+    const def = buildToolDefinitions(await ctx({ lunch: null })).find((d) => d.name === "lunch_search")!;
+    await expect(def.handler({} as never, undefined)).rejects.toThrow("설정");
   });
 });
