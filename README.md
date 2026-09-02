@@ -1,5 +1,5 @@
 ---
-lastReviewed: 2026-07-28
+lastReviewed: 2026-09-02
 ---
 
 # Asahi — 개인 AI 비서 (상주 에이전트)
@@ -28,6 +28,7 @@ Asahi/
 ├─ agent/     상주 에이전트 앱 (백엔드 데몬) — TypeScript / Node.js
 │  ├─ src/       core · adapters · events · store · remote · memory · scripts · config · index · worker
 │  └─ tests/     vitest 단위 테스트
+├─ server/    동아리 웹 API (홈페이지 로그인 등, 부원 협업 영역) — server/README.md 참조
 ├─ data/      런타임 데이터 (git 제외)
 │  ├─ store/     (로컬 캐시 — 런타임 DB는 Supabase Postgres, 원격, DATABASE_URL)
 │  └─ memory/    비서의 장기 기억 (마크다운)
