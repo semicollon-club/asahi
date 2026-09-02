@@ -15,14 +15,20 @@
     "typecheck": "tsc -p tsconfig.check.json"
   },
   "dependencies": {
+    "bcryptjs": "^3.0.3",
+    "cookie-parser": "^1.4.7",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
+    "pg": "^8.23.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@types/cookie-parser": "^1.4.10",
     "@types/express": "^5.0.6",
     "@types/node": "^26.1.1",
+    "@types/pg": "^8.23.1",
     "@types/supertest": "^7.2.1",
+    "pg-mem": "^3.0.14",
     "supertest": "^7.2.2",
     "tsx": "^4.23.0",
     "typescript": "^5.9.3",
