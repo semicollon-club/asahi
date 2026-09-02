@@ -1,5 +1,5 @@
 ---
-lastReviewed: 2026-08-06
+lastReviewed: 2026-09-02
 ---
 
 # 기여 가이드 (CONTRIBUTING)
@@ -8,9 +8,23 @@ lastReviewed: 2026-08-06
 정리했다. 처음 이 리포를 여는 기여자든, 오랜만에 돌아온 소유자 본인이든 여기서 시작하면
 된다.
 
-> **에이전트가 읽고 있다면** [docs/agent-onboarding.md](docs/agent-onboarding.md)를 먼저 봐라.
+> **에이전트가 읽고 있다면** 루트의 [AGENTS.md](AGENTS.md)가 진입 문서다. `agent/` 작업이라면
+> [docs/agent-onboarding.md](docs/agent-onboarding.md)를 먼저 봐라.
 > 이 문서는 셋업 절차이고, 그쪽은 작업 방식과 이 환경의 함정(계정 분리, PowerShell 5.1,
 > 배포 순서, PM2 의 거짓 신호, cmd.exe 인용 경계)을 모은 것이다.
+
+## 이 저장소의 두 영역과 브랜치 규칙 (2026-09-02부터)
+
+이 리포는 동아리 **백엔드 모노레포**가 됐다. `agent/`(상주 비서, 이 문서의 나머지가 다루는 영역)와
+`server/`(동아리 웹 API — 셋업·규칙은 [server/README.md](server/README.md),
+스키마 변경은 [server/migrations/README.md](server/migrations/README.md)) 두 영역이 있고,
+Railway에 서로 다른 서비스로 배포된다.
+
+공통 브랜치 규칙:
+
+- `main` 직접 push 금지 — 브랜치를 만들어 PR로. CI(agent·server typecheck+test+build)가 필수 체크다
+- `production`은 실서비스 자동 배포 브랜치 — 운영자만 main→production으로 반영한다
+- 웹 API의 DB 스키마는 마이그레이션 파일로만 변경한다 (운영 반영은 배포 시 자동)
 
 ## 사전 요구사항
 
