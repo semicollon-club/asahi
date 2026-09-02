@@ -22,9 +22,12 @@ function cookieOptions(expiresAt?: Date) {
   return {
     httpOnly: true, // JS에서 접근 불가 → XSS로 토큰 탈취 방지
     secure: production, // 운영에서는 HTTPS로만 전송
-    // 프론트(Vercel)와 API(Railway)가 다른 도메인이라 운영에서는 none 이 필요하다.
-    // 로컬(localhost 포트만 다름)은 same-site 라 lax 로 충분하다.
-    sameSite: production ? ("none" as const) : ("lax" as const),
+    // 학습 노트: API가 api.semicollon.com 으로 이동하면서 프론트(semicollon.com)와
+    // 같은 사이트가 됐다. 그래서 Lax 로 충분하다 —
+    // - None 이었을 때: 크로스사이트 쿠키(서드파티) 취급 → Safari 등에서 차단될 수 있었음
+    // - Lax: 다른 사이트에서 시작된 POST 등에 쿠키가 실리지 않아 CSRF 방어에도 유리
+    // 단, 옛 vercel.app 주소로 접속하면 API와 크로스사이트라 로그인이 동작하지 않는다(의도됨).
+    sameSite: "lax" as const,
     path: "/",
     ...(expiresAt ? { expires: expiresAt } : {}),
   };
