@@ -20,6 +20,12 @@ npm test
 npm run build
 ```
 
+## DB 변경 (스키마)
+
+DB 대시보드에서 직접 고치지 않는다. `migrations/`에 SQL 파일을 추가하고
+`npm run migrate:dev`로 dev DB에 적용해 확인한 뒤 PR에 포함한다 —
+운영 반영은 배포 때 자동. 상세: [migrations/README.md](migrations/README.md)
+
 ## 구조 규칙
 
 - 기능은 라우터 단위로 `src/` 아래에 추가하고 `app.ts`에서 조립한다.

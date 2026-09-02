@@ -12,7 +12,9 @@
     "start": "node dist/index.js",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc -p tsconfig.check.json"
+    "typecheck": "tsc -p tsconfig.check.json",
+    "migrate": "node dist/scripts/migrate.js",
+    "migrate:dev": "tsx src/scripts/migrate.ts"
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",
