@@ -60,6 +60,7 @@ describe("로그인 · 세션 · 로그아웃", () => {
     expect(login.status).toBe(200);
     expect(login.headers["set-cookie"]?.[0]).toContain("sid=");
     expect(login.headers["set-cookie"]?.[0]).toContain("HttpOnly");
+    expect(login.headers["set-cookie"]?.[0]).toContain("SameSite=Lax");
 
     const me = await agent.get("/auth/me");
     expect(me.status).toBe(200);
