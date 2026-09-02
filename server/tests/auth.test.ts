@@ -84,24 +84,27 @@ describe("로그인 · 세션 · 로그아웃", () => {
     expect(row.token_hash).toBe(hashToken(rawToken));
   });
 
-  it("로그아웃하면 세션이 DB에서 삭제되고 /auth/me 는 401", async () => {
+  it("로그아웃하면 세션이 DB에서 삭제되고 /auth/me 는 user:null", async () => {
     await agent.post("/auth/login").send({ username: "semicolon", password: goodUser.password });
     await agent.post("/auth/logout");
     const me = await agent.get("/auth/me");
-    expect(me.status).toBe(401);
+    expect(me.status).toBe(200);
+    expect(me.body.user).toBeNull();
     const count = (await db.query("select count(*) as c from web.sessions")).rows[0];
     expect(Number(count.c)).toBe(0);
   });
 
-  it("만료된 세션은 인증되지 않는다", async () => {
+  it("만료된 세션은 인증되지 않는다 (user:null)", async () => {
     await agent.post("/auth/login").send({ username: "semicolon", password: goodUser.password });
     await db.query("update web.sessions set expires_at = now() - interval '1 minute'");
     const me = await agent.get("/auth/me");
-    expect(me.status).toBe(401);
+    expect(me.status).toBe(200);
+    expect(me.body.user).toBeNull();
   });
 
-  it("쿠키 없이 /auth/me 는 401", async () => {
+  it("쿠키 없이 /auth/me 는 200 + user:null (비로그인은 오류가 아니다)", async () => {
     const res = await request(createApp({ db })).get("/auth/me");
-    expect(res.status).toBe(401);
+    expect(res.status).toBe(200);
+    expect(res.body.user).toBeNull();
   });
 });
