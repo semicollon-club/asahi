@@ -84,15 +84,14 @@ export function createAuthRouter(db: Db): Router {
     }
   });
 
+  // "지금 누구야?"는 비로그인도 정상 상태이므로 401 대신 200 + user:null 로 답한다.
+  // (401을 쓰면 페이지 로드마다 브라우저 콘솔에 빨간 에러가 찍힌다. 인증이 '필요한'
+  // 다른 라우트들은 계속 401이 맞다 — me 만 질의형이라 특수 취급.)
   router.get("/me", async (req, res, next) => {
     try {
       const token = (req.cookies as Record<string, string | undefined>)[SESSION_COOKIE];
       const user = token ? await getSessionUser(db, token) : null;
-      if (!user) {
-        res.status(401).json({ error: "로그인이 필요합니다" });
-        return;
-      }
-      res.json({ user });
+      res.json({ user: user ?? null });
     } catch (e) {
       next(e);
     }
