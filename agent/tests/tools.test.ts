@@ -814,37 +814,78 @@ describe("runtime_info", () => {
     expect(out).not.toMatch(/할 수 있어요/); // 거부 문구가 아니어야 한다
   });
 
-  it("runtime_info 는 워커의 커밋과 일치 여부를 보여준다", async () => {
+  // 2026-09-03: 봇 커밋과 워커 커밋의 SHA 동일성 비교를 걷어냈다. 두 값은 애초에 같은 갈래의
+  // 커밋이 아니다 — 봇은 배포 브랜치(production)의 커밋을 RAILWAY_GIT_COMMIT_SHA 로 보고하고,
+  // 워커는 자기 클론의 main HEAD 를 보고한다. main→production PR 병합은 production 에만 있는
+  // 머지 커밋을 만들고(2026-09-02 부터), asahi 서비스는 watch path(/agent/**)로 배포돼 봇 커밋이
+  // "브랜치 팁"이 아니라 "마지막으로 agent/ 를 바꾼 배포 커밋"에 머문다. 이 둘은 각각 독립적으로
+  // 등식을 깬다. 실제로 2026-09-02 이후에는 워커가 최신 main 이어도 항상 "갱신 필요"가 떴고,
+  // 그 오탐이 반복되면 진짜 갱신 실패를 알리는 decideMissingAlerts 의 신뢰까지 같이 깎는다.
+  // 대조할 수 없는 두 값을 대조하는 대신 사실만 보고한다.
+  it("커밋이 서로 달라도 갱신이 필요하다고 말하지 않는다", async () => {
     const c = await ctx({
       isOwner: true,
       isPrivate: true,
       runtime: {
         model: "m", sdkVersion: "s", deployTarget: "cloud", maxTurns: 30,
-        botCommit: "abc1234",
-        workers: [{ workerId: "semicolon-shared", commit: "abc1234", connectedAt: 1 }],
+        botCommit: "47ced9e7c3e6da66fa863d08b4499e74c9f63b94",
+        workers: [{ workerId: "semicolon-shared", commit: "ffa3ed6bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", connectedAt: 1 }],
+      },
+    });
+    const out = await runtimeInfoHandler(c);
+    expect(out).not.toContain("갱신");
+    expect(out).not.toContain("다름");
+    expect(out).not.toContain("일치");
+  });
+
+  it("봇 커밋과 워커 커밋을 사실 그대로 나란히 보고한다", async () => {
+    const c = await ctx({
+      isOwner: true,
+      isPrivate: true,
+      runtime: {
+        model: "m", sdkVersion: "s", deployTarget: "cloud", maxTurns: 30,
+        botCommit: "47ced9e7c3e6da66fa863d08b4499e74c9f63b94",
+        workers: [{ workerId: "semicolon-shared", commit: "ffa3ed6bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", connectedAt: 1 }],
       },
     });
     const out = await runtimeInfoHandler(c);
     expect(out).toContain("semicolon-shared");
-    expect(out).toContain("abc1234");
-    expect(out).toContain("일치");
+    expect(out).toContain("47ced9e");
+    expect(out).toContain("ffa3ed6");
   });
 
-  it("runtime_info 는 워커가 낡았으면 그렇게 말한다", async () => {
+  // 안내 한 줄이 없으면, 두 SHA 가 나란히 놓인 화면을 본 사람이 "다른데 왜 아무 말이 없지"
+  // 하고 스스로 대조하게 된다 — 오탐을 지우는 것만으로는 그 오해를 막지 못한다.
+  it("두 커밋이 함께 보일 때는 대조하지 않는 이유를 한 줄로 알린다", async () => {
     const c = await ctx({
       isOwner: true,
       isPrivate: true,
       runtime: {
         model: "m", sdkVersion: "s", deployTarget: "cloud", maxTurns: 30,
-        botCommit: "abc1234",
-        workers: [{ workerId: "semicolon-shared", commit: "999zzzz", connectedAt: 1 }],
+        botCommit: "47ced9e7c3e6da66fa863d08b4499e74c9f63b94",
+        workers: [{ workerId: "semicolon-shared", commit: "ffa3ed6bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", connectedAt: 1 }],
       },
     });
-    expect(await runtimeInfoHandler(c)).toContain("다름");
+    expect(await runtimeInfoHandler(c)).toContain("대조하지 않아요");
   });
 
-  it("봇 커밋을 모르면 비교하지 않는다(로컬 PM2)", async () => {
-    // 비교할 기준이 없는 것과 불일치는 다른 상태다. 전자를 후자로 보고하면 거짓 경보가 된다.
+  it("봇 브랜치를 알면 커밋 옆에 함께 보고한다", async () => {
+    // 두 커밋이 왜 다른지를 한 화면에서 설명하는 값이다 — 봇 쪽 SHA 가 어느 갈래의 것인지.
+    const c = await ctx({
+      isOwner: true,
+      isPrivate: true,
+      runtime: {
+        model: "m", sdkVersion: "s", deployTarget: "cloud", maxTurns: 30,
+        botCommit: "47ced9e7c3e6da66fa863d08b4499e74c9f63b94", botBranch: "production",
+        workers: [{ workerId: "semicolon-shared", commit: "ffa3ed6bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", connectedAt: 1 }],
+      },
+    });
+    expect(await runtimeInfoHandler(c)).toContain("47ced9e (production)");
+  });
+
+  it("봇 커밋을 모르면 대조 안내도 넣지 않는다(로컬 PM2)", async () => {
+    // 화면에 SHA 가 하나뿐이면 대조할 것이 없다 — 설명할 필요도 없는 자리에 안내를 넣으면
+    // 그것대로 잡음이다.
     const c = await ctx({
       isOwner: true,
       isPrivate: true,
@@ -855,17 +896,12 @@ describe("runtime_info", () => {
     });
     const out = await runtimeInfoHandler(c);
     expect(out).toContain("abc1234");
-    expect(out).not.toContain("다름");
-    expect(out).not.toContain("일치");
+    expect(out).not.toContain("대조하지 않아요");
   });
 
-  it("워커 커밋을 모르면 비교하지 않는다(옛 워커·git 읽기 실패)", async () => {
-    // 위 테스트와 대칭인 반대쪽 갈래: 이번엔 봇 커밋은 있고 워커 커밋만 없다. verdict() 는
-    // botCommit===undefined 와 workerCommit===undefined 를 OR 로 묶는데, 후자 쪽은 이 테스트가
-    // 생기기 전까지 아무 테스트도 지키지 않았다 — 그 갈래만 지워도 기존 테스트는 그대로 통과했다.
-    // Task 2 이전 코드로 도는 옛 워커나 git 읽기에 실패한 워커가 commit 을 안 실으면 이 경로를
-    // 타는데, 여기서 "모른다"를 "다르다"로 오판하면 거짓 경보가 되고 반복되면 진짜 불일치도
-    // 무시하게 된다(리뷰 지적).
+  it("워커 커밋을 모르면 알 수 없음으로 보고한다(옛 워커·git 읽기 실패)", async () => {
+    // 워커가 commit 을 안 실어 보내는 경로(Task 2 이전 워커, git 읽기 실패)다. 여기서도
+    // 대조할 두 값이 갖춰지지 않으므로 안내 줄은 나오지 않는다.
     const c = await ctx({
       isOwner: true,
       isPrivate: true,
@@ -877,8 +913,7 @@ describe("runtime_info", () => {
     });
     const out = await runtimeInfoHandler(c);
     expect(out).toContain("알 수 없음");
-    expect(out).not.toContain("다름");
-    expect(out).not.toContain("일치");
+    expect(out).not.toContain("대조하지 않아요");
   });
 });
 
