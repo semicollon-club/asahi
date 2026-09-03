@@ -30,8 +30,11 @@ export type RuntimeInfo = {
   sdkVersion: string;
   deployTarget: "local" | "cloud";
   maxTurns: number;
-  // Railway 가 주입하는 git 변수. 로컬 PM2 에는 없으므로 선택적이다 — 없으면 비교를 생략한다.
+  // Railway 가 주입하는 git 변수. 로컬 PM2 에는 없으므로 선택적이다 — 없으면 보고하지 않는다.
   botCommit?: string;
+  // 그 커밋이 어느 갈래의 것인지(RAILWAY_GIT_BRANCH). 워커 커밋과 나란히 놓였을 때 "왜 다른가"를
+  // 한 화면에서 설명하는 값이라, 커밋 옆에 붙여야 의미가 있다 — 없으면 커밋만 보고한다.
+  botBranch?: string;
   workers: Array<{ workerId: string; commit?: string; connectedAt: number }>;
 };
 
@@ -294,26 +297,50 @@ export async function dbQueryHandler(ctx: ToolCtx, args: { sql: string }): Promi
 // 함께 묶여 있던 db_schema/db_query 는 그대로 DM 전용이다: 그 둘은 DB 를 직접 읽지만 이
 // 도구는 모델명·SDK 버전·커밋·한도만 낸다. 노출(allowedToolsFor)과 실행(이 게이트)이 같은
 // 기준(isOwner)을 쓰므로 "도구는 보이는데 실행하면 거부"가 생기지 않는다.
+// 2026-09-03: 봇 커밋과 워커 커밋을 SHA 로 대조하던 판정(`봇과 일치` / `봇과 다름 — 워커 갱신
+// 필요`)을 걷어냈다. 두 값은 애초에 같은 갈래의 커밋이 아니라, 다르다는 사실만으로는 워커가
+// 낡았는지 알 수 없다. 두 가지가 각각 독립적으로 그 등식을 깬다.
+//
+// (1) 배포 브랜치가 갈렸다. 2026-09-02 부터 운영 반영이 `main → production` PR 병합이라,
+//     production 팁은 main 에 존재하지 않는 머지 커밋이다. 봇이 보고하는 RAILWAY_GIT_COMMIT_SHA
+//     는 그 머지 커밋이고, 워커는 자기 클론의 main HEAD 를 보고한다(deploy/update-worker.ps1 이
+//     origin/main 만 따라간다) — 두 값이 같아질 수 있는 경우가 없다.
+// (2) watch path 로 배포된다. asahi 서비스는 `/agent/**` 가 바뀔 때만 재배포되므로, 봇 커밋은
+//     "브랜치 팁"이 아니라 "마지막으로 agent/ 를 바꾼 배포 커밋"에 머문다. server/ 만 바뀐 배포가
+//     지나갈 때마다 봇 커밋은 그대로고 워커 커밋만 앞으로 간다.
+//
+// 그래서 2026-09-02 이후로는 워커가 최신이어도 이 도구가 항상 "워커 갱신 필요"를 냈다(실측:
+// 봇 47ced9e / 워커 ffa3ed6 — 두 커밋의 agent/ 트리 해시는 같았다). 사람을 매번 미니PC 점검으로
+// 몰고, 같은 문구를 몇 번 보면 진짜 갱신 실패도 무시하게 된다. 대조할 수 없는 두 값을 억지로
+// 대조하는 대신 사실만 보고하고, 왜 대조하지 않는지 한 줄로 밝힌다 — "워커가 실제로 낡았는가"를
+// 판정하려면 커밋 신원이 아니라 돌고 있는 코드를 견주는 다른 장치가 필요하고, 그건 별도 작업이다.
+// 워커가 아예 사라지는 쪽은 staleWorker.ts 의 decideMissingAlerts 가 그대로 지킨다.
 export async function runtimeInfoHandler(ctx: ToolCtx): Promise<string> {
   if (!ctx.isOwner) return OWNER_ONLY;
   const r = ctx.runtime;
   const short = (sha: string) => sha.slice(0, 7);
-  // botCommit 이 없으면(로컬 PM2) 판정 자체를 내지 않는다. "비교할 수 없음"을 "다름"으로
-  // 보고하면 거짓 경보가 되고, 그 경보를 몇 번 보면 진짜 불일치도 무시하게 된다.
-  const verdict = (workerCommit?: string): string => {
-    if (r.botCommit === undefined || workerCommit === undefined) return "";
-    return r.botCommit === workerCommit ? " (봇과 일치)" : " (봇과 다름 — 워커 갱신 필요)";
-  };
+  const botLine =
+    r.botCommit === undefined
+      ? "봇 커밋: 알 수 없음"
+      : `봇 커밋: ${short(r.botCommit)}${r.botBranch ? ` (${r.botBranch})` : ""}`;
   const workerLines =
     r.workers.length === 0
       ? ["워커: 붙어 있는 워커가 없어요."]
-      : r.workers.map((w) => `워커 ${w.workerId}: 커밋 ${w.commit ? short(w.commit) : "알 수 없음"}${verdict(w.commit)}`);
+      : r.workers.map((w) => `워커 ${w.workerId}: 커밋 ${w.commit ? short(w.commit) : "알 수 없음"}`);
+  // 안내 줄은 두 커밋이 실제로 한 화면에 같이 놓일 때만 낸다. 오탐 문구를 지우는 것만으로는
+  // 부족하다 — 다른 SHA 두 개가 나란히 있고 아무 말도 없으면, 보는 사람이 그 자리에서 스스로
+  // 대조하며 같은 오해를 다시 만든다. 반대로 화면에 SHA 가 하나뿐이면 설명할 대상 자체가 없다.
+  const bothShown = r.botCommit !== undefined && r.workers.some((w) => w.commit !== undefined);
+  const compareNote = bothShown
+    ? ["※ 봇은 배포 브랜치의 커밋을, 워커는 자기 클론의 커밋을 보고해요 — 서로 다른 갈래라 대조하지 않아요."]
+    : [];
   return [
     `모델(설정): ${r.model}`,
     `SDK: @anthropic-ai/claude-agent-sdk@${r.sdkVersion}`,
     `배포 대상: ${r.deployTarget}`,
-    `봇 커밋: ${r.botCommit ? short(r.botCommit) : "알 수 없음"}`,
+    botLine,
     ...workerLines,
+    ...compareNote,
     `한 응답 내 도구 반복 상한(maxTurns): ${r.maxTurns}`,
     `한도: 소유자는 무제한, 손님은 시간당 제한(유저별/전역).`,
   ].join("\n");

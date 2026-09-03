@@ -23,7 +23,7 @@ import { IntrospectRepo } from "./store/introspectRepo.js";
 import { AgentCore } from "./core/core.js";
 import { makeRunAgentTurn } from "./core/agent.js";
 import { DigestRunner, DIGEST_TOPICS, type DigestTopic } from "./core/digest.js";
-import { decideStaleAlerts, decideMissingAlerts, type StaleState, type SeenState } from "./core/staleWorker.js";
+import { decideMissingAlerts, type SeenState } from "./core/staleWorker.js";
 import { DiscordAdapter } from "./adapters/discord.js";
 
 // 비밀값(.env)은 리포 루트(agent/ 바깥, data/ 와 같은 위치)에서 읽는다.
@@ -170,14 +170,15 @@ async function main() {
     void digest.checkAndRun().catch((err) => console.error("[digest] 스케줄 확인 오류:", err));
   }, 60 * 1000);
 
-  // 워커가 낡은 채로 오래 있으면 소유자에게 알린다. 주기는 조각 B 의 자동 갱신 폴링(5분)과
-  // 맞춘다 — 그보다 자주 봐야 할 이유가 없다.
-  const staleState: StaleState = new Map();
-  // 붙어 있던 워커가 사라진 것도 같은 타이머에서 본다(2026-08-01). 낡음 판정은 "붙어 있는"
-  // 워커만 훑으므로 워커가 통째로 없어지면 조용한데, 실제로 그 상태로 13시간 반이 지나갔다.
+  // 붙어 있던 워커가 사라지면 소유자에게 알린다(2026-08-01: 그 상태로 13시간 반이 지나갔다).
+  // 주기는 조각 B 의 자동 갱신 폴링(5분)과 맞춘다 — 그보다 자주 봐야 할 이유가 없다.
+  //
+  // 2026-09-03: 같은 타이머에서 돌던 낡음 판정(decideStaleAlerts)은 제거됐다 — 봇 커밋과 워커
+  // 커밋이 서로 다른 갈래라 대조 자체가 성립하지 않았고, 그래서 배포마다 거짓 경보가 나갔다
+  // (사정은 core/staleWorker.ts 머리말). 이제 이 타이머가 보는 것은 부재 하나뿐이다.
   const seenState: SeenState = new Map();
   const staleTimer = setInterval(() => {
-    // FIX(최종 리뷰): decideStaleAlerts 자체가 던지면(예: workersInfo() 가 이 함수의 전제와
+    // FIX(최종 리뷰): decideMissingAlerts 자체가 던지면(예: workersInfo() 가 이 함수의 전제와
     // 어긋나는 값을 주는 경우) 그 예외는 setInterval 콜백 안이라 동기적으로 튀어 오르고, 아래
     // .catch() 는 findDmFor 이후의 프로미스 체인만 덮으므로 이 예외를 잡지 못한다 — 잡는 사람이
     // 없으면 uncaught exception 으로 24/7 봇 프로세스 전체가 죽는다. 그래서 이 콜백 전체를
@@ -186,13 +187,6 @@ async function main() {
       const now = Date.now();
       const info = hub.workersInfo();
       const alerts = [
-        ...decideStaleAlerts({
-          workers: info,
-          botCommit: process.env.RAILWAY_GIT_COMMIT_SHA,
-          now,
-          state: staleState,
-          thresholdMs: 15 * 60_000,
-        }),
         ...decideMissingAlerts({
           connected: info.map((w) => w.workerId),
           now,

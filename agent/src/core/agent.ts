@@ -324,7 +324,9 @@ export function makeRunAgentTurn(
   now: () => number = Date.now,
 ): TurnRunner {
   return async (req) => {
-    const runtime: RuntimeInfo = { model, sdkVersion: SDK_VERSION, deployTarget, maxTurns: 30, botCommit: process.env.RAILWAY_GIT_COMMIT_SHA, workers: hub?.workersInfo() ?? [] };
+    // botBranch: 봇 커밋이 어느 갈래의 것인지. 워커 커밋과 나란히 놓인 두 SHA 가 왜 다른지를
+    // runtime_info 가 한 화면에서 설명하게 해 준다 — Railway 밖(로컬 PM2)에서는 없다.
+    const runtime: RuntimeInfo = { model, sdkVersion: SDK_VERSION, deployTarget, maxTurns: 30, botCommit: process.env.RAILWAY_GIT_COMMIT_SHA, botBranch: process.env.RAILWAY_GIT_BRANCH, workers: hub?.workersInfo() ?? [] };
     const ctx: ToolCtx = buildToolCtx(repos, req.context, runtime, github, now);
 
     // Task 7: "어느 기계를, 그것이 있기는 한가"를 여기 한 곳에서만 정한다 — resolveTurnWorker 가
