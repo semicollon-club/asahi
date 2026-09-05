@@ -154,10 +154,21 @@ pm2 --version
 
 공유 워커는 상시 켜져 있으므로, 코드가 바뀔 때마다 사람이 매번 미니PC 앞에 앉아
 `git pull`·`npm ci`·재기동을 손으로 반복할 필요가 없다. `deploy/update-worker.ps1` 이
-5분마다 `origin/main` 을 확인해 새 커밋이 있으면 워커를 내리고, 갱신한 뒤, **직접 다시
+5분마다 `origin/production` 을 확인해 새 커밋이 있으면 워커를 내리고, 갱신한 뒤, **직접 다시
 띄운다.** 같은 회차에서 워커가 살아 있는지도 확인해 죽어 있으면 살린다 — 즉 이 스크립트가
 갱신자이자 감시자다. 리포 안에 있으므로 스크립트 자신도 `git pull` 로 함께 갱신된다. 아래는
 미니PC 한 대에 **한 번만** 하면 되는 등록 절차다.
+
+**워커는 봇과 같은 브랜치(`production`)를 따른다(2026-09-05).** 그전에는 `main` 을 따랐는데,
+main 은 부원이 PR 로 자유롭게 쌓는 통합 브랜치라 검증 전 코드가 공유 미니PC 에 먼저 깔렸고,
+봇(production 배포)과 워커가 서로 다른 커밋으로 도는 창이 구조적으로 열려 있었다. 같은
+브랜치를 따라야 "두 커밋이 다르다"가 곧 "다른 코드다"가 된다. **main 을 따르던 클론은
+손대지 않아도 된다** — 새 스크립트가 main 으로 먼저 도착한 뒤(옛 스크립트가 당겨 온다) 매
+회차 `origin/production` 을 보다가, 운영자가 production 에 병합해 그 커밋이 지금 HEAD 를 담는
+순간 워커를 내리고 `git checkout -B production origin/production` 으로 옮겨 탄 뒤 다시 띄운다.
+그때까지는 로그에 "브랜치 전환 대기" 한 줄만 남는다(회차마다 반복되지 않는다). 전환이 끝났는지는
+asahi 창에서 `git -C C:\asahi-worker branch --show-current` 가 `production` 인지, 로그에 "브랜치
+전환 완료" 가 있는지로 본다. 등록된 작업 정의는 그대로다 — 스크립트 경로가 같다.
 
 > **작업 스케줄러의 "작업이 실패한 경우 다시 시작" 은 이 용도로 쓸 수 없다(2026-08-01 실측).**
 > 그 설정은 작업이 **시작에** 실패했을 때를 위한 것이고, 프로그램이 실행돼서 **어떤 종료
@@ -257,7 +268,7 @@ WORKER_SENTINEL=C:\asahi-worker\update.flag
 ```powershell
 $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -File C:\asahi-worker\deploy\update-worker.ps1"
 $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(2) -RepetitionInterval (New-TimeSpan -Minutes 5)
-Register-ScheduledTask -TaskName "asahi-worker-update" -Action $action -Trigger $trigger -Description "5분마다 origin/main 을 확인해 새 커밋이 있으면 워커를 갱신한다"
+Register-ScheduledTask -TaskName "asahi-worker-update" -Action $action -Trigger $trigger -Description "5분마다 origin/production 을 확인해 새 커밋이 있으면 워커를 갱신한다"
 ```
 
 `-RepetitionDuration ([TimeSpan]::MaxValue)` 를 덧붙이는 옛 관용구("무기한 반복")는 쓰지
