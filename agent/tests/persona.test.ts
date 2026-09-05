@@ -674,7 +674,74 @@ describe("깃허브 발행 안내", () => {
         const tools = allowedToolsFor("allowed", isPrivate, isOwner, "local", { workerConnected: true, githubReady });
         expect(prompt.includes("publish_project")).toBe(tools.includes("mcp__asahi__publish_project"));
         expect(prompt.includes("create_pull_request")).toBe(tools.includes("mcp__asahi__create_pull_request"));
+        // 2단계(표준 절차)에서 더한 읽기 도구 둘도 같은 축이다.
+        expect(prompt.includes("list_repos")).toBe(tools.includes("mcp__asahi__list_repos"));
+        expect(prompt.includes("pr_review_comments")).toBe(tools.includes("mcp__asahi__pr_review_comments"));
+        expect(prompt.includes("pr_status")).toBe(tools.includes("mcp__asahi__pr_status"));
       }
+    }
+  });
+});
+
+// 2026-09-05 2단계 — 운영자가 실환경에서 clone → 브랜치 → 커밋 → push → main PR 흐름을 확인한 뒤,
+// 그 절차를 부원이 일일이 말하지 않아도 봇이 기본으로 따르게 해 달라고 했다. 안내가 단계로
+// 적혀 있어야 모델이 그 순서로 움직인다 — 도구 이름만 나열하면 순서는 매번 모델이 정한다.
+// 각 클레임은 실제 동작(커밋 규약·force push 금지·리뷰 반영 방식)과 일치해야 하므로 낱말을 고정한다.
+describe("깃허브 표준 작업 절차 안내(2단계)", () => {
+  const on = () => buildSystemPrompt({ role: "allowed", isPrivate: false, isOwner: false, workerConnected: true, githubReady: true });
+
+  it("절차를 번호 매긴 단계로 안내하고, 사용자가 말하지 않아도 기본으로 따르라고 한다", () => {
+    const p = on();
+    expect(p).toContain("표준 절차");
+    expect(p).toMatch(/1\. .*list_repos/);
+    expect(p).toMatch(/git switch -c/);
+    expect(p).toMatch(/git push -u origin/);
+    expect(p).toMatch(/\n\s*[67]\. .*create_pull_request/);
+    expect(p).toContain("일일이 말하지 않아도");
+  });
+
+  it("작업 전에 main 을 최신으로 맞추고 거기서 브랜치를 딴다", () => {
+    const p = on();
+    expect(p).toContain("git fetch origin");
+    expect(p).toContain("git pull --ff-only");
+  });
+
+  it("커밋 규약(Conventional Commits)과 PR 전 검증(테스트·타입체크·빌드)을 요구한다", () => {
+    const p = on();
+    expect(p).toContain("Conventional Commits");
+    expect(p).toMatch(/테스트.*타입체크.*빌드/);
+  });
+
+  it("force push 를 금하고, 리뷰 반영은 같은 브랜치에 새 커밋으로 하라고 한다", () => {
+    const p = on();
+    expect(p).toContain("force push");
+    expect(p).toContain("pr_review_comments");
+    expect(p).toMatch(/같은 .*브랜치/);
+  });
+
+  // PR 추적(B2): PR 을 낸 뒤의 CI 결과·병합은 봇이 그 채널로 알려주고, 물으면 pr_status 로 본다.
+  // 이 사실을 모르면 모델은 "깃허브에서 확인하세요" 라고만 답한다.
+  it("PR 을 낸 뒤 CI·병합 소식이 자동으로 오고 pr_status 로 확인할 수 있다고 안내한다", () => {
+    const p = on();
+    expect(p).toContain("pr_status");
+    expect(p).toMatch(/CI.*병합/);
+  });
+
+  it("main·production 직접 push·병합 금지와 git config 금지는 그대로 남는다(회귀 유지)", () => {
+    const p = on();
+    expect(p).toContain("main·production 브랜치에는 직접 push 하지도, 병합하지도 마세요");
+    expect(p).toContain("git config");
+    expect(p).toContain("git clone");
+  });
+
+  it("깃허브 설정이 없거나 워커가 없으면 절차 안내 자체가 없다(도구가 없는데 절차만 주지 않는다)", () => {
+    for (const ctx of [
+      { workerConnected: true, githubReady: false },
+      { workerConnected: false, githubReady: true },
+    ]) {
+      const p = buildSystemPrompt({ role: "allowed", isPrivate: false, isOwner: false, ...ctx });
+      expect(p).not.toContain("표준 절차");
+      expect(p).not.toContain("list_repos");
     }
   });
 });

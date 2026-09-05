@@ -13,6 +13,7 @@ import { MemoriesRepo } from "../src/store/memoriesRepo.js";
 import { TurnsRepo } from "../src/store/turnsRepo.js";
 import { AllowedDirsRepo } from "../src/store/allowedDirsRepo.js";
 import { ProjectsRepo } from "../src/store/projectsRepo.js";
+import { PullRequestsRepo } from "../src/store/pullRequestsRepo.js";
 import { ActionsRepo } from "../src/store/actionsRepo.js";
 import { IntrospectRepo } from "../src/store/introspectRepo.js";
 import { AgentCore, formatProgress } from "../src/core/core.js";
@@ -82,7 +83,7 @@ async function toolCtxWithRealWorker(o: { roots: string[]; allowed: string[] }):
     repos: {
       memories: new MemoriesRepo(db), users: new UsersRepo(db),
       allowedDirs: { list: async () => o.allowed } as unknown as AllowedDirsRepo,
-      introspect: new IntrospectRepo(db), projects: new ProjectsRepo(db),
+      introspect: new IntrospectRepo(db), projects: new ProjectsRepo(db), pullRequests: new PullRequestsRepo(db),
     },
     role: "owner", isPrivate: true, isOwner: true, userId: "owner", conversationId: 1,
     runtime: { model: "claude-opus-5", sdkVersion: "0.3.207", deployTarget: "local", maxTurns: 30, workers: [] },

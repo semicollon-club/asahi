@@ -10,8 +10,12 @@ import { assertReadOnlySql, formatQueryResult } from "./sqlGuard.js";
 import { REMOTE_TOOL_NAMES, remoteToolHandler, displayNameOf, noreplyEmailOf } from "./remoteTools.js";
 import { isPathWithinAny, normalizeDir } from "./paths.js";
 import type { ProjectsRepo, ProjectRow } from "../store/projectsRepo.js";
+import type { PullRequestsRepo, PullRequestRow } from "../store/pullRequestsRepo.js";
 import type { GithubAppConfig, FetchLike } from "../github/appToken.js";
 import { mintInstallationToken, createOrgRepo, createPullRequest } from "../github/appToken.js";
+import { listInstallationRepos, formatRepoList } from "../github/repos.js";
+import { fetchPrFeedback, formatPrFeedback, formatKst, type WorkflowRun } from "../github/pulls.js";
+import { mintTrackerToken, inspectPullRequest, planPrUpdate, type TrackerToken } from "./prTracker.js";
 import type { ShellTokenSource } from "../github/shellToken.js";
 import { normalizeRepoName, decideOwnership, publishSourceDir } from "./publish.js";
 import { scopeDirs } from "./workerSelect.js";
@@ -44,6 +48,9 @@ export type ToolCtx = {
   repos: {
     memories: MemoriesRepo; users: UsersRepo; allowedDirs: AllowedDirsRepo; introspect: IntrospectRepo;
     projects: ProjectsRepo;
+    // PR 추적 표(2026-09-05) — create_pull_request 가 기록하고 pr_status 가 읽는다. 폴러(core/prTracker.ts)는
+    // 이 ctx 를 거치지 않고 index.ts 가 같은 리포를 직접 준다.
+    pullRequests: PullRequestsRepo;
   };
   role: Role;
   isPrivate: boolean;
@@ -449,8 +456,13 @@ export function allowedToolsFor(
   // 그 축을 끄는 것을 잊은 새 무인 턴이 생겼을 때 조용히 열린다.
   // create_pull_request 도 같은 축이다(2026-09-05) — 워커 없이는 올릴 브랜치를 만들 방법이 없고, 사람이
   // 지켜보지 않는 턴에서 조직 리포에 PR 이 생기면 안 되는 것도 발행과 같다.
+  // list_repos·pr_review_comments(2단계, 같은 날 오후)도 같은 축이다. 둘은 읽기 전용이라 워커가 꼭
+  // 필요한 건 아니지만, 표준 절차(persona.ts)의 첫 단계와 리뷰 반영 단계를 받치는 도구라 절차가
+  // 열릴 때만 함께 열리는 것이 맞고, 축을 새로 만들면 그 축을 끄는 것을 잊은 무인 턴에서 조직의
+  // 비공개 저장소 이름·리뷰 내용이 조용히 열린다 — 위 문단이 발행에 대해 말한 것과 같은 함정이다.
+  // pr_status(PR 추적, 같은 날 B2)도 같은 축 — 아사히가 낸 PR 의 상태를 묻는 일은 절차의 일부다.
   const publishTools = workerConnected && githubReady
-    ? [t("publish_project"), t("restore_project"), t("create_pull_request")]
+    ? [t("publish_project"), t("restore_project"), t("create_pull_request"), t("list_repos"), t("pr_review_comments"), t("pr_status")]
     : [];
   const dirTools = workerConnected ? [t("allow_dir"), t("revoke_dir"), t("list_dirs")] : [];
   const webTools = webToolsEnabled ? WEB_TOOLS : [];
@@ -715,12 +727,191 @@ export async function createPullRequestHandler(
   // PR 의 깃허브 작성자는 App 이라 그것만으로는 누가 냈는지 안 보인다 — 본문 끝에 요청자를 남긴다.
   const requester = await displayNameOf(ctx);
   const body = `${(args.body ?? "").trim()}\n\n---\n아사히를 통해 ${requester} 님이 요청한 PR 입니다.`.trim();
+  let pr: { url: string; number: number };
   try {
-    const pr = await createPullRequest({ config: github, token, repoName: repo, head, base, title, body, fetchImpl: ctx.githubFetch });
-    return { ok: true, content: `PR 을 만들었어요: ${pr.url}` };
+    pr = await createPullRequest({ config: github, token, repoName: repo, head, base, title, body, fetchImpl: ctx.githubFetch });
   } catch (err) {
     return { ok: false, content: err instanceof Error ? err.message : String(err) };
   }
+  // 추적 표에 남긴다(PR 추적, 2026-09-05) — 폴러(core/prTracker.ts)가 이 행으로 CI 결과·병합을 이 대화에
+  // 알리고 운영자에게 새 PR 을 알린다. 기록은 부가 기능이다: PR 은 이미 깃허브에 생겼으므로 기록이
+  // 실패했다고 실패라고 말하면 사용자가 없는 문제(PR 이 안 만들어졌다)를 찾는다 — 성공은 그대로
+  // 전하고 알림이 안 올 수 있다는 것만 덧붙인다.
+  let tracked = true;
+  try {
+    await ctx.repos.pullRequests.record({
+      repo, number: pr.number, url: pr.url, head, base, title,
+      requesterUserId: ctx.userId, conversationId: ctx.conversationId, ts: ctx.now(),
+    });
+  } catch (err) {
+    tracked = false;
+    console.error(`[tools] PR 추적 기록 실패(${repo}#${pr.number}):`, err);
+  }
+  return {
+    ok: true,
+    content: tracked
+      ? `PR 을 만들었어요: ${pr.url}`
+      : `PR 을 만들었어요: ${pr.url}\n(추적 기록에는 실패해서 CI·병합 알림이 안 올 수 있어요.)`,
+  };
+}
+
+// ── 2단계(2026-09-05 오후): 표준 절차를 받치는 읽기 도구 둘 ──────────────────────
+// 운영자가 실환경에서 clone → 브랜치 → 커밋 → push → main PR 흐름을 확인한 뒤, 그 절차를 봇이 기본으로
+// 따르게 했다(persona.ts 의 PUBLISH_LINES). 절차의 첫 단계("저장소 이름을 확인한다")와 마지막 뒤의
+// 되돌아오는 단계("리뷰를 반영한다")에 도구가 없어 각각 하나씩 더한다. 둘 다 읽기만 하고, 노출
+// 조건(allowedToolsFor 의 publishTools)과 같은 확인을 여기서 되풀이한다 — 노출 판정과 실행 판정이
+// 갈리면 조용히 새는 자리다(resolveTarget·createPullRequestHandler 와 같은 이유).
+function githubReadGate(ctx: ToolCtx): { ok: false; content: string } | { ok: true; github: GithubAppConfig } {
+  if (!ctx.remote) return { ok: false, content: "지금은 워커가 연결돼 있지 않아 할 수 없어요." };
+  if (!ctx.github) return { ok: false, content: "깃허브 발행이 아직 설정되지 않았어요. 관리자에게 알려주세요." };
+  return { ok: true, github: ctx.github };
+}
+
+export async function listReposHandler(ctx: ToolCtx): Promise<{ ok: boolean; content: string }> {
+  const gate = githubReadGate(ctx);
+  if (!gate.ok) return gate;
+  // 목록에는 이름·설명·기본 브랜치·공개 여부만 필요하다 — metadata 읽기가 그 최소 권한이다. 범위는
+  // 설치 전체: 어느 리포를 볼지 미리 알 수 없어 좁힐 축이 없다(셸 토큰이 조직 전체인 것과 같은 이유,
+  // github/shellToken.ts). 셸 토큰과 달리 쓰기 권한이 전혀 없어, 이 토큰이 새도 이름을 보는 것
+  // 이상은 못 한다 — 그리고 워커로 가지도 않는다(봇 안에서만 쓰고 버린다).
+  let token: string;
+  try {
+    token = (await mintInstallationToken({
+      config: gate.github, repoNames: [], permissions: { metadata: "read" }, nowMs: ctx.now(), fetchImpl: ctx.githubFetch,
+    })).token;
+  } catch (err) {
+    return { ok: false, content: err instanceof Error ? err.message : String(err) };
+  }
+  try {
+    return { ok: true, content: formatRepoList(await listInstallationRepos({ token, fetchImpl: ctx.githubFetch })) };
+  } catch (err) {
+    return { ok: false, content: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+export async function prReviewCommentsHandler(
+  ctx: ToolCtx,
+  args: { repo: string; number: number },
+): Promise<{ ok: boolean; content: string }> {
+  const gate = githubReadGate(ctx);
+  if (!gate.ok) return gate;
+  const repo = (args.repo ?? "").trim();
+  if (!validRepoName(repo)) {
+    return { ok: false, content: "저장소 이름은 조직 안의 리포 이름 하나여야 해요(영문·숫자·점·하이픈·밑줄 — 조직 이름이나 주소는 빼고)." };
+  }
+  const number = args.number;
+  if (!Number.isInteger(number) || number <= 0) return { ok: false, content: "PR 번호는 1 이상의 정수여야 해요." };
+
+  // 대상 리포가 정해져 있으니 그 리포 하나·pull_requests 읽기로만 발급한다 — 좁힐 수 있으면 좁힌다
+  // (발행 설계 §3). 읽기만 하는 도구라 write 를 요청할 이유도 없다.
+  let token: string;
+  try {
+    token = (await mintInstallationToken({
+      config: gate.github, repoNames: [repo], permissions: { pull_requests: "read" }, nowMs: ctx.now(), fetchImpl: ctx.githubFetch,
+    })).token;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    const hint = /permission/i.test(msg)
+      ? " 깃허브 App(asahi-publisher)에 Pull requests 권한이 있어야 해요 — deploy/github-app-셋업.md 참고."
+      : "";
+    return { ok: false, content: msg + hint };
+  }
+  try {
+    const feedback = await fetchPrFeedback({ org: gate.github.org, repo, number, token, fetchImpl: ctx.githubFetch });
+    return { ok: true, content: formatPrFeedback(feedback) };
+  } catch (err) {
+    return { ok: false, content: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+// ── PR 추적(2026-09-05 B2): pr_status ───────────────────────────────────────────
+const PR_STATE_KO: Record<string, string> = { open: "열림", merged: "병합됨", closed: "닫힘" };
+const CI_STATE_KO: Record<string, string> = {
+  unknown: "CI 미확인", pending: "CI 진행 중", success: "CI 통과", failure: "CI 실패", none: "CI 없음",
+};
+
+export function formatPrStatusLine(row: PullRequestRow, o: { failures?: WorkflowRun[] } = {}): string {
+  const failed = o.failures && o.failures.length > 0 ? `(${o.failures.map((f) => f.name).join(", ")})` : "";
+  const checked = row.lastCheckedTs === null ? "아직 확인 전" : `마지막 확인 ${formatKst(row.lastCheckedTs)}`;
+  return `- ${row.repo}#${row.number} 「${row.title}」 — ${PR_STATE_KO[row.state] ?? row.state} · ${CI_STATE_KO[row.ciState] ?? row.ciState}${failed} · ${checked} · ${row.url}`;
+}
+
+// 인자 없이 부르면 표에서 목록을(요청자 자신의 것, 소유자는 전원), 리포·번호를 주면 그 PR 하나를 지금
+// 깃허브에서 확인해 표를 갱신하고 보여준다 — "CI 통과했어?" 에 폴링 간격을 기다리게 하지 않기 위해서다.
+// 판정은 폴러와 같은 함수(inspectPullRequest·planPrUpdate)다. 갱신 patch 는 notified 표시까지 그대로
+// 적용한다 — 이 도구의 답이 곧 알림이라, 폴러가 같은 소식을 채널에 한 번 더 내지 않는다(요청자가 아닌
+// 사람이 다른 채널에서 물은 경우 요청자가 그 소식을 못 듣는 것은 스펙 §4.4 가 받아들인 한계다).
+export async function prStatusHandler(
+  ctx: ToolCtx,
+  args: { repo?: string; number?: number },
+): Promise<{ ok: boolean; content: string }> {
+  const gate = githubReadGate(ctx);
+  if (!gate.ok) return gate;
+  const hasRepo = args.repo !== undefined;
+  const hasNumber = args.number !== undefined;
+
+  if (hasRepo || hasNumber) {
+    if (!hasRepo || !hasNumber) {
+      return { ok: false, content: "특정 PR 을 보려면 저장소 이름과 PR 번호를 함께 주세요. 목록을 보려면 둘 다 빼세요." };
+    }
+    const repo = String(args.repo).trim();
+    if (!validRepoName(repo)) {
+      return { ok: false, content: "저장소 이름은 조직 안의 리포 이름 하나여야 해요(영문·숫자·점·하이픈·밑줄 — 조직 이름이나 주소는 빼고)." };
+    }
+    const number = args.number as number;
+    if (!Number.isInteger(number) || number <= 0) return { ok: false, content: "PR 번호는 1 이상의 정수여야 해요." };
+
+    let row: PullRequestRow | null;
+    try {
+      row = await ctx.repos.pullRequests.byRepoNumber(repo, number);
+    } catch (err) {
+      return { ok: false, content: `PR 기록을 확인하는 중 오류가 발생했어요: ${err instanceof Error ? err.message : String(err)}` };
+    }
+    if (row === null) {
+      return {
+        ok: false,
+        content: `${repo}#${number} 은 아사히가 만든 PR 기록에 없어요 — 추적은 아사히가 create_pull_request 로 만든 PR 만 해요. 깃허브에서 직접 확인해 주세요.`,
+      };
+    }
+
+    let token: TrackerToken;
+    try {
+      token = await mintTrackerToken({ config: gate.github, repoNames: [repo], nowMs: ctx.now(), fetchImpl: ctx.githubFetch });
+    } catch (err) {
+      return { ok: false, content: err instanceof Error ? err.message : String(err) };
+    }
+    try {
+      const now = ctx.now();
+      const insp = await inspectPullRequest({
+        config: gate.github, repo, number, token, nowMs: now, createdTs: row.createdTs, fetchImpl: ctx.githubFetch,
+      });
+      const { patch } = planPrUpdate(row, insp, now);
+      await ctx.repos.pullRequests.update(row.id, patch);
+      const fresh = (await ctx.repos.pullRequests.byRepoNumber(repo, number)) ?? { ...row, ...patch, state: insp.state, ciState: insp.ci };
+      const note = token.ciAvailable ? [] : ["※ App 에 actions 권한이 없어 CI 결과는 확인하지 못했어요 — deploy/github-app-셋업.md"];
+      return { ok: true, content: [formatPrStatusLine(fresh, { failures: insp.failures }), ...note].join("\n") };
+    } catch (err) {
+      return { ok: false, content: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  let rows: PullRequestRow[];
+  try {
+    rows = ctx.isOwner ? await ctx.repos.pullRequests.listRecent(10) : await ctx.repos.pullRequests.listByRequester(ctx.userId, 10);
+  } catch (err) {
+    return { ok: false, content: `PR 기록을 확인하는 중 오류가 발생했어요: ${err instanceof Error ? err.message : String(err)}` };
+  }
+  if (rows.length === 0) {
+    return { ok: true, content: ctx.isOwner ? "아사히가 만든 PR 기록이 없어요." : "아사히로 만든 당신의 PR 이 아직 없어요." };
+  }
+  return {
+    ok: true,
+    content: [
+      `${ctx.isOwner ? "아사히가 만든 PR" : "당신의 PR"} ${rows.length}개(최근 순):`,
+      ...rows.map((r) => formatPrStatusLine(r)),
+      "※ 상태는 봇이 주기적으로 갱신해요(갓 낸 PR 은 2분마다). 특정 PR 을 지금 확인하려면 저장소 이름과 번호를 주세요.",
+    ].join("\n"),
+  };
 }
 
 // 도구 선언 목록을 buildTools 에서 분리해 내보낸다. 이 배열 자체가 "핸들러의 반환을 MCP 결과로
@@ -780,6 +971,30 @@ export function buildToolDefinitions(ctx: ToolCtx) {
         body: z.string().optional().describe("PR 설명(무엇을 왜 바꿨는지)"),
       },
       async (args) => { const r = await createPullRequestHandler(ctx, args); return textResult(r.content, !r.ok); },
+    ),
+    tool(
+      "list_repos",
+      "동아리 깃허브 조직(semicollon-club)의 저장소 목록을 보여줍니다 — 이름·설명·기본 브랜치·공개 여부. 사용자가 '저장소 뭐 있어?' 라고 묻거나 clone·PR 대상 이름이 불확실할 때 기억으로 답하지 말고 이 도구를 부르세요.",
+      {},
+      async () => { const r = await listReposHandler(ctx); return textResult(r.content, !r.ok); },
+    ),
+    tool(
+      "pr_review_comments",
+      "동아리 저장소 PR 에 달린 리뷰·코드 코멘트·대화 코멘트를 시간순으로 읽습니다. 리뷰를 반영하라는 요청을 받으면 먼저 이걸로 내용을 읽고, 같은 작업 브랜치에서 고쳐 새 커밋으로 push 하세요.",
+      {
+        repo: z.string().describe("조직 안의 저장소 이름(예: homepage). 조직 이름·주소는 빼세요"),
+        number: z.number().int().positive().describe("PR 번호"),
+      },
+      async (args) => { const r = await prReviewCommentsHandler(ctx, args); return textResult(r.content, !r.ok); },
+    ),
+    tool(
+      "pr_status",
+      "아사히가 만든 PR 의 상태(열림·병합됨·닫힘)와 CI 결과를 보여줍니다. 인자 없이 부르면 당신의 PR 목록(소유자는 전원)을 표에서 읽고, 저장소 이름과 PR 번호를 함께 주면 그 PR 하나를 지금 깃허브에서 확인합니다. 'CI 통과했어?'·'내 PR 어떻게 됐어?' 에 기억으로 답하지 말고 이 도구를 부르세요.",
+      {
+        repo: z.string().optional().describe("조직 안의 저장소 이름(PR 번호와 함께 줄 때만)"),
+        number: z.number().int().positive().optional().describe("PR 번호(저장소 이름과 함께 줄 때만)"),
+      },
+      async (args) => { const r = await prStatusHandler(ctx, args); return textResult(r.content, !r.ok); },
     ),
     tool(
       "manage_access",
