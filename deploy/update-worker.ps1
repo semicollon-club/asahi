@@ -14,6 +14,13 @@
 # 처럼 나온다). 저장한 뒤에는 파일 첫 3바이트가 EF BB BF 인지 확인할 것.
 param(
   [string]$RepoPath = "C:\asahi-worker",
+  # 워커가 따라갈 브랜치. 봇(Railway `asahi` 서비스)이 production 에서 배포되므로 워커도 같은
+  # 브랜치를 따른다(2026-09-05). 그전에는 main 을 따랐는데, main 은 부원이 PR 로 자유롭게 쌓는
+  # 통합 브랜치라 검증 전 코드가 공유 미니PC 에 먼저 깔렸고, 봇과 워커가 서로 다른 커밋으로 도는
+  # 창이 구조적으로 열려 있었다 — "두 커밋이 다르다"가 곧 "다른 코드다"여야 침묵 어긋남이 없다.
+  # 클론이 아직 다른 브랜치(옛 설정의 main)에 있으면 아래 본문이 스스로 전환한다 — 사람이 미니PC
+  # 에서 체크아웃할 필요가 없다.
+  [string]$Branch = "production",
   # 센티넬과 로그를 리포 안에 두는 이유: 윈도우 기본 ACL 에서 표준 계정은 C:\ 루트에 폴더는
   # 만들 수 있어도 "파일"은 만들 수 없다. 2026-08-01 첫 실전 갱신이 정확히 이걸로 막혔다 —
   # 센티넬 생성이 ACCESS DENIED 로 죽었고, 로그조차 같은 이유로 못 남아 작업 스케줄러 결과
@@ -47,6 +54,23 @@ function Write-Log([string]$Message) {
     # 때는 원인이 보이게 stdout 에라도 남긴다. 예약 실행에서는 버려지지만 없는 것보다 낫다.
     try { Write-Output $Message } catch {}
   }
+}
+
+function Write-LogOnce([string]$Message) {
+  # 같은 문장이 로그의 마지막 몇 줄 안에 이미 있으면 다시 쓰지 않는다 — "전환 대기"처럼 회차마다
+  # 반복될 수 있는 상태는 한 번만 남겨야 정작 중요한 줄이 묻히지 않는다(파일 머리말의 원칙).
+  # 마지막 한 줄만 보지 않는 이유: 워커가 죽어 있는 동안은 회차마다 "워커를 띄웁니다" 가 끼어들어
+  # 마지막 줄이 매번 바뀐다(2026-09-05 운영자 PC 하네스에서 실측 — 대기 줄이 회차마다 쌓였다).
+  # 다른 상태가 지나가고 한참 뒤 다시 이 상태가 되면 다시 한 번 남긴다. 타임스탬프는 Write-Log 의
+  # 형식대로 앞 20자다.
+  try {
+    if (Test-Path $LogPath) {
+      foreach ($line in @(Get-Content -Path $LogPath -Tail 5 -Encoding UTF8)) {
+        if ($line -and $line.Length -gt 20 -and $line.Substring(20) -eq $Message) { return }
+      }
+    }
+  } catch {}
+  Write-Log $Message
 }
 
 function Get-WorkerProcess {
@@ -89,52 +113,71 @@ try {
   # 이제는 이 5분 회차가 갱신·크래시·부팅 실패를 가리지 않고 전부 덮는다.
   if ((Get-WorkerProcess).Count -eq 0) { Start-Worker "감시 — 워커 프로세스가 없음" }
 
-  git fetch origin main | Out-Null
-  if ($LASTEXITCODE -ne 0) { Exit-Failure "git fetch origin main 실패 (종료 코드 $LASTEXITCODE)" }
+  git fetch origin $Branch | Out-Null
+  if ($LASTEXITCODE -ne 0) { Exit-Failure "git fetch origin $Branch 실패 (종료 코드 $LASTEXITCODE)" }
 
   # git rev-parse 는 없는 ref 를 줘도 던지지 않는다 — 인자 문자열을 그대로 stdout 에 찍고
-  # 종료 코드 128 로 끝낼 뿐이다. 확인하지 않으면 $local/$remote 가 "HEAD"·"origin/main" 같은
-  # 문자열 그대로 남고, 그 뒤 비교·조상 검사가 엉뚱하게 실패해 로그가 원인을 오진하게 된다.
+  # 종료 코드 128 로 끝낼 뿐이다. 확인하지 않으면 $local/$remote 가 "HEAD"·"origin/production"
+  # 같은 문자열 그대로 남고, 그 뒤 비교·조상 검사가 엉뚱하게 실패해 로그가 원인을 오진하게 된다.
   $local = (git rev-parse HEAD).Trim()
   if ($LASTEXITCODE -ne 0) { Exit-Failure "git rev-parse HEAD 실패 (종료 코드 $LASTEXITCODE, 출력: $local)" }
-  $remote = (git rev-parse origin/main).Trim()
-  if ($LASTEXITCODE -ne 0) { Exit-Failure "git rev-parse origin/main 실패 (종료 코드 $LASTEXITCODE, 출력: $remote)" }
-  if ($local -eq $remote) { exit 0 }
+  $remote = (git rev-parse "origin/$Branch").Trim()
+  if ($LASTEXITCODE -ne 0) { Exit-Failure "git rev-parse origin/$Branch 실패 (종료 코드 $LASTEXITCODE, 출력: $remote)" }
+
+  # HEAD 가 detached 면 어느 브랜치를 따라가는지 알 수 없다 — pull 도, 아래 전환 판정도 성립하지
+  # 않는다. -q 는 detached 에서 아무것도 찍지 않으므로 종료 코드와 빈 출력을 함께 걸러낸다(빈
+  # 값에 .Trim() 을 부르면 이 검사 대신 "예외 발생" 이라는 엉뚱한 로그가 남는다).
+  $currentRaw = git symbolic-ref -q --short HEAD
+  if ($LASTEXITCODE -ne 0 -or -not $currentRaw) {
+    Write-Log "실패: HEAD 가 detached 상태라 따라갈 브랜치가 없다. 사람이 리포 상태를 봐야 한다. 워커는 건드리지 않았다."
+    exit 1
+  }
+  $current = "$currentRaw".Trim()
+
+  # 클론이 다른 브랜치(옛 설정의 main)에 있으면 $Branch 로 옮겨 탄다. 전환은 아래 "새 커밋"과 같은
+  # 절차(센티넬 → 워커 종료 대기 → 적용 → 재기동)로 하되, checkout 이 pull 의 자리를 대신한다.
+  $switching = ($current -ne $Branch)
+  if (-not $switching -and $local -eq $remote) { exit 0 }
 
   $shortLocal = $local.Substring(0, 7)
   $shortRemote = $remote.Substring(0, 7)
 
-  # 로컬 HEAD 가 origin/main 의 조상이어야 --ff-only 가 성공한다. 이걸 워커를 건드리기(센티넬
+  # 로컬 HEAD 가 origin/$Branch 의 조상이어야 한다 — 갱신이면 --ff-only 가 성공하는 조건이고,
+  # 전환이면 "지금 도는 코드를 $Branch 가 이미 담고 있다"는 뜻이다. 이걸 워커를 건드리기(센티넬
   # 생성) 전에 확인하지 않으면, 분기된 리포에서 워커만 반복해서 내렸다 올리게 된다 — 5분마다,
   # 영원히, 매번 "갱신 완료"라는 거짓 로그와 함께. 사람이 풀어야 하는 상태이므로 여기서는
   # 워커를 아직 건드리지 않는다.
-  git merge-base --is-ancestor HEAD origin/main
+  #
+  # 전환 중에 조상이 아닌 것은 실패가 아니라 대기다. 이 스크립트 자신은 main 으로 먼저 도착하고
+  # (옛 스크립트가 main 을 당겨 온다) production 병합은 그 뒤에 오므로, 첫 회차에는
+  # origin/production 이 아직 지금 HEAD 를 담지 않은 것이 정상이다. 여기서 성급히 checkout 하면
+  # 스크립트가 옛 판(main 추적)으로 되돌아가고, 그 옛 판은 production 커밋을 main 으로
+  # fast-forward 하지 못해 영원히 멈춘다 — 그래서 production 이 따라올 때까지 아무것도 건드리지
+  # 않고 기다린다. 운영자가 병합하면 다음 회차에 저절로 넘어간다.
+  git merge-base --is-ancestor HEAD "origin/$Branch"
   if ($LASTEXITCODE -ne 0) {
-    Write-Log "실패: HEAD($shortLocal) 가 origin/main($shortRemote) 의 조상이 아니라 fast-forward 불가. 로컬 커밋이나 리베이스로 분기했을 수 있다 — 사람이 리포 상태를 봐야 한다. 워커는 건드리지 않았다."
+    if ($switching) {
+      Write-LogOnce "브랜치 전환 대기: 지금은 $current($shortLocal) 인데 origin/$Branch($shortRemote) 가 아직 이 커밋을 담지 않았다. 운영자가 $Branch 에 병합하면 다음 회차에 자동으로 전환한다. 워커는 건드리지 않았다."
+      exit 0
+    }
+    Write-Log "실패: HEAD($shortLocal) 가 origin/$Branch($shortRemote) 의 조상이 아니라 fast-forward 불가. 로컬 커밋이나 리베이스로 분기했을 수 있다 — 사람이 리포 상태를 봐야 한다. 워커는 건드리지 않았다."
     exit 1
   }
 
-  # 조상 검사는 커밋 그래프만 본다 — 아래 git pull --ff-only 가 실제로 성공하려면 두 조건이
-  # 더 필요한데, 둘 다 그래프와 무관해서 위 검사를 통과한 뒤에도 따로 깨질 수 있다. 여기서
-  # 걸러내지 않으면 센티넬을 만들고 워커를 내린 "다음"에야 pull 이 실패해, 이 스크립트가
-  # 막으려는 바로 그 증상(5분마다 워커를 헛되이 내렸다 올리는 무한 루프)을 그대로 재현한다.
-  #
-  # (1) HEAD 가 detached 면 git pull 이 어느 브랜치의 upstream 을 따라갈지 알 수 없다.
-  git symbolic-ref -q HEAD | Out-Null
-  if ($LASTEXITCODE -ne 0) {
-    Write-Log "실패: HEAD 가 detached 상태라 fast-forward pull 이 따라갈 브랜치가 없다. 사람이 리포 상태를 봐야 한다. 워커는 건드리지 않았다."
-    exit 1
-  }
-  # (2) 추적 파일에 커밋 안 된 변경이 있으면, 그 변경이 들어오는 커밋의 변경분과 겹칠 때
-  # 커밋 그래프는 fast-forward 가 맞아도 작업 트리에 적용하는 단계(체크아웃)가 "로컬 변경을
-  # 덮어쓰게 된다"며 거부한다.
+  # 조상 검사는 커밋 그래프만 본다 — 실제 pull·checkout 이 성공하려면 조건이 하나 더 필요한데,
+  # 그래프와 무관해서 위 검사를 통과한 뒤에도 따로 깨질 수 있다. 여기서 걸러내지 않으면 센티넬을
+  # 만들고 워커를 내린 "다음"에야 실패해, 이 스크립트가 막으려는 바로 그 증상(5분마다 워커를
+  # 헛되이 내렸다 올리는 무한 루프)을 그대로 재현한다: 추적 파일에 커밋 안 된 변경이 있으면, 그
+  # 변경이 들어오는 커밋의 변경분과 겹칠 때 커밋 그래프는 맞아도 작업 트리에 적용하는 단계가
+  # "로컬 변경을 덮어쓰게 된다"며 거부한다.
   git diff --quiet HEAD
   if ($LASTEXITCODE -ne 0) {
-    Write-Log "실패: 추적 파일에 커밋 안 된 변경이 있어 fast-forward pull 이 덮어쓸 수 있다. 사람이 리포 상태를 봐야 한다. 워커는 건드리지 않았다."
+    Write-Log "실패: 추적 파일에 커밋 안 된 변경이 있어 pull·checkout 이 덮어쓸 수 있다. 사람이 리포 상태를 봐야 한다. 워커는 건드리지 않았다."
     exit 1
   }
 
-  Write-Log "새 커밋 발견: $shortLocal -> $shortRemote"
+  if ($switching) { Write-Log "추적 브랜치 전환: $current($shortLocal) -> $Branch($shortRemote)" }
+  else { Write-Log "새 커밋 발견: $shortLocal -> $shortRemote" }
 
   # 워커에게 "끝나면 나가라"고 알린다. 언제 나갈지는 워커가 정한다.
   New-Item -ItemType File -Path $Sentinel -Force | Out-Null
@@ -162,8 +205,17 @@ try {
   Write-Log "워커 프로세스 종료 확인(node.exe/$RepoPath 매칭 0건)."
 
   $lockBefore = (Get-FileHash "$RepoPath\agent\package-lock.json").Hash
-  git pull --ff-only
-  if ($LASTEXITCODE -ne 0) { Exit-Failure "git pull --ff-only 실패 (종료 코드 $LASTEXITCODE)" }
+  if ($switching) {
+    # -B: 로컬에 같은 이름의 브랜치가 있든 없든 origin/$Branch 를 가리키게 만들고, 시작점이 원격
+    # 추적 브랜치라 upstream 도 거기로 잡힌다 — 다음 회차부터의 git pull --ff-only 가 그 upstream 을
+    # 따라간다. 옛 브랜치(main)는 지우지 않고 그대로 둔다 — 지울 이유가 없고, 지우다 실패하면 그
+    # 실패가 전환 자체를 가린다.
+    git checkout -B $Branch "origin/$Branch"
+    if ($LASTEXITCODE -ne 0) { Exit-Failure "git checkout -B $Branch origin/$Branch 실패 (종료 코드 $LASTEXITCODE)" }
+  } else {
+    git pull --ff-only
+    if ($LASTEXITCODE -ne 0) { Exit-Failure "git pull --ff-only 실패 (종료 코드 $LASTEXITCODE)" }
+  }
   $lockAfter = (Get-FileHash "$RepoPath\agent\package-lock.json").Hash
 
   # npm ci 는 잠금 파일이 바뀐 커밋에만 돌린다. 대부분의 커밋은 의존성을 건드리지 않는데,
@@ -180,7 +232,8 @@ try {
   # 센티넬을 먼저 지운다 — 남아 있으면 방금 띄운 워커가 15초 뒤 그것을 보고 또 스스로 나간다.
   Remove-Item -Path $Sentinel -Force -ErrorAction SilentlyContinue
   Start-Worker "갱신 완료 후"
-  Write-Log "갱신 완료: $shortLocal -> $shortRemote."
+  if ($switching) { Write-Log "브랜치 전환 완료: 이제 $Branch($shortRemote) 를 따른다." }
+  else { Write-Log "갱신 완료: $shortLocal -> $shortRemote." }
   exit 0
 } catch {
   Exit-Failure "예외 발생: $($_.Exception.Message)"
