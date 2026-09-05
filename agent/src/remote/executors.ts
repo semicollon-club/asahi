@@ -16,6 +16,7 @@ import {
 import { pathFlavorOf, isPathWithinAny } from "../core/paths.js";
 import { parsePm2List, renderProcList, procNameFor, parseProcName, type ProcInfo } from "./proc.js";
 import { isDiscordCdnUrl } from "../core/attachments.js";
+import { FILE_NAME_HEADER, FILE_RETURN_MAX_BYTES } from "../core/fileReturn.js";
 import { defaultRunGit, type RunGit } from "./gitCommit.js";
 import { runPublish, runRestore } from "./gitPublish.js";
 import { shellGitEnv, shellGitOf } from "./gitEnv.js";
@@ -35,6 +36,24 @@ const SH_DEFAULT_TIMEOUT_MS = 120_000;
 // 같은 문제(디스코드 CDN 다운로드)를 10초 AbortController 로 풀어 뒀으므로 그 방식을 그대로
 // 따른다 — 두 곳이 다른 타임아웃을 쓰면 왜 다른지 설명할 이유가 없다.
 const DEFAULT_FILE_FETCH_TIMEOUT_MS = 10_000;
+// send_file 의 업로드 타임아웃. file_fetch 보다 긴 이유는 방향이다 — 내려받기는 디스코드 CDN 에서 오지만
+// 올리기는 미니PC 의 가정용 회선 업링크로 8MB 까지 나간다. 허브의 120초 호출 타임아웃(hub.ts) 안에서
+// 끝나야 하므로 그 절반이다.
+const DEFAULT_SEND_FILE_TIMEOUT_MS = 60_000;
+
+// send_file 이 봇에게서 받는 업로드 인자(core/remoteTools.ts 가 주입). 모델은 이 값을 정하지 않는다 —
+// 봇이 덮어쓴다. 형태가 어긋나면 "토큰 없음"으로 본다.
+function uploadTokenOf(v: unknown): string | undefined {
+  if (typeof v !== "object" || v === null) return undefined;
+  const t = (v as Record<string, unknown>).token;
+  return typeof t === "string" && t.length > 0 ? t : undefined;
+}
+
+function fmtBytes(n: number): string {
+  if (n >= 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(n % (1024 * 1024) === 0 ? 0 : 1)}MB`;
+  if (n >= 1024) return `${Math.round(n / 1024)}KB`;
+  return `${n}B`;
+}
 // sh_exec 는 "resolve 를 정확히 한 번, 항상, 유한한 시간 안에" 를 보장해야 한다. 그 보장을
 // 3단계로 나눠 각각 유예 시간을 둔다 — close 이벤트가 오면 그 즉시 남은 단계를 모두 건너뛰고
 // resolve 하므로, 정상적으로 죽는 프로세스는 아래 두 상수를 전혀 기다리지 않는다. 이 값들은
@@ -418,6 +437,14 @@ export function makeExecutors(
     // git_publish·git_restore 가 쓰는 주입 지점. runPm2 와 같은 이유로 열어 둔다 — 테스트가
     // 실제 git 프로세스를 띄우지 않고 명령 목록과 실패 경로를 검증한다.
     runGit?: RunGit;
+    // send_file(파일 반환, 2026-09-05)이 파일을 올릴 봇의 POST /files 주소. worker.ts 가 HUB_URL 에서
+    // 유도해(core/fileReturn.ts 의 fileReturnUrlOf) 넘긴다 — 봇이 호출마다 실어 보내는 값이 아니다(모델이
+    // 정할 여지를 두지 않는다). 없으면 send_file 은 그 사실을 말하고 실패한다.
+    fileReturnUrl?: string;
+    // 업로드 타임아웃·상한 주입(테스트용). 상한 기본값은 봇의 /files 와 같은 FILE_RETURN_MAX_BYTES 다 —
+    // 워커가 먼저 거르면 8MB 를 다 올리고서야 413 을 받는 낭비가 없다.
+    sendFileTimeoutMs?: number;
+    sendFileMaxBytes?: number;
   } = {},
 ): Executors {
   // proc_start 가 회원 명령을 적을 스크립트 파일 위치(DEFAULT_SCRIPT_DIR·writeStartScript 선언부
@@ -427,6 +454,10 @@ export function makeExecutors(
   // file_fetch(아래)의 타임아웃. 테스트가 실제로 10초를 기다리지 않고도 타임아웃 경로를
   // 재현할 수 있도록 주입 지점을 열어 둔다 — scriptDir 과 같은 이유.
   const fileFetchTimeoutMs = opts.fileFetchTimeoutMs ?? DEFAULT_FILE_FETCH_TIMEOUT_MS;
+  // send_file(아래)의 업로드 주소·타임아웃·상한. 주소가 없으면 도구는 그 사실을 말하고 실패한다.
+  const fileReturnUrl = opts.fileReturnUrl;
+  const sendFileTimeoutMs = opts.sendFileTimeoutMs ?? DEFAULT_SEND_FILE_TIMEOUT_MS;
+  const sendFileMaxBytes = opts.sendFileMaxBytes ?? FILE_RETURN_MAX_BYTES;
 
   // Finding 3(Minor, 후속 리뷰): DEFAULT_SCRIPT_DIR 선언부의 "회원 폴더(roots) 밖에 둔다"는
   // 지금까지 강제되지 않는 주석일 뿐이었다 — roots(WORKER_ROOTS)에 언젠가 사용자 프로필 폴더가
@@ -855,6 +886,65 @@ export function makeExecutors(
         return { ok: true, content: g.path };
       } catch (err) {
         return { ok: false, content: `받아오지 못했어요: ${String(err)}` };
+      }
+    },
+
+    // 파일 반환(풀 하네스 설계 §8, 0단계 0.3). file_fetch 의 반대 방향 — 워커 디스크의 파일 하나를 봇의
+    // POST /files 로 올리고, 봇이 그 대화 채널에 첨부로 보낸다. 모델이 부르는 도구다(REMOTE_TOOL_NAMES).
+    // 모델이 정하는 것은 path 하나뿐이다: 업로드 주소는 이 워커의 설정(fileReturnUrl, HUB_URL 에서 유도),
+    // 인증 토큰은 봇이 호출마다 주입한 args.upload.token(core/remoteTools.ts — sh_exec 의 git 과 같은
+    // 자리)이다. 토큰은 이 호출 동안 메모리에만 있고 어떤 출력 문구에도 섞지 않는다.
+    async send_file(args) {
+      const g = gate(args.path);
+      if (!g.ok) return g.res;
+      if (!fileReturnUrl) {
+        return { ok: false, content: "이 워커는 업로드 주소를 몰라요(HUB_URL 에서 유도하지 못했어요) — 관리자에게 알려주세요." };
+      }
+      const token = uploadTokenOf(args.upload);
+      if (!token) {
+        return { ok: false, content: "봇이 업로드 토큰을 주지 않아 파일을 보낼 수 없어요(봇이 옛 버전이거나 파일 반환이 꺼져 있어요)." };
+      }
+      let size: number;
+      try {
+        const st = await fs.stat(g.path);
+        if (st.isDirectory()) return { ok: false, content: "폴더는 보낼 수 없어요 — 파일 하나의 경로를 주세요." };
+        size = st.size;
+      } catch {
+        return { ok: false, content: `파일이 없어요: ${g.path}` };
+      }
+      if (size > sendFileMaxBytes) {
+        return { ok: false, content: `파일이 디스코드 첨부 상한(${fmtBytes(sendFileMaxBytes)})을 넘어요 — ${fmtBytes(size)}. 줄이거나 나눠서 보내야 해요.` };
+      }
+      const name = path.basename(g.path);
+      try {
+        const bytes = await fs.readFile(g.path);
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), sendFileTimeoutMs);
+        let res: Response;
+        try {
+          res = await (opts.fetchImpl ?? fetch)(fileReturnUrl, {
+            method: "POST",
+            headers: {
+              authorization: `Bearer ${token}`,
+              [FILE_NAME_HEADER]: encodeURIComponent(name),
+              "content-type": "application/octet-stream",
+            },
+            body: bytes,
+            signal: ctrl.signal,
+          });
+        } finally {
+          clearTimeout(timer);
+        }
+        if (res.status === 413) {
+          return { ok: false, content: `봇이 파일을 거절했어요 — 디스코드 첨부 상한(${fmtBytes(sendFileMaxBytes)})을 넘어요.` };
+        }
+        if (res.status === 401) {
+          return { ok: false, content: "봇이 업로드 토큰을 거부했어요(만료됐을 수 있어요) — 한 번 더 시도해 보세요." };
+        }
+        if (!res.ok) return { ok: false, content: `보내지 못했어요(HTTP ${res.status}).` };
+        return { ok: true, content: `${name}(${fmtBytes(size)})을 디스코드에 첨부로 보냈어요.` };
+      } catch (err) {
+        return { ok: false, content: `보내지 못했어요: ${String(err)}` };
       }
     },
 

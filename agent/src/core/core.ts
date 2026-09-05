@@ -511,7 +511,8 @@ export class AgentCore {
         }
       }
 
-      const context: TurnContext = { role, isPrivate: conv.isPrivate, isOwner, userId, conversationId: conv.id };
+      // channelRef(2026-09-05, 파일 반환): send_file 의 작업 토큰이 첨부를 보낼 채널 — 이 대화의 디스코드 채널이다.
+      const context: TurnContext = { role, isPrivate: conv.isPrivate, isOwner, userId, conversationId: conv.id, channelRef: conv.discordChannelId };
       // Task 7: 능력 안내는 "지금 이 턴에 워커가 실제로 연결돼 있는가"로 갈린다 — agent.ts 의
       // resolveTurnWorker 와 완전히 같은 판정(위치 기반 선택 → registry 로 workerId 조회 → hub
       // 연결 확인)을 여기서도 계산해 페르소나에 싣는다. 예전(shouldConnectWorker)엔 hub.isConnected

@@ -1682,3 +1682,32 @@ describe("pr_status 핸들러", () => {
     expect(seen).toHaveLength(0);
   });
 });
+
+// 파일 반환(2026-09-05, 풀 하네스 0단계): send_file 은 원격 도구 12개 중 하나라 노출 축이 fs_*/sh_exec 와
+// 정확히 같다(REMOTE_TOOL_NAMES 를 통째로 스플라이스) — 워커가 붙은 턴이면 네 신원 모두 받고, 아니면 아무도
+// 못 받는다. 여기서 따로 고정하는 이유는 persona.ts 의 안내와 이 노출이 같은 축을 봐야 하기 때문이다.
+describe("allowedToolsFor / allowedToolDefinitions — send_file 노출", () => {
+  const SF = "mcp__asahi__send_file";
+
+  it("워커가 연결되면 네 신원 모두 send_file 을 받는다", () => {
+    expect(allowedToolsFor("owner", true, true, "local", { workerConnected: true })).toContain(SF);
+    expect(allowedToolsFor("owner", false, true, "local", { workerConnected: true })).toContain(SF);
+    expect(allowedToolsFor("allowed", true, false, "local", { workerConnected: true })).toContain(SF);
+    expect(allowedToolsFor("allowed", false, false, "local", { workerConnected: true })).toContain(SF);
+  });
+
+  it("워커가 없으면 아무도 받지 않는다", () => {
+    expect(allowedToolsFor("owner", true, true, "cloud", { workerConnected: false })).not.toContain(SF);
+    expect(allowedToolsFor("allowed", false, false, "cloud")).not.toContain(SF);
+  });
+
+  it("도구 정의에 path 하나만 열려 있다 — 토큰·주소는 모델이 정하는 인자가 아니다", async () => {
+    const c = await ctx({ remote: {} });
+    const allowed = allowedToolsFor("allowed", true, false, "local", { workerConnected: true, webToolsEnabled: false });
+    const defs = allowedToolDefinitions(c, allowed);
+    const def = defs.find((d) => d.name === "send_file");
+    expect(def).toBeDefined();
+    expect(def!.description).toContain("첨부");
+    expect(def!.description).toMatch(/8\s?MB/);
+  });
+});

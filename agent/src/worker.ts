@@ -6,6 +6,7 @@ import { makeExecutors, type Executors } from "./remote/executors.js";
 import { startWorkerClient, type ClientSocket } from "./remote/workerClient.js";
 import { readCommit, defaultRunGit } from "./remote/gitCommit.js";
 import { planShutdown } from "./remote/workerShutdown.js";
+import { fileReturnUrlOf } from "./core/fileReturn.js";
 
 // 로컬 워커(1단계 얇은 워커): 디스코드에도 DB에도 붙지 않고, Railway 허브로 아웃바운드
 // WebSocket 을 열어 도구 호출만 받아 실행한다. 판단·기억·세션은 전부 허브(봇) 쪽에 있다.
@@ -51,7 +52,12 @@ function trackInFlight(executors: Executors): { wrapped: Executors; idle: () => 
 async function main() {
   try {
     const config = loadWorkerConfig();
-    const { wrapped: executors, idle } = trackInFlight(makeExecutors(config.roots));
+    // 파일 반환(2026-09-05): send_file 이 올릴 봇의 POST /files 주소는 HUB_URL 에서 유도한다 — 허브와 같은 http
+    // 서버의 다른 경로라 설정을 하나 더 두지 않는다(core/fileReturn.ts). 유도가 안 되면 워커는 그대로 뜨고
+    // send_file 만 그 사실을 말하며 실패한다.
+    const fileReturnUrl = fileReturnUrlOf(config.hubUrl) ?? undefined;
+    if (fileReturnUrl === undefined) console.warn(`[worker] HUB_URL 에서 업로드 주소를 유도하지 못했습니다 — send_file 을 쓸 수 없습니다: ${config.hubUrl}`);
+    const { wrapped: executors, idle } = trackInFlight(makeExecutors(config.roots, { fileReturnUrl }));
     // 기동 시 한 번만 읽는다 — 워커는 갱신될 때 재시작되므로 도는 동안 커밋이 바뀌지 않는다.
     const commit = await readCommit(defaultRunGit);
 

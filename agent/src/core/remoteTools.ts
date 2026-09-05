@@ -45,8 +45,10 @@ export async function shellGitArgs(ctx: ToolCtx): Promise<ShellGit> {
 // 이름을 달리 지은 이유: 내장 도구와 이름이 겹치면 어느 쪽이 도는지 알 수 없다.
 // proc_* 넷은 이름 목록을 여기서 다시 적지 않고 proc.ts 의 것을 그대로 편다 — 목록이 두 곳에
 // 있으면 한쪽만 늘어나는 날이 오고, 그때 "게이트를 안 타는 도구"가 조용히 생긴다.
+// send_file(파일 반환, 2026-09-05): path 인자가 있어 fs_read 와 같은 1차 경로 필터를 그대로 탄다 — 허용
+// 폴더 밖 파일은 워커에 가기 전에 여기서 거절된다. 업로드 토큰 주입은 아래 remoteToolHandler 끝부분.
 export const REMOTE_TOOL_NAMES = [
-  "fs_read", "fs_write", "fs_edit", "fs_glob", "fs_grep", "fs_tree", "sh_exec",
+  "fs_read", "fs_write", "fs_edit", "fs_glob", "fs_grep", "fs_tree", "sh_exec", "send_file",
   ...PROC_TOOL_NAMES,
 ] as const;
 
@@ -363,6 +365,20 @@ export async function remoteToolHandler(
   // sh_exec 의 git 자격증명·신원은 경로 검사와 무관한 별도의 주입이다(위 shellGitArgs). 모델이 git
   // 키를 끼워 보내도 여기서 덮어쓴다 — 워커가 임의 토큰·임의 신원을 받는 표면을 만들지 않는다.
   if (tool === "sh_exec") args = { ...args, git: await shellGitArgs(ctx) };
+
+  // 파일 반환(2026-09-05, 풀 하네스 0단계): send_file 의 업로드 토큰도 같은 종류의 주입이다. 토큰은 이
+  // 부원·이 대화·이 대화의 채널로 발급되고(core/jobToken.ts), 봇의 POST /files 는 오직 그 토큰 안의
+  // 채널로만 첨부를 보낸다 — 모델이 upload 를 끼워 보내도 덮어쓰므로 다른 채널로 보내는 표면이 없다.
+  // 발급기나 채널이 없는 턴(배선 안 된 호출측)은 워커까지 보내 401 을 받게 두지 않고 여기서 거부한다 —
+  // 그 문구가 "봇이 토큰을 거부했다"(일시 오류처럼 읽힌다)가 아니라 "준비되지 않았다"여야 사람이 맞는 곳을
+  // 본다.
+  if (tool === "send_file") {
+    if (!ctx.jobTokens || ctx.channelRef === undefined) {
+      return deny("이 대화에서는 파일 반환이 준비되지 않아 디스코드로 파일을 보낼 수 없어요. 관리자에게 알려주세요.");
+    }
+    const token = ctx.jobTokens.mint({ userId: ctx.userId, conversationId: ctx.conversationId, channelRef: ctx.channelRef });
+    args = { ...args, upload: { token } };
+  }
 
   let r: { ok: boolean; content: string };
   try {

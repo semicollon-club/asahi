@@ -40,13 +40,15 @@ const ctxWith = (
 const contentOf = async (p: Promise<{ content: string; ok: boolean }>): Promise<string> => (await p).content;
 
 describe("원격 도구", () => {
-  it("도구 이름 11개를 고정으로 노출한다", () => {
+  it("도구 이름 12개를 고정으로 노출한다", () => {
     // Task 4: fs_tree 추가 — 폴더 구조 전용 조회 도구.
     // proc_* 넷은 PROC_TOOL_NAMES(proc.ts)를 펴서 들어온다 — 이 목록이 늘어난다는 건 게이트를
     // 타야 할 도구가 늘었다는 뜻이므로, 개수 자체를 여기서 고정해 조용한 추가를 막는다.
+    // 파일 반환(2026-09-05): send_file 추가 — path 인자가 있어 경로 도구와 같은 1차 필터를 타고,
+    // 업로드 토큰은 아래 "send_file 의 업로드 토큰 주입" describe 대로 봇이 끼운다.
     expect([...REMOTE_TOOL_NAMES].sort()).toEqual([
       "fs_edit", "fs_glob", "fs_grep", "fs_read", "fs_tree", "fs_write",
-      "proc_list", "proc_logs", "proc_start", "proc_stop", "sh_exec",
+      "proc_list", "proc_logs", "proc_start", "proc_stop", "send_file", "sh_exec",
     ]);
   });
 
@@ -1056,5 +1058,73 @@ describe("sh_exec 의 git 자격증명 주입", () => {
     );
     await remoteToolHandler(ctx, "fs_read", { path: "/w/a" });
     expect(seen[0].git).toBeUndefined();
+  });
+});
+
+// 파일 반환(2026-09-05, 풀 하네스 0단계 0.3): send_file 은 워커가 봇의 POST /files 로 파일을 올리는
+// 도구다. 그 요청을 인증하는 작업 토큰(core/jobToken.ts)은 sh_exec 의 git 토큰과 같은 자리에서 봇이
+// 주입한다 — 모델은 토큰을 보지도 정하지도 못하고, 토큰이 가리키는 채널(이 대화)로만 첨부가 간다.
+describe("send_file 의 업로드 토큰 주입", () => {
+  const seenArgs = () => {
+    const seen: Array<Record<string, unknown>> = [];
+    const call = async (_tool: string, args: Record<string, unknown>) => { seen.push(args); return { ok: true, content: "보냈어요" }; };
+    return { seen, call };
+  };
+  const minter = () => {
+    const minted: Array<Record<string, unknown>> = [];
+    return { minted, jobTokens: { mint: (c: Record<string, unknown>) => { minted.push(c); return `tok-${minted.length}`; } } };
+  };
+
+  it("이 부원·이 대화·이 채널로 토큰을 발급해 upload.token 으로 싣는다(path 는 그대로)", async () => {
+    const { seen, call } = seenArgs();
+    const { minted, jobTokens } = minter();
+    const ctx = ctxWith({ call }, {
+      userId: "u1", conversationId: 42, channelRef: "chan-42", jobTokens,
+      repos: { allowedDirs: { list: async () => ["/w"] } },
+    });
+    const r = await remoteToolHandler(ctx, "send_file", { path: "/w/out/그림.png" });
+    expect(r).toEqual({ content: "보냈어요", ok: true });
+    expect(minted).toEqual([{ userId: "u1", conversationId: 42, channelRef: "chan-42" }]);
+    expect(seen[0]).toEqual({ path: "/w/out/그림.png", upload: { token: "tok-1" } });
+  });
+
+  it("경로 도구와 같은 1차 필터를 탄다 — 허용 폴더 밖이면 토큰을 발급하지도 워커를 부르지도 않는다", async () => {
+    const { seen, call } = seenArgs();
+    const { minted, jobTokens } = minter();
+    const ctx = ctxWith({ call }, { userId: "u1", channelRef: "c", jobTokens, repos: { allowedDirs: { list: async () => ["/w"] } } });
+    const r = await remoteToolHandler(ctx, "send_file", { path: "/etc/passwd" });
+    expect(r.ok).toBe(false);
+    expect(r.content).toContain("허용된 폴더 밖");
+    expect(minted).toHaveLength(0);
+    expect(seen).toHaveLength(0);
+  });
+
+  it("모델이 upload 를 끼워 보내도 봇의 값으로 덮어쓴다", async () => {
+    const { seen, call } = seenArgs();
+    const { jobTokens } = minter();
+    const ctx = ctxWith({ call }, { userId: "u1", channelRef: "c", jobTokens, repos: { allowedDirs: { list: async () => ["/w"] } } });
+    await remoteToolHandler(ctx, "send_file", { path: "/w/a.png", upload: { token: "forged", url: "https://evil" } });
+    expect(seen[0].upload).toEqual({ token: "tok-1" });
+  });
+
+  it("토큰 발급기나 채널이 없는 턴(파일 반환 미배선)은 거부한다 — 워커까지 가서 401 을 받게 두지 않는다", async () => {
+    const { seen, call } = seenArgs();
+    const noMinter = ctxWith({ call }, { userId: "u1", channelRef: "c", repos: { allowedDirs: { list: async () => ["/w"] } } });
+    const r1 = await remoteToolHandler(noMinter, "send_file", { path: "/w/a.png" });
+    expect(r1.ok).toBe(false);
+    expect(r1.content).toContain("파일 반환");
+    const noChannel = ctxWith({ call }, { userId: "u1", jobTokens: minter().jobTokens, repos: { allowedDirs: { list: async () => ["/w"] } } });
+    const r2 = await remoteToolHandler(noChannel, "send_file", { path: "/w/a.png" });
+    expect(r2.ok).toBe(false);
+    expect(seen).toHaveLength(0);
+  });
+
+  it("다른 도구에는 upload 를 싣지 않는다", async () => {
+    const { seen, call } = seenArgs();
+    const ctx = ctxWith({ call }, { userId: "owner", channelRef: "c", jobTokens: minter().jobTokens, repos: { allowedDirs: { list: async () => ["/w"] } } });
+    await remoteToolHandler(ctx, "fs_read", { path: "/w/a" });
+    await remoteToolHandler(ctx, "sh_exec", { command: "ls" });
+    expect(seen[0].upload).toBeUndefined();
+    expect(seen[1].upload).toBeUndefined();
   });
 });
