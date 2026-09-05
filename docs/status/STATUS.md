@@ -165,7 +165,7 @@ lastReviewed: 2026-09-05
   그 과정에서 결함 넷이 드러나 전부 고쳤다(도구 미노출·committer 신원 누락·자격증명 헬퍼 체인·
   clone 의 config 영구 기록 — `deploy/smoke-test.md` 의 검증 기록 참고).
   **아직 안 눌러본 것**: 남의 프로젝트 이름 거절(음성 테스트), 설정이 없을 때 조용히 없는가.
-- **워커 git 자격증명·PR 생성(2026-09-05, 미검증)** — 부원이 디스코드만으로 동아리 저장소를
+- **워커 git 자격증명·PR 생성(2026-09-05)** — 부원이 디스코드만으로 동아리 저장소를
   clone → 브랜치 작업 → 커밋 → push → main 에 PR 까지 한다. 그전에는 발행·되받기 두 도구가
   아사히가 만든 리포에만 닿아 기존 저장소 작업은 반만 됐다(셸의 `git push` 는 자격증명이 없어
   항상 실패). 이제 봇이 `sh_exec` 호출마다 조직 전체·`contents:write`·1시간 설치 토큰과 그
@@ -176,13 +176,27 @@ lastReviewed: 2026-09-05
   발행도 이제 push 전에 fetch 해 원격이 앞서면 멈추고 안내하며, 폴더를 새로 만든 경우는 원격
   히스토리 위에 얹는다(`agent/src/remote/gitPublish.ts` 의 `alignWithRemote`). 토큰이 없으면
   git 은 프롬프트를 기다리지 않고 한국어 사유와 함께 즉시 실패한다(2026-09-05 운영자 PC 실측).
-  **실환경에서는 아직 하나도 눌러보지 않았다** — `deploy/smoke-test.md` "워커 git 자격증명·PR
-  생성" 절. **운영자가 해야 하는 것**: App 의 `Pull requests: Read and write` 권한을 조직 설치에서
-  승인(App 쪽은 2026-09-05 에 추가됐고 설치 승인이 남았다 — `deploy/github-app-셋업.md`), 미니PC
-  Git 2.31 이상 확인. **브랜치 정책**(깃허브가 집행, 확인됨): `production` 은 운영자만 push — 봇
-  토큰도 못 올린다. `main` 은 부원이 PR 로 자유롭게 쌓는 통합 브랜치(CI 필수). 봇 자신은 어느
-  쪽에도 직접 push 하지 않고 PR 까지만 한다 — 그건 페르소나 규칙이다(`docs/security/risk-register.md`
-  §9). 설계: `docs/superpowers/specs/2026-09-05-worker-git-credentials-design.md`.
+  **2026-09-05 오후 운영자가 실사용으로 확인했다** — 디스코드만으로 clone → 작업 브랜치 → 작업·커밋 →
+  push → main PR 까지 실제로 돌았다. App 의 `Pull requests: Read and write` 권한은 같은 날 조직 설치
+  승인까지 끝났다(`deploy/github-app-셋업.md`). 아직 안 눌러본 것(커밋 신원·토큰 잔류 없음·설정 없을 때
+  즉시 실패·재발행 두 경우)은 `deploy/smoke-test.md` "워커 git 자격증명·PR 생성" 절에 남아 있다.
+  **브랜치 정책**(깃허브가 집행, 확인됨): `production` 은 운영자만 push — 봇 토큰도 못 올린다. `main` 은
+  부원이 PR 로 자유롭게 쌓는 통합 브랜치(CI 필수). 봇 자신은 어느 쪽에도 직접 push 하지 않고 PR 까지만
+  한다 — 그건 페르소나 규칙이다(`docs/security/risk-register.md` §9). 설계:
+  `docs/superpowers/specs/2026-09-05-worker-git-credentials-design.md`.
+- **표준 git 작업 절차·저장소 목록·리뷰 읽기(2026-09-05 2단계, 미검증)** — 위 흐름이 확인된 직후
+  운영자가 "부원이 절차를 말하지 않아도 봇이 그 절차를 기본으로 따르게" 하기로 했다. 페르소나
+  (`agent/src/core/persona.ts` 의 `PUBLISH_LINES`)가 번호 매긴 7단계 — 저장소 확인·main 최신화
+  (`git pull --ff-only`) → `git switch -c <종류>/<설명>` → 작업·테스트·타입체크·빌드 → Conventional
+  Commits 커밋 → `git push -u origin` (force push 금지) → `create_pull_request` → 주소 보고 — 와
+  "리뷰 반영은 같은 브랜치에 새 커밋" 규칙을 준다. 그 절차를 받치는 읽기 도구 둘이 생겼다:
+  `list_repos`(설치 저장소 목록 — `metadata:read`, 설치 전체)와 `pr_review_comments`(PR 의 리뷰·코드
+  코멘트·대화 코멘트를 시간순으로 — `pull_requests:read`, 그 리포 하나). 둘 다 발행·PR 생성과 같은
+  축(워커 연결 + 깃허브 설정)으로 열리고, 토큰은 읽기 전용이며 봇 안에서만 쓰고 버린다 — 워커로 가는
+  토큰은 늘지 않았다. **실환경 확인은 아직이다** — 절차를 말하지 않은 요청이 7단계를 밟는가, 리뷰
+  반영 왕복이 되는가(`deploy/smoke-test.md` 같은 절). 다음 조각(PR 추적 — 봇이 낸 PR 의 CI 결과·병합을
+  요청자 채널에 알리고 운영자에게 새 PR 을 알리는 `pull_requests` 표와 폴러, `pr_status` 도구)은
+  설계만 끝났다: `docs/superpowers/specs/2026-09-05-git-workflow-followups-design.md` §4.
 - **모델**: 기본 Opus 계열 최신 모델로 고정, 환경변수로 재정의 가능.
 
 ## 테스트
@@ -259,10 +273,14 @@ skip 3건의 성격은 서로 다르다. 1건은 Postgres READ ONLY 트랜잭션
 - **워커 브랜치 전환(main → production, 2026-09-05)** — 갱신 스크립트의 전환·대기·갱신·거절 경로는
   운영자 PC 의 Windows PowerShell 5.1 에서 실제 클론으로 돌려 확인했지만, 미니PC 의 작업 스케줄러
   아래에서 첫 전환이 실제로 일어나는 것은 아직이다(`deploy/smoke-test.md` 의 "워커 브랜치 전환").
-- **워커 git 자격증명·PR 생성 전부(2026-09-05)** — 비공개 리포 clone·커밋 신원·브랜치 push·PR
-  생성·토큰 잔류 없음·설정 없을 때 즉시 실패·재발행 두 경우. 유닛 테스트는 env 의 모양과 이 PC 의
-  실제 git 이 그 env 를 읽는 것까지만 본다 — 미니PC 의 Git 버전(2.31 이상 필요)·cmd.exe 경유·
-  App 권한(PR)은 실환경에서만 확인된다(`deploy/smoke-test.md` 해당 절).
+- **워커 git 자격증명·PR 생성의 나머지(2026-09-05)** — 핵심 경로(clone·브랜치 작업·push·PR 생성)는
+  같은 날 오후 운영자가 실사용으로 확인했다. 남은 것: 커밋 신원(`git log -1 --format="%an <%ae>"`
+  가 그 부원의 noreply 주소인가, 모델이 `git config` 를 안 건드렸는가)·토큰 잔류 없음·설정 없을 때
+  즉시 실패·재발행 두 경우(`deploy/smoke-test.md` 해당 절).
+- **표준 git 작업 절차·`list_repos`·`pr_review_comments`(2026-09-05 2단계)** — 유닛 테스트는 안내의
+  낱말과 도구의 게이팅·토큰 범위·포맷만 고정한다. 모델이 절차를 말하지 않은 요청("homepage 에 X
+  고쳐줘")에 실제로 7단계를 순서대로 밟는가, 리뷰 코멘트를 읽고 같은 브랜치에 얹어 push 하는가는
+  실환경에서만 보인다(`deploy/smoke-test.md` 같은 절의 새 항목 셋).
 
 ## 알려진 한계
 

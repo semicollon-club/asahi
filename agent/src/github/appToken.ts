@@ -144,3 +144,17 @@ export async function createPullRequest(o: {
   const body = (await res.json()) as { html_url: string; number: number };
   return { url: body.html_url, number: body.number };
 }
+
+// GET 한 번(2026-09-05, 2단계 — github/repos.ts·github/pulls.ts 가 쓴다). 성공이면 본문(JSON)을,
+// 실패면 상태 코드와 깃허브의 message 를 돌려준다 — 던지지 않는다. 호출측이 상태별로 다르게
+// 다뤄야 해서다(예: PR 의 대화 코멘트를 403 으로 못 읽으면 "없는 정보"로 두고 나머지는 보여준다).
+// 네트워크 실패·타임아웃은 fetchWithTimeout 이 던지는 그대로 올라간다 — 그건 "깃허브가 거절했다"가
+// 아니라 "닿지 못했다"라 같은 갈래가 아니다. 헤더·타임아웃·message 추출은 위 함수들과 같은 것을
+// 쓴다 — 로직이 갈라지면 한쪽만 고쳐지는 날이 온다.
+export type GithubGetResult<T> = { ok: true; body: T } | { ok: false; status: number; message: string };
+
+export async function githubGet<T>(o: { token: string; url: string; fetchImpl?: FetchLike }): Promise<GithubGetResult<T>> {
+  const res = await fetchWithTimeout(o.fetchImpl ?? fetch, o.url, { method: "GET", headers: headers(o.token, false) });
+  if (res.status < 200 || res.status >= 300) return { ok: false, status: res.status, message: await messageOf(res) };
+  return { ok: true, body: (await res.json()) as T };
+}

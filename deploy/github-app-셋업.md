@@ -47,9 +47,10 @@ lastReviewed: 2026-09-05
 |---|---|---|
 | **Contents** | Read and write | git push. 이 기능의 본체다. 2026-09-05 부터는 `sh_exec` 의 git(clone·fetch·push)도 이 권한의 단기 토큰을 쓴다 |
 | **Administration** | Read and write | 리포 자동 생성(`POST /orgs/{org}/repos`)에만 쓰인다 |
-| **Pull requests** | Read and write | PR 생성(`create_pull_request`, 2026-09-05). 부원이 브랜치를 올린 뒤 main 에 PR 을 내는 마지막 조각이다 |
+| **Pull requests** | Read and write | PR 생성(`create_pull_request`, 2026-09-05). 부원이 브랜치를 올린 뒤 main 에 PR 을 내는 마지막 조각이다. PR 의 리뷰·코멘트 읽기(`pr_review_comments`, 같은 날 2단계)는 이 권한의 읽기 쪽만 쓴다 |
 
-`Metadata: Read-only` 는 자동으로 켜진다 — 정상이다.
+`Metadata: Read-only` 는 자동으로 켜진다 — 정상이다. 저장소 목록(`list_repos`, 2026-09-05 2단계)은 이
+권한만으로 돈다 — 따로 켤 것이 없다.
 
 > **이미 만든 App 에 권한을 더하려면**(2026-09-05 기준 `asahi-publisher` 설치에는 `Pull requests`
 > 가 없다 — 설치 권한이 `administration`·`contents`·`metadata` 셋뿐인 것을 API 로 확인했다):
