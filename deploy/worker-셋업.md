@@ -169,6 +169,10 @@ main 은 부원이 PR 로 자유롭게 쌓는 통합 브랜치라 검증 전 코
 그때까지는 로그에 "브랜치 전환 대기" 한 줄만 남는다(회차마다 반복되지 않는다). 전환이 끝났는지는
 asahi 창에서 `git -C C:\asahi-worker branch --show-current` 가 `production` 인지, 로그에 "브랜치
 전환 완료" 가 있는지로 본다. 등록된 작업 정의는 그대로다 — 스크립트 경로가 같다.
+**전환 전에 `git branch` 에 production 이 안 보이는 것은 정상이다** — 그 목록은 로컬 브랜치뿐이고,
+production 은 원격에 있다. 스크립트는 목적지 refspec 을 명시해 가져오므로(`+refs/heads/production:
+refs/remotes/origin/production`) 클론이 `--single-branch` 로 만들어져 `origin/production` 이 없던
+경우에도 동작하며, 로컬 `production` 브랜치는 전환하는 그 회차에 만든다.
 
 > **작업 스케줄러의 "작업이 실패한 경우 다시 시작" 은 이 용도로 쓸 수 없다(2026-08-01 실측).**
 > 그 설정은 작업이 **시작에** 실패했을 때를 위한 것이고, 프로그램이 실행돼서 **어떤 종료
