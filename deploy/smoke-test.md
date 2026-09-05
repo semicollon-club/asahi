@@ -611,9 +611,16 @@ JS 를 받아 파일을 쓰지 못하고 죽는다. `setInterval` 이 프로세�
 ## 워커 git 자격증명·PR 생성(2026-09-05)
 
 아직 한 번도 실제로 눌러보지 않은 기능이다(`docs/superpowers/specs/2026-09-05-worker-git-credentials-design.md`).
-봇(production 배포)과 미니PC 워커(자동 갱신) **양쪽이 새 코드**여야 한다 — 워커 커밋을
-`runtime_info` 로 먼저 확인한다(`docs/agent-onboarding.md` 3절). 이 절의 항목은 전부 **서버
-채널**(공유 워커)에서 한다.
+봇(production 배포)과 미니PC 워커(production 자동 갱신 — 2026-09-05 부터 봇과 같은 브랜치)
+**양쪽이 새 코드**여야 한다 — 워커 커밋을 `runtime_info` 로 먼저 확인한다(`docs/agent-onboarding.md`
+3절). 이 절의 항목은 전부 **서버 채널**(공유 워커)에서 한다.
+
+- [ ] **워커 브랜치 전환(한 번)** — 미니PC asahi 창에서 `git -C C:\asahi-worker branch --show-current`
+  가 `production` 이고, `C:\asahi-worker\update-worker.log` 에 "브랜치 전환 완료" 가 있다.
+  기대 결과: production 병합 전에는 "브랜치 전환 대기" 가 **한 줄만** 있고(회차마다 반복되면
+  `Write-LogOnce` 가 깨진 것), 병합 뒤 다음 회차에 "추적 브랜치 전환 … 브랜치 전환 완료" 가 남고
+  워커 프로세스의 생성 시각이 그 뒤다. 이후 `runtime_info` 의 워커 커밋이 `origin/production`
+  의 팁과 같다.
 
 - [ ] **비공개 저장소 clone** — "semicollon-club/test-1 받아줘" 라고 한다(공개 리포는 인증 없이도
   되므로 비공개로 확인해야 의미가 있다).
