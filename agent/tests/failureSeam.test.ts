@@ -85,7 +85,7 @@ async function toolCtxWithRealWorker(o: { roots: string[]; allowed: string[] }):
       introspect: new IntrospectRepo(db), projects: new ProjectsRepo(db),
     },
     role: "owner", isPrivate: true, isOwner: true, userId: "owner", conversationId: 1,
-    runtime: { model: "claude-opus-4-8", sdkVersion: "0.3.207", deployTarget: "local", maxTurns: 30, workers: [] },
+    runtime: { model: "claude-opus-5", sdkVersion: "0.3.207", deployTarget: "local", maxTurns: 30, workers: [] },
     remote: {
       workerId: "test-worker", workerKind: "personal", roots: o.roots,
       call: (tool, args) => executors[tool]!(args),
@@ -192,7 +192,7 @@ async function coreSetup() {
   const config: Config = {
     discordToken: "t", ownerId: "owner", databaseUrl: "postgres://test", dataDir: ":memory:", memoryDir: "x",
     sessionIdleMinutes: 30, maxTurnsPerHour: 30, maxTurnsPerHourPerUser: 20, maxTurnsPerHourGlobal: 40,
-    ownerReserve: 10, deployTarget: "local", model: "claude-opus-4-8", httpPort: 3000, digestChannels: {},
+    ownerReserve: 10, deployTarget: "local", model: "claude-opus-5", httpPort: 3000, digestChannels: {},
     // 깃허브 발행 미설정 — 이 테스트의 관심사가 아니다. 설정이 없으면 발행 도구가 안 열린다.
     github: null,
   };
