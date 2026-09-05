@@ -19,6 +19,12 @@ import type { BotVersion } from "../remote/gitCommit.js";
 import { resolveWorkerSelector } from "./workerSelect.js";
 import type { ImageInput } from "./images.js";
 import { skillPluginDirFrom, resolveSkillsEnabled, skillPluginsFor } from "./skills.js";
+import { progressFromMessage, isProgressUpdate, type PendingTool, type ProgressUpdate } from "./sdkEvents.js";
+import { buildSystemPrompt } from "./persona.js";
+import { profileFor } from "./profiles.js";
+import { shellGitArgs } from "./remoteTools.js";
+import { isSessionNotFound } from "./turnPrep.js";
+import type { TurnOutcome, TurnStartInput } from "../remote/hub.js";
 
 // 자기인지(§Task5): SDK_VERSION 은 package.json 의 @anthropic-ai/claude-agent-sdk 버전과 동기화한다.
 // DEFAULT_MODEL 은 makeRunAgentTurn 의 model 인자가 없을 때 쓰는 기본 모델이다.
@@ -36,24 +42,10 @@ if (SKILL_PLUGINS.length === 0) console.warn(`[agent] 스킬 폴더가 없어 �
 // channelRef(2026-09-05, 파일 반환): 이 대화의 디스코드 채널. send_file 의 작업 토큰이 첨부를 보낼 채널을
 // 이 값으로 정한다 — 대화 턴(core.ts)은 항상 채우고, 채우지 않는 호출측에서는 send_file 이 거부된다.
 export type TurnContext = { role: Role; isPrivate: boolean; isOwner: boolean; userId: string; conversationId: number; channelRef?: string };
-// 턴 처리 중 진행 상황(판별 유니온). 표시용 텍스트로 바꾸는 건 core.ts 의 formatProgress 가 맡는다.
-export type ProgressUpdate =
-  | { kind: "tool"; name: string; input?: string }
-  // 표시와 기록이 같은 값에서 나오도록 확장했다(2026-07-28 관측 기반 스펙 §3).
-  // ok/summary 는 SDK 의 tool_result 블록에서, input/durationMs 는 짝지은 tool 이벤트에서 온다.
-  | { kind: "tool_result"; name?: string; input?: string; ok: boolean; summary?: string; durationMs?: number }
-  | { kind: "answering" };
-
-// tool_use_id → 그 호출의 이름·입력·시작 시각. 예전엔 이름(string)만 담았는데, 기록 한 행을
-// 채우려면 input 과 소요시간이 필요하다. 짝짓기는 반드시 id 로 한다 — 이름으로 짝지으면 같은
-// 도구를 연달아 부를 때 어긋난다.
-export type PendingTool = { name: string; input?: string; startedAt: number };
-
-// 결과 요약의 기록 상한 — actions.result_summary 에 남길 해상도다. 표시 줄의 상한은 이 값이
-// 아니라 core.ts 의 PROGRESS_SUMMARY_MAX(80)가 따로 갖는다. 같은 이벤트에서 나온 두 소비자가
-// 서로 다른 예산을 갖는 지점이라, 표시를 늘리려고 이 값을 건드리면 표시는 그대로이고 DB
-// 해상도만 바뀐다(최종 리뷰 Important 2 로 갈라진 뒤 이 주석이 낡아 바로잡았다).
-export const RESULT_SUMMARY_MAX = 200;
+// 진행 업데이트(ProgressUpdate·PendingTool·RESULT_SUMMARY_MAX·progressFromMessage 등)는 core/sdkEvents.ts 로 옮겼다
+// (풀 하네스 2단계 — 워커의 세션 러너도 같은 매핑을 쓴다). 예전 이름으로 그대로 재수출한다 — 호출부·테스트는 바뀌지 않는다.
+export { shortToolName, summarizeToolInput, progressFromMessage, RESULT_SUMMARY_MAX } from "./sdkEvents.js";
+export type { ProgressUpdate, PendingTool } from "./sdkEvents.js";
 
 // images(§Task3 이미지 입력): 있으면 query() 의 prompt 를 문자열 대신 async-iterable(SDKUserMessage 1개)로
 // 바꿔 멀티모달 턴을 만든다(buildMultimodalMessage). 없으면 기존 문자열 prompt 경로 그대로(회귀 없음).
@@ -104,30 +96,6 @@ export type ToolRepos = {
   pullRequests: PullRequestsRepo;
 };
 
-// mcp__asahi__recall → recall 처럼 인프로세스 MCP 접두어를 벗겨 짧게 만든다. 접두어가 없으면 그대로.
-export function shortToolName(name: string): string {
-  const parts = name.split("__");
-  return name.startsWith("mcp__") && parts.length >= 3 ? parts.slice(2).join("__") : name;
-}
-
-function truncate(s: string, max = 40): string {
-  const t = s.trim();
-  return t.length > max ? `${t.slice(0, max)}…` : t;
-}
-
-// 도구 입력 객체에서 사람이 읽을 만한 짧은 요약 하나를 뽑는다(대표 키 우선순위). 없으면 undefined.
-export function summarizeToolInput(input: unknown): string | undefined {
-  if (typeof input === "string") return input.trim().length > 0 ? truncate(input) : undefined;
-  if (input && typeof input === "object") {
-    const obj = input as Record<string, unknown>;
-    for (const key of ["query", "title", "content", "path", "file_path", "pattern", "command", "description"]) {
-      const v = obj[key];
-      if (typeof v === "string" && v.length > 0) return truncate(v);
-    }
-  }
-  return undefined;
-}
-
 // 이미지가 있는 턴의 SDK 입력 메시지(멀티모달). 텍스트가 비면 이미지 블록만 넣는다.
 export function buildMultimodalMessage(text: string, images: ImageInput[]): SDKUserMessage {
   const content: Array<Record<string, unknown>> = [];
@@ -136,73 +104,6 @@ export function buildMultimodalMessage(text: string, images: ImageInput[]): SDKU
     content.push({ type: "image", source: { type: "base64", media_type: img.mediaType, data: img.base64 } });
   }
   return { type: "user", parent_tool_use_id: null, message: { role: "user", content } } as unknown as SDKUserMessage;
-}
-
-// tool_result 블록의 content 에서 표시·요약용 텍스트를 뽑는다. Anthropic 메시지 스펙(SDK 의
-// ToolResultBlockParam)상 content 는 string 이거나 블록 배열(TextBlockParam 등)이다 — 그런데 이
-// 저장소의 모든 도구는 tools.ts 의 textResult(`{ content: [{ type: "text", text }] }`)를 거치므로
-// 실제로 오는 건 항상 배열 쪽이다. content 를 string 으로만 가정했던 예전 구현(`typeof
-// block.content === "string" ? block.content : undefined`)은 이 배열을 그냥 지나쳐 body 가 항상
-// undefined 가 됐고, summary 는 실사용에서 한 번도 채워진 적이 없었다(리뷰 지적 — 지금까지의
-// 테스트가 content 를 전부 string 으로만 넣어 이 구멍을 못 잡았다). 아래는 is_error 방어(없으면
-// 성공으로 간주)와 같은 정신으로 SDK 가 어느 모양으로 주든 동작하게 둘 다 받는다: 배열이면
-// type==="text" 인 블록들의 text 만 골라 구분자 없이 이어붙이고(이미지 등 다른 타입 블록은
-// 무시), text 블록이 하나도 없으면 undefined.
-function extractResultText(content: unknown): string | undefined {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return undefined;
-  const texts = content
-    .filter((b): b is { type: "text"; text: string } =>
-      !!b && typeof b === "object" && (b as { type?: unknown }).type === "text" && typeof (b as { text?: unknown }).text === "string")
-    .map((b) => b.text);
-  return texts.length > 0 ? texts.join("") : undefined;
-}
-
-// query() 스트림 메시지 하나에서 진행 업데이트들을 뽑는 순수 함수. assistant 의 tool_use → 'tool',
-// 그 뒤 user 의 tool_result → 'tool_result'(이름·입력은 pending 으로 되찾고 성패·요약은 이 블록
-// 자체에서, 소요시간은 짝지은 tool 의 시작 시각과의 차로 계산), text 블록 → 'answering'.
-// pending 은 호출자가 턴 하나 동안 유지하는 tool_use_id → PendingTool 맵(이 함수가 채우고 소비한다).
-// now(기본 Date.now)는 테스트가 시계를 주입해 durationMs 를 결정적으로 검증할 수 있게 한다.
-type ProgressSourceMessage = { type: string; message?: unknown };
-export function progressFromMessage(
-  message: ProgressSourceMessage,
-  pending: Map<string, PendingTool>,
-  now: () => number = Date.now,
-): ProgressUpdate[] {
-  const inner = message.message;
-  const content = inner && typeof inner === "object" ? (inner as { content?: unknown }).content : undefined;
-  if (!Array.isArray(content)) return [];
-  const updates: ProgressUpdate[] = [];
-  for (const raw of content) {
-    if (!raw || typeof raw !== "object") continue;
-    const block = raw as {
-      type?: unknown; name?: unknown; id?: unknown; input?: unknown;
-      tool_use_id?: unknown; is_error?: unknown; content?: unknown;
-    };
-    if (block.type === "tool_use" && typeof block.name === "string") {
-      const name = shortToolName(block.name);
-      const input = summarizeToolInput(block.input);
-      if (typeof block.id === "string") pending.set(block.id, { name, input, startedAt: now() });
-      updates.push({ kind: "tool", name, input });
-    } else if (block.type === "tool_result" && typeof block.tool_use_id === "string") {
-      const p = pending.get(block.tool_use_id);
-      pending.delete(block.tool_use_id);
-      // is_error 가 실려 오지 않는 SDK 버전에서도 안전하게 동작한다 — 없으면 성공으로 본다.
-      const ok = block.is_error !== true;
-      const body = extractResultText(block.content);
-      updates.push({
-        kind: "tool_result",
-        name: p?.name,
-        input: p?.input,
-        ok,
-        summary: body === undefined ? undefined : body.slice(0, RESULT_SUMMARY_MAX),
-        durationMs: p === undefined ? undefined : now() - p.startedAt,
-      });
-    } else if (block.type === "text") {
-      updates.push({ kind: "answering" });
-    }
-  }
-  return updates;
 }
 
 // TurnContext → ToolCtx 로 옮기는 순수 함수(테스트 대상) — makeRunAgentTurn 안에 인라인
@@ -259,9 +160,29 @@ export async function resolveTurnWorker(
 ): Promise<{ workerId: string; kind: WorkerKind } | null> {
   if (req.noRemoteTools === true || !registry || !hub) return null;
   const sel = resolveWorkerSelector(req.context);
-  const id = sel.kind === "personal" ? await registry.personalWorkerOf(sel.userId) : await registry.sharedWorkerId();
-  if (id === null || !hub.isConnected(id)) return null;
-  return { workerId: id, kind: sel.kind };
+  if (sel.kind === "personal") {
+    const personal = await registry.personalWorkerOf(sel.userId);
+    if (personal !== null && hub.isConnected(personal)) return { workerId: personal, kind: "personal" };
+    // 풀 하네스 2단계(2026-09-05 밤, 계획 2.5): 개인 워커가 없거나 끊겨 있으면 소유자 DM 도 공유 워커로 간다 — 관리자
+    // 스코프다(scopeDirs 는 소유자를 좁히지 않는다). 미니PC 단일 호스트에서 허브가 루프백에만 묶여 개인 PC 워커는 붙을
+    // 수 없게 됐고(설계 §3·§6), 그 뒤 소유자 DM 은 워커 없는 대화로 떨어져 있었다. 선택자(workerSelect.ts)는 그대로
+    // "소유자 DM 은 개인 워커"를 말한다 — 개인 워커가 실제로 붙어 있으면 여전히 그것이 우선이다.
+  }
+  const shared = await registry.sharedWorkerId();
+  if (shared === null || !hub.isConnected(shared)) return null;
+  return { workerId: shared, kind: "shared" };
+}
+
+// 풀 하네스 2단계(계획 2.6): 이 턴을 세션 러너(계정 B 의 Claude Code)로 보낼지. 조건을 순수 함수 하나에 모아 둔다 —
+// 플래그(HARNESS_OWNER), 소유자만(2단계), 그 워커가 harness 모드, 이미지 없음(base64 가 프레임 상한 1MB 를 넘길 수
+// 있다 — 이미지 턴은 옛 경로), 무인 턴 아님(요약·정기 게시는 봇 안에서 도구 없이 돈다), 작업 토큰 발급기·채널(토큰
+// 클레임)·작업 폴더(워커 roots[0])가 있음. 하나라도 빠지면 옛 경로(봇 자기 세션 + 원격 도구)다 — 되돌리기가 플래그
+// 하나인 이유가 이 함수다.
+export function decideHarnessDispatch(o: {
+  enabled: boolean; isOwner: boolean; workerIsHarness: boolean; hasImages: boolean; noRemoteTools: boolean;
+  hasJobTokens: boolean; hasChannelRef: boolean; hasCwd: boolean;
+}): boolean {
+  return o.enabled && o.isOwner && o.workerIsHarness && !o.hasImages && !o.noRemoteTools && o.hasJobTokens && o.hasChannelRef && o.hasCwd;
 }
 
 // FIX3(중요, 최종 리뷰 3차): req.noWebTools 를 뽑아내는 순수 함수 — resolveWorkerConnected 를
@@ -328,6 +249,9 @@ export function makeRunAgentTurn(
     call(workerId: string, tool: string, args: Record<string, unknown>): Promise<{ ok: boolean; content: string }>;
     rootsOf(workerId: string): string[];
     workersInfo(): Array<{ workerId: string; commit?: string; connectedAt: number }>;
+    // 풀 하네스 2단계 — 세션 러너 디스패치. 선택인 이유는 테스트의 가짜 허브가 둘을 안 갖기 때문이다(없으면 옛 경로).
+    isHarness?(workerId: string): boolean;
+    startTurn?(workerId: string, start: TurnStartInput, onEvent: (e: Record<string, unknown>) => void): { id: string; result: Promise<TurnOutcome>; cancel(): void };
   },
   github: GithubAppConfig | null = null,
   now: () => number = Date.now,
@@ -336,7 +260,8 @@ export function makeRunAgentTurn(
   // 호출측) send_file 은 remoteToolHandler 가 거부한다.
   // botVersion(1단계, 미니PC 단일 호스트): index.ts 가 기동 시 resolveBotVersion(remote/gitCommit.ts)으로 읽은
   // 봇 자기 커밋·브랜치. 없으면 예전처럼 Railway 주입 변수를 그대로 본다(아래 runtime).
-  extras: { jobTokens?: JobTokenMinter; botVersion?: BotVersion } = {},
+  // harness(2단계): HARNESS_OWNER 플래그. 켜져 있고 조건이 맞는 소유자 턴은 아래 runHarnessTurn 으로 간다.
+  extras: { jobTokens?: JobTokenMinter; botVersion?: BotVersion; harness?: { enabled: boolean } } = {},
 ): TurnRunner {
   // sh_exec 의 git 이 쓸 단기 토큰 공급원(2026-09-05). 턴이 아니라 이 러너의 수명으로 하나만 만든다 —
   // 캐시가 턴을 넘어 살아야 sh_exec 호출마다 깃허브 API 를 두드리지 않는다(shellToken.ts). 깃허브
@@ -381,6 +306,24 @@ export function makeRunAgentTurn(
     // ctx.remote 구성(호출 통로 + workerId/workerKind + 워커 roots) 자체도 buildRemoteCtx 로
     // 뽑아 테스트한다(agent.test.ts).
     ctx.remote = buildRemoteCtx(worker, hub);
+
+    // 풀 하네스 2단계(계획 2.6): 조건이 맞는 소유자 턴은 봇 자기 세션(아래 query)이 아니라 세션 러너로 간다. 시스템
+    // 프롬프트는 core.ts 가 만든 것(원격 도구·기억 도구 안내)이 아니라 하네스용으로 다시 만든다 — 그 턴의 도구는
+    // Claude Code 내장 도구다. 프롬프트(컨텍스트 블록 + 화자 표기 + 메시지)·resume·onProgress 는 그대로 쓴다.
+    const harnessCwd = worker !== null ? hub?.rootsOf(worker.workerId)[0] : undefined;
+    if (decideHarnessDispatch({
+      enabled: extras.harness?.enabled === true,
+      isOwner: req.context.isOwner,
+      workerIsHarness: worker !== null && hub?.isHarness?.(worker.workerId) === true,
+      hasImages: (req.images?.length ?? 0) > 0,
+      noRemoteTools: req.noRemoteTools === true,
+      hasJobTokens: extras.jobTokens !== undefined,
+      hasChannelRef: req.context.channelRef !== undefined,
+      hasCwd: harnessCwd !== undefined,
+    })) {
+      return runHarnessTurn(req, ctx, worker!, harnessCwd!, extras.jobTokens!, hub!);
+    }
+
     // githubReady 도 반드시 여기로 넘긴다. 안 넘기면 기본값 false 로 떨어져 도구가 노출되지
     // 않는데, persona 의 능력 안내는 core.ts 가 config.github 을 직접 보고 만들어 실려 버린다 —
     // 실제로 2026-08-07 첫 실사용이 이 상태였다: 아사히가 "네, 올릴 수 있습니다" 라고 안내한 뒤
@@ -470,4 +413,39 @@ export function makeRunAgentTurn(
 
     return { text, sessionId, ok };
   };
+
+  // 세션 러너 턴(풀 하네스 설계 §3·§7). 봇은 세션을 열지 않는다 — 프로필·작업 토큰·git 인자·하네스용 시스템 프롬프트를
+  // turn.start 에 실어 보내고, turn.event 를 onProgress 로 잇고(모양이 맞는 것만 — isProgressUpdate), turn.result 를
+  // TurnResult 로 바꾼다. 세션 없음(resume 실패)은 옛 경로와 같은 문구로 던진다 — core.ts 의 재시도 경로가 그대로 잡는다.
+  async function runHarnessTurn(
+    req: TurnRequest,
+    ctx: ToolCtx,
+    worker: { workerId: string; kind: WorkerKind },
+    cwd: string,
+    jobTokens: JobTokenMinter,
+    h: NonNullable<typeof hub>,
+  ): Promise<TurnResult> {
+    const profile = profileFor(req.context, { ownerModel: model });
+    const token = jobTokens.mint({ userId: req.context.userId, conversationId: req.context.conversationId, channelRef: req.context.channelRef! });
+    // git 자격증명·신원은 sh_exec 와 같은 자리(shellGitArgs)에서 같은 수명으로 만든다 — 세션 환경으로 옮겨지는 것만 다르다.
+    const git = (await shellGitArgs(ctx)) as unknown as Record<string, unknown>;
+    const systemPrompt = buildSystemPrompt({
+      role: req.context.role, isPrivate: req.context.isPrivate, isOwner: req.context.isOwner, deployTarget,
+      workerConnected: true, githubReady: github !== null, harness: { cwd },
+    });
+    console.log(`[agent] 하네스 턴 — 워커 ${worker.workerId}, 모델 ${profile.model}, resume ${req.resume ? "있음" : "없음"}`);
+    const turn = h.startTurn!(worker.workerId, {
+      userId: req.context.userId, cwd, systemPrompt, prompt: req.prompt, profile, token, git,
+      ...(req.resume !== undefined ? { resume: req.resume } : {}),
+    }, (e) => {
+      if (req.onProgress && isProgressUpdate(e)) req.onProgress(e);
+    });
+    const out = await turn.result;
+    if (!out.ok && out.error !== undefined && isSessionNotFound(new Error(out.error))) throw new Error(out.error);
+    return {
+      text: out.ok ? out.text : `(에이전트 오류: ${out.error ?? "알 수 없음"})`,
+      sessionId: out.sessionId,
+      ok: out.ok,
+    };
+  }
 }

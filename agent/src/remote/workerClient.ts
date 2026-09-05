@@ -1,4 +1,4 @@
-import { encodeFrame, parseFrame } from "./protocol.js";
+import { encodeFrame, parseFrame, type WorkerMode, type TurnStartFrame, type TurnEventFrame, type TurnResultFrame } from "./protocol.js";
 import type { Executors } from "./executors.js";
 
 // 실제 WebSocket 을 감싸는 최소 인터페이스(허브의 HubSocket 과 대칭). onOpen 이 추가로 필요한 건
@@ -20,6 +20,11 @@ export type WorkerClientOpts = {
   executors: Executors;
   onStatus?: (s: string) => void;
   retryDelayMs?: number;
+  // 풀 하네스 2단계: hello 에 실어 보내는 워커 모드와, turn.start 를 넘길 세션 러너(remote/sessionRunner.ts). 러너가
+  // 없으면(도구 모드) turn.start 에 즉시 실패 결과를 돌려준다 — 봇은 원래 mode 를 보고 보내지 않지만, 보내더라도 침묵하지
+  // 않는다.
+  mode?: WorkerMode;
+  runner?: { start(frame: TurnStartFrame, send: (f: TurnEventFrame | TurnResultFrame) => void): void; cancel(id: string): void };
 };
 
 const DEFAULT_RETRY_MS = 3000;
@@ -44,7 +49,7 @@ export function startWorkerClient(opts: WorkerClientOpts): { stop(): void } {
       if (current !== socket) return;
       status("연결됨 — 인증 중");
       try {
-        socket.send(encodeFrame({ type: "hello", token: opts.token, workerId: opts.workerId, roots: opts.roots, commit: opts.commit }));
+        socket.send(encodeFrame({ type: "hello", token: opts.token, workerId: opts.workerId, roots: opts.roots, commit: opts.commit, mode: opts.mode }));
       } catch (err) {
         // 아래 result·pong 전송과 같은 이유로 감싼다 — send 가 동기적으로 던지면 이 콜백 밖으로
         // 튀어나가 unhandled 예외로 프로세스를 죽일 수 있다.
@@ -74,6 +79,32 @@ export function startWorkerClient(opts: WorkerClientOpts): { stop(): void } {
         } catch (err) {
           status(`pong 전송 실패: ${String(err)}`);
         }
+        return;
+      }
+      if (frame.type === "turn.start") {
+        // 러너가 send 로 낸 프레임은 그대로 소켓으로 나간다 — result 전송과 같은 가드(재연결로 교체된 소켓이면 버린다)와
+        // 같은 try/catch(닫힌 소켓에 보내다 던지면 워커가 죽는다).
+        const sendFrame = (f: TurnEventFrame | TurnResultFrame) => {
+          if (current !== socket) return;
+          try {
+            socket.send(encodeFrame(f));
+          } catch (err) {
+            status(`turn 프레임 전송 실패: ${String(err)}`);
+          }
+        };
+        if (!opts.runner) {
+          sendFrame({ type: "turn.result", id: frame.id, ok: false, text: "", error: "이 워커에는 세션 러너가 없어요(WORKER_MODE=harness 가 아니에요)." });
+          return;
+        }
+        try {
+          opts.runner.start(frame, sendFrame);
+        } catch (err) {
+          sendFrame({ type: "turn.result", id: frame.id, ok: false, text: "", error: `세션 러너 오류: ${err instanceof Error ? err.message : String(err)}` });
+        }
+        return;
+      }
+      if (frame.type === "turn.cancel") {
+        opts.runner?.cancel(frame.id);
         return;
       }
       if (frame.type !== "call") return;

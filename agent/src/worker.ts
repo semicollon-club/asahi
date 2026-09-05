@@ -1,12 +1,17 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import dotenv from "dotenv";
+import { query } from "@anthropic-ai/claude-agent-sdk";
 import { loadWorkerConfig } from "./config.js";
 import { makeExecutors, type Executors } from "./remote/executors.js";
 import { startWorkerClient, type ClientSocket } from "./remote/workerClient.js";
 import { readCommit, defaultRunGit } from "./remote/gitCommit.js";
 import { planShutdown } from "./remote/workerShutdown.js";
 import { fileReturnUrlOf } from "./core/fileReturn.js";
+import { makeSessionRunner, llmProxyUrlOf, type SessionQuery, type SessionRunner } from "./remote/sessionRunner.js";
+import { skillPluginDirFrom, skillPluginsFor } from "./core/skills.js";
 
 // 로컬 워커(1단계 얇은 워커): 디스코드에도 DB에도 붙지 않고, Railway 허브로 아웃바운드
 // WebSocket 을 열어 도구 호출만 받아 실행한다. 판단·기억·세션은 전부 허브(봇) 쪽에 있다.
@@ -57,7 +62,27 @@ async function main() {
     // send_file 만 그 사실을 말하며 실패한다.
     const fileReturnUrl = fileReturnUrlOf(config.hubUrl) ?? undefined;
     if (fileReturnUrl === undefined) console.warn(`[worker] HUB_URL 에서 업로드 주소를 유도하지 못했습니다 — send_file 을 쓸 수 없습니다: ${config.hubUrl}`);
-    const { wrapped: executors, idle } = trackInFlight(makeExecutors(config.roots, { fileReturnUrl }));
+    const { wrapped: executors, idle: executorsIdle } = trackInFlight(makeExecutors(config.roots, { fileReturnUrl }));
+
+    // 풀 하네스 2단계: WORKER_MODE=harness 면 세션 러너를 켠다. 이 프로세스에는 자격증명이 없다 — 세션은 봇의 루프백
+    // 프록시(HUB_URL 에서 유도한 /llm)와 봇이 turn.start 마다 주는 작업 토큰으로 모델을 부른다(remote/sessionRunner.ts).
+    // 세션 폴더(부원별 CLAUDE_CONFIG_DIR)는 워커 계정의 프로필 아래에 둔다 — WORKER_ROOTS 밖이라 fs_* 로는 닿지 않는다
+    // (sh_exec 는 같은 계정이라 닿는다 — 설계 §5 가 받아들인 위험). 스킬 플러그인은 봇 자기 세션과 같은 폴더(이 클론의
+    // agent/skill-plugin)다 — src/ 에서 두 단계 위가 agent/ 이므로 core/ 기준 함수에 core 폴더를 흉내 낸 경로를 준다.
+    let runner: SessionRunner | undefined;
+    if (config.mode === "harness") {
+      const llmBaseUrl = llmProxyUrlOf(config.hubUrl);
+      if (llmBaseUrl === null) throw new Error(`HUB_URL 에서 프록시 주소를 유도하지 못했습니다: ${config.hubUrl}`);
+      const sessionRootDir = config.sessionDir ?? path.join(os.homedir(), ".asahi-sessions");
+      const pluginDir = skillPluginDirFrom(path.join(path.dirname(fileURLToPath(import.meta.url)), "core"));
+      runner = makeSessionRunner({
+        query: query as unknown as SessionQuery, llmBaseUrl, sessionRootDir,
+        plugins: skillPluginsFor({ pluginDir, exists: fs.existsSync(pluginDir) }),
+      });
+      console.log(`[worker] 세션 러너 켬 — 프록시 ${llmBaseUrl}, 세션 폴더 ${sessionRootDir}`);
+    }
+    // 갱신 종료(planShutdown)는 도구 호출과 세션 턴이 모두 끝나길 기다린다.
+    const idle = () => Promise.all([executorsIdle(), runner ? runner.idle() : Promise.resolve()]).then(() => undefined);
     // 기동 시 한 번만 읽는다 — 워커는 갱신될 때 재시작되므로 도는 동안 커밋이 바뀌지 않는다.
     const commit = await readCommit(defaultRunGit);
 
@@ -80,6 +105,8 @@ async function main() {
       roots: config.roots,
       commit,
       executors,
+      mode: config.mode,
+      runner,
       onStatus: (s) => console.log(`[worker] ${s}`),
     });
 
@@ -109,7 +136,7 @@ async function main() {
       }, 15_000);
     }
 
-    console.log(`로컬 워커가 시작되었습니다 (허브=${config.hubUrl}, 커밋=${commit ?? "알 수 없음"}, 폴더=${config.roots.join(", ")}).`);
+    console.log(`로컬 워커가 시작되었습니다 (허브=${config.hubUrl}, 모드=${config.mode}, 커밋=${commit ?? "알 수 없음"}, 폴더=${config.roots.join(", ")}).`);
   } catch (err) {
     // FIX8: 이전(DB 폴링) 버전의 main().catch 와 같은 문구로 복원한다 — WORKER_ROOTS 오타 같은
     // 설정 오류가 맨 스택트레이스 대신 사람이 읽을 수 있는 한 줄로 보이게 한다.

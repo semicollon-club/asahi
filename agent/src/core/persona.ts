@@ -29,6 +29,11 @@ export type PersonaContext = {
   // 소유자에게는 싣지 않는다: scopeDirs 가 소유자를 좁히지 않아 "그 사람의 폴더" 하나로 특정되지
   // 않고, 애초에 list_dirs 로 직접 조회할 수 있다. 워커 미연결이면 무시된다(도구가 없으므로).
   workspaceDirs?: string[];
+  // 풀 하네스 2단계(2026-09-05 밤): 이 턴이 세션 러너(계정 B 의 Claude Code)에서 돈다. 그 턴의 도구는 봇의 인프로세스
+  // MCP(fs_*/sh_exec/remember/recall/db_*/…)가 아니라 Claude Code 내장 도구다 — 능력 안내와 기억 블록이 그 사실을 따라야
+  // 한다(안내와 실제 도구가 어긋나면 모델이 없는 도구를 시도하다 실패를 사용자에게 전한다). cwd 는 세션의 작업 폴더.
+  // 소유자에게만 뜻이 있다 — 손님은 2단계에서 새 경로를 타지 않으므로 무시한다(buildCapabilityBlock).
+  harness?: { cwd: string };
 };
 
 // ── 블록 ① 정체성과 불가침 규칙 ─────────────────────────────────────────────
@@ -214,7 +219,27 @@ const OWNER_SERVER_MEMORY_LINES =
 const GUEST_OWNER_ONLY_LINE =
   "\n- 접근 권한 관리, DB 직접 조회, 내가 어떤 모델·버전·커밋으로 도는지 확인은 소유자만 할 수 있습니다. 요청받으면 채널을 옮기면 된다는 식으로 안내하지 마세요 — 어디서 물었는지가 아니라 누가 물었는지로 갈리는 일입니다.";
 
+// 하네스 턴의 git 안내. 셸 git 과 같은 자격증명 규약(GIT_CONFIG_*)이 세션 환경에 있어 Bash 의 git 이 그대로 인증한다.
+// PR 생성 도구(create_pull_request)는 봇의 MCP 라 이 턴에는 없다 — 4단계(MCP 허브)까지는 push 뒤 사용자에게 넘긴다.
+const HARNESS_GIT_LINES =
+  "\n- **동아리 깃허브 저장소(semicollon-club) 작업은 Bash 의 git 으로 합니다.** clone·fetch·pull·push 에 자격증명과 커밋 신원이 이 세션의 환경으로 자동으로 붙습니다 — git config 를 바꾸거나 토큰을 묻지 마세요. 절차는 clone → 작업 브랜치 → 작업·커밋 → push 까지이고, main 으로의 풀 리퀘스트(PR) 생성은 이 턴의 도구로는 할 수 없으니 브랜치를 push 한 뒤 사용자에게 PR 을 열어 달라고 알립니다. 병합은 운영자가 합니다.";
+
+// 하네스 턴(소유자)의 능력 블록. 도구 이름은 Claude Code 내장 도구다 — 원격 도구 이름(fs_*/sh_exec/proc_*/send_file)과
+// 봇 MCP 이름(remember/recall/db_*/runtime_info/manage_access)은 한 번도 쓰지 않는다(persona.test 가 고정한다).
+function buildHarnessCapabilityBlock(ctx: PersonaContext, h: { cwd: string }): string {
+  const where = ctx.isPrivate ? "소유자와의 1:1 비공개 대화" : "공개 채널(서버) 대화";
+  const publish = ctx.githubReady === true ? HARNESS_GIT_LINES : "";
+  return `## 능력
+- ${where}이고, 이 턴은 동아리 미니PC 의 작업 계정에서 Claude Code 로 직접 돕니다. 파일·셸·검색은 내장 도구(Read/Write/Edit/Glob/Grep/Bash/WebSearch/WebFetch, 필요하면 Task 서브에이전트)로 합니다 — 원격 도구 이름은 없습니다.
+- 작업 폴더는 \`${h.cwd}\` 입니다. 이 기계의 관리자 권한으로 폴더 제한 없이 다루되, 부원들의 작업 폴더(그 아래 숫자 이름 폴더)는 그 사람의 것임을 존중하세요. 프로젝트는 작업 폴더 바로 밑에 폴더 하나로 만들고 그 안에서 작업하세요.
+- 이 턴에는 봇의 기억·DB·접근관리 도구가 없습니다. 기억을 저장하거나 조회해 달라는 요청은 "이 방식의 턴에서는 아직 기억 도구를 쓸 수 없어요" 라고 답하세요 — 시도하지 마세요.
+- 만든 파일을 디스코드로 보내는 도구도 이 턴에는 없습니다 — 파일의 절대경로를 알려 주세요.${publish}
+- 특정 작업(예: UI 디자인)에는 전용 스킬이 있을 수 있습니다. 먼저 쓸 수 있는 스킬이 있는지 살펴보고, 있으면 그 지침을 따르세요.`;
+}
+
 function buildCapabilityBlock(ctx: PersonaContext): string {
+  // 풀 하네스 2단계: 소유자 하네스 턴은 도구가 다른 세계다 — 아래 분기 어느 것도 맞지 않는다.
+  if (ctx.isOwner && ctx.harness !== undefined) return buildHarnessCapabilityBlock(ctx, ctx.harness);
   const connected = ctx.workerConnected === true;
   // 발행 도구가 실제로 열리는 조건과 정확히 같다(tools.ts 의 publishTools).
   const publish = connected && ctx.githubReady === true ? PUBLISH_LINES : "";
@@ -314,10 +339,12 @@ function buildCapabilityBlock(ctx: PersonaContext): string {
 
 // 턴별 컨텍스트(역할·DM여부·워커 연결)로 시스템 프롬프트를 만든다. 능력 계층(§7.1)을 반영한다.
 export function buildSystemPrompt(ctx: PersonaContext): string {
+  // 하네스 턴(소유자)에는 remember/recall 이 없다 — 기억 블록을 넣으면 모델이 없는 도구를 쓰라는 지시를 받는다.
+  const harness = ctx.isOwner && ctx.harness !== undefined;
   return [
     IDENTITY,
     QUALITY,
-    MEMORY,
+    ...(harness ? [] : [MEMORY]),
     buildCapabilityBlock(ctx),
   ].filter((block) => block.length > 0).join("\n\n");
 }

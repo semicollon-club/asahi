@@ -244,6 +244,14 @@ Remove-Item Env:ASAHI_PROBE_TOKEN
 - 루프백이라 지연·프레임 상한 걱정이 없지만 큰 것(파일)은 §8 의 HTTP 로 간다 — 두 배치에서 같은 코드다.
 - 러너 재시작·자동 갱신: 진행 중 작업이 있으면 센티넬이 기다리는 지금 규칙(`workerShutdown.ts`) 그대로.
 
+**구현(2026-09-06, 2단계):** 프레임은 `remote/protocol.ts`(hello 에 `mode` 추가 — `harness` 인 워커에게만 봇이 `turn.start`
+를 보낸다), 허브 쪽은 `hub.startTurn`(이벤트 콜백 + 결과 프로미스 + `cancel`, 30분 상한, 끊김·재연결·종료 때 실패로 정리),
+워커 쪽은 `workerClient.ts` 가 `remote/sessionRunner.ts` 에 위임한다. 러너는 부원별로 세션 하나(같은 부원의 두 번째 turn.start
+는 즉시 실패), `permissionMode: bypassPermissions`, 서브에이전트가 꺼진 프로필은 `disallowedTools: ["Task"]`. 봇의 디스패치는
+`core/agent.ts` 의 `decideHarnessDispatch`(플래그·소유자·harness 워커·이미지 없음·무인 아님·토큰 발급기·채널·작업 폴더) —
+하나라도 빠지면 옛 경로라 되돌리기가 플래그 하나다. 세션 없음(resume 실패)은 옛 경로와 같은 문구로 던져 core.ts 의 재시도
+경로를 그대로 탄다. 이미지 턴·손님 턴·무인 턴은 2단계에서 새 경로를 타지 않는다.
+
 ## 8. 파일 반환
 
 산출물(이미지·PDF·캡처)을 디스코드로 돌려주는 경로 — 로드맵 7번. 배치와 무관하게 먼저 만든다.

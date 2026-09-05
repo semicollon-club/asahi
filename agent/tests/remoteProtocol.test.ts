@@ -82,3 +82,55 @@ describe("hello — commit 은 선택 필드다(옛 워커 호환)", () => {
     expect(f).toEqual({ type: "hello", token: "t", workerId: "w", roots: ["/r"] });
   });
 });
+
+// 풀 하네스 2단계(2026-09-05 밤): 세션 러너 프레임 넷. 옛 도구 호출 프레임과 공존한다 — 전환 기간 동안 같은
+// 소켓으로 call/result 와 turn.* 가 함께 흐른다. hello 의 mode 는 "이 워커가 턴을 돌릴 수 있는가"를 봇에 알린다.
+describe("프레임 — 세션 러너(turn.*)", () => {
+  const start: Frame = {
+    type: "turn.start", id: "t1", userId: "u1", cwd: "C:\\asahi-workspace", systemPrompt: "sys", prompt: "hi",
+    resume: "sess-1", profile: { model: "claude-opus-5", maxTurns: 30, subagents: true, effort: "high", tools: ["Read"] },
+    token: "asahi-job.x.y", git: { userName: "홍길동", userEmail: "u1@users.noreply.github.com", token: "ghs_1" },
+  };
+
+  it("turn.start/turn.event/turn.result/turn.cancel 을 인코딩·파싱해도 값이 보존된다", () => {
+    const frames: Frame[] = [
+      start,
+      { type: "turn.event", id: "t1", event: { kind: "tool", name: "Read", input: "a.ts" } },
+      { type: "turn.result", id: "t1", ok: true, text: "다 했어요", sessionId: "sess-2" },
+      { type: "turn.result", id: "t1", ok: false, text: "", error: "No conversation found with session ID sess-1" },
+      { type: "turn.cancel", id: "t1" },
+    ];
+    for (const f of frames) expect(parseFrame(encodeFrame(f))).toEqual(f);
+  });
+
+  it("turn.start 는 선택 필드(resume·git·effort·tools)가 없어도 통과한다", () => {
+    const minimal: Frame = {
+      type: "turn.start", id: "t2", userId: "u1", cwd: "/w", systemPrompt: "s", prompt: "p",
+      profile: { model: "m", maxTurns: 10, subagents: false }, token: "tok",
+    };
+    expect(parseFrame(encodeFrame(minimal))).toEqual(minimal);
+  });
+
+  it("turn.start 의 필수 필드가 빠지거나 프로필 모양이 틀리면 null", () => {
+    const base = { type: "turn.start", id: "t", userId: "u", cwd: "/w", systemPrompt: "s", prompt: "p", token: "k", profile: { model: "m", maxTurns: 1, subagents: true } };
+    expect(parseFrame(JSON.stringify({ ...base, token: undefined }))).toBeNull();
+    expect(parseFrame(JSON.stringify({ ...base, cwd: 3 }))).toBeNull();
+    expect(parseFrame(JSON.stringify({ ...base, profile: { model: "m", subagents: true } }))).toBeNull();
+    expect(parseFrame(JSON.stringify({ ...base, profile: { model: "m", maxTurns: "30", subagents: true } }))).toBeNull();
+    expect(parseFrame(JSON.stringify({ ...base, profile: "opus" }))).toBeNull();
+  });
+
+  it("turn.event 는 event 가 객체여야 하고, turn.result 는 ok 가 boolean·text 가 문자열이어야 한다", () => {
+    expect(parseFrame(JSON.stringify({ type: "turn.event", id: "t", event: "tool" }))).toBeNull();
+    expect(parseFrame(JSON.stringify({ type: "turn.result", id: "t", ok: "yes", text: "" }))).toBeNull();
+    expect(parseFrame(JSON.stringify({ type: "turn.result", id: "t", ok: true }))).toBeNull();
+    expect(parseFrame(JSON.stringify({ type: "turn.cancel" }))).toBeNull();
+  });
+
+  it("hello 의 mode 는 선택이고 tools/harness 만 받는다 — 다른 값은 mode 없는 hello 로 통과시킨다(연결을 막지 않는다)", () => {
+    const h: Frame = { type: "hello", token: "t", workerId: "w", roots: ["/a"], mode: "harness" };
+    expect(parseFrame(encodeFrame(h))).toEqual(h);
+    expect(parseFrame(JSON.stringify({ type: "hello", token: "t", workerId: "w", roots: ["/a"], mode: "weird" })))
+      .toEqual({ type: "hello", token: "t", workerId: "w", roots: ["/a"] });
+  });
+});

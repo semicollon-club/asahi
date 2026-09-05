@@ -154,6 +154,15 @@ lastReviewed: 2026-09-05
   않는다. 업로드 주소는 워커가 `HUB_URL` 에서 유도하므로 운영자 설정은 없다. 능력 안내(`persona.ts`)가 세
   연결 분기 모두에 "경로만 말하지 말고 실제로 보내라"를 싣는다. 스펙 `docs/superpowers/specs/2026-09-05-
   full-harness-worker-design.md` §8, 능력 모델 `docs/security/capability-model.md` 의 파일 반환 절.
+- **풀 하네스 2단계 — 인증 프록시 + 세션 러너(2026-09-06, 소유자 턴만, 플래그 뒤, 실사용 미검증)** — 봇(계정 A)에
+  `/llm/v1/*` 인증 프록시(`core/llmProxy.ts`: 경로 허용 목록·작업 토큰 검증·Authorization 을 구독 OAuth 로 교체·베타 헤더
+  보정·SSE 통과)를, 워커(계정 B)에 `WORKER_MODE=harness` 의 세션 러너(`remote/sessionRunner.ts`: `turn.start` 하나를 Agent SDK
+  `query()` 한 턴으로 — `ANTHROPIC_BASE_URL` 은 프록시, `ANTHROPIC_AUTH_TOKEN` 은 작업 토큰, 부원별 `CLAUDE_CONFIG_DIR`, git 은
+  `sh_exec` 와 같은 `GIT_CONFIG_*`)를 넣었다. 프레임 넷 `turn.start/event/result/cancel`(옛 도구 프레임과 공존), 허브의
+  `startTurn`, 프로필 표(`core/profiles.ts` — 소유자 Opus 5·서브에이전트 열림, 손님 Sonnet 5·low·Task 닫힘), 소유자 DM 의
+  공유 워커 폴백(개인 워커가 없으면 관리자 스코프), 하네스용 능력 안내(내장 도구·기억 도구 없음). `HARNESS_OWNER=true` 인
+  봇이 harness 모드 워커에 소유자 턴(이미지 없음·무인 아님)을 보낸다 — 그 외는 전부 옛 경로. **그 턴에는 봇의 MCP 도구
+  (기억·DB·send_file·PR 생성)가 없다** — 4단계 MCP 허브의 몫이고, 능력 안내가 그 사실을 말한다.
 - **웹 검색** — 모든 대화에서 SDK 내장 `WebSearch` 를 쓴다(`WebFetch` 는 열지 않았다).
 - **정기 뉴스 게시** — 매일 KST 7시에 대회 소식·개발 뉴스를 조사해 각 채널에 올린다.
   정각이 아니라 "지났는데 오늘 아직 안 했으면" 실행하므로 재배포로 그 순간을 놓쳐도 그날 안에
@@ -337,6 +346,13 @@ skip 3건의 성격은 서로 다르다. 1건은 Postgres READ ONLY 트랜잭션
   막아, 소유자 두 분기에만 예외 문장을 넣었다(`persona.ts` 의 `OWNER_MAINTENANCE_LINE`, `docs/security/capability-model.md`).
   유닛 테스트는 문장의 위치(소유자·연결 분기에만)를 고정한다. 모델이 실제로 그 문장을 따라 유지보수 명령을 실행하는지는
   실환경에서만 보인다 — 첫 검증은 이 문단을 실은 배포 뒤 소유자의 Tailscale 복구 지시 그 자체다.
+- **풀 하네스 2단계(2026-09-06)** — 유닛 테스트는 프레임 넷의 파싱, 허브의 `startTurn`(이벤트·결과·끊김·타임아웃·취소·도구
+  호출과 공존), 워커 클라이언트의 turn.* 위임, 세션 러너(가짜 `query` — 이벤트 매핑·세션 id·실패·부원별 단일 세션·취소·idle),
+  프록시(가짜 업스트림 — 401·404·503·헤더 교체·SSE 통과·502), 프로필 네 신원, 소유자 DM 폴백, 하네스 디스패치(가짜 허브로
+  `makeRunAgentTurn` 끝까지), 하네스 능력 안내를 고정한다. **실제 Claude Code 가 계정 B 에서 프록시를 통해 한 턴을 도는 것은
+  아직 한 번도 돌지 않았다** — 프로브(§4.4)가 운영자 PC 에서 같은 구조를 실측했을 뿐이다. 첫 검증은 미니PC 에서
+  `WORKER_MODE=harness` + `HARNESS_OWNER=true` 를 켜고 `deploy/smoke-test.md` 의 2단계 항목 다섯을 훑는 것이다
+  (`deploy/minipc-단일호스트-셋업.md` 9절).
 
 ## 알려진 한계
 

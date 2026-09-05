@@ -334,3 +334,36 @@ describe("봇 설정 — BOT_SENTINEL(자동 갱신 센티넬)", () => {
       .toBe("C:/Users/asahi-bot/asahi-bot/update.flag");
   });
 });
+
+// 풀 하네스 2단계(2026-09-05 밤): 워커 모드. tools(지금까지의 얇은 워커)가 기본이고, harness 면 세션 러너도 켠다 —
+// 도구 실행기는 두 모드 모두 그대로 돈다(전환 기간 공존). 세션 폴더(부원별 CLAUDE_CONFIG_DIR 의 루트)는 선택이다.
+describe("워커 설정 — WORKER_MODE·WORKER_SESSION_DIR", () => {
+  const base = { WORKER_ID: "w", WORKER_TOKEN: "t", HUB_URL: "ws://127.0.0.1:3100/worker", WORKER_ROOTS: "C:/ws" };
+  it("기본은 tools 다", () => {
+    expect(loadWorkerConfig(base).mode).toBe("tools");
+    expect(loadWorkerConfig({ ...base, WORKER_MODE: "" }).mode).toBe("tools");
+  });
+  it("harness 를 받는다", () => {
+    expect(loadWorkerConfig({ ...base, WORKER_MODE: "harness" }).mode).toBe("harness");
+  });
+  it("다른 값은 시작 시점에 실패한다 — 오타를 조용히 tools 로 떨어뜨리지 않는다", () => {
+    expect(() => loadWorkerConfig({ ...base, WORKER_MODE: "harnes" })).toThrow(/WORKER_MODE/);
+  });
+  it("WORKER_SESSION_DIR 은 있으면 그대로, 없으면 undefined(러너가 기본 위치를 정한다)", () => {
+    expect(loadWorkerConfig(base).sessionDir).toBeUndefined();
+    expect(loadWorkerConfig({ ...base, WORKER_SESSION_DIR: "D:/sessions" }).sessionDir).toBe("D:/sessions");
+  });
+});
+
+// 봇 쪽: 프록시가 끼울 구독 자격증명과, 소유자 턴을 새 경로로 보내는 플래그.
+describe("봇 설정 — CLAUDE_CODE_OAUTH_TOKEN·HARNESS_OWNER", () => {
+  it("구독 토큰은 선택이며 그대로 실린다(없으면 프록시가 503 을 낸다)", () => {
+    expect(loadConfig(base).claudeOauthToken).toBeUndefined();
+    expect(loadConfig({ ...base, CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat-x" }).claudeOauthToken).toBe("sk-ant-oat-x");
+  });
+  it("HARNESS_OWNER 는 정확히 true 일 때만 켜진다", () => {
+    expect(loadConfig(base).harnessOwner).toBe(false);
+    expect(loadConfig({ ...base, HARNESS_OWNER: "true" }).harnessOwner).toBe(true);
+    expect(loadConfig({ ...base, HARNESS_OWNER: "1" }).harnessOwner).toBe(false);
+  });
+});
