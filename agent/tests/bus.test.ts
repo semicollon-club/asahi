@@ -24,3 +24,19 @@ describe("EventBus", () => {
     expect(second).toHaveBeenCalled();
   });
 });
+
+// 파일 반환(2026-09-05): 다섯째 이벤트. 바이트(Buffer)를 나르는 유일한 이벤트라 텍스트 이벤트 구독자에게
+// 흘러들지 않는지를 함께 본다 — assistant_message 구독자가 이걸 받으면 text 가 없어 어댑터가 깨진다.
+describe("EventBus — assistant_file", () => {
+  it("assistant_file 구독자만 받고 텍스트 이벤트 구독자는 받지 않는다", () => {
+    const bus = new EventBus();
+    const onFile = vi.fn();
+    const onText = vi.fn();
+    bus.subscribe("assistant_file", onFile);
+    bus.subscribe("assistant_message", onText);
+    const e = { type: "assistant_file" as const, channel: "discord" as const, channelRef: "c1", name: "a.png", data: Buffer.from([1]), ts: 1 };
+    bus.publish(e);
+    expect(onFile).toHaveBeenCalledWith(e);
+    expect(onText).not.toHaveBeenCalled();
+  });
+});

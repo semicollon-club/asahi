@@ -12,8 +12,8 @@ lastReviewed: 2026-08-06
 
 | 디렉토리/파일 | 책임 | 주요 파일 |
 | --- | --- | --- |
-| `adapters/` | 채널(현재는 discord.js) 실제 I/O. 들어온 이벤트를 라우팅 판단해 `user_message`로 발행하고, 코어가 발행한 `assistant_message`/`system_notice`/`progress`를 구독해 실제 전송·편집을 수행한다 | `discord.ts` |
-| `core/` | 대화 오케스트레이션(직렬화·한도 판단), SDK 턴 실행, 페르소나(시스템 프롬프트), 도구 정의·원격 도구 1차 경로 필터, 이 턴이 쓸 워커 선택(개인/공유), 읽기전용 SQL 가드, 정기 게시(주제 정의·실행 판정·실행), PR 추적(폴링 간격·알림 판정·1분 타이머의 폴러 — 모델 턴을 열지 않는다). `discord.js`에 의존하지 않는다(채널 불가지론) | `core.ts`, `agent.ts`, `persona.ts`, `tools.ts`, `remoteTools.ts`, `workerSelect.ts`, `pathPermission.ts`, `paths.ts`, `sqlGuard.ts`, `turnPrep.ts`, `commands.ts`, `images.ts`, `digest.ts`, `prTracker.ts`, `staleWorker.ts` |
+| `adapters/` | 채널(현재는 discord.js) 실제 I/O. 들어온 이벤트를 라우팅 판단해 `user_message`로 발행하고, 코어가 발행한 `assistant_message`/`system_notice`/`progress`를 구독해 실제 전송·편집을 수행한다. `assistant_file`(파일 반환, 2026-09-05)은 그 채널에 첨부로 보내되 진행 표시(상태 메시지·⏳ 반응)는 건드리지 않는다 — 턴 도중의 부수 전송이다 | `discord.ts` |
+| `core/` | 대화 오케스트레이션(직렬화·한도 판단), SDK 턴 실행, 페르소나(시스템 프롬프트), 도구 정의·원격 도구 1차 경로 필터, 이 턴이 쓸 워커 선택(개인/공유), 읽기전용 SQL 가드, 정기 게시(주제 정의·실행 판정·실행), PR 추적(폴링 간격·알림 판정·1분 타이머의 폴러 — 모델 턴을 열지 않는다), 파일 반환(작업 토큰 발급·검증과 `POST /files` 핸들러 — 8MB 상한, 받은 바이트는 디스크에 쓰지 않고 `assistant_file` 이벤트로 넘긴다; 2026-09-05). `discord.js`에 의존하지 않는다(채널 불가지론) | `core.ts`, `agent.ts`, `persona.ts`, `tools.ts`, `remoteTools.ts`, `workerSelect.ts`, `pathPermission.ts`, `paths.ts`, `sqlGuard.ts`, `turnPrep.ts`, `commands.ts`, `images.ts`, `digest.ts`, `prTracker.ts`, `staleWorker.ts`, `jobToken.ts`, `fileReturn.ts` |
 | `events/` | 어댑터↔코어를 분리하는 얇은 pub/sub 이벤트버스. 이벤트 타입 정의의 유일한 출처 | `bus.ts` |
 | `store/` | Postgres 영속 계층(레포지토리 패턴). 스키마 정의와 테이블별 CRUD/쿼리만 담당하며, 그 위 어떤 계층에도 의존하지 않는 최하위 레이어다. `allowed_dirs`는 Task 7부터 `user_id`가 아니라 `worker_id` 키다 — 폴더는 사람이 아니라 그 폴더가 실제로 존재하는 기계(워커)에 속한다는 사실에 맞췄다(마이그레이션 없음 — `deploy/worker-셋업.md` 참고) | `schema.ts`, `db.ts`, `usersRepo.ts`, `conversationsRepo.ts`, `participantsRepo.ts`, `messagesRepo.ts`, `summariesRepo.ts`, `memoriesRepo.ts`, `turnsRepo.ts`, `allowedDirsRepo.ts`, `workersRepo.ts`, `introspectRepo.ts`, `settingsRepo.ts`, `projectsRepo.ts`, `pullRequestsRepo.ts` |
 | `remote/` | 봇↔워커 WebSocket 전송 계층. `protocol.ts`(양쪽 공유 계약)·`hub.ts`(봇 쪽 서버)·`workerClient.ts`/`executors.ts`/`roots.ts`(워커 쪽). `core/` 의 순수 경로 헬퍼(`pathPermission.ts`의 `resolveRealOrNearestAncestor`, `paths.ts`의 `isPathWithinAny`)만 재사용하고 `discord.js`에는 의존하지 않는다. `store/`는 원칙적으로 의존하지 않지만 한 줄 예외가 있다 — 아래 "허용 의존 방향" 참고 | `protocol.ts`, `hub.ts`, `workerClient.ts`, `executors.ts`, `roots.ts` |
@@ -75,9 +75,9 @@ lastReviewed: 2026-08-06
 - `memory/memory.ts`는 `node:fs`/`node:path`만 쓰는 독립 유틸리티다.
 - `config.ts`는 설정 로더다. 예외적으로 `remote/roots.ts`(루트 형식 판정)와 `core/digest.ts`(타입 전용)에 의존한다 — 같은 판정 규칙을 설정 로드 시점과 실행 시점에 각각 복제하면 어긋나기 때문이다. 이 둘 말고는 어떤 모듈도 참조하지 않는다.
 
-## 이벤트버스 계약: 4개 이벤트
+## 이벤트버스 계약: 5개 이벤트
 
-`events/bus.ts`가 정의하는 `AgentEvent`는 정확히 4가지로 이뤄진 판별 유니온이다. 공통
+`events/bus.ts`가 정의하는 `AgentEvent`는 정확히 5가지로 이뤄진 판별 유니온이다. 공통
 필드는 `channel: "discord"`(현재 유일한 `ChannelKind`), `channelRef: string`(응답 대상
 채널 참조), `ts: number`.
 
@@ -87,6 +87,7 @@ lastReviewed: 2026-08-06
 | `assistant_message` | `text: string`(최종 응답 본문) | `core`(턴 성공 시) | 어댑터(실제 디스코드 전송) |
 | `system_notice` | `text: string`(오류·안내 문구) | `core`(`notify()` — 한도 초과, 처리 오류, 이미지 다운로드 실패 등) | 어댑터(전송) |
 | `progress` | `text: string`(도구 호출/완료/답변 작성 중 등 진행 텍스트) | `core`(턴 처리 중 `onProgress` 콜백을 `formatProgress`로 변환) | 어댑터(메시지 편집으로 진행 표시) |
+| `assistant_file` | `name: string`, `data: Buffer`(파일 바이트 — 다섯 이벤트 중 유일하게 텍스트가 아니다) | `core/fileReturn.ts`(`POST /files` 핸들러 — 턴이 아니라 워커의 `send_file` 업로드가 발행 시점이다. 채널은 요청이 아니라 작업 토큰의 `channelRef`가 정한다) | 어댑터(그 채널에 첨부 전송. 진행 표시는 끝내지 않는다 — 턴은 아직 진행 중이다) |
 
 `ConversationHint`(`user_message` 전용 부가 필드): `kind`("dm"|"thread"),
 `discordChannelId`, `originMessageId?`, `guildId?`, `parentChannelId?`, `isPrivate`,

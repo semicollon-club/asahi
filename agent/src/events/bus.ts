@@ -36,7 +36,12 @@ export type AssistantMessageEvent = { type: "assistant_message"; channel: Channe
 export type SystemNoticeEvent = { type: "system_notice"; channel: ChannelKind; channelRef: string; text: string; ts: number };
 // 턴 처리 중 진행 상황(도구 호출/결과/답변 시작 등)을 알리는 이벤트(2B). 실제 표시(전송·편집)는 어댑터 쪽 책임.
 export type ProgressEvent = { type: "progress"; channel: ChannelKind; channelRef: string; text: string; ts: number };
-export type AgentEvent = UserMessageEvent | AssistantMessageEvent | SystemNoticeEvent | ProgressEvent;
+// 파일 반환(2026-09-05, 풀 하네스 0단계): 워커가 봇의 POST /files 로 올린 파일을 그 대화 채널에 첨부로
+// 보내라는 이벤트. 다섯 이벤트 중 유일하게 텍스트가 아니라 바이트(data)를 나른다. 발행자는 코어의 턴이
+// 아니라 HTTP 핸들러(core/fileReturn.ts)다 — 턴 도중 도구 호출로 나가는 부수 전송이라 어댑터는 이 이벤트로
+// 진행 표시(상태 메시지·⏳ 반응)를 끝내지 않는다(adapters/discord.ts).
+export type AssistantFileEvent = { type: "assistant_file"; channel: ChannelKind; channelRef: string; name: string; data: Buffer; ts: number };
+export type AgentEvent = UserMessageEvent | AssistantMessageEvent | SystemNoticeEvent | ProgressEvent | AssistantFileEvent;
 
 type Handler = (e: AgentEvent) => void | Promise<void>;
 

@@ -787,3 +787,22 @@ describe("발행 안내가 폴더 구조를 못박는가", () => {
     expect(p()).toContain("한글·공백");
   });
 });
+
+// 파일 반환(2026-09-05, 풀 하네스 0단계): 도구가 있어도 있는 줄 모르면 쓰이지 않는다(스킬·발행 안내와 같은
+// 이유). send_file 은 워커 연결 축(tools.ts 의 remote 배열)으로 열리므로 안내도 정확히 그 축에서만 낸다 —
+// 미연결 프롬프트가 없는 도구 이름을 달고 다니면 이 저장소가 결함으로 다루는 "안내와 실제 도구의 어긋남"이다.
+describe("buildSystemPrompt — 파일 반환(send_file)을 안내한다", () => {
+  it("워커가 연결된 네 분기 모두 send_file 을 언급하고, 경로만 말하지 말고 실제로 보내라고 한다", () => {
+    for (const { ctx } of ALL_IDENTITIES) {
+      const cap = capabilitySection(buildSystemPrompt({ ...ctx, workerConnected: true }));
+      expect(cap).toMatch(/send_file/);
+      expect(cap).toMatch(/8\s?MB/);
+    }
+  });
+
+  it("워커 미연결이면 네 분기 모두 언급하지 않는다", () => {
+    for (const { ctx } of ALL_IDENTITIES) {
+      expect(capabilitySection(buildSystemPrompt({ ...ctx, workerConnected: false }))).not.toMatch(/send_file/);
+    }
+  });
+});
