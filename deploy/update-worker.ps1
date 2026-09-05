@@ -113,7 +113,12 @@ try {
   # 이제는 이 5분 회차가 갱신·크래시·부팅 실패를 가리지 않고 전부 덮는다.
   if ((Get-WorkerProcess).Count -eq 0) { Start-Worker "감시 — 워커 프로세스가 없음" }
 
-  git fetch origin $Branch | Out-Null
+  # 목적지 refspec 을 명시한다 — `git fetch origin production` 만으로는 클론의 remote.origin.fetch 가
+  # 그 브랜치를 덮을 때만 origin/production 이 갱신된다. --single-branch 로 만든 클론(refspec 이 main
+  # 하나)이나 옛 클론에서는 FETCH_HEAD 만 바뀌고 origin/production 은 생기지 않아 아래 rev-parse 가
+  # 실패한다(2026-09-05, 운영자가 미니PC 의 브랜치 목록에 production 이 없다고 지적한 것이 계기).
+  # 로컬 `git branch` 에 production 이 안 보이는 것은 정상이다 — 로컬 브랜치는 아래 전환 때 만든다.
+  git fetch origin "+refs/heads/${Branch}:refs/remotes/origin/${Branch}" | Out-Null
   if ($LASTEXITCODE -ne 0) { Exit-Failure "git fetch origin $Branch 실패 (종료 코드 $LASTEXITCODE)" }
 
   # git rev-parse 는 없는 ref 를 줘도 던지지 않는다 — 인자 문자열을 그대로 stdout 에 찍고
@@ -207,14 +212,28 @@ try {
   $lockBefore = (Get-FileHash "$RepoPath\agent\package-lock.json").Hash
   if ($switching) {
     # -B: 로컬에 같은 이름의 브랜치가 있든 없든 origin/$Branch 를 가리키게 만들고, 시작점이 원격
-    # 추적 브랜치라 upstream 도 거기로 잡힌다 — 다음 회차부터의 git pull --ff-only 가 그 upstream 을
-    # 따라간다. 옛 브랜치(main)는 지우지 않고 그대로 둔다 — 지울 이유가 없고, 지우다 실패하면 그
-    # 실패가 전환 자체를 가린다.
+    # 추적 브랜치라 upstream 도 거기로 잡힌다(사람이 미니PC 에서 손으로 git pull 할 때를 위한 것 —
+    # 이 스크립트 자신은 아래처럼 upstream 에 기대지 않는다). 옛 브랜치(main)는 지우지 않고 그대로
+    # 둔다 — 지울 이유가 없고, 지우다 실패하면 그 실패가 전환 자체를 가린다.
     git checkout -B $Branch "origin/$Branch"
     if ($LASTEXITCODE -ne 0) { Exit-Failure "git checkout -B $Branch origin/$Branch 실패 (종료 코드 $LASTEXITCODE)" }
+    # 단일 브랜치 클론이면 remote.origin.fetch 가 main 만 덮어, 사람이 손으로 git pull 해도 production 이
+    # 따라오지 않고 위 checkout 도 upstream 을 잡아 주지 않는다(운영자 PC 하네스 실측: "no upstream
+    # configured"). 이 스크립트 자신은 명시 refspec 과 merge --ff-only 만 쓰므로 영향이 없지만, 클론을
+    # 사람이 다룰 수 있는 정상 모양으로 남긴다 — refspec 을 한 번 더하고(전체 refspec 이 이미 있으면
+    # 그대로) upstream 을 잡는다. 둘 다 실패해도 전환 자체는 이미 끝났으므로 결과를 확인하지 않는다.
+    $spec = "+refs/heads/${Branch}:refs/remotes/origin/${Branch}"
+    $have = @(git config --get-all remote.origin.fetch)
+    if (($have -notcontains $spec) -and ($have -notcontains "+refs/heads/*:refs/remotes/origin/*")) {
+      git config --add remote.origin.fetch $spec
+    }
+    git branch --set-upstream-to="origin/$Branch" $Branch | Out-Null
   } else {
-    git pull --ff-only
-    if ($LASTEXITCODE -ne 0) { Exit-Failure "git pull --ff-only 실패 (종료 코드 $LASTEXITCODE)" }
+    # git pull 이 아니라 방금 명시적으로 가져온 origin/$Branch 로 merge --ff-only 한다. pull 은 클론의
+    # refspec·upstream·pull.rebase 설정에 따라 무엇을 가져와 무엇과 합칠지가 달라지는데, 이 스크립트는
+    # 그 설정을 통제하지 않는다 — 위 fetch 가 갱신한 ref 하나만 믿는 편이 어떤 클론에서도 같다.
+    git merge --ff-only "origin/$Branch"
+    if ($LASTEXITCODE -ne 0) { Exit-Failure "git merge --ff-only origin/$Branch 실패 (종료 코드 $LASTEXITCODE)" }
   }
   $lockAfter = (Get-FileHash "$RepoPath\agent\package-lock.json").Hash
 

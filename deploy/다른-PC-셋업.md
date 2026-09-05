@@ -1,10 +1,10 @@
 ---
-lastReviewed: 2026-07-13
+lastReviewed: 2026-09-05
 ---
 
 # 다른 PC에서 Asahi 운영하기
 
-이 PC가 꺼져 있어도 다른 PC에서 봇을 띄울 수 있게 하는 절차. 코드는 GitHub(`wwoosshh/asahi`)에 있고, **비밀값(.env)은 git에 올라가지 않으므로** 새 PC에서 따로 준비한다. 대화·기억 등 실제 상태는 **Supabase Postgres**(`DATABASE_URL`)에 중앙 저장되므로, 같은 `DATABASE_URL`을 가리키기만 하면 새 PC에서도 기억이 그대로 이어진다.
+이 PC가 꺼져 있어도 다른 PC에서 봇을 띄울 수 있게 하는 절차. 코드는 GitHub(`semicollon-club/asahi` — 옛 주소 `wwoosshh/asahi` 는 리다이렉트된다)에 있고, **비밀값(.env)은 git에 올라가지 않으므로** 새 PC에서 따로 준비한다. 대화·기억 등 실제 상태는 **Supabase Postgres**(`DATABASE_URL`)에 중앙 저장되므로, 같은 `DATABASE_URL`을 가리키기만 하면 새 PC에서도 기억이 그대로 이어진다.
 
 ## 사전 요구
 - **Node.js 22 이상**, **git**
@@ -13,7 +13,7 @@ lastReviewed: 2026-07-13
 ## 최초 셋업 (새 PC에서 한 번)
 
 ```powershell
-git clone https://github.com/wwoosshh/asahi.git
+git clone https://github.com/semicollon-club/asahi.git
 cd asahi\agent
 npm install
 npm run build
