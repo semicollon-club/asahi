@@ -36,10 +36,28 @@ import https from "node:https";
 import os from "node:os";
 import fs from "node:fs";
 import path from "node:path";
+import readline from "node:readline";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 
 const PORT = Number(process.env.ASAHI_PROBE_PORT ?? 8787);
 const MODEL = process.env.ASAHI_PROBE_MODEL ?? "claude-sonnet-5";
+
+// 토큰을 환경변수로 못 넘길 때(2026-09-05 운영자 PC: PowerShell 5.1 의 Read-Host 보안 입력에 붙여 넣기가 안 되고,
+// 메모장 경로는 저장 전에 다음 명령이 돌았다) 스크립트가 직접 묻는다. 입력은 화면에 표시하지 않는다 — 콘솔은
+// 오른쪽 클릭이 붙여 넣기다. 그냥 Enter 면 토큰 없이 경로만 확인한다. 값은 이 프로세스 메모리에만 있다.
+function promptHidden(question: string): Promise<string> {
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: true });
+  const internal = rl as unknown as { _writeToOutput?: (s: string) => void; output: NodeJS.WritableStream };
+  let muted = false;
+  internal._writeToOutput = (s: string) => {
+    if (!muted) internal.output.write(s);
+    else if (s.includes("\n") || s.includes("\r")) internal.output.write("\n");
+  };
+  return new Promise((resolve) => {
+    rl.question(question, (answer) => { rl.close(); resolve(answer.trim()); });
+    muted = true;
+  });
+}
 
 // 끼울 자격증명. 직접 준 토큰이 우선이고, 운영자가 옵션을 켰을 때만 이 PC 의 Claude Code 로그인 파일을
 // 읽는다(값은 메모리에만 두고 절대 출력하지 않는다). 파일 모양이 다르면 이유만 말하고 토큰 없이 진행한다.
@@ -60,7 +78,8 @@ function readLocalLogin(): string | undefined {
   }
   return undefined;
 }
-const REAL = process.env.ASAHI_PROBE_TOKEN ?? (process.env.ASAHI_PROBE_USE_LOCAL_LOGIN === "1" ? readLocalLogin() : undefined);
+// 끼울 진짜 자격증명. main 에서 정한다 — 환경변수 → (옵션) 로컬 로그인 파일 → 대화식 입력 순.
+let REAL: string | undefined;
 
 type Seen = { method: string; path: string; auth: "bearer" | "x-api-key" | "none"; beta: boolean; status: number };
 const seen: Seen[] = [];
@@ -84,14 +103,24 @@ function startProxy(): Promise<http.Server> {
         const beta = String(headers["anthropic-beta"] ?? "");
         if (!beta.includes("oauth-2025-04-20")) headers["anthropic-beta"] = [beta, "oauth-2025-04-20"].filter(Boolean).join(",");
       }
-      const up = https.request(
-        { host: "api.anthropic.com", method: req.method, path: req.url, headers: { ...headers, host: "api.anthropic.com", "content-length": String(body.length) } },
-        (upRes) => {
-          seen.push({ method: req.method ?? "?", path: req.url ?? "?", auth, beta: headers["anthropic-beta"] !== undefined, status: upRes.statusCode ?? 0 });
-          res.writeHead(upRes.statusCode ?? 502, upRes.headers);
-          upRes.pipe(res);
-        },
-      );
+      let up: http.ClientRequest;
+      try {
+        up = https.request(
+          { host: "api.anthropic.com", method: req.method, path: req.url, headers: { ...headers, host: "api.anthropic.com", "content-length": String(body.length) } },
+          (upRes) => {
+            seen.push({ method: req.method ?? "?", path: req.url ?? "?", auth, beta: headers["anthropic-beta"] !== undefined, status: upRes.statusCode ?? 0 });
+            res.writeHead(upRes.statusCode ?? 502, upRes.headers);
+            upRes.pipe(res);
+          },
+        );
+      } catch (err) {
+        // 헤더 값이 잘못됐을 때(ERR_INVALID_CHAR 등) 프록시 프로세스가 죽지 않게 한다 — 사유는 결과 JSON 에 남는다.
+        console.error("프록시가 업스트림 요청을 만들지 못했어요:", err instanceof Error ? err.message : String(err));
+        seen.push({ method: req.method ?? "?", path: req.url ?? "?", auth, beta: false, status: 0 });
+        res.writeHead(502);
+        res.end();
+        return;
+      }
       up.on("error", () => { seen.push({ method: req.method ?? "?", path: req.url ?? "?", auth, beta: false, status: 0 }); res.writeHead(502); res.end(); });
       up.end(body);
     });
@@ -100,6 +129,32 @@ function startProxy(): Promise<http.Server> {
 }
 
 async function main(): Promise<void> {
+  REAL = process.env.ASAHI_PROBE_TOKEN ?? (process.env.ASAHI_PROBE_USE_LOCAL_LOGIN === "1" ? readLocalLogin() : undefined);
+  if (!REAL && process.stdin.isTTY && process.env.ASAHI_PROBE_NO_PROMPT !== "1") {
+    console.log(
+      "Railway → asahi 서비스 → Variables → CLAUDE_CODE_OAUTH_TOKEN 의 값을 복사해 아래에 붙여 넣고 Enter 를 누르세요\n" +
+        "(입력은 화면에 표시되지 않아요. 이 콘솔에서 붙여 넣기는 마우스 오른쪽 클릭입니다. 그냥 Enter 면 토큰 없이 경로만 확인합니다.)",
+    );
+    const typed = await promptHidden("토큰: ");
+    if (typed.length > 0) REAL = typed;
+    console.log(REAL ? `토큰을 받았어요(길이 ${REAL.length}). 프록시를 띄웁니다.` : "토큰 없이 진행합니다.");
+  }
+  // 값을 쓰기 전에 모양을 본다 — 2026-09-05 실측: 가려진 값(●●●)을 복사해 붙이면 헤더에 못 쓰는 문자라
+  // 프록시가 ERR_INVALID_CHAR 로 죽었다. 값은 출력하지 않고 무엇이 문제인지만 말한다.
+  if (REAL !== undefined) {
+    const nonAscii = [...REAL].filter((c) => c.charCodeAt(0) < 0x21 || c.charCodeAt(0) > 0x7e);
+    const allSame = new Set([...REAL]).size === 1;
+    if (nonAscii.length > 0) {
+      console.error(
+        `붙여 넣은 값(길이 ${REAL.length})에 HTTP 헤더에 쓸 수 없는 문자가 ${nonAscii.length}개 있어요` +
+          (allSame ? " — 전부 같은 문자라 가려진 값(●●●)을 복사한 것으로 보여요." : ".") +
+          " Railway Variables 에서 눈 아이콘으로 값을 표시한 뒤 복사하거나, 값 옆의 복사 버튼을 쓰세요.",
+      );
+      process.exit(2);
+    }
+    const kind = REAL.startsWith("sk-ant-oat") ? "구독 OAuth 토큰" : REAL.startsWith("sk-ant-api") ? "API 키" : "알 수 없는 형식";
+    console.log(`토큰 종류: ${kind}`);
+  }
   const server = await startProxy();
   // 자격증명 없는 워커를 흉내 낸다: 로컬 로그인을 못 보게 빈 설정 폴더, 더미 토큰, 프록시 주소.
   const emptyConfig = fs.mkdtempSync(path.join(os.tmpdir(), "asahi-probe-cfg-"));
