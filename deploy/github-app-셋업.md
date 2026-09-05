@@ -41,12 +41,13 @@ lastReviewed: 2026-09-05
 
 ### 권한 (Repository permissions)
 
-세 개만 켠다. 나머지는 전부 `No access` 로 둔다.
+아래 넷을 켠다(Actions 는 선택). 나머지는 전부 `No access` 로 둔다.
 
 | 권한 | 값 | 왜 |
 |---|---|---|
 | **Contents** | Read and write | git push. 이 기능의 본체다. 2026-09-05 부터는 `sh_exec` 의 git(clone·fetch·push)도 이 권한의 단기 토큰을 쓴다 |
 | **Administration** | Read and write | 리포 자동 생성(`POST /orgs/{org}/repos`)에만 쓰인다 |
+| **Actions** | Read-only (선택) | PR 추적(2026-09-05 2단계)이 그 커밋의 워크플로 실행으로 CI 결과를 본다. 없으면 봇이 `pull_requests` 만으로 다시 발급해 병합 알림만 가고 CI 는 "미확인" 으로 둔다 — 기동은 막히지 않는다. 2026-09-05 기준 설치에는 이미 있다(Read and write 로 켜져 있으나 봇은 읽기만 요청한다) |
 | **Pull requests** | Read and write | PR 생성(`create_pull_request`, 2026-09-05). 부원이 브랜치를 올린 뒤 main 에 PR 을 내는 마지막 조각이다. PR 의 리뷰·코멘트 읽기(`pr_review_comments`, 같은 날 2단계)는 이 권한의 읽기 쪽만 쓴다 |
 
 `Metadata: Read-only` 는 자동으로 켜진다 — 정상이다. 저장소 목록(`list_repos`, 2026-09-05 2단계)은 이

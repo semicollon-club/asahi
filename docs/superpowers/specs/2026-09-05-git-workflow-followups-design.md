@@ -88,7 +88,7 @@ lastReviewed: 2026-09-05
 
 | 열 | 뜻 |
 |---|---|
-| `repo`, `number`, `url`, `head`, `base`, `title` | PR 신원. `(repo, number)` 가 UNIQUE |
+| `repo`, `pr_number`, `url`, `head`, `base`, `title` | PR 신원. `(repo, pr_number)` 가 UNIQUE — 같은 PR 을 두 번 기록해도 행이 하나라 알림이 두 벌 나가지 않는다 |
 | `requester_user_id` | 요청한 부원의 디스코드 id |
 | `conversation_id` | PR 을 낸 대화. 후속 알림은 이 대화의 채널로 간다(알릴 때 `conversations` 에서 채널을 다시 찾는다) |
 | `state` | `open` → `merged` 또는 `closed` |
@@ -115,7 +115,17 @@ lastReviewed: 2026-09-05
    `success`, 실행이 하나도 없는데 만든 지 10분이 지났으면 `none`. `success`/`failure` 로 처음 넘어갈
    때 요청자 대화 채널에 한 번 알린다(실패면 실패한 잡 이름과 링크).
 6. `owner_notified_ts` 가 빈 행은 운영자에게 알린다 — `PR_NOTIFY_CHANNEL_ID` 가 설정돼 있으면 그
-   채널로, 없으면 소유자 DM(`conversations.findDmFor`) 으로. 요청자가 운영자 자신이면 생략한다.
+   채널로, 없으면 소유자 DM(`conversations.findDmFor`) 으로. 요청자가 운영자 자신이면 생략한다. 둘 다
+   없으면 경고 로그 한 줄을 남기고 표시는 남긴다(채널이 생길 때까지 매 틱 같은 경고를 반복하지 않는다).
+
+알림의 종류: 담담한 소식(새 PR·CI 통과·병합)은 `assistant_message` 로, 경고(CI 실패·병합 없이 닫힘)만
+`system_notice`(어댑터가 ⚠️ 를 붙인다)로 나간다. 알림 문구에는 제목·상태·링크만 실리고 코멘트 본문은
+싣지 않는다(§5). CI 알림은 커밋이 바뀌면(새 push) 그 커밋의 결과를 다시 알린다 — 실패 알림을 받고 고쳐
+올린 부원이 "이제 통과했다"를 들어야 한다. 알릴 대화를 못 찾아도(대화가 지워짐 등) `*_notified_ts` 는
+남긴다 — 매 틱 재시도해 언젠가 도착하면 그때는 낡은 소식이다.
+
+판정(`pollIntervalMs`·`isDue`·`planPrUpdate`)은 `agent/src/core/prTracker.ts` 의 순수 함수고 클래스
+`PrTracker` 는 그것을 표·깃허브·버스에 잇기만 한다 — `digest.ts`·`staleWorker.ts` 와 같은 배치다.
 
 체크 런(`checks: read`)이 아니라 워크플로 실행(`actions: read`)을 보는 이유: App 에 `actions` 권한은
 이미 있고(2026-09-05 설치 확인) `checks` 는 없다 — 새 권한 승인 절차를 만들지 않는다. 이 조직의 CI 는
@@ -135,7 +145,13 @@ lastReviewed: 2026-09-05
 인자 없이 부르면 요청자가 낸 PR(소유자는 전부)을 최근 10개까지 표에서 읽어 상태·CI·주소를 보여주고
 마지막 확인 시각을 붙인다. `repo`+`number` 를 주면 그 PR 하나를 깃허브에서 **지금** 확인해 표를
 갱신하고 보여준다 — "CI 통과했어?" 에 폴링 간격을 기다리게 하지 않기 위해서다. 노출 축은 위 두 도구와
-같다.
+같다. 추적하지 않는 PR(사람이 깃허브에서 직접 만든 것)은 깃허브를 부르지 않고 그렇다고 말한다.
+
+지금 확인의 판정은 폴러와 같은 함수(`inspectPullRequest`·`planPrUpdate`)를 쓰고, 그 결과의 patch 를
+**notified 표시까지 그대로** 적용한다 — 이 도구의 답이 곧 알림이라, 폴러가 같은 소식을 채널에 한 번 더
+내지 않는다. 받아들인 한계: 요청자가 아닌 사람(운영자)이 다른 채널에서 그 PR 을 물어 병합·CI 결과를
+처음 관측하면, 요청자의 채널에는 그 소식이 가지 않는다. 드문 경우이고, 반대로 두 곳에 같은 알림을 내는
+쪽이 더 거슬린다고 봤다.
 
 ## 5. 위협 판단
 

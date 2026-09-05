@@ -677,6 +677,7 @@ describe("깃허브 발행 안내", () => {
         // 2단계(표준 절차)에서 더한 읽기 도구 둘도 같은 축이다.
         expect(prompt.includes("list_repos")).toBe(tools.includes("mcp__asahi__list_repos"));
         expect(prompt.includes("pr_review_comments")).toBe(tools.includes("mcp__asahi__pr_review_comments"));
+        expect(prompt.includes("pr_status")).toBe(tools.includes("mcp__asahi__pr_status"));
       }
     }
   });
@@ -716,6 +717,14 @@ describe("깃허브 표준 작업 절차 안내(2단계)", () => {
     expect(p).toContain("force push");
     expect(p).toContain("pr_review_comments");
     expect(p).toMatch(/같은 .*브랜치/);
+  });
+
+  // PR 추적(B2): PR 을 낸 뒤의 CI 결과·병합은 봇이 그 채널로 알려주고, 물으면 pr_status 로 본다.
+  // 이 사실을 모르면 모델은 "깃허브에서 확인하세요" 라고만 답한다.
+  it("PR 을 낸 뒤 CI·병합 소식이 자동으로 오고 pr_status 로 확인할 수 있다고 안내한다", () => {
+    const p = on();
+    expect(p).toContain("pr_status");
+    expect(p).toMatch(/CI.*병합/);
   });
 
   it("main·production 직접 push·병합 금지와 git config 금지는 그대로 남는다(회귀 유지)", () => {

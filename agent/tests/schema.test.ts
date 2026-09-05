@@ -14,6 +14,7 @@ describe("새 스키마(Postgres)", () => {
     for (const t of [
       "users", "conversations", "conversation_participants", "messages",
       "memories", "conversation_summaries", "logs", "actions", "turns", "backups", "triggers", "meta",
+      "pull_requests",
     ]) {
       expect(names).toContain(t);
     }
