@@ -615,6 +615,8 @@ JS 를 받아 파일을 쓰지 못하고 죽는다. `setInterval` 이 프로세�
 **양쪽이 새 코드**여야 한다 — 워커 커밋을 `runtime_info` 로 먼저 확인한다(`docs/agent-onboarding.md`
 3절). 이 절의 항목은 전부 **서버 채널**(공유 워커)에서 한다.
 
+- [ ] **봇 배포 트리거** — `docs/`·`deploy/` 만 바뀐 production 병합(이 항목을 더한 PR 자신)에서 Railway
+  `asahi` 서비스 배포가 "No changes to watched files"로 스킵되지 않고 뜨는가.
 - [ ] **워커 브랜치 전환(한 번)** — 미니PC asahi 창에서 `git -C C:\asahi-worker branch --show-current`
   가 `production` 이고, `C:\asahi-worker\update-worker.log` 에 "브랜치 전환 완료" 가 있다.
   기대 결과: production 병합 전에는 "브랜치 전환 대기" 가 **한 줄만** 있고(회차마다 반복되면
