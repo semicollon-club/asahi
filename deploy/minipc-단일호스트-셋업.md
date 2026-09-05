@@ -34,6 +34,12 @@ lastReviewed: 2026-09-05
 - Railway `asahi` 서비스의 **Variables 값을 볼 수 있다**(A 의 `.env` 로 옮긴다).
 - 이 커밋이 `production` 에 병합돼 있다 — 워커의 `update-worker.ps1` 이 래퍼로 바뀐 판이 미니PC 에 먼저 깔려야
   하고(다음 회차에 자동), A 의 클론도 `production` 을 받는다.
+- **원격 접속이 Tailscale 이면 미니PC 의 Tailscale 에 "Run unattended"(무인 실행)가 켜져 있어야 한다.** 꺼져 있으면
+  로그인한 사용자가 로그아웃하는 순간 Tailscale 이 함께 내려가 원격 데스크톱이 끊긴다 — 2026-09-05 밤에 실제로 겪었고,
+  미니PC 앞에 갈 수 없는 상태라 아래 절차가 멈췄다. 확인은 트레이의 Tailscale 아이콘 메뉴. **그리고 이 절차 중에는 절대
+  로그아웃하지 않는다** — 다른 계정의 창이 필요하면 `runas /user:<계정> powershell` 로 그 계정의 PowerShell 을 관리자
+  세션 안에서 띄운다(1·2절). 원격 접속이 끊겼을 때 봇을 통해 되살리는 길은 소유자의 유지보수 지시다(`docs/security/
+  capability-model.md` 의 "소유자 유지보수 예외") — 승인 링크가 나올 수 있는 명령은 **운영자만 보는 채널**에서 시킨다.
 
 ## 1. 계정 A 만들기(관리자 창, 한 번)
 
@@ -48,20 +54,33 @@ Set-LocalUser -Name asahi-bot -PasswordNeverExpires $true
 적어 둔다). 관리자 그룹에 넣지 않는다 — `Users` 그룹의 표준 계정이어야 한다(`Get-LocalGroupMember Administrators`
 에 없어야 한다).
 
-그다음 **로그인 화면에서 `asahi-bot` 으로 한 번 로그인**한다 — 프로필 폴더 `C:\Users\asahi-bot` 이 이때 만들어진다.
-이후 2~3절은 그 계정의 PowerShell 창(관리자 아님)에서 한다. 로그인 상태로 두지 않아도 된다 — 작업 스케줄러
-작업은 로그온 여부와 무관하게 돈다(4절).
+그다음 **같은 관리자 창에서 `asahi-bot` 계정의 PowerShell 을 띄운다** — 로그인 화면에서 계정을 전환하지 않는다(원격
+세션이 끊긴다, 0절):
+
+```powershell
+runas /user:asahi-bot powershell
+```
+
+암호를 넣으면 새 창이 뜬다. 이 창은 `asahi-bot` 으로 돌고(첫 줄에 `whoami` 를 쳐서 `…\asahi-bot` 인지 본다), 처음
+열릴 때 프로필 폴더 `C:\Users\asahi-bot` 이 만들어진다. 2~3절은 이 창에서 한다. 작업 스케줄러 작업은 로그온 여부와
+무관하게 돈다(4절).
 
 ## 2. 클론과 의존성(asahi-bot 창)
 
 ```powershell
+whoami
 cd $env:USERPROFILE
 git clone -b production https://github.com/semicollon-club/asahi.git asahi-bot
 cd asahi-bot\agent
-npm ci
+npm.cmd ci
 New-Item -ItemType Directory -Force ..\logs | Out-Null
 ```
 
+- `whoami` 가 `<컴퓨터 이름>\asahi-bot` 이어야 한다. `asahi-admin` 이 보이면 잘못된 창이다 — 2026-09-05 밤 실제로 관리자
+  창에서 클론해 `C:\Users\asahi-admin\asahi-bot` 에 들어간 적이 있다(그 폴더는 지우고 다시 했다).
+- `npm.cmd ci` 인 이유: `npm` 만 치면 PowerShell 이 `npm.ps1` 을 열려다 실행 정책에 막힌다("이 시스템에서 스크립트를
+  실행할 수 없으므로"). `.cmd` 로 부르면 그 스크립트를 거치지 않는다. 봇 작업은 `cmd.exe` 로 실행되므로 운영에는 영향이
+  없다.
 - `-b production` — 봇도 워커와 같은 브랜치를 따른다. 클론이 `main` 에 있으면 업데이터가 첫 회차에 스스로 전환하지만
   처음부터 맞추는 편이 낫다.
 - `npm ci` 는 `package-lock.json` 그대로 설치한다(`npm install` 이 아니다 — 업데이터도 `ci` 를 쓴다).
