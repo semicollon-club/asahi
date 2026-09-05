@@ -1,5 +1,8 @@
 import { describe, it, expect } from "vitest";
-import { fetchPrFeedback, formatPrFeedback, PR_FEEDBACK_BODY_MAX, type PrFeedback } from "../src/github/pulls.js";
+import {
+  fetchPrFeedback, formatPrFeedback, PR_FEEDBACK_BODY_MAX, type PrFeedback,
+  fetchPullRequestSnapshot, fetchWorkflowRuns, aggregateCi, failedRuns, CI_NONE_AFTER_MS, type WorkflowRun,
+} from "../src/github/pulls.js";
 
 const ORG = "semicollon-club";
 const PR = {
@@ -131,5 +134,75 @@ describe("formatPrFeedback", () => {
     const out = formatPrFeedback({ ...base, issueComments: null });
     expect(out).toContain("대화 코멘트");
     expect(out).toMatch(/못 읽|권한/);
+  });
+});
+
+// ── PR 추적(B2) 이 쓰는 조각들 ──────────────────────────────────────────────
+describe("fetchPullRequestSnapshot", () => {
+  it("PR 하나의 상태·커밋만 읽는다(리뷰·코멘트는 부르지 않는다)", async () => {
+    const { seen, fetchImpl } = fakeGithub();
+    const s = await fetchPullRequestSnapshot({ org: ORG, repo: "homepage", number: 7, token: "t", fetchImpl });
+    expect(seen.map((x) => x.url)).toEqual([`https://api.github.com/repos/${ORG}/homepage/pulls/7`]);
+    expect(s).toEqual({
+      number: 7, title: "로그인 페이지", state: "open", merged: false, url: PR.html_url,
+      head: "feat/login", base: "main", headSha: "abc1234def",
+    });
+  });
+
+  it("못 읽으면 번호를 담아 던진다", async () => {
+    const { fetchImpl } = fakeGithub({ prStatus: 404 });
+    await expect(fetchPullRequestSnapshot({ org: ORG, repo: "homepage", number: 7, token: "t", fetchImpl })).rejects.toThrow(/#7/);
+  });
+});
+
+describe("fetchWorkflowRuns", () => {
+  it("그 커밋(head_sha)의 워크플로 실행만 묻고 이름·상태·결론·링크로 좁힌다", async () => {
+    let seenUrl = "";
+    const fetchImpl = (async (url: string) => {
+      seenUrl = String(url);
+      return new Response(JSON.stringify({
+        total_count: 1,
+        workflow_runs: [{ name: "agent", status: "completed", conclusion: "success", html_url: "https://github.com/x/actions/runs/1", id: 1 }],
+      }), { status: 200 });
+    }) as unknown as typeof fetch;
+    const runs = await fetchWorkflowRuns({ org: ORG, repo: "homepage", headSha: "abc1234def", token: "t", fetchImpl });
+    expect(seenUrl.startsWith(`https://api.github.com/repos/${ORG}/homepage/actions/runs?`)).toBe(true);
+    expect(seenUrl).toContain("head_sha=abc1234def");
+    expect(runs).toEqual([{ name: "agent", status: "completed", conclusion: "success", url: "https://github.com/x/actions/runs/1" }]);
+  });
+
+  it("못 읽으면 던진다", async () => {
+    const fetchImpl = (async () => new Response(JSON.stringify({ message: "Resource not accessible by integration" }), { status: 403 })) as unknown as typeof fetch;
+    await expect(fetchWorkflowRuns({ org: ORG, repo: "homepage", headSha: "abc", token: "t", fetchImpl })).rejects.toThrow(/Resource not accessible/);
+  });
+});
+
+describe("aggregateCi — 워크플로 실행 여러 개를 상태 하나로", () => {
+  const run = (status: string, conclusion: string | null, name = "w"): WorkflowRun => ({ name, status, conclusion, url: "u" });
+
+  it("실행이 아직 없으면 잠시는 대기, 시간이 지나면 CI 없음", () => {
+    expect(aggregateCi([], { ageMs: 1_000 })).toBe("pending");
+    expect(aggregateCi([], { ageMs: CI_NONE_AFTER_MS })).toBe("none");
+  });
+
+  it("하나라도 돌고 있으면 대기", () => {
+    expect(aggregateCi([run("completed", "success"), run("in_progress", null)], { ageMs: 0 })).toBe("pending");
+    expect(aggregateCi([run("queued", null)], { ageMs: 0 })).toBe("pending");
+  });
+
+  it("전부 끝났고 실패·취소·시간 초과가 하나라도 있으면 실패", () => {
+    expect(aggregateCi([run("completed", "success"), run("completed", "failure")], { ageMs: 0 })).toBe("failure");
+    expect(aggregateCi([run("completed", "cancelled")], { ageMs: 0 })).toBe("failure");
+    expect(aggregateCi([run("completed", "timed_out")], { ageMs: 0 })).toBe("failure");
+  });
+
+  it("전부 성공·건너뜀·중립이면 성공", () => {
+    expect(aggregateCi([run("completed", "success"), run("completed", "skipped"), run("completed", "neutral")], { ageMs: 0 })).toBe("success");
+  });
+
+  it("failedRuns 는 실패로 친 실행만 고른다", () => {
+    const ok = run("completed", "success", "docs");
+    const bad = run("completed", "failure", "agent");
+    expect(failedRuns([ok, bad, run("in_progress", null, "x")])).toEqual([bad]);
   });
 });

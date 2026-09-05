@@ -8,6 +8,7 @@ import { MemoriesRepo } from "../src/store/memoriesRepo.js";
 import { UsersRepo } from "../src/store/usersRepo.js";
 import { AllowedDirsRepo } from "../src/store/allowedDirsRepo.js";
 import { ProjectsRepo } from "../src/store/projectsRepo.js";
+import { PullRequestsRepo } from "../src/store/pullRequestsRepo.js";
 import { IntrospectRepo } from "../src/store/introspectRepo.js";
 import {
   buildToolCtx, buildMultimodalMessage, buildRemoteCtx, resolveTurnWorker,
@@ -24,7 +25,7 @@ const testRuntime: RuntimeInfo = { model: "claude-opus-4-8", sdkVersion: "0.3.20
 // 종료됐다 — tools.ts 의 canManagePc 주석 참고)를 이 테스트가 직접 잡아낸다.
 async function repos(): Promise<ToolRepos> {
   const db = await openTestDb();
-  return { memories: new MemoriesRepo(db), users: new UsersRepo(db), allowedDirs: new AllowedDirsRepo(db), introspect: new IntrospectRepo(db), projects: new ProjectsRepo(db) };
+  return { memories: new MemoriesRepo(db), users: new UsersRepo(db), allowedDirs: new AllowedDirsRepo(db), introspect: new IntrospectRepo(db), projects: new ProjectsRepo(db), pullRequests: new PullRequestsRepo(db) };
 }
 
 describe("buildToolCtx — makeRunAgentTurn 의 ToolCtx 구성", () => {
@@ -37,7 +38,7 @@ describe("buildToolCtx — makeRunAgentTurn 의 ToolCtx 구성", () => {
 
   it("buildToolCtx 는 introspect 리포와 runtime 을 ctx 로 옮긴다", async () => {
     const db = await openTestDb();
-    const repos: ToolRepos = { memories: {} as any, users: {} as any, allowedDirs: {} as any, introspect: new IntrospectRepo(db), projects: new ProjectsRepo(db) };
+    const repos: ToolRepos = { memories: {} as any, users: {} as any, allowedDirs: {} as any, introspect: new IntrospectRepo(db), projects: new ProjectsRepo(db), pullRequests: new PullRequestsRepo(db) };
     const runtime: RuntimeInfo = { model: "claude-opus-4-8", sdkVersion: "0.3.207", deployTarget: "local", maxTurns: 30, workers: [] };
     const ctx = buildToolCtx(repos, { role: "owner", isPrivate: true, isOwner: true, userId: "o", conversationId: 1 }, runtime);
     expect(ctx.repos.introspect).toBe(repos.introspect);

@@ -40,6 +40,9 @@ export type Config = {
   digestChannels: DigestChannels;
   // 깃허브 발행 설정. 없으면 null 이고, 그때는 발행 도구가 아예 노출되지 않는다.
   github: GithubAppConfig | null;
+  // PR 추적(2026-09-05): 봇이 만든 새 PR 을 운영자에게 알릴 채널. 없으면 소유자 DM 으로 간다 —
+  // 선택값이라 비어 있어도 기동에 지장이 없다(core/prTracker.ts).
+  prNotifyChannelId?: string;
 };
 
 // 깃허브 발행 설정. 개인키는 base64 한 줄로 받는다 — 줄바꿈이 든 PEM 은 .env 파서·배포
@@ -91,6 +94,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       ...(env.DIGEST_DEVNEWS_CHANNEL_ID ? { devnews: env.DIGEST_DEVNEWS_CHANNEL_ID } : {}),
     },
     github: loadGithubConfig(env),
+    prNotifyChannelId: env.PR_NOTIFY_CHANNEL_ID || undefined,
   };
 }
 

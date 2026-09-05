@@ -6,6 +6,7 @@ import type { MemoriesRepo } from "../store/memoriesRepo.js";
 import type { AllowedDirsRepo } from "../store/allowedDirsRepo.js";
 import type { GithubAppConfig } from "../github/appToken.js";
 import type { ProjectsRepo } from "../store/projectsRepo.js";
+import type { PullRequestsRepo } from "../store/pullRequestsRepo.js";
 import type { IntrospectRepo } from "../store/introspectRepo.js";
 import type { WorkerKind } from "../store/workersRepo.js";
 import fs from "node:fs";
@@ -95,6 +96,8 @@ export type TurnRunner = (req: TurnRequest) => Promise<TurnResult>;
 export type ToolRepos = {
   memories: MemoriesRepo; users: UsersRepo; allowedDirs: AllowedDirsRepo; introspect: IntrospectRepo;
   projects: ProjectsRepo;
+  // PR 추적 표(2026-09-05) — create_pull_request 가 기록하고 pr_status 가 읽는다.
+  pullRequests: PullRequestsRepo;
 };
 
 // mcp__asahi__recall → recall 처럼 인프로세스 MCP 접두어를 벗겨 짧게 만든다. 접두어가 없으면 그대로.

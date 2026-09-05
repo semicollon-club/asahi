@@ -1,4 +1,4 @@
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 
 // Postgres DDL. better-sqlite3 -> pg 이전(feat/postgres-supabase-store)에서
 // 기존 SQLite 스키마(db.ts 의 legacy SCHEMA + 이 파일의 NEW_SCHEMA)를 하나로 합쳤다.
@@ -241,4 +241,33 @@ CREATE TABLE IF NOT EXISTS projects (
   last_push_ts BIGINT
 );
 CREATE INDEX IF NOT EXISTS idx_projects_owner ON projects(owner_user_id);
+
+-- 봇이 create_pull_request 로 만든 PR 의 추적(2026-09-05, docs/superpowers/specs/2026-09-05-git-workflow-followups-design.md §4).
+-- 사람이 깃허브에서 직접 만든 PR 은 여기 없다. core/prTracker.ts 가 1분 타이머에서 열린 행을 훑어
+-- CI 결과·병합을 요청자 대화 채널에 알리고 운영자에게 새 PR 을 알린다 — *_notified_ts 셋이 "한 번만"을
+-- 보장한다. (repo, pr_number) 가 UNIQUE 인 것이 핵심이다: 같은 PR 을 두 번 기록해도 행이 하나라 알림이
+-- 두 벌 나가지 않는다(projects.repo_name 과 같은 장치). conversation_id 는 그 PR 을 낸 대화 — 알릴 때
+-- conversations 에서 채널을 다시 찾는다(채널 id 를 여기 복제하면 두 표가 어긋난다).
+CREATE TABLE IF NOT EXISTS pull_requests (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  repo TEXT NOT NULL,
+  pr_number INTEGER NOT NULL,
+  url TEXT NOT NULL,
+  head TEXT NOT NULL,
+  base TEXT NOT NULL,
+  title TEXT NOT NULL,
+  requester_user_id TEXT NOT NULL,
+  conversation_id BIGINT,
+  created_ts BIGINT NOT NULL,
+  state TEXT NOT NULL DEFAULT 'open',
+  ci_state TEXT NOT NULL DEFAULT 'unknown',
+  head_sha TEXT,
+  owner_notified_ts BIGINT,
+  ci_notified_ts BIGINT,
+  closed_notified_ts BIGINT,
+  last_checked_ts BIGINT,
+  UNIQUE (repo, pr_number)
+);
+CREATE INDEX IF NOT EXISTS idx_pull_requests_state ON pull_requests(state);
+CREATE INDEX IF NOT EXISTS idx_pull_requests_requester ON pull_requests(requester_user_id, created_ts);
 `;

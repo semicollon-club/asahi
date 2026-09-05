@@ -206,6 +206,21 @@ describe("정기 게시 채널 설정", () => {
   });
 });
 
+// PR 추적(2026-09-05): 봇이 만든 새 PR 을 운영자에게 알릴 채널. 없으면 소유자 DM 으로 간다 —
+// 그래서 선택값이고, 비어 있어도 기동에 지장이 없어야 한다.
+describe("PR 알림 채널 설정", () => {
+  const base = { DATABASE_URL: "postgres://x", DISCORD_TOKEN: "d", DISCORD_OWNER_ID: "o" };
+
+  it("PR_NOTIFY_CHANNEL_ID 를 읽는다", () => {
+    expect(loadConfig({ ...base, PR_NOTIFY_CHANNEL_ID: "C9" } as NodeJS.ProcessEnv).prNotifyChannelId).toBe("C9");
+  });
+
+  it("없거나 비어 있으면 undefined 다(소유자 DM 폴백)", () => {
+    expect(loadConfig(base as NodeJS.ProcessEnv).prNotifyChannelId).toBeUndefined();
+    expect(loadConfig({ ...base, PR_NOTIFY_CHANNEL_ID: "" } as NodeJS.ProcessEnv).prNotifyChannelId).toBeUndefined();
+  });
+});
+
 // Task 4(배선): 워커 신원이 WORKER_USER_ID(디스코드 사용자 ID 공유)에서 WORKER_ID(레지스트리에
 // 등록된 워커 자신의 id)로 바뀐다 — register-worker 가 발급한 id 를 그대로 쓴다.
 describe("워커 설정 — WORKER_ID", () => {

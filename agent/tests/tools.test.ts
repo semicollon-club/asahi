@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { openTestDb } from "../src/store/db.js";
 import { ProjectsRepo } from "../src/store/projectsRepo.js";
+import { PullRequestsRepo } from "../src/store/pullRequestsRepo.js";
 import { IntrospectRepo } from "../src/store/introspectRepo.js";
 import { MemoriesRepo } from "../src/store/memoriesRepo.js";
 import { UsersRepo } from "../src/store/usersRepo.js";
@@ -15,7 +16,7 @@ import {
   dbSchemaHandler, dbQueryHandler, runtimeInfoHandler,
   allowedToolsFor, buildToolDefinitions, allowedToolDefinitions, type ToolCtx,
   publishHandler, restoreHandler, createPullRequestHandler,
-  listReposHandler, prReviewCommentsHandler,
+  listReposHandler, prReviewCommentsHandler, prStatusHandler,
 } from "../src/core/tools.js";
 import { SHARED_MEMORY_MAX_LEN, SHARED_MEMORY_TITLE_MAX_LEN } from "../src/core/memoryScope.js";
 
@@ -30,7 +31,7 @@ async function ctx(over: CtxOver = {}): Promise<ToolCtx> {
   const db = await openTestDb();
   const { remote, ...rest } = over;
   return {
-    repos: { memories: new MemoriesRepo(db), users: new UsersRepo(db), allowedDirs: new AllowedDirsRepo(db), introspect: new IntrospectRepo(db), projects: new ProjectsRepo(db) },
+    repos: { memories: new MemoriesRepo(db), users: new UsersRepo(db), allowedDirs: new AllowedDirsRepo(db), introspect: new IntrospectRepo(db), projects: new ProjectsRepo(db), pullRequests: new PullRequestsRepo(db) },
     role: "allowed", isPrivate: true, isOwner: false, userId: "guest", conversationId: 1,
     runtime: { model: "claude-opus-4-8", sdkVersion: "0.3.207", deployTarget: "local", maxTurns: 30, workers: [] },
     // 발행 미설정이 기본이다 — 발행을 시험하는 케이스만 over.github 로 채운다.
@@ -52,7 +53,7 @@ async function ctx(over: CtxOver = {}): Promise<ToolCtx> {
 async function ownerCtx(over = {}) {
   const db = await openTestDb();
   return {
-    repos: { memories: new MemoriesRepo(db), users: new UsersRepo(db), allowedDirs: new AllowedDirsRepo(db), introspect: new IntrospectRepo(db), projects: new ProjectsRepo(db) },
+    repos: { memories: new MemoriesRepo(db), users: new UsersRepo(db), allowedDirs: new AllowedDirsRepo(db), introspect: new IntrospectRepo(db), projects: new ProjectsRepo(db), pullRequests: new PullRequestsRepo(db) },
     role: "owner", isPrivate: true, isOwner: true, userId: "owner", conversationId: 1,
     runtime: { model: "claude-opus-4-8", sdkVersion: "0.3.207", deployTarget: "local", maxTurns: 30, workers: [] },
     ...over,
@@ -1527,5 +1528,157 @@ describe("pr_review_comments 핸들러", () => {
     expect(r.ok).toBe(true);
     expect(r.content).toContain("src/login.ts:42");
     expect(r.content).toMatch(/대화 코멘트/);
+  });
+});
+
+// ── PR 추적(B2, 2026-09-05) ─────────────────────────────────────────────────
+// 봇이 만든 PR 은 표에 남아, 폴러(core/prTracker.ts)가 CI 결과·병합을 요청자 채널에 알리고 운영자에게
+// 새 PR 을 알린다. 표에 남기는 자리는 create_pull_request 성공 직후 한 곳뿐이다.
+describe("create_pull_request — 성공하면 추적 표에 남긴다", () => {
+  const github = githubForTests();
+  function fakeGithub() {
+    const fetchImpl = (async (url: string) => {
+      if (String(url).includes("/access_tokens")) return jsonResponse({ token: "ghs_pr", expires_at: "2026-09-05T01:00:00Z" }, 201);
+      return jsonResponse({ html_url: "https://github.com/semicollon-club/homepage/pull/7", number: 7 }, 201);
+    }) as unknown as typeof fetch;
+    return { fetchImpl };
+  }
+
+  it("리포·번호·브랜치·요청자·대화를 기록한다", async () => {
+    const c = await ctx({ github, githubFetch: fakeGithub().fetchImpl, remote: {}, conversationId: 42 });
+    const r = await createPullRequestHandler(c, { repo: "homepage", head: "feat/login", title: "로그인 페이지" });
+    expect(r.ok).toBe(true);
+    const row = await c.repos.pullRequests.byRepoNumber("homepage", 7);
+    expect(row).toMatchObject({
+      repo: "homepage", number: 7, head: "feat/login", base: "main", title: "로그인 페이지",
+      requesterUserId: "guest", conversationId: 42, state: "open", ciState: "unknown",
+      url: "https://github.com/semicollon-club/homepage/pull/7",
+    });
+  });
+
+  // 기록은 부가 기능이다 — PR 은 이미 깃허브에 생겼으므로 기록이 실패했다고 실패라고 말하면 사용자가
+  // 없는 문제(PR 이 안 만들어졌다)를 찾는다. 성공은 그대로 전하되 알림이 안 올 수 있다고 덧붙인다.
+  it("기록이 실패해도 PR 생성 성공은 그대로 전하고, 알림이 안 올 수 있다고 덧붙인다", async () => {
+    const c = await ctx({ github, githubFetch: fakeGithub().fetchImpl, remote: {} });
+    c.repos.pullRequests = { record: async () => { throw new Error("db down"); } } as unknown as PullRequestsRepo;
+    const r = await createPullRequestHandler(c, { repo: "homepage", head: "feat/login", title: "로그인 페이지" });
+    expect(r.ok).toBe(true);
+    expect(r.content).toContain("https://github.com/semicollon-club/homepage/pull/7");
+    expect(r.content).toMatch(/알림/);
+  });
+});
+
+describe("pr_status 게이팅", () => {
+  it("발행·PR 생성과 같은 축으로 열리고 닫힌다", () => {
+    expect(allowedToolsFor("allowed", false, false, "local", { workerConnected: true, githubReady: true })).toContain("mcp__asahi__pr_status");
+    expect(allowedToolsFor("owner", true, true, "local", { workerConnected: false, githubReady: true })).not.toContain("mcp__asahi__pr_status");
+    expect(allowedToolsFor("owner", true, true, "local", { workerConnected: true, githubReady: false })).not.toContain("mcp__asahi__pr_status");
+  });
+});
+
+describe("pr_status 핸들러", () => {
+  const github = githubForTests();
+  const recordArgs = (over: Record<string, unknown> = {}) => ({
+    repo: "homepage", number: 7, url: "https://github.com/semicollon-club/homepage/pull/7", head: "feat/login", base: "main",
+    title: "로그인 페이지", requesterUserId: "guest", conversationId: 1, ts: 900_000, ...over,
+  });
+  // 상태 조회와 그 커밋의 워크플로 실행 두 엔드포인트(+토큰 발급)만 흉내 낸다.
+  function fakeGithub(o: { state?: "open" | "closed"; merged?: boolean; runs?: Array<{ name: string; status: string; conclusion: string | null }> } = {}) {
+    const seen: Array<{ url: string; body: Record<string, unknown> | null }> = [];
+    const fetchImpl = (async (url: string, init: RequestInit) => {
+      const u = String(url);
+      seen.push({ url: u, body: init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : null });
+      if (u.includes("/access_tokens")) return jsonResponse({ token: "ghs_track", expires_at: "2026-09-05T01:00:00Z" }, 201);
+      if (/\/pulls\/\d+$/.test(u)) {
+        return jsonResponse({
+          number: 7, title: "로그인 페이지", state: o.state ?? "open", merged: o.merged ?? false,
+          html_url: "https://github.com/semicollon-club/homepage/pull/7", head: { ref: "feat/login", sha: "abc1234" }, base: { ref: "main" },
+        });
+      }
+      if (u.includes("/actions/runs")) {
+        return jsonResponse({ total_count: (o.runs ?? []).length, workflow_runs: (o.runs ?? []).map((r) => ({ ...r, html_url: "https://github.com/x/actions/runs/1" })) });
+      }
+      return jsonResponse({ message: `unexpected ${u}` }, 500);
+    }) as unknown as typeof fetch;
+    return { seen, fetchImpl };
+  }
+
+  it("깃허브 설정이 없거나 워커가 없으면 거절한다", async () => {
+    expect((await prStatusHandler(await ctx({ remote: {} }), {})).ok).toBe(false);
+    expect((await prStatusHandler(await ctx({ github }), {})).ok).toBe(false);
+  });
+
+  it("추적 중인 PR 이 없으면 그렇다고 말한다", async () => {
+    const r = await prStatusHandler(await ctx({ github, remote: {} }), {});
+    expect(r.ok).toBe(true);
+    expect(r.content).toContain("없어요");
+  });
+
+  it("인자 없이 부르면 요청자 자신의 PR 만 최근 순으로 보여준다(깃허브를 부르지 않는다)", async () => {
+    const { seen, fetchImpl } = fakeGithub();
+    const c = await ctx({ github, githubFetch: fetchImpl, remote: {} });
+    await c.repos.pullRequests.record(recordArgs({ number: 1, ts: 100 }));
+    await c.repos.pullRequests.record(recordArgs({ number: 2, requesterUserId: "other", ts: 200 }));
+    const mine = await c.repos.pullRequests.record(recordArgs({ number: 3, ts: 300 }));
+    await c.repos.pullRequests.update(mine.id, { ciState: "success", lastCheckedTs: 1_000_000 });
+    const r = await prStatusHandler(c, {});
+    expect(r.ok).toBe(true);
+    expect(r.content).toContain("homepage#3");
+    expect(r.content).toContain("homepage#1");
+    expect(r.content).not.toContain("homepage#2");
+    expect(r.content.indexOf("homepage#3")).toBeLessThan(r.content.indexOf("homepage#1"));
+    expect(r.content).toMatch(/CI 통과/);
+    expect(seen).toHaveLength(0);
+  });
+
+  it("소유자는 전원의 PR 을 본다", async () => {
+    const c = await ctx({ github, remote: {}, role: "owner", isOwner: true, userId: "owner" });
+    await c.repos.pullRequests.record(recordArgs({ number: 1, requesterUserId: "a" }));
+    await c.repos.pullRequests.record(recordArgs({ number: 2, requesterUserId: "b" }));
+    const r = await prStatusHandler(c, {});
+    expect(r.content).toContain("homepage#1");
+    expect(r.content).toContain("homepage#2");
+  });
+
+  it("리포·번호를 주면 그 PR 을 지금 깃허브에서 확인해 표를 갱신하고, 토큰은 그 리포·읽기 권한으로만 발급한다", async () => {
+    const { seen, fetchImpl } = fakeGithub({ runs: [{ name: "agent", status: "completed", conclusion: "success" }] });
+    const c = await ctx({ github, githubFetch: fetchImpl, remote: {} });
+    await c.repos.pullRequests.record(recordArgs());
+    const r = await prStatusHandler(c, { repo: "homepage", number: 7 });
+    expect(r.ok).toBe(true);
+    expect(r.content).toContain("homepage#7");
+    expect(r.content).toMatch(/CI 통과/);
+    const token = seen.find((s) => s.url.endsWith("/access_tokens"))!;
+    expect(token.body).toEqual({ repositories: ["homepage"], permissions: { pull_requests: "read", actions: "read" } });
+    const row = (await c.repos.pullRequests.byRepoNumber("homepage", 7))!;
+    expect(row.ciState).toBe("success");
+    expect(row.headSha).toBe("abc1234");
+    expect(row.lastCheckedTs).toBe(1_000_000);
+  });
+
+  it("병합된 것을 확인하면 상태를 병합으로 바꾼다", async () => {
+    const { fetchImpl } = fakeGithub({ state: "closed", merged: true });
+    const c = await ctx({ github, githubFetch: fetchImpl, remote: {} });
+    await c.repos.pullRequests.record(recordArgs());
+    const r = await prStatusHandler(c, { repo: "homepage", number: 7 });
+    expect(r.content).toContain("병합");
+    expect((await c.repos.pullRequests.byRepoNumber("homepage", 7))!.state).toBe("merged");
+  });
+
+  it("추적하지 않는 PR 이면 깃허브를 부르지 않고 그 사실을 말한다", async () => {
+    const { seen, fetchImpl } = fakeGithub();
+    const r = await prStatusHandler(await ctx({ github, githubFetch: fetchImpl, remote: {} }), { repo: "homepage", number: 99 });
+    expect(r.ok).toBe(false);
+    expect(r.content).toMatch(/기록에 없|추적/);
+    expect(seen).toHaveLength(0);
+  });
+
+  it("리포·번호가 규칙에 안 맞거나 하나만 주면 깃허브를 부르지 않는다", async () => {
+    const { seen, fetchImpl } = fakeGithub();
+    const c = await ctx({ github, githubFetch: fetchImpl, remote: {} });
+    for (const bad of [{ repo: "../x", number: 7 }, { repo: "homepage", number: 0 }, { repo: "homepage" }, { number: 7 }]) {
+      expect((await prStatusHandler(c, bad)).ok).toBe(false);
+    }
+    expect(seen).toHaveLength(0);
   });
 });

@@ -14,6 +14,7 @@ import { MessagesRepo } from "./store/messagesRepo.js";
 import { SummariesRepo } from "./store/summariesRepo.js";
 import { MemoriesRepo } from "./store/memoriesRepo.js";
 import { ProjectsRepo } from "./store/projectsRepo.js";
+import { PullRequestsRepo } from "./store/pullRequestsRepo.js";
 import { TurnsRepo } from "./store/turnsRepo.js";
 import { AllowedDirsRepo } from "./store/allowedDirsRepo.js";
 import { ActionsRepo } from "./store/actionsRepo.js";
@@ -24,6 +25,7 @@ import { AgentCore } from "./core/core.js";
 import { makeRunAgentTurn } from "./core/agent.js";
 import { DigestRunner, DIGEST_TOPICS, type DigestTopic } from "./core/digest.js";
 import { decideMissingAlerts, type SeenState } from "./core/staleWorker.js";
+import { PrTracker } from "./core/prTracker.js";
 import { DiscordAdapter } from "./adapters/discord.js";
 
 // 비밀값(.env)은 리포 루트(agent/ 바깥, data/ 와 같은 위치)에서 읽는다.
@@ -55,6 +57,7 @@ async function main() {
     memories: new MemoriesRepo(db),
     turns: new TurnsRepo(db),
     projects: new ProjectsRepo(db),
+    pullRequests: new PullRequestsRepo(db),
     allowedDirs,
     introspect: new IntrospectRepo(db),
     workers: new WorkersRepo(db),
@@ -122,13 +125,20 @@ async function main() {
   // 에이전트 cwd 는 소스가 아닌 데이터 영역에 둔다 — 에이전트가 소스 트리를 훑지 않도록(1단계 점검 지적).
   const agentCwd = path.resolve(config.dataDir, "..", "agent-cwd");
   fs.mkdirSync(agentCwd, { recursive: true });
-  const runTurn = makeRunAgentTurn({ memories: repos.memories, users: repos.users, allowedDirs: repos.allowedDirs, introspect: repos.introspect, projects: repos.projects }, config.deployTarget, config.model, repos.workers, hub, config.github);
+  const runTurn = makeRunAgentTurn({ memories: repos.memories, users: repos.users, allowedDirs: repos.allowedDirs, introspect: repos.introspect, projects: repos.projects, pullRequests: repos.pullRequests }, config.deployTarget, config.model, repos.workers, hub, config.github);
 
   // 정기 게시(조사) 실행기. runTurn·agentCwd 는 core 와 동일한 것을 공유한다 —
   // 별도 프로세스가 아니라 같은 봇 안에서 같은 방식으로 LLM 턴을 돌리는 또 하나의 진입점이다.
   const digest = new DigestRunner({
     runTurn, bus, settings: new SettingsRepo(db), agentCwd,
     channels: config.digestChannels,
+  });
+
+  // PR 추적(2026-09-05): 봇이 만든 PR 의 CI 결과·병합을 그 PR 을 낸 대화 채널에, 새 PR 을 운영자에게
+  // 알린다(core/prTracker.ts). 아래 1분 타이머에 얹는다 — 타이머를 새로 만들지 않는다.
+  const prTracker = new PrTracker({
+    pullRequests: repos.pullRequests, conversations, users, bus,
+    github: config.github, ownerId: config.ownerId, notifyChannelId: config.prNotifyChannelId,
   });
 
   // FIX3(최종 리뷰): core.ts 도 hub 를 받아 능력 안내(persona.ts)에 "이번 턴에 워커가 실제로
@@ -162,12 +172,25 @@ async function main() {
     }
   }
 
+  // PR 알림 채널도 정기 게시 채널과 같은 이유로 기동 시 한 번 확인한다 — 잘못된 ID 는 그러지 않으면
+  // 새 PR 마다 전송 실패 로그 한 줄로만 드러난다.
+  if (config.prNotifyChannelId) {
+    console.log(`[index] PR 알림 채널: ${config.prNotifyChannelId}`);
+    if (!(await discord.canReachChannel(config.prNotifyChannelId))) {
+      console.warn(
+        `[index] PR 알림 채널에 접근할 수 없습니다 — PR_NOTIFY_CHANNEL_ID=${config.prNotifyChannelId}. ` +
+          `채널 ID 가 올바른지, 봇이 그 채널을 볼 권한이 있는지 확인하세요.`,
+      );
+    }
+  }
+
   await core.recoverPending(); // 크래시로 남은 미처리 메시지 재개
 
-  // 유휴 세션 정리 + 정기 게시 확인: 1분마다 같은 타이머에서 함께 확인한다(타이머를 새로 만들지 않는다).
+  // 유휴 세션 정리 + 정기 게시 확인 + PR 추적: 1분마다 같은 타이머에서 함께 확인한다(타이머를 새로 만들지 않는다).
   const idleTimer = setInterval(() => {
     void core.closeIdleConversations().catch((err) => console.error("[core] 유휴 정리 오류:", err));
     void digest.checkAndRun().catch((err) => console.error("[digest] 스케줄 확인 오류:", err));
+    void prTracker.tick().catch((err) => console.error("[prTracker] 확인 오류:", err));
   }, 60 * 1000);
 
   // 붙어 있던 워커가 사라지면 소유자에게 알린다(2026-08-01: 그 상태로 13시간 반이 지나갔다).
