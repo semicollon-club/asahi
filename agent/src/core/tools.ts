@@ -12,6 +12,8 @@ import { isPathWithinAny, normalizeDir } from "./paths.js";
 import type { ProjectsRepo, ProjectRow } from "../store/projectsRepo.js";
 import type { GithubAppConfig, FetchLike } from "../github/appToken.js";
 import { mintInstallationToken, createOrgRepo, createPullRequest } from "../github/appToken.js";
+import { listInstallationRepos, formatRepoList } from "../github/repos.js";
+import { fetchPrFeedback, formatPrFeedback } from "../github/pulls.js";
 import type { ShellTokenSource } from "../github/shellToken.js";
 import { normalizeRepoName, decideOwnership, publishSourceDir } from "./publish.js";
 import { scopeDirs } from "./workerSelect.js";
@@ -449,8 +451,12 @@ export function allowedToolsFor(
   // 그 축을 끄는 것을 잊은 새 무인 턴이 생겼을 때 조용히 열린다.
   // create_pull_request 도 같은 축이다(2026-09-05) — 워커 없이는 올릴 브랜치를 만들 방법이 없고, 사람이
   // 지켜보지 않는 턴에서 조직 리포에 PR 이 생기면 안 되는 것도 발행과 같다.
+  // list_repos·pr_review_comments(2단계, 같은 날 오후)도 같은 축이다. 둘은 읽기 전용이라 워커가 꼭
+  // 필요한 건 아니지만, 표준 절차(persona.ts)의 첫 단계와 리뷰 반영 단계를 받치는 도구라 절차가
+  // 열릴 때만 함께 열리는 것이 맞고, 축을 새로 만들면 그 축을 끄는 것을 잊은 무인 턴에서 조직의
+  // 비공개 저장소 이름·리뷰 내용이 조용히 열린다 — 위 문단이 발행에 대해 말한 것과 같은 함정이다.
   const publishTools = workerConnected && githubReady
-    ? [t("publish_project"), t("restore_project"), t("create_pull_request")]
+    ? [t("publish_project"), t("restore_project"), t("create_pull_request"), t("list_repos"), t("pr_review_comments")]
     : [];
   const dirTools = workerConnected ? [t("allow_dir"), t("revoke_dir"), t("list_dirs")] : [];
   const webTools = webToolsEnabled ? WEB_TOOLS : [];
@@ -723,6 +729,75 @@ export async function createPullRequestHandler(
   }
 }
 
+// ── 2단계(2026-09-05 오후): 표준 절차를 받치는 읽기 도구 둘 ──────────────────────
+// 운영자가 실환경에서 clone → 브랜치 → 커밋 → push → main PR 흐름을 확인한 뒤, 그 절차를 봇이 기본으로
+// 따르게 했다(persona.ts 의 PUBLISH_LINES). 절차의 첫 단계("저장소 이름을 확인한다")와 마지막 뒤의
+// 되돌아오는 단계("리뷰를 반영한다")에 도구가 없어 각각 하나씩 더한다. 둘 다 읽기만 하고, 노출
+// 조건(allowedToolsFor 의 publishTools)과 같은 확인을 여기서 되풀이한다 — 노출 판정과 실행 판정이
+// 갈리면 조용히 새는 자리다(resolveTarget·createPullRequestHandler 와 같은 이유).
+function githubReadGate(ctx: ToolCtx): { ok: false; content: string } | { ok: true; github: GithubAppConfig } {
+  if (!ctx.remote) return { ok: false, content: "지금은 워커가 연결돼 있지 않아 할 수 없어요." };
+  if (!ctx.github) return { ok: false, content: "깃허브 발행이 아직 설정되지 않았어요. 관리자에게 알려주세요." };
+  return { ok: true, github: ctx.github };
+}
+
+export async function listReposHandler(ctx: ToolCtx): Promise<{ ok: boolean; content: string }> {
+  const gate = githubReadGate(ctx);
+  if (!gate.ok) return gate;
+  // 목록에는 이름·설명·기본 브랜치·공개 여부만 필요하다 — metadata 읽기가 그 최소 권한이다. 범위는
+  // 설치 전체: 어느 리포를 볼지 미리 알 수 없어 좁힐 축이 없다(셸 토큰이 조직 전체인 것과 같은 이유,
+  // github/shellToken.ts). 셸 토큰과 달리 쓰기 권한이 전혀 없어, 이 토큰이 새도 이름을 보는 것
+  // 이상은 못 한다 — 그리고 워커로 가지도 않는다(봇 안에서만 쓰고 버린다).
+  let token: string;
+  try {
+    token = (await mintInstallationToken({
+      config: gate.github, repoNames: [], permissions: { metadata: "read" }, nowMs: ctx.now(), fetchImpl: ctx.githubFetch,
+    })).token;
+  } catch (err) {
+    return { ok: false, content: err instanceof Error ? err.message : String(err) };
+  }
+  try {
+    return { ok: true, content: formatRepoList(await listInstallationRepos({ token, fetchImpl: ctx.githubFetch })) };
+  } catch (err) {
+    return { ok: false, content: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+export async function prReviewCommentsHandler(
+  ctx: ToolCtx,
+  args: { repo: string; number: number },
+): Promise<{ ok: boolean; content: string }> {
+  const gate = githubReadGate(ctx);
+  if (!gate.ok) return gate;
+  const repo = (args.repo ?? "").trim();
+  if (!validRepoName(repo)) {
+    return { ok: false, content: "저장소 이름은 조직 안의 리포 이름 하나여야 해요(영문·숫자·점·하이픈·밑줄 — 조직 이름이나 주소는 빼고)." };
+  }
+  const number = args.number;
+  if (!Number.isInteger(number) || number <= 0) return { ok: false, content: "PR 번호는 1 이상의 정수여야 해요." };
+
+  // 대상 리포가 정해져 있으니 그 리포 하나·pull_requests 읽기로만 발급한다 — 좁힐 수 있으면 좁힌다
+  // (발행 설계 §3). 읽기만 하는 도구라 write 를 요청할 이유도 없다.
+  let token: string;
+  try {
+    token = (await mintInstallationToken({
+      config: gate.github, repoNames: [repo], permissions: { pull_requests: "read" }, nowMs: ctx.now(), fetchImpl: ctx.githubFetch,
+    })).token;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    const hint = /permission/i.test(msg)
+      ? " 깃허브 App(asahi-publisher)에 Pull requests 권한이 있어야 해요 — deploy/github-app-셋업.md 참고."
+      : "";
+    return { ok: false, content: msg + hint };
+  }
+  try {
+    const feedback = await fetchPrFeedback({ org: gate.github.org, repo, number, token, fetchImpl: ctx.githubFetch });
+    return { ok: true, content: formatPrFeedback(feedback) };
+  } catch (err) {
+    return { ok: false, content: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 // 도구 선언 목록을 buildTools 에서 분리해 내보낸다. 이 배열 자체가 "핸들러의 반환을 MCP 결과로
 // 바꾸는" 이음매(seam)인데, createSdkMcpServer 안에 인라인으로 묻혀 있으면 그 변환을 테스트가
 // 직접 실행할 방법이 없다 — 지금까지 성패 전달이 이 지점에서 끊긴 채로 여러 번의 리뷰를 통과한
@@ -780,6 +855,21 @@ export function buildToolDefinitions(ctx: ToolCtx) {
         body: z.string().optional().describe("PR 설명(무엇을 왜 바꿨는지)"),
       },
       async (args) => { const r = await createPullRequestHandler(ctx, args); return textResult(r.content, !r.ok); },
+    ),
+    tool(
+      "list_repos",
+      "동아리 깃허브 조직(semicollon-club)의 저장소 목록을 보여줍니다 — 이름·설명·기본 브랜치·공개 여부. 사용자가 '저장소 뭐 있어?' 라고 묻거나 clone·PR 대상 이름이 불확실할 때 기억으로 답하지 말고 이 도구를 부르세요.",
+      {},
+      async () => { const r = await listReposHandler(ctx); return textResult(r.content, !r.ok); },
+    ),
+    tool(
+      "pr_review_comments",
+      "동아리 저장소 PR 에 달린 리뷰·코드 코멘트·대화 코멘트를 시간순으로 읽습니다. 리뷰를 반영하라는 요청을 받으면 먼저 이걸로 내용을 읽고, 같은 작업 브랜치에서 고쳐 새 커밋으로 push 하세요.",
+      {
+        repo: z.string().describe("조직 안의 저장소 이름(예: homepage). 조직 이름·주소는 빼세요"),
+        number: z.number().int().positive().describe("PR 번호"),
+      },
+      async (args) => { const r = await prReviewCommentsHandler(ctx, args); return textResult(r.content, !r.ok); },
     ),
     tool(
       "manage_access",

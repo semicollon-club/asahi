@@ -17,6 +17,7 @@ lastReviewed: 2026-08-06
 | `events/` | 어댑터↔코어를 분리하는 얇은 pub/sub 이벤트버스. 이벤트 타입 정의의 유일한 출처 | `bus.ts` |
 | `store/` | Postgres 영속 계층(레포지토리 패턴). 스키마 정의와 테이블별 CRUD/쿼리만 담당하며, 그 위 어떤 계층에도 의존하지 않는 최하위 레이어다. `allowed_dirs`는 Task 7부터 `user_id`가 아니라 `worker_id` 키다 — 폴더는 사람이 아니라 그 폴더가 실제로 존재하는 기계(워커)에 속한다는 사실에 맞췄다(마이그레이션 없음 — `deploy/worker-셋업.md` 참고) | `schema.ts`, `db.ts`, `usersRepo.ts`, `conversationsRepo.ts`, `participantsRepo.ts`, `messagesRepo.ts`, `summariesRepo.ts`, `memoriesRepo.ts`, `turnsRepo.ts`, `allowedDirsRepo.ts`, `workersRepo.ts`, `introspectRepo.ts`, `settingsRepo.ts` |
 | `remote/` | 봇↔워커 WebSocket 전송 계층. `protocol.ts`(양쪽 공유 계약)·`hub.ts`(봇 쪽 서버)·`workerClient.ts`/`executors.ts`/`roots.ts`(워커 쪽). `core/` 의 순수 경로 헬퍼(`pathPermission.ts`의 `resolveRealOrNearestAncestor`, `paths.ts`의 `isPathWithinAny`)만 재사용하고 `discord.js`에는 의존하지 않는다. `store/`는 원칙적으로 의존하지 않지만 한 줄 예외가 있다 — 아래 "허용 의존 방향" 참고 | `protocol.ts`, `hub.ts`, `workerClient.ts`, `executors.ts`, `roots.ts` |
+| `github/` | 깃허브 REST 호출 계층(2026-08-07 발행에서 시작, 2026-09-05 확장). `appToken.ts`(App JWT·설치 토큰 발급·리포 생성·PR 생성·타임아웃 있는 GET 한 겹), `shellToken.ts`(`sh_exec` 의 git 이 쓰는 조직 전체 단기 토큰의 캐시 공급원), `repos.ts`(설치 저장소 목록·표시), `pulls.ts`(PR 의 리뷰·코멘트 묶어 읽기·표시). 순수 HTTP + 포맷이라 `store`·`events`·`adapters`·`discord.js` 어디에도 의존하지 않고, `core/`(도구 핸들러)와 `core/agent.ts`(셸 토큰 공급원 생성)만 이 디렉토리를 부른다. 개인키는 `config.ts` 가 읽어 `GithubAppConfig` 로 넘긴다 — 이 계층은 오류 메시지에 자격증명이 섞이지 않게 깃허브 응답의 `message` 만 뽑는다 | `appToken.ts`, `shellToken.ts`, `repos.ts`, `pulls.ts` |
 | `memory/` | 에이전트 작업 디렉토리(`agentCwd`)의 파일 기반 기억 스캐폴드(`MEMORY.md` 초기화). DB 기반 기억(`store/memoriesRepo.ts`의 remember/recall)과는 별개 개념이다 | `memory.ts` |
 | `config.ts`(디렉토리 아님, `src/` 최상위 파일) | 환경변수 로드·검증. 봇용 `loadConfig`/`Config`와 워커용 `loadWorkerConfig`/`WorkerConfig` 두 세트를 제공한다. 값 검증을 위해 `remote/roots.ts`의 `isUnambiguousRoot`(WORKER_ROOTS 판정)와 `core/digest.ts`의 `DigestChannels`(타입 전용)를 임포트한다 — 판정 규칙을 두 곳에 복제하지 않기 위한 의도적 의존이다. 워커용 설정은 `databaseUrl`도 `model`도 갖지 않는다 — 워커는 이제 DB도 모델도 다루지 않는다(`docs/decisions/0006-thin-worker.md`) | `config.ts` |
 
@@ -67,6 +68,10 @@ lastReviewed: 2026-08-06
   끊어 뒀지만, 해시 함수 자체는 공유 모듈로 빼지 않아 이 한 줄만 경계를 넘는다 — 리뷰에서
   지적됐고, 별도 모듈로 빼는 파급 대비 이득이 적어 당장은 그대로 둔 의도적 타협이다). 워커
   쪽 최종 경로 판정에 `core`의 헬퍼를 재사용하는 것(`remote/roots.ts`)은 이 예외와 별개다.
+- `github/`는 `node:crypto`와 전역 `fetch`만 쓰는 독립 계층이다 — `core`가 부르고(`tools.ts`의
+  발행·PR·저장소 목록·리뷰 읽기 핸들러, `agent.ts`의 셸 토큰 공급원), `remote/`는 그 결과(토큰
+  문자열)를 인자로 받을 뿐 이 디렉토리를 임포트하지 않는다. 역방향(`github` → `core`/`store`) 의존은
+  없다.
 - `memory/memory.ts`는 `node:fs`/`node:path`만 쓰는 독립 유틸리티다.
 - `config.ts`는 설정 로더다. 예외적으로 `remote/roots.ts`(루트 형식 판정)와 `core/digest.ts`(타입 전용)에 의존한다 — 같은 판정 규칙을 설정 로드 시점과 실행 시점에 각각 복제하면 어긋나기 때문이다. 이 둘 말고는 어떤 모듈도 참조하지 않는다.
 

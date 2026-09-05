@@ -35,3 +35,6 @@ update.flag
 # 아무 효과가 없다.
 !agent/skill-plugin/**/
 !agent/skill-plugin/**
+
+# superpowers SDD ledger (docs/agent-onboarding.md says it is git-ignored)
+.superpowers/

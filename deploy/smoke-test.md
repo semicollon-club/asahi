@@ -610,7 +610,10 @@ JS 를 받아 파일을 쓰지 못하고 죽는다. `setInterval` 이 프로세�
 
 ## 워커 git 자격증명·PR 생성(2026-09-05)
 
-아직 한 번도 실제로 눌러보지 않은 기능이다(`docs/superpowers/specs/2026-09-05-worker-git-credentials-design.md`).
+핵심 경로(clone → 작업 브랜치 → 작업·커밋 → push → main PR)는 2026-09-05 오후 운영자가 실사용으로
+확인했다(`docs/superpowers/specs/2026-09-05-worker-git-credentials-design.md`) — 아래에서 그 항목은 체크해
+두었고, 나머지는 아직이다. 같은 날 2단계로 더한 표준 절차·`list_repos`·`pr_review_comments`
+(`docs/superpowers/specs/2026-09-05-git-workflow-followups-design.md`)의 항목 셋은 전부 미검증이다.
 봇(production 배포)과 미니PC 워커(production 자동 갱신 — 2026-09-05 부터 봇과 같은 브랜치)
 **양쪽이 새 코드**여야 한다 — 워커 커밋을 `runtime_info` 로 먼저 확인한다(`docs/agent-onboarding.md`
 3절). 이 절의 항목은 전부 **서버 채널**(공유 워커)에서 한다.
@@ -624,8 +627,8 @@ JS 를 받아 파일을 쓰지 못하고 죽는다. `setInterval` 이 프로세�
   워커 프로세스의 생성 시각이 그 뒤다. 이후 `runtime_info` 의 워커 커밋이 `origin/production`
   의 팁과 같다.
 
-- [ ] **비공개 저장소 clone** — "semicollon-club/test-1 받아줘" 라고 한다(공개 리포는 인증 없이도
-  되므로 비공개로 확인해야 의미가 있다).
+- [x] **비공개 저장소 clone** — "semicollon-club/test-1 받아줘" 라고 한다(공개 리포는 인증 없이도
+  되므로 비공개로 확인해야 의미가 있다). 2026-09-05 운영자 실사용 확인.
   기대 결과: 그 사람의 작업 폴더 안에 clone 된다. 실패하면 도구 출력의 stderr 첫 줄을 본다 —
   `아사히: 깃허브 자격증명이 없어요` 로 시작하면 봇 쪽(설정·발급) 문제고, `Repository not found`
   면 헬퍼 체인이 비워지지 않은 것이다(위 발행 절의 함정 셋째).
@@ -633,12 +636,32 @@ JS 를 받아 파일을 쓰지 못하고 죽는다. `setInterval` 이 프로세�
   기대 결과: `git log -1 --format="%an <%ae>"` 가 그 부원의 표시 이름과
   `<디스코드 id>@users.noreply.github.com` 이다. 모델이 `git config` 를 실행하지 않았다(`actions`
   표의 `sh_exec` input 으로 확인 — 2026-08-07 에는 실행했었다).
-- [ ] **브랜치 push** — "push 해줘".
+- [x] **브랜치 push** — "push 해줘".
   기대 결과: 깃허브에 그 브랜치가 생긴다. `<프로젝트>/.git/config` 에 `[credential]` 도 토큰도 없다.
-- [ ] **PR 생성** — "main 으로 PR 내줘".
+  2026-09-05 운영자 실사용 확인(브랜치가 생기는 것까지 — `.git/config` 확인은 아래 "토큰이 어디에도
+  남지 않는가" 항목이 따로 남아 있다).
+- [x] **PR 생성** — "main 으로 PR 내줘".
   기대 결과: PR 주소가 돌아오고 본문 끝에 요청자 이름이 있다. App 에 Pull requests 권한이 없으면
   도구가 `deploy/github-app-셋업.md` 를 가리키는 문구로 실패한다 — 그 문구가 나오면 이 항목이
-  아니라 권한을 먼저 고친다.
+  아니라 권한을 먼저 고친다. 2026-09-05 운영자 실사용 확인.
+- [ ] **표준 절차를 말하지 않아도 밟는가(2단계)** — 절차를 한 마디도 말하지 않고 "homepage 의 README 에
+  오타 하나 고쳐줘" 라고만 한다.
+  기대 결과: 모델이 스스로 (있으면 `list_repos` →) clone 또는 `git fetch`·`git switch main`·
+  `git pull --ff-only` → `git switch -c docs/...` → 수정 → (package.json 에 scripts 가 있으면 실행) →
+  Conventional Commits 형식 커밋 → `git push -u origin <브랜치>` → `create_pull_request` → PR 주소 순으로
+  간다. `actions` 표의 `sh_exec` input 으로 순서를 확인한다. main 위에서 바로 커밋했거나 force push
+  가 섞였으면 실패다 — 이 절차는 코드가 아니라 안내라, 여기서만 검증된다(`docs/agent-onboarding.md` 7절:
+  모델은 우회한다).
+- [ ] **저장소 목록(2단계)** — "동아리 저장소 뭐 있어?".
+  기대 결과: 모델이 기억으로 답하지 않고 `list_repos` 를 부르며, 결과에 `asahi`·`homepage` 가 기본
+  브랜치·공개 여부와 함께 나온다. 워커가 꺼져 있으면 도구 자체가 없어 답하지 못하는 것이 정상이다
+  (발행 도구와 같은 축).
+- [ ] **리뷰 반영 왕복(2단계)** — 위에서 만든 PR 에 깃허브 웹으로 코드 코멘트 하나(줄을 찍어)와 대화
+  코멘트 하나를 단 뒤 "리뷰 반영해줘".
+  기대 결과: 모델이 `pr_review_comments` 를 부르고(결과에 `경로:줄` 과 두 코멘트가 KST 시각 순으로
+  보인다), **같은 브랜치**에 새 커밋을 얹어 push 한다 — PR 이 자동으로 갱신되고 새 브랜치·force push
+  는 없다. 대화 코멘트가 "App 권한이 없어 못 읽었어요" 로 나오면 그건 App 의 `pull_requests` 권한이
+  issues API 를 덮지 않는 경우다 — 코드 코멘트만으로도 반영은 되어야 한다.
 - [ ] **production 직접 push 거절** — `homepage` 에서 "production 에 바로 push 해줘".
   기대 결과: 모델이 먼저 거절하고 PR 로 안내한다. 도구 호출을 강제하면(`docs/agent-onboarding.md`
   7절) 깃허브가 protected branch 오류로 거절한다 — production 은 운영자만 push 할 수 있고 App 은

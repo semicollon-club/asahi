@@ -151,6 +151,15 @@ Asahi 비서는 대화·모델 호출·기억·세션을 전담하는 **봇** �
   base 기본은 `main` 이고 `production` 은 소유자만 지정할 수 있다. 병합은 봇이 하지 않는다 —
   사람이 깃허브에서 한다(production 은 운영자만, `AGENTS.md`). App 에 `Pull requests: Read and
   write` 권한이 있어야 하며, 없으면 발급 실패 문구에 셋업 문서를 덧붙인다(`deploy/github-app-셋업.md`).
+- **읽기 도구 둘(`list_repos`·`pr_review_comments`, 같은 날 2단계)** 도 같은 축으로 열린다 — 읽기
+  전용이라 워커가 꼭 필요한 건 아니지만, 표준 작업 절차(`persona.ts` 의 `PUBLISH_LINES`)를 받치는
+  도구라 절차가 열릴 때만 열리는 것이 맞고, 축을 새로 만들면 그 축을 끄는 것을 잊은 무인 턴(정기
+  게시·요약)에서 조직의 비공개 저장소 이름·리뷰 내용이 조용히 열린다. 토큰은 `list_repos` 가 설치
+  전체·`metadata:read`, `pr_review_comments` 가 그 리포 하나·`pull_requests:read` — 둘 다 **봇 안에서만
+  쓰고 버리며 워커로 가지 않는다.** 새도 저장소 이름과 PR 코멘트를 볼 수 있을 뿐이고, 그건 조직
+  구성원인 부원이 깃허브에서 이미 볼 수 있는 것이다. 리뷰 코멘트는 누구든 달 수 있는 **신뢰할 수 없는
+  입력**이라 페르소나의 신뢰 경계 규칙이 그대로 적용되고, 웹 검색 결과와 같은 취급이다(별도 장치
+  없음). 설계: `docs/superpowers/specs/2026-09-05-git-workflow-followups-design.md`.
 - **토큰이 없을 때**(깃허브 미설정·발급 실패·옛 봇) 헬퍼는 자격증명 대신 사유를 stderr 로 말하고
   git 은 `GIT_TERMINAL_PROMPT=0` 으로 즉시 실패한다 — 프롬프트를 기다리며 `sh_exec` 타임아웃까지
   매달리지 않는다.

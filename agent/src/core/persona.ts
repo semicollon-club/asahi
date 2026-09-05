@@ -141,8 +141,24 @@ const PUBLISH_LINES =
   // 사고의 재발을 이 문장이 막는다. production 은 깃허브의 push 제한이 봇 토큰까지 막지만, main 은
   // 부원이 PR 로 쌓는 통합 브랜치라 일부러 열려 있다 — 봇이 거기 직접 올리지 않는 것은 코드가 아니라
   // 이 안내가 유일한 장치다(docs/security/capability-model.md "워커의 git 자격증명" 절).
-  "\n- **동아리의 기존 깃허브 저장소(semicollon-club 조직)는 sh_exec 의 git 으로 직접 다룹니다.** clone·fetch·pull·push 에 깃허브 자격증명이 자동으로 붙고, 커밋 작성자도 지금 대화하는 사람으로 자동 설정됩니다 — `git config` 로 이름·이메일·자격증명을 설정하려 하지 마세요(공유 기계의 설정을 오염시킵니다). 작업 폴더 안에서 `git clone https://github.com/semicollon-club/<저장소>` 로 받고, **새 브랜치**를 만들어 작업·커밋한 뒤 그 브랜치를 push 하고, create_pull_request 로 main 에 PR 을 냅니다(repo 는 저장소 이름만, head 는 그 브랜치 이름)." +
-  "\n- **main·production 브랜치에는 직접 push 하지도, 병합하지도 마세요.** 병합은 사람이 깃허브에서 합니다(production 은 운영자만) — PR 링크를 알려주는 것까지가 당신의 일입니다. 사용자가 main 에 바로 올리자고 해도 브랜치와 PR 로 안내하세요.";
+  //
+  // 2단계(같은 날 오후): 운영자가 실환경에서 clone → 브랜치 → 커밋 → push → main PR 흐름을 확인한 뒤,
+  // 그 절차를 부원이 일일이 말하지 않아도 봇이 기본으로 따르게 하기로 했다. 도구 이름만 나열하면
+  // 순서는 매번 모델이 정한다 — 번호 매긴 단계로 적어야 그 순서로 움직인다. 단계마다 실제 명령을
+  // 적는 이유도 같다: "main 을 최신으로" 라고만 쓰면 모델이 `git pull` 로 merge 커밋을 만들거나 main
+  // 위에서 바로 작업하는 등 매번 다른 길을 간다. 검증(3단계)을 커밋 전에 두는 이유는 CI 가 main 의
+  // 필수 체크라, 깨진 채 올린 PR 은 운영자가 병합할 수 없어 되돌아오기 때문이다. list_repos(1단계)·
+  // pr_review_comments(리뷰 반영)는 이 절차를 위해 같은 날 더한 읽기 도구다(tools.ts).
+  "\n- **동아리의 기존 깃허브 저장소(semicollon-club 조직) 작업은 아래 표준 절차를 기본으로 따릅니다.** 사용자가 절차를 일일이 말하지 않아도 이 순서대로 진행하고, 지금 어느 단계인지 짧게 알리면서 갑니다. 이 저장소들은 sh_exec 의 git 으로 직접 다룹니다 — clone·fetch·pull·push 에 깃허브 자격증명이 자동으로 붙고, 커밋 작성자도 지금 대화하는 사람으로 자동 설정됩니다." +
+  "\n  1. 저장소 이름이 불확실하면 list_repos 로 확인합니다. 작업 폴더 안에 그 저장소의 클론이 없으면 `git clone https://github.com/semicollon-club/<저장소>` 로 받고, 이미 있으면 `git fetch origin` 뒤 `git switch main` 과 `git pull --ff-only` 로 main 을 최신으로 맞춥니다." +
+  "\n  2. main 에서 작업 브랜치를 새로 만듭니다: `git switch -c <종류>/<짧은-영문-설명>` — 종류는 feat·fix·docs·refactor·test·chore 중 하나입니다. 같은 작업을 이어 하는 중이면 그 브랜치를 그대로 씁니다." +
+  "\n  3. 그 브랜치에서 작업합니다. 저장소에 테스트·타입체크·빌드 스크립트(package.json 의 scripts 등)가 있으면 커밋 전에 실행해 통과를 확인하고, 실패하면 고친 뒤 진행합니다. 못 고치면 그 사실을 사용자와 PR 본문에 그대로 적습니다." +
+  "\n  4. 바꾼 파일만 `git add` 해 커밋합니다. 제목은 Conventional Commits 형식의 한국어(`feat(범위): 무엇을 바꿨는지`), 본문에는 왜 바꿨는지를 짧게 씁니다. `git config` 로 이름·이메일·자격증명을 설정하지 마세요 — 봇이 호출마다 붙이므로 필요 없고, 공유 기계의 설정을 오염시킵니다." +
+  "\n  5. `git push -u origin <브랜치>` 로 올립니다. force push(`--force`·`-f`)는 하지 않습니다." +
+  "\n  6. create_pull_request 로 main 에 PR 을 냅니다(repo 는 저장소 이름만, head 는 그 브랜치 이름). 제목은 커밋 제목과 같은 형식으로, 본문에는 무엇을 왜 바꿨는지와 3단계에서 무엇을 돌려 어떤 결과가 나왔는지를 적습니다." +
+  "\n  7. PR 주소를 사용자에게 알리고 마칩니다." +
+  "\n- **main·production 브랜치에는 직접 push 하지도, 병합하지도 마세요.** 병합은 사람이 깃허브에서 합니다(production 은 운영자만) — PR 링크를 알려주는 것까지가 당신의 일입니다. 사용자가 main 에 바로 올리자고 해도 브랜치와 PR 로 안내하세요." +
+  "\n- **리뷰 반영**: PR 에 리뷰나 코멘트가 달렸다고 하면 pr_review_comments 로 내용을 읽고, 같은 작업 브랜치에서 고쳐 새 커밋으로 push 하세요 — PR 은 자동으로 갱신됩니다. 브랜치를 새로 만들거나 force push 하지 마세요.";
 
 const FORGET_DISAMBIGUATION_HINT = "같은 제목이 여러 개 걸리면 지우지 않고 번호(id) 목록을 보여주니 그 번호로 다시 지정하세요.";
 

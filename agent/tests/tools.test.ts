@@ -15,6 +15,7 @@ import {
   dbSchemaHandler, dbQueryHandler, runtimeInfoHandler,
   allowedToolsFor, buildToolDefinitions, allowedToolDefinitions, type ToolCtx,
   publishHandler, restoreHandler, createPullRequestHandler,
+  listReposHandler, prReviewCommentsHandler,
 } from "../src/core/tools.js";
 import { SHARED_MEMORY_MAX_LEN, SHARED_MEMORY_TITLE_MAX_LEN } from "../src/core/memoryScope.js";
 
@@ -1366,5 +1367,165 @@ describe("create_pull_request 핸들러", () => {
     // 본문에 요청자가 남는다 — PR 의 깃허브 작성자는 App 이라 그것만으로는 누가 냈는지 안 보인다.
     expect(String(pr.body.body)).toContain("로그인 폼과 세션 쿠키");
     expect(String(pr.body.body)).toContain("guest");
+  });
+});
+
+// ── 2단계(2026-09-05): 표준 절차를 받치는 읽기 도구 둘 ───────────────────────────
+// list_repos(설치 저장소 목록)·pr_review_comments(PR 리뷰·코멘트 읽기)는 발행·PR 생성과 같은 축
+// (워커 연결 + 깃허브 설정)으로 열고 닫는다. 읽기 전용이라 워커가 꼭 필요한 건 아니지만, 축을
+// 새로 만들면 그 축을 끄는 것을 잊은 무인 턴(정기 게시·요약)에서 조용히 열린다(발행 도구 게이팅
+// 주석과 같은 이유) — 조직의 비공개 저장소 이름·리뷰 내용이 사람이 안 보는 턴에 흘러들 이유가 없다.
+describe("list_repos / pr_review_comments 게이팅", () => {
+  const both = (tools: string[]) =>
+    tools.includes("mcp__asahi__list_repos") && tools.includes("mcp__asahi__pr_review_comments");
+
+  it("워커 연결 + 깃허브 설정이면 네 신원 모두에게 열린다", () => {
+    for (const [isPrivate, isOwner] of [[true, true], [false, true], [true, false], [false, false]] as const) {
+      expect(both(allowedToolsFor("allowed", isPrivate, isOwner, "local", { workerConnected: true, githubReady: true }))).toBe(true);
+    }
+  });
+
+  it("워커가 없거나 깃허브 설정이 없으면 닫힌다", () => {
+    expect(both(allowedToolsFor("owner", true, true, "local", { workerConnected: false, githubReady: true }))).toBe(false);
+    expect(both(allowedToolsFor("owner", true, true, "local", { workerConnected: true, githubReady: false }))).toBe(false);
+  });
+});
+
+// 실제 키로 JWT 를 만들어 fetch 가짜까지 도달하게 한다(create_pull_request 테스트와 같은 방식).
+function githubForTests() {
+  const { privateKey } = crypto.generateKeyPairSync("rsa", { modulusLength: 2048 });
+  return {
+    org: "semicollon-club", appId: "1", installationId: "2",
+    privateKeyPem: privateKey.export({ type: "pkcs1", format: "pem" }).toString(),
+  };
+}
+const jsonResponse = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
+
+describe("list_repos 핸들러", () => {
+  const github = githubForTests();
+  const REPOS = [
+    { name: "homepage", description: "동아리 홈페이지", private: false, default_branch: "main", pushed_at: "2026-09-05T00:00:00Z", archived: false, html_url: "https://github.com/semicollon-club/homepage" },
+    { name: "asahi", description: null, private: false, default_branch: "main", pushed_at: "2026-09-01T00:00:00Z", archived: false, html_url: "https://github.com/semicollon-club/asahi" },
+  ];
+  function fakeGithub(o: { listStatus?: number } = {}) {
+    const seen: Array<{ url: string; body: Record<string, unknown> | null }> = [];
+    const fetchImpl = (async (url: string, init: RequestInit) => {
+      seen.push({ url: String(url), body: init.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : null });
+      if (String(url).includes("/access_tokens")) return jsonResponse({ token: "ghs_meta", expires_at: "2026-09-05T01:00:00Z" }, 201);
+      if (o.listStatus !== undefined && o.listStatus !== 200) return jsonResponse({ message: "Resource not accessible by integration" }, o.listStatus);
+      return jsonResponse({ total_count: REPOS.length, repositories: REPOS });
+    }) as unknown as typeof fetch;
+    return { seen, fetchImpl };
+  }
+
+  it("깃허브 설정이 없으면 거절한다(노출 판정과 실행 판정을 따로 확인한다)", async () => {
+    const r = await listReposHandler(await ctx({ remote: {} }));
+    expect(r.ok).toBe(false);
+    expect(r.content).toContain("설정");
+  });
+
+  it("워커가 없으면 거절한다", async () => {
+    const r = await listReposHandler(await ctx({ github }));
+    expect(r.ok).toBe(false);
+  });
+
+  // 목록에는 리포 이름만 필요하다 — metadata 읽기가 그 최소 권한이고, 어느 리포를 볼지 미리 알
+  // 수 없으므로 범위는 설치 전체다(셸 토큰이 조직 전체인 것과 같은 이유).
+  it("토큰은 설치 전체·metadata 읽기로만 발급하고, 목록을 돌려준다", async () => {
+    const { seen, fetchImpl } = fakeGithub();
+    const r = await listReposHandler(await ctx({ github, githubFetch: fetchImpl, remote: {} }));
+    expect(r.ok).toBe(true);
+    expect(r.content).toContain("homepage");
+    expect(r.content).toContain("동아리 홈페이지");
+    expect(r.content).toContain("asahi");
+    const token = seen.find((s) => s.url.endsWith("/access_tokens"))!;
+    expect(token.body).toEqual({ repositories: [], permissions: { metadata: "read" } });
+  });
+
+  it("목록 조회가 실패하면 깃허브의 사유를 전한다", async () => {
+    const { fetchImpl } = fakeGithub({ listStatus: 403 });
+    const r = await listReposHandler(await ctx({ github, githubFetch: fetchImpl, remote: {} }));
+    expect(r.ok).toBe(false);
+    expect(r.content).toMatch(/Resource not accessible/);
+  });
+});
+
+describe("pr_review_comments 핸들러", () => {
+  const github = githubForTests();
+  const args = { repo: "homepage", number: 7 };
+  function fakeGithub(o: { prStatus?: number; issueStatus?: number } = {}) {
+    const seen: Array<{ url: string; body: Record<string, unknown> | null }> = [];
+    const fetchImpl = (async (url: string, init: RequestInit) => {
+      const u = String(url);
+      seen.push({ url: u, body: init.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : null });
+      if (u.includes("/access_tokens")) return jsonResponse({ token: "ghs_read", expires_at: "2026-09-05T01:00:00Z" }, 201);
+      if (u.endsWith("/pulls/7")) {
+        return o.prStatus !== undefined && o.prStatus !== 200
+          ? jsonResponse({ message: "Not Found" }, o.prStatus)
+          : jsonResponse({
+              number: 7, title: "로그인 페이지", state: "open", merged: false,
+              html_url: "https://github.com/semicollon-club/homepage/pull/7",
+              head: { ref: "feat/login", sha: "abc1234" }, base: { ref: "main" },
+            });
+      }
+      if (u.endsWith("/pulls/7/reviews")) {
+        return jsonResponse([{ user: { login: "wwoosshh" }, state: "CHANGES_REQUESTED", body: "에러 처리가 빠졌어요.", submitted_at: "2026-09-05T05:00:00Z" }]);
+      }
+      if (u.endsWith("/pulls/7/comments")) {
+        return jsonResponse([{ id: 1, user: { login: "wwoosshh" }, path: "src/login.ts", line: 42, body: "null 체크가 필요합니다.", created_at: "2026-09-05T05:01:00Z", in_reply_to_id: null }]);
+      }
+      if (u.endsWith("/issues/7/comments")) {
+        return o.issueStatus !== undefined && o.issueStatus !== 200
+          ? jsonResponse({ message: "Resource not accessible by integration" }, o.issueStatus)
+          : jsonResponse([{ user: { login: "member" }, body: "테스트도 추가해 주세요.", created_at: "2026-09-05T05:05:00Z" }]);
+      }
+      return jsonResponse({ message: `unexpected ${u}` }, 500);
+    }) as unknown as typeof fetch;
+    return { seen, fetchImpl };
+  }
+
+  it("깃허브 설정이 없거나 워커가 없으면 거절한다", async () => {
+    expect((await prReviewCommentsHandler(await ctx({ remote: {} }), args)).ok).toBe(false);
+    expect((await prReviewCommentsHandler(await ctx({ github }), args)).ok).toBe(false);
+  });
+
+  it("저장소 이름·PR 번호가 규칙에 안 맞으면 깃허브를 부르지 않는다", async () => {
+    const { seen, fetchImpl } = fakeGithub();
+    const c = await ctx({ github, githubFetch: fetchImpl, remote: {} });
+    for (const bad of [
+      { ...args, repo: "../x" }, { ...args, repo: "semicollon-club/homepage" },
+      { ...args, number: 0 }, { ...args, number: -1 }, { ...args, number: 1.5 },
+    ]) {
+      expect((await prReviewCommentsHandler(c, bad)).ok).toBe(false);
+    }
+    expect(seen).toHaveLength(0);
+  });
+
+  // 대상 리포가 정해져 있으므로 좁힐 수 있고, 좁힐 수 있으면 좁힌다(발행 설계 §3). 읽기만 하는
+  // 도구라 write 를 요청할 이유도 없다.
+  it("토큰은 그 리포 하나·pull_requests 읽기로만 발급하고, 리뷰·코드 코멘트·대화 코멘트를 정리해 돌려준다", async () => {
+    const { seen, fetchImpl } = fakeGithub();
+    const r = await prReviewCommentsHandler(await ctx({ github, githubFetch: fetchImpl, remote: {} }), args);
+    expect(r.ok).toBe(true);
+    expect(r.content).toContain("변경 요청");
+    expect(r.content).toContain("src/login.ts:42");
+    expect(r.content).toContain("테스트도 추가해 주세요.");
+    const token = seen.find((s) => s.url.endsWith("/access_tokens"))!;
+    expect(token.body).toEqual({ repositories: ["homepage"], permissions: { pull_requests: "read" } });
+  });
+
+  it("PR 을 못 찾으면 그 번호를 담아 실패를 전한다", async () => {
+    const { fetchImpl } = fakeGithub({ prStatus: 404 });
+    const r = await prReviewCommentsHandler(await ctx({ github, githubFetch: fetchImpl, remote: {} }), args);
+    expect(r.ok).toBe(false);
+    expect(r.content).toContain("#7");
+  });
+
+  it("대화 코멘트를 못 읽어도 나머지는 보여주고 그 사실을 남긴다", async () => {
+    const { fetchImpl } = fakeGithub({ issueStatus: 403 });
+    const r = await prReviewCommentsHandler(await ctx({ github, githubFetch: fetchImpl, remote: {} }), args);
+    expect(r.ok).toBe(true);
+    expect(r.content).toContain("src/login.ts:42");
+    expect(r.content).toMatch(/대화 코멘트/);
   });
 });
