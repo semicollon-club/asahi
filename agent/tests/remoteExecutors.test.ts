@@ -172,6 +172,26 @@ describe("워커 실행기", () => {
     expect(r.content).not.toContain("종료 코드");
   });
 
+  // 2026-09-05: 봇이 sh_exec 인자에 실어 보낸 git 자격증명·신원은 자식 프로세스의 환경으로만
+  // 옮겨진다(gitEnv.ts). 어느 변수가 어떤 모양으로 들어가는지는 gitEnv.test.ts 가 보고, 여기서는
+  // 그 env 가 실제로 spawn 된 셸까지 닿는지만 실제 프로세스로 확인한다.
+  it("sh_exec 는 봇이 준 git 인자를 자식 환경으로 옮긴다", async () => {
+    const command = process.platform === "win32"
+      ? "echo %ASAHI_GH_TOKEN% %GIT_TERMINAL_PROMPT% %GIT_CONFIG_KEY_0%"
+      : "echo $ASAHI_GH_TOKEN $GIT_TERMINAL_PROMPT $GIT_CONFIG_KEY_0";
+    const r = await ex.sh_exec({ command, git: { token: "ghs_probe", userName: "홍길동", userEmail: "1@users.noreply.github.com" } });
+    expect(r.ok).toBe(true);
+    expect(r.content).toContain("ghs_probe 0 credential.helper");
+  });
+
+  // 옛 봇은 git 인자를 안 보낸다 — 그래도 프롬프트는 꺼져야 git 이 입력을 기다리며 타임아웃까지
+  // 매달리지 않는다(2026-09-05 이전에는 sh_exec 에 이 변수조차 없었다).
+  it("sh_exec 는 git 인자가 없어도 대화형 프롬프트를 끈다", async () => {
+    const command = process.platform === "win32" ? "echo [%GIT_TERMINAL_PROMPT%]" : "echo [$GIT_TERMINAL_PROMPT]";
+    const r = await ex.sh_exec({ command });
+    expect(r.content).toContain("[0]");
+  });
+
   it("describeExit 는 신호 종료(code=null)를 코드 대신 사실로 적는다", () => {
     // "(종료 코드 null)" 은 사람에게도 모델에게도 의미가 없다.
     expect(describeExit("", null)).toContain("신호로 종료됨");

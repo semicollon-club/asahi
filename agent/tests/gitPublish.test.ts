@@ -79,8 +79,9 @@ describe("runPublish", () => {
     const runGit: RunGit = async (args) => { calls.push(args); return { ok: true, stdout: "" }; };
     const r = await runPublish(base, deps(runGit).deps);
     expect(r.ok).toBe(true);
-    // publishArgv 목록 + add 뒤의 ls-files 한 번
-    expect(calls.length).toBe(publishArgv(base).length + 1);
+    // publishArgv 목록 + fetch 뒤의 rev-parse·merge-base 두 번 + add 뒤의 ls-files 한 번
+    expect(calls.length).toBe(publishArgv(base).length + 3);
+    expect(calls[calls.length - 1]).toContain("push");
   });
 
   // 이것이 제외 규칙이 실제로 집행되는 유일한 지점이다 — 목록만 있고 파일을 안 쓰면
@@ -117,21 +118,88 @@ describe("runPublish", () => {
     expect(calls[calls.length - 1]).toContain("push");
   });
 
-  // push 에만 토큰을 준다 — 토큰이 닿는 프로세스 수를 최소로 둔다.
-  it("자격증명은 push 에만 넘긴다", async () => {
+  // 네트워크로 나가는 명령(fetch·push)에만 토큰을 준다 — 토큰이 닿는 프로세스 수를 최소로 둔다.
+  it("자격증명은 fetch·push 에만 넘긴다", async () => {
     const seen: Array<{ cmd: string[]; env: Record<string, string> | undefined }> = [];
     const runGit: RunGit = async (args, env) => { seen.push({ cmd: args, env }); return { ok: true, stdout: "" }; };
     await runPublish(base, deps(runGit).deps);
     const withToken = seen.filter((s) => s.env !== undefined);
-    expect(withToken.length).toBe(1);
-    expect(withToken[0].cmd).toContain("push");
-    expect(withToken[0].env!.ASAHI_GH_TOKEN).toBe("ghs_secret");
+    // "-C dir -c ... -c ..." 뒤에 서브커맨드가 오므로 위치가 아니라 이름으로 찾는다
+    expect(withToken.map((s) => s.cmd.find((a) => a === "fetch" || a === "push"))).toEqual(["fetch", "push"]);
+    for (const s of withToken) expect(s.env!.ASAHI_GH_TOKEN).toBe("ghs_secret");
+    // 자격증명 헬퍼 체인(빈 값 → 우리 것)은 그 두 명령의 서브커맨드 앞에 온다
+    for (const s of withToken) expect(s.cmd.join(" ")).toContain("credential.helper= -c credential.helper=");
   });
 
   it("실패 메시지에도 토큰이 섞이지 않는다", async () => {
     const runGit: RunGit = async () => ({ ok: false, stdout: "fatal: could not read Password for 'https://ghs_secret@github.com'" });
     const r = await runPublish(base, deps(runGit).deps);
     expect(r.content).not.toContain("ghs_secret");
+  });
+});
+
+// 2026-09-05: 발행이 원격 히스토리를 모른 채 init→add→commit→push 만 하던 것을 고친다. 원격이
+// 다른 곳에서 먼저 바뀌었거나(다른 PC·깃허브 웹) 폴더를 되받기 없이 다시 만들었으면 push 가
+// non-fast-forward 로 거절됐고, 사용자에게는 영문 git 오류만 올라갔다.
+describe("runPublish — 원격 히스토리 맞추기", () => {
+  const deps = (runGit: RunGit) => ({ runGit, writeFile: async () => {}, sizeOf: async () => 10 });
+  // 서브커맨드 이름으로 응답을 정한다. "-C dir" 와 "-c ..." 가 앞에 붙으므로 위치가 아니라 이름으로 찾는다.
+  const sub = (args: string[]) => args.find((a) => ["init", "branch", "remote", "fetch", "rev-parse", "merge-base", "reset", "add", "ls-files", "commit", "push"].includes(a));
+  const scripted = (fail: Record<string, string>) => {
+    const calls: string[][] = [];
+    const runGit: RunGit = async (args) => {
+      calls.push(args);
+      const name = sub(args) ?? "";
+      return name in fail ? { ok: false, stdout: fail[name] } : { ok: true, stdout: "" };
+    };
+    return { calls, runGit };
+  };
+  const names = (calls: string[][]) => calls.map((c) => sub(c));
+
+  it("publishArgv 는 remote add 뒤, add 앞에서 fetch 한다", () => {
+    const argv = publishArgv(base).map((a) => a[0]);
+    expect(argv.indexOf("fetch")).toBeGreaterThan(argv.lastIndexOf("remote"));
+    expect(argv.indexOf("fetch")).toBeLessThan(argv.indexOf("add"));
+  });
+
+  // 첫 발행에서는 원격이 비어 있어 fetch 가 실패한다 — remote remove 와 같이 정상이다.
+  it("fetch 가 실패하면(첫 발행) 그대로 진행해 push 까지 간다", async () => {
+    const { calls, runGit } = scripted({ fetch: "fatal: couldn't find remote ref main" });
+    const r = await runPublish(base, deps(runGit));
+    expect(r.ok).toBe(true);
+    expect(names(calls)).toContain("push");
+    expect(names(calls)).not.toContain("reset");
+  });
+
+  // 폴더를 손으로 다시 만든 경우다 — git init 이 고아 히스토리를 만들면 push 가 거절되므로,
+  // 원격 히스토리 위에 작업 트리를 얹어 새 커밋 하나로 만든다.
+  it("로컬에 커밋이 없고 원격에 있으면 reset --soft FETCH_HEAD 로 그 위에 얹는다", async () => {
+    const { calls, runGit } = scripted({ "rev-parse": "fatal: Needed a single revision" });
+    const r = await runPublish(base, deps(runGit));
+    expect(r.ok).toBe(true);
+    const seq = names(calls);
+    expect(seq.indexOf("reset")).toBeGreaterThan(seq.indexOf("fetch"));
+    expect(seq.indexOf("reset")).toBeLessThan(seq.indexOf("add"));
+    expect(calls.find((c) => sub(c) === "reset")).toEqual(["-C", base.dir, "reset", "--soft", "FETCH_HEAD"]);
+    expect(seq).not.toContain("merge-base");
+  });
+
+  it("원격에 로컬에 없는 커밋이 있으면 commit·push 전에 멈추고 되받기를 안내한다", async () => {
+    const { calls, runGit } = scripted({ "merge-base": "" });
+    const r = await runPublish(base, deps(runGit));
+    expect(r.ok).toBe(false);
+    expect(r.content).toContain("pull --rebase");
+    expect(r.content).toContain("restore_project");
+    expect(names(calls)).not.toContain("commit");
+    expect(names(calls)).not.toContain("push");
+  });
+
+  it("로컬이 원격을 이미 담고 있으면 그대로 진행한다", async () => {
+    const { calls, runGit } = scripted({});
+    const r = await runPublish(base, deps(runGit));
+    expect(r.ok).toBe(true);
+    expect(calls.find((c) => sub(c) === "merge-base")).toEqual(["-C", base.dir, "merge-base", "--is-ancestor", "FETCH_HEAD", "HEAD"]);
+    expect(names(calls)).not.toContain("reset");
   });
 });
 

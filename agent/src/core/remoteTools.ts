@@ -2,7 +2,44 @@ import { isPathWithinAny } from "./paths.js";
 import { extractCandidatePaths } from "./pathPermission.js";
 import { scopeDirs } from "./workerSelect.js";
 import { PROC_TOOL_NAMES, procNameFor, isValidUserId } from "../remote/proc.js";
+import type { ShellGit } from "../remote/gitEnv.js";
 import type { ToolCtx } from "./tools.js";
+
+// 커밋 author·PR 본문 등에 쓸 이 사람의 표시 이름. 조회가 실패하거나 이름이 비어 있으면 userId 로
+// 폴백한다 — 이름 하나 때문에 셸이나 발행이 멈추면 안 된다(recall 의 "(작성자 미상)" 폴백과 같은
+// 자리다). tools.ts 의 발행·PR 생성도 이 함수를 쓴다 — 같은 규칙을 두 곳에 두면 한쪽만 바뀌는 날이 온다.
+export async function displayNameOf(ctx: ToolCtx): Promise<string> {
+  try {
+    const names = await ctx.repos.users.displayNames();
+    return names[ctx.userId] || ctx.userId;
+  } catch {
+    return ctx.userId;
+  }
+}
+
+// 부원의 실제 이메일은 묻지도 저장하지도 않는다(발행 설계 §8) — 깃허브 noreply 형식을 쓴다.
+export function noreplyEmailOf(userId: string): string {
+  return `${userId}@users.noreply.github.com`;
+}
+
+// sh_exec 에 실어 보낼 git 인자(2026-09-05). 토큰은 봇이 발급하고(ctx.shellTokens, github/shellToken.ts)
+// 신원은 이 사람의 것이다 — 모델은 이 값을 정하지 않는다(proc_* 의 name·cwd 와 같은 주입이라, 모델이
+// 무엇을 넘기든 여기서 덮어쓴다). 토큰을 못 구해도 명령은 그대로 실행한다: 대부분의 셸 명령은 git 과
+// 무관하고, git 이라면 워커 쪽 헬퍼가 그 사유를 stderr 로 말한다(remote/gitEnv.ts 의 NO_TOKEN_HELPER).
+export async function shellGitArgs(ctx: ToolCtx): Promise<ShellGit> {
+  const userName = await displayNameOf(ctx);
+  const userEmail = noreplyEmailOf(ctx.userId);
+  if (!ctx.shellTokens) {
+    return {
+      userName, userEmail,
+      tokenError: "아사히: 봇에 깃허브 App 이 설정되지 않아 깃허브 자격증명을 줄 수 없어요. 관리자에게 알려주세요.",
+    };
+  }
+  const r = await ctx.shellTokens.get(ctx.now());
+  return "token" in r
+    ? { token: r.token, userName, userEmail }
+    : { userName, userEmail, tokenError: `아사히: 깃허브 토큰 발급에 실패했어요 — ${r.error}` };
+}
 
 // 워커에서 실행되는 원격 도구 이름. SDK 내장 Read/Write/Edit/Glob/Grep/Bash 를 대체한다.
 // 이름을 달리 지은 이유: 내장 도구와 이름이 겹치면 어느 쪽이 도는지 알 수 없다.
@@ -322,6 +359,10 @@ export async function remoteToolHandler(
         : { ...args, onlyUserId: ctx.userId, labels };
     }
   }
+
+  // sh_exec 의 git 자격증명·신원은 경로 검사와 무관한 별도의 주입이다(위 shellGitArgs). 모델이 git
+  // 키를 끼워 보내도 여기서 덮어쓴다 — 워커가 임의 토큰·임의 신원을 받는 표면을 만들지 않는다.
+  if (tool === "sh_exec") args = { ...args, git: await shellGitArgs(ctx) };
 
   let r: { ok: boolean; content: string };
   try {

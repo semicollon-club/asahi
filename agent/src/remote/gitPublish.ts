@@ -60,10 +60,15 @@ export function pushEnv(token: string): Record<string, string> {
 }
 
 // git 서브커맨드 목록을 순서대로 돌려준다. 각 배열의 0번째는 항상 그 서브커맨드 이름
-// (init·branch·remote·add·commit·push)이다 — runPublish 가 "이게 add 단계인가·push 단계인가"를
+// (init·branch·remote·fetch·add·commit·push)이다 — runPublish 가 "이게 add 단계인가·push 단계인가"를
 // 판정하고 실패 메시지에 이름을 넣을 때 이 위치를 그대로 믿는다.
 //
-// 실행에 필요한 "-C dir"(모든 명령)·"-c credential.helper=..."(push 만)는 여기 넣지 않고
+// fetch 가 remote add 뒤, add 앞에 있는 이유(2026-09-05): 이 목록은 원래 원격 히스토리를 전혀
+// 모른 채 init→add→commit→push 만 했다. 원격이 다른 곳에서 먼저 바뀌었거나(다른 PC·깃허브 웹) 폴더를
+// 되받기 없이 다시 만들었으면 push 가 non-fast-forward 로 거절됐고, 사용자에게는 영문 git 오류만
+// 올라갔다. fetch 로 원격 끝을 알아 온 뒤 runPublish 의 alignWithRemote 가 로컬을 그 위에 맞춘다.
+//
+// 실행에 필요한 "-C dir"(모든 명령)·"-c credential.helper=..."(fetch·push 만)는 여기 넣지 않고
 // runPublish 가 실제로 실행하기 직전에 얹는다. 여기서 같이 섞으면 두 가지가 깨진다:
 //   1) "-C" 가 0번째를 차지해 서브커맨드 이름으로 각 배열을 식별할 수 없게 된다 — 이 목록을
 //      순수 함수로 검증하는 이유 자체(위 설명)가 무색해진다.
@@ -77,6 +82,7 @@ export function publishArgv(a: PublishArgs): string[][] {
     ["branch", "-M", "main"],
     ["remote", "remove", "origin"],
     ["remote", "add", "origin", a.cloneUrl],
+    ["fetch", "origin", "main"],
     ["add", "-A"],
     ["commit", "-m", a.message, `--author=${a.authorName} <${a.authorEmail}>`, "--allow-empty"],
     ["push", "-u", "origin", "main"],
@@ -99,6 +105,32 @@ export type PublishDeps = {
   sizeOf: (dir: string, rels: string[]) => Promise<number>;
 };
 
+// fetch 가 성공한 뒤(원격 main 이 있다) 로컬 히스토리를 그 위에 맞춘다. 셋으로 갈린다.
+//   - 로컬에 커밋이 없다(폴더를 손으로 다시 만들었거나 되받기 없이 새로 만든 경우): git init 이 만든
+//     고아 히스토리로 push 하면 거절되므로, reset --soft FETCH_HEAD 로 원격 끝을 HEAD 로 삼는다. 작업
+//     트리는 그대로라 이어지는 add·commit 이 "원격 대비 달라진 것"만 새 커밋 하나로 만든다.
+//   - 로컬이 원격을 이미 담고 있다(되받은 폴더, 첫 발행 때 그 폴더): 그대로 진행한다.
+//   - 원격에 로컬이 모르는 커밋이 있다(다른 PC·깃허브 웹에서 먼저 바뀜): commit·push 전에 멈추고
+//     되받기를 안내한다. 여기서 자동으로 병합하지 않는 이유는 runRestore 가 --ff-only 를 고집하는
+//     이유와 같다 — 갈라진 히스토리를 사람 모르게 합치면 그 결과를 아무도 검토하지 않는다.
+// 이 호출들에는 자격증명을 주지 않는다 — 전부 로컬 저장소만 본다.
+async function alignWithRemote(a: PublishArgs, runGit: RunGit): Promise<{ ok: false; content: string } | null> {
+  const head = await runGit(["-C", a.dir, "rev-parse", "-q", "--verify", "HEAD"]);
+  if (!head.ok) {
+    const reset = await runGit(["-C", a.dir, "reset", "--soft", "FETCH_HEAD"]);
+    return reset.ok ? null : { ok: false, content: redact(`git reset 에 실패했어요: ${reset.stdout}`, a.token) };
+  }
+  const contained = await runGit(["-C", a.dir, "merge-base", "--is-ancestor", "FETCH_HEAD", "HEAD"]);
+  if (contained.ok) return null;
+  return {
+    ok: false,
+    content:
+      "원격 저장소에 이 폴더에 없는 새 커밋이 있어서 그대로 올리면 거절돼요. 먼저 sh_exec 로 " +
+      "`git pull --rebase origin main` 을 해서 합친 뒤(자격증명은 자동으로 붙어요) 다시 발행하거나, " +
+      "이 폴더의 변경을 버려도 된다면 restore_project 로 버리고 새로 받은 뒤 다시 만드세요.",
+  };
+}
+
 export async function runPublish(a: PublishArgs, deps: PublishDeps): Promise<{ ok: boolean; content: string }> {
   const argv = publishArgv(a);
   const env = pushEnv(a.token);
@@ -110,6 +142,9 @@ export async function runPublish(a: PublishArgs, deps: PublishDeps): Promise<{ o
     const name = cmd[0];
     const isAdd = name === "add";
     const isPush = name === "push";
+    const isFetch = name === "fetch";
+    // 네트워크로 나가 깃허브 인증이 필요한 둘. 자격증명 헬퍼와 토큰 env 는 이 둘에만 붙는다.
+    const isNetwork = isPush || isFetch;
     const isCommit = name === "commit";
 
     // `add -A` 직전에 .gitignore 를 쓴다. 이것이 제외 규칙이 실제로 집행되는 유일한 지점이다 —
@@ -121,25 +156,35 @@ export async function runPublish(a: PublishArgs, deps: PublishDeps): Promise<{ o
     }
 
     // -C dir 는 모든 호출에 필요하다 — RunGit 은 cwd 를 받지 않으므로(gitCommit.ts), 어느
-    // 작업 폴더에서 도는지는 이 인자가 정한다. push 에만 자격증명 헬퍼(-c)를 더 얹는다 — 로컬
+    // 작업 폴더에서 도는지는 이 인자가 정한다. fetch·push 에만 자격증명 헬퍼(-c)를 더 얹는다 — 로컬
     // 명령까지 붙이면 그 문자열이 이유 없이 여러 프로세스의 명령줄에 퍼진다.
     // committer 신원은 commit 에만 얹는다(위 COMMITTER_NAME 선언부 참고). 자격증명 헬퍼와
     // 같은 자리에서 같은 방식으로 붙이는 이유는 publishArgv 의 계약을 지키기 위해서다 —
     // 그 배열의 0번째는 항상 서브커맨드여야 하고, -c 를 거기 끼우면 위 name 판정이 깨진다.
-    const fullArgs = isPush
+    const fullArgs = isNetwork
       ? ["-C", a.dir, ...CREDENTIAL_ARGS, ...cmd]
       : isCommit
         ? ["-C", a.dir, "-c", `user.name=${COMMITTER_NAME}`, "-c", `user.email=${COMMITTER_EMAIL}`, ...cmd]
         : ["-C", a.dir, ...cmd];
 
-    // push 만 자격증명이 필요하다. 나머지에 env 를 주지 않는 것은 토큰이 닿는 프로세스 수를
+    // fetch·push 만 자격증명이 필요하다. 나머지에 env 를 주지 않는 것은 토큰이 닿는 프로세스 수를
     // 최소로 두기 위해서다.
-    const r = isPush ? await deps.runGit(fullArgs, env) : await deps.runGit(fullArgs);
+    const r = isNetwork ? await deps.runGit(fullArgs, env) : await deps.runGit(fullArgs);
 
     // remote remove 는 origin 이 없으면 실패한다 — 첫 발행에서는 정상이므로 넘어간다.
     if (!r.ok && name === "remote" && cmd[1] === "remove") continue;
+    // fetch 도 첫 발행에서는 실패한다(원격이 비어 있어 "couldn't find remote ref main") — 마찬가지로
+    // 정상이다. 인증·네트워크 실패도 여기서는 삼켜지지만 잃는 정보는 없다: 같은 원인이면 뒤의 push 가
+    // 같은 문구로 실패해 그대로 보고된다.
+    if (!r.ok && isFetch) continue;
     if (!r.ok) {
       return { ok: false, content: redact(`git ${name} 에 실패했어요: ${r.stdout}`, a.token) };
+    }
+
+    // 원격 main 이 실제로 있을 때만(fetch 성공) 로컬을 그 위에 맞춘다 — 위 alignWithRemote 참고.
+    if (isFetch) {
+      const blocked = await alignWithRemote(a, deps.runGit);
+      if (blocked !== null) return blocked;
     }
 
     // add 직후에 스테이징된 것의 총 용량을 잰다. commit·push 전에 멈춰야 되돌릴 것이 없다.

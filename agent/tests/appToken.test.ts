@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import crypto from "node:crypto";
-import { buildAppJwt, mintInstallationToken, createOrgRepo } from "../src/github/appToken.js";
+import { buildAppJwt, mintInstallationToken, createOrgRepo, createPullRequest } from "../src/github/appToken.js";
 
 // 실제 키를 리포에 두지 않는다 — 테스트마다 생성한다(2048비트도 vitest 에서 충분히 빠르다).
 const { privateKey } = crypto.generateKeyPairSync("rsa", { modulusLength: 2048 });
@@ -126,5 +126,41 @@ describe("createOrgRepo", () => {
     const fetchImpl = (async () =>
       new Response(JSON.stringify({ message: "name already exists on this account" }), { status: 422 })) as unknown as typeof fetch;
     await expect(createOrgRepo({ config, token: "t", repoName: "x", fetchImpl })).rejects.toThrow(/already exists/);
+  });
+});
+
+// 2026-09-05: 부원이 디스코드만으로 브랜치를 올리고 main 에 PR 을 내는 흐름의 마지막 조각.
+// git 만으로는 PR 을 만들 수 없어 봇이 REST 로 만든다 — 자격증명은 발행과 같이 봇만 갖는다.
+describe("createPullRequest", () => {
+  it("리포의 pulls 엔드포인트로 PR 을 만들고 주소·번호를 돌려준다", async () => {
+    let seenUrl = "";
+    let seenBody: Record<string, unknown> = {};
+    let seenAuth = "";
+    const fetchImpl = (async (url: string, init: RequestInit) => {
+      seenUrl = String(url);
+      seenBody = JSON.parse(String(init.body));
+      seenAuth = String((init.headers as Record<string, string>).authorization);
+      return new Response(
+        JSON.stringify({ html_url: "https://github.com/semicollon-club/homepage/pull/7", number: 7 }),
+        { status: 201 },
+      );
+    }) as unknown as typeof fetch;
+
+    const r = await createPullRequest({
+      config, token: "ghs_pr", repoName: "homepage", head: "feat/login", base: "main", title: "로그인", body: "설명", fetchImpl,
+    });
+
+    expect(seenUrl).toBe("https://api.github.com/repos/semicollon-club/homepage/pulls");
+    expect(seenBody).toEqual({ title: "로그인", head: "feat/login", base: "main", body: "설명" });
+    expect(seenAuth).toBe("Bearer ghs_pr");
+    expect(r).toEqual({ url: "https://github.com/semicollon-club/homepage/pull/7", number: 7 });
+  });
+
+  it("실패하면 깃허브의 사유를 담아 던진다", async () => {
+    const fetchImpl = (async () =>
+      new Response(JSON.stringify({ message: "No commits between main and feat/login" }), { status: 422 })) as unknown as typeof fetch;
+    await expect(
+      createPullRequest({ config, token: "t", repoName: "homepage", head: "feat/login", base: "main", title: "x", fetchImpl }),
+    ).rejects.toThrow(/No commits between/);
   });
 });

@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -13,7 +14,7 @@ import {
   allowDirHandler, revokeDirHandler, listDirsHandler,
   dbSchemaHandler, dbQueryHandler, runtimeInfoHandler,
   allowedToolsFor, buildToolDefinitions, allowedToolDefinitions, type ToolCtx,
-  publishHandler, restoreHandler,
+  publishHandler, restoreHandler, createPullRequestHandler,
 } from "../src/core/tools.js";
 import { SHARED_MEMORY_MAX_LEN, SHARED_MEMORY_TITLE_MAX_LEN } from "../src/core/memoryScope.js";
 
@@ -1130,6 +1131,17 @@ describe("발행 도구 게이팅", () => {
     }
   });
 
+  // 2026-09-05: PR 생성은 발행과 같은 축(워커 연결 + 깃허브 설정)으로 열고 닫는다 — 워커 없이
+  // 브랜치를 올릴 방법이 없고, 사람이 지켜보지 않는 턴에서 조직 리포에 PR 이 생기면 안 된다.
+  it("create_pull_request 도 같은 축으로 열리고 닫힌다", () => {
+    const on = allowedToolsFor("allowed", false, false, "local", { workerConnected: true, githubReady: true });
+    expect(on).toContain("mcp__asahi__create_pull_request");
+    const noWorker = allowedToolsFor("allowed", false, false, "local", { workerConnected: false, githubReady: true });
+    expect(noWorker).not.toContain("mcp__asahi__create_pull_request");
+    const noGithub = allowedToolsFor("allowed", false, false, "local", { workerConnected: true, githubReady: false });
+    expect(noGithub).not.toContain("mcp__asahi__create_pull_request");
+  });
+
   // 노출해 두고 부를 때 실패시키면 모델이 매번 시도했다가 실패를 사용자에게 전달한다.
   it("깃허브 설정이 없으면 안 열린다", () => {
     const tools = allowedToolsFor("owner", true, true, "local", { workerConnected: true, githubReady: false });
@@ -1238,5 +1250,121 @@ describe("발행 대상 폴더가 없을 때", () => {
     expect(r.ok).toBe(false);
     expect(r.content).toContain("폴더를 먼저 만들고");
     expect(calls).not.toContain("git_publish");
+  });
+});
+
+// 2026-09-05: 부원이 sh_exec 의 git 으로 브랜치를 올린 뒤 main 에 PR 을 내는 마지막 조각.
+// 대상 리포·브랜치는 모델이 말하지만 조직은 설정이 정하고, 토큰은 그 리포·pull_requests:write 로만
+// 발급한다. main·production 병합은 운영자의 몫이라 PR 까지만 한다.
+describe("create_pull_request 핸들러", () => {
+  // 실제 키로 JWT 를 만들어 fetch 가짜까지 도달하게 한다(appToken.test.ts 와 같은 방식).
+  const { privateKey } = crypto.generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const github = {
+    org: "semicollon-club", appId: "1", installationId: "2",
+    privateKeyPem: privateKey.export({ type: "pkcs1", format: "pem" }).toString(),
+  };
+
+  // access_tokens 와 pulls 두 엔드포인트만 흉내 낸다. 무엇을 어떤 권한으로 요청했는지 기록한다.
+  function fakeGithub(o: { tokenStatus?: number; tokenMessage?: string; prStatus?: number; prMessage?: string } = {}) {
+    const seen: Array<{ url: string; body: Record<string, unknown> }> = [];
+    const fetchImpl = (async (url: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body ?? "{}")) as Record<string, unknown>;
+      seen.push({ url: String(url), body });
+      if (String(url).includes("/access_tokens")) {
+        return o.tokenStatus !== undefined && o.tokenStatus !== 201
+          ? new Response(JSON.stringify({ message: o.tokenMessage ?? "nope" }), { status: o.tokenStatus })
+          : new Response(JSON.stringify({ token: "ghs_pr", expires_at: "2026-09-05T01:00:00Z" }), { status: 201 });
+      }
+      return o.prStatus !== undefined && o.prStatus !== 201
+        ? new Response(JSON.stringify({ message: o.prMessage ?? "nope" }), { status: o.prStatus })
+        : new Response(JSON.stringify({ html_url: "https://github.com/semicollon-club/homepage/pull/7", number: 7 }), { status: 201 });
+    }) as unknown as typeof fetch;
+    return { seen, fetchImpl };
+  }
+  const args = { repo: "homepage", head: "feat/login", title: "로그인 페이지" };
+
+  it("깃허브 설정이 없으면 거절한다(노출 판정과 실행 판정을 따로 확인한다)", async () => {
+    const c = await ctx({ remote: {} });
+    const r = await createPullRequestHandler(c, args);
+    expect(r.ok).toBe(false);
+    expect(r.content).toContain("설정");
+  });
+
+  it("워커가 없으면 거절한다", async () => {
+    const c = await ctx({ github });
+    const r = await createPullRequestHandler(c, args);
+    expect(r.ok).toBe(false);
+  });
+
+  it("저장소·브랜치·제목이 규칙에 안 맞으면 깃허브를 부르지 않는다", async () => {
+    const { seen, fetchImpl } = fakeGithub();
+    const c = await ctx({ github, githubFetch: fetchImpl, remote: {} });
+    for (const bad of [
+      { ...args, repo: "../x" }, { ...args, repo: "semicollon-club/homepage" },
+      { ...args, head: "feat..x" }, { ...args, head: "has space" }, { ...args, head: "-leading" },
+      { ...args, title: "   " },
+    ]) {
+      const r = await createPullRequestHandler(c, bad);
+      expect(r.ok).toBe(false);
+    }
+    expect(seen).toHaveLength(0);
+  });
+
+  it("head 와 base 가 같으면 거절한다", async () => {
+    const { seen, fetchImpl } = fakeGithub();
+    const c = await ctx({ github, githubFetch: fetchImpl, remote: {} });
+    const r = await createPullRequestHandler(c, { ...args, head: "main" });
+    expect(r.ok).toBe(false);
+    expect(seen).toHaveLength(0);
+  });
+
+  it("손님은 production 을 base 로 지정할 수 없다", async () => {
+    const { seen, fetchImpl } = fakeGithub();
+    const c = await ctx({ github, githubFetch: fetchImpl, remote: {} });
+    const r = await createPullRequestHandler(c, { ...args, base: "production" });
+    expect(r.ok).toBe(false);
+    expect(r.content).toContain("production");
+    expect(seen).toHaveLength(0);
+  });
+
+  it("소유자는 production 을 base 로 지정할 수 있다", async () => {
+    const { seen, fetchImpl } = fakeGithub();
+    const c = await ctx({ github, githubFetch: fetchImpl, remote: {}, role: "owner", isOwner: true, userId: "owner" });
+    const r = await createPullRequestHandler(c, { ...args, head: "main", base: "production" });
+    expect(r.ok).toBe(true);
+    expect(seen.find((s) => s.url.endsWith("/pulls"))!.body.base).toBe("production");
+  });
+
+  // App 에 Pull requests 권한이 없으면 깃허브는 토큰 발급 자체를 거절한다 — 그 문구만 보면
+  // 사용자는 원인을 모른다. 어디를 고쳐야 하는지까지 말한다.
+  it("토큰 발급이 권한 부족으로 실패하면 App 권한 안내를 덧붙인다", async () => {
+    const { fetchImpl } = fakeGithub({ tokenStatus: 422, tokenMessage: "The permissions requested are not granted to this installation." });
+    const c = await ctx({ github, githubFetch: fetchImpl, remote: {} });
+    const r = await createPullRequestHandler(c, args);
+    expect(r.ok).toBe(false);
+    expect(r.content).toContain("Pull requests");
+  });
+
+  it("PR 생성 자체가 실패하면 깃허브의 사유를 그대로 전한다", async () => {
+    const { fetchImpl } = fakeGithub({ prStatus: 422, prMessage: "No commits between main and feat/login" });
+    const c = await ctx({ github, githubFetch: fetchImpl, remote: {} });
+    const r = await createPullRequestHandler(c, args);
+    expect(r.ok).toBe(false);
+    expect(r.content).toContain("No commits between");
+  });
+
+  it("성공하면 주소를 돌려주고, 토큰은 그 리포·pull_requests:write 로만 발급한다", async () => {
+    const { seen, fetchImpl } = fakeGithub();
+    const c = await ctx({ github, githubFetch: fetchImpl, remote: {} });
+    const r = await createPullRequestHandler(c, { ...args, body: "로그인 폼과 세션 쿠키" });
+    expect(r.ok).toBe(true);
+    expect(r.content).toContain("https://github.com/semicollon-club/homepage/pull/7");
+    const token = seen.find((s) => s.url.endsWith("/access_tokens"))!;
+    expect(token.body).toEqual({ repositories: ["homepage"], permissions: { pull_requests: "write" } });
+    const pr = seen.find((s) => s.url.endsWith("/repos/semicollon-club/homepage/pulls"))!;
+    expect(pr.body).toMatchObject({ title: "로그인 페이지", head: "feat/login", base: "main" });
+    // 본문에 요청자가 남는다 — PR 의 깃허브 작성자는 App 이라 그것만으로는 누가 냈는지 안 보인다.
+    expect(String(pr.body.body)).toContain("로그인 폼과 세션 쿠키");
+    expect(String(pr.body.body)).toContain("guest");
   });
 });
