@@ -40,6 +40,11 @@ lastReviewed: 2026-09-05
   로그아웃하지 않는다** — 다른 계정의 창이 필요하면 `runas /user:<계정> powershell` 로 그 계정의 PowerShell 을 관리자
   세션 안에서 띄운다(1·2절). 원격 접속이 끊겼을 때 봇을 통해 되살리는 길은 소유자의 유지보수 지시다(`docs/security/
   capability-model.md` 의 "소유자 유지보수 예외") — 승인 링크가 나올 수 있는 명령은 **운영자만 보는 채널**에서 시킨다.
+- **봇이 쓸 포트가 비어 있는지 본다.** `Get-NetTCPConnection -LocalPort 3000,3100 -State Listen | Select-Object LocalAddress,
+  LocalPort, OwningProcess`. 동아리 미니PC 에는 `SYSTEM` 계정의 다른 node 서비스가 이미 3000 을 쓰고 있어(2026-09-05 밤
+  실측 — 우리 것이 아니다) 봇은 **3100** 을 쓴다. 다른 계정의 프로세스가 쓰는 포트에 묶으면 `listen EACCES: permission
+  denied 127.0.0.1:3000` 으로 봇이 즉시 죽는다 — 같은 계정이면 "address in use", 다른 계정이면 "permission denied" 로
+  나오는 윈도우 특성이다. 아래 `.env` 의 `PORT` 와 워커의 `HUB_URL` 포트는 여기서 정한 값으로 맞춘다.
 
 ## 1. 계정 A 만들기(관리자 창, 한 번)
 
@@ -102,7 +107,7 @@ Variables 를 아래 표대로 옮긴다 — **값을 복사할 때는 Railway �
 | `DATABASE_URL` | 그대로 | Supabase Session pooler 문자열(`deploy/railway-셋업.md` "DATABASE_URL" 절). DB 는 그대로 Supabase |
 | `CLAUDE_CODE_OAUTH_TOKEN` | 그대로 | 108자·`sk-ant-oat…`. 2단계 프록시가 쓰는 자격증명도 이것이다 |
 | `DEPLOY_TARGET` | `cloud` → **`local`** | 미니PC 는 컨테이너가 아니다. `runtime_info` 가 local 로 보고하고 봇·워커 커밋을 견준다 |
-| `PORT` | (Railway 주입) → **`3000`** | 워커의 `HUB_URL` 포트와 같아야 한다 |
+| `PORT` | (Railway 주입) → **`3100`** | 워커의 `HUB_URL` 포트와 같아야 한다. 3000 은 미니PC 의 다른 서비스가 쓴다(0절의 포트 확인) |
 | `HUB_BIND` | (없음) → **`127.0.0.1`** | 루프백 전용. 비우면 모든 인터페이스에 열린다 — 미니PC 에서는 반드시 채운다 |
 | `BOT_SENTINEL` | (없음) → **`C:\Users\asahi-bot\asahi-bot\update.flag`** | 4절 업데이터의 `-Sentinel` 기본값(`<RepoPath>\update.flag`)과 같아야 한다 |
 | `DIGEST_CONTEST_CHANNEL_ID`, `DIGEST_DEVNEWS_CHANNEL_ID` | 그대로 | 있을 때만 |
@@ -121,10 +126,19 @@ Get-Content C:\Users\asahi-bot\asahi-bot\.env
 `액세스가 거부되었습니다` 가 나와야 한다. 내용이 보이면 A 의 클론이 프로필 폴더 밖에 있거나 폴더 권한이 바뀐 것이다 —
 이 상태로 컷오버하면 부원이 셸 한 줄로 봇의 모든 자격증명을 읽을 수 있다. 여기서 멈추고 위치부터 고친다.
 
-## 4. 작업 스케줄러 둘 등록(관리자 창, 한 번)
+## 4. 작업 스케줄러 둘 등록(승격된 관리자 창, 한 번)
 
-다른 계정(A)으로 도는 작업을 만들려면 그 계정의 암호가 필요하므로 **관리자 PowerShell** 에서 한다. 첫 줄이 암호를
-묻는다(1절에서 적어 둔 것 — 붙여 넣지 말고 친다). 등록이 끝나면 `Clear-History` 로 지운다.
+다른 계정(A)으로 도는 작업을 만들려면 그 계정의 암호가 필요하므로 관리자 PowerShell 에서 하는데, **반드시 "관리자
+권한으로 실행"(UAC) 으로 승격된 창**이어야 한다. 부팅 시 트리거가 붙은 작업은 승격되지 않은 창에서는 `0x80070005`(액세스
+거부)로 등록이 막힌다 — 2026-09-05 밤 실측: 같은 창에서 5분 반복 작업(`asahi-bot-update`)은 등록되고 부팅 작업(`asahi-bot`)만
+거부됐다. 승격 확인은 이 한 줄이 `True` 인지다:
+
+```powershell
+([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+```
+
+첫 줄이 암호를 묻는다(1절에서 적어 둔 것 — 붙여 넣지 말고 친다). `Read-Host` 는 입력을 화면에 그대로 두므로 그 창의
+출력을 어딘가에 붙일 때 암호 줄은 지운다. 등록이 끝나면 `Clear-History` 로 지운다.
 
 ```powershell
 $pw = Read-Host "asahi-bot 암호"
@@ -155,10 +169,33 @@ Clear-History
   중 어떤 코드로 끝나든 스케줄러는 완료로 본다(`deploy/worker-셋업.md` "자동 갱신" 절의 2026-08-01 실측). 죽은 봇을
   살리는 것은 업데이터의 감시자 역할이다.
 - 등록 뒤 `Start-ScheduledTask asahi-bot` 을 **아직 부르지 않는다**(Railway 봇이 돌고 있다).
-- 첫 시작 때 `Get-ScheduledTaskInfo asahi-bot` 의 `LastTaskResult` 가 `0x80070569`(요청한 로그온 유형이 허용되지
-  않음)이면 A 에 "배치 작업으로 로그온" 권한이 없는 것이다 — 보통은 암호와 함께 등록하면 자동으로 부여된다. 안 됐으면
-  작업 스케줄러 GUI(`taskschd.msc`)에서 `asahi-bot` 속성 → "사용자가 로그온할 때만 실행" 을 고른 뒤 다시 "로그온 여부에
-  관계없이 실행" 으로 저장하면 부여된다.
+- **"배치 작업으로 로그온" 권한은 PowerShell 등록으로는 부여되지 않는다**(2026-09-05 밤 실측 — 워커 계정은 GUI 등록
+  때 자동으로 받았지만 `asahi-bot` 은 받지 못했다). 증상: `schtasks /Run /TN asahi-bot` 이 "실행하도록 시도했습니다" 라고
+  하는데 `Get-ScheduledTaskInfo` 의 `LastTaskResult` 가 `267011`(한 번도 안 돌았음) 그대로고 로그 파일이 생기지 않는다.
+  작업 스케줄러의 기록 로그는 기본으로 꺼져 있어 흔적이 없다 — `wevtutil sl Microsoft-Windows-TaskScheduler/Operational
+  /e:true` 로 켠 뒤 다시 실행하면 이벤트 `101`·`104` 에 오류 값 `2147943785`(0x80070569)가 남는다. 확인은
+  `secedit /export /cfg $env:TEMP\secpol.cfg` 뒤 그 파일의 `SeBatchLogonRight` 줄에 `asahi-bot`(또는 그 SID)이 없는 것이다.
+  고침(승격 창, Home 에디션에는 `secpol.msc` 가 없어 `secedit` 로 한다 — 기존 목록을 그대로 두고 A 의 SID 하나만 더한다):
+
+  ```powershell
+  $sid = (Get-LocalUser asahi-bot).SID.Value
+  secedit /export /cfg $env:TEMP\secpol.cfg | Out-Null
+  $line = (Select-String -Path $env:TEMP\secpol.cfg -Pattern "^SeBatchLogonRight").Line   # 예: SeBatchLogonRight = asahi,*S-1-5-32-544,...
+  $cfg = "$env:TEMP\batch.inf"
+  @"
+  [Unicode]
+  Unicode=yes
+  [Version]
+  signature=`"`$CHICAGO`$`"
+  Revision=1
+  [Privilege Rights]
+  $line,*$sid
+  "@ | Out-File -FilePath $cfg -Encoding Unicode
+  secedit /configure /db "$env:TEMP\batch.sdb" /cfg $cfg /areas USER_RIGHTS
+  secedit /export /cfg $env:TEMP\secpol2.cfg | Out-Null; Select-String -Path $env:TEMP\secpol2.cfg -Pattern "SeBatchLogonRight"
+  ```
+
+  마지막 줄의 목록에 `asahi-bot` 이 보이면 된 것이다. 재부팅 없이 다음 `schtasks /Run` 부터 적용된다.
 
 ## 5. 컷오버
 
@@ -168,16 +205,21 @@ Clear-History
    서비스·Variables 는 남아 롤백에 쓴다). 디스코드에서 아사히가 오프라인이 되는 것을 확인한다.
 2. **A 의 봇을 띄운다.** 관리자(또는 asahi-bot) 창에서:
    ```powershell
-   Start-ScheduledTask -TaskName asahi-bot
-   Get-Content C:\Users\asahi-bot\asahi-bot\logs\bot.log -Tail 30 -Wait
+   schtasks /Run /TN asahi-bot
+   Start-Sleep 40
+   Get-ScheduledTaskInfo -TaskName asahi-bot | Format-List LastRunTime, LastTaskResult
+   Get-Content C:\Users\asahi-bot\asahi-bot\logs\bot.log -Tail 30 -Encoding UTF8
    ```
-   `워커 허브 대기 중: 포트 3000 (바인드 127.0.0.1)` → `[discord] 로그인 완료: …` → `상주 비서가 시작되었습니다.` 세 줄이
+   `schtasks /Run` 은 `Start-ScheduledTask` 와 달리 결과를 말로 찍고, `LastTaskResult` 는 `267009`(실행 중)여야 한다.
+   `-Encoding UTF8` 이 없으면 로그의 한글이 깨져 보인다(로그는 UTF-8, PowerShell 5.1 의 기본은 cp949).
+   `워커 허브 대기 중: 포트 3100 (바인드 127.0.0.1)` → `[discord] 로그인 완료: …` → `상주 비서가 시작되었습니다.` 세 줄이
    나와야 한다. `환경변수 누락: …` 이면 3절의 `.env`, `ECONNREFUSED`/`ENETUNREACH` 면 `DATABASE_URL`(Session pooler 인가),
-   `(바인드 127.0.0.1)` 이 안 보이면 `HUB_BIND` 를 본다. 디스코드에서 아사히가 온라인이 되고 소유자 DM 에 한 마디가
+   `(바인드 127.0.0.1)` 이 안 보이면 `HUB_BIND`, `listen EACCES: permission denied 127.0.0.1:<포트>` 면 그 포트를 다른
+   계정의 프로세스가 쓰는 것이다(0절 — `.env` 의 `PORT` 를 바꾸고 다시 `schtasks /Run`). 디스코드에서 아사히가 온라인이 되고 소유자 DM 에 한 마디가
    답이 오면 봇 이사는 끝이다 — 아직 워커는 옛 주소(Railway)를 보고 있다.
 3. **워커를 새 허브로 돌린다.** `asahi` 창에서 `C:\asahi-worker\.env` 의 한 줄을 바꾼다:
    ```
-   HUB_URL=ws://127.0.0.1:3000/worker
+   HUB_URL=ws://127.0.0.1:3100/worker
    ```
    워커는 `.env` 를 기동 시 한 번만 읽으므로 재시작해야 한다. 표준 계정은 `Stop-ScheduledTask` 권한이 없으니 센티넬로
    내린다 — **만들고, 프로세스가 사라진 것을 확인하고, 지우고, 띄운다**(지우지 않으면 재시작된 워커가 15초 안에 같은
@@ -188,8 +230,8 @@ Clear-History
    Remove-Item C:\asahi-worker\update.flag
    Start-ScheduledTask -TaskName asahi-worker
    ```
-   워커 로그(`C:\asahi-worker\logs\worker.log`)에 `로컬 워커가 시작되었습니다 (허브=ws://127.0.0.1:3000/worker, …)` →
-   `[worker] 준비됨` 이 찍혀야 한다. 봇 로그에는 새 연결이 인증됐다는 허브 줄이 뒤따른다.
+   워커 로그(`C:\asahi-worker\logs\worker.log`, `-Encoding UTF8` 로 읽는다)에 `로컬 워커가 시작되었습니다
+   (허브=ws://127.0.0.1:3100/worker, …)` → `[worker] 준비됨` 이 찍혀야 한다. 봇 로그에는 새 연결이 인증됐다는 허브 줄이 뒤따른다.
 4. **디스코드에서 확인한다.** 소유자 계정으로 서버 채널에서 `runtime_info` 를 부르면 `배포 대상: local`, `봇 커밋:
    <7자> (production)`, 워커 커밋, 그리고 `※ 봇과 워커 커밋이 같아요.` 가 나와야 한다(다르면 한쪽 클론이 아직 옛
    커밋이다 — 5분 뒤 다시 본다). 이어서 파일 하나를 읽게 하고(`fs_read`), 작은 파일을 보내 달라고 한다(`send_file` —
@@ -197,11 +239,20 @@ Clear-History
 5. **업데이터를 켠다.** 관리자 창에서 `Enable-ScheduledTask -TaskName asahi-bot-update`. 2분 뒤 첫 회차가 돌고
    `Get-ScheduledTaskInfo asahi-bot-update` 의 `LastTaskResult` 가 `0` 이면 정상이다(새 커밋이 없으면 로그
    `update-bot.log` 는 비어 있다 — 조용히 정상).
-6. **스모크.** `deploy/smoke-test.md` 의 "미니PC 단일 호스트" 절 항목을 훑는다. 특히 **다른 PC 에서 미니PC 의 3000
-   포트가 닿지 않는 것**(`Test-NetConnection <미니PC IP> -Port 3000` 이 `TcpTestSucceeded : False`)을 꼭 본다.
+6. **스모크.** `deploy/smoke-test.md` 의 "미니PC 단일 호스트" 절 항목을 훑는다. 특히 **다른 PC 에서 미니PC 의 3100
+   포트가 닿지 않는 것**(`Test-NetConnection <미니PC IP> -Port 3100` 이 `TcpTestSucceeded : False`)을 꼭 본다.
 
 Railway 서비스는 **지우지 않고 배포만 없는 상태로 둔다** — 롤백 수단이다. 5단계(부원 개방·자원 관리)가 끝난 뒤
 Railway 를 정리한다(설계 §11).
+
+**첫 컷오버 실측 기록(2026-09-05 밤, 운영자 원격).** 걸린 시간은 약 1시간 40분이었고 그중 절차 자체는 20분, 나머지는 이
+문서에 없던 함정 넷이었다 — 전부 위에 반영했다. (1) 계정 전환을 위한 로그아웃이 Tailscale(무인 실행 꺼짐)을 내려 원격
+접속이 끊겼다 → 워커 경유 소유자 지시(`tailscale up --unattended`)로 복구, 그 과정에서 페르소나의 소유자 유지보수 예외가
+생겼다(`docs/security/capability-model.md`). (2) 2절을 관리자 창에서 실행해 클론이 `asahi-admin` 프로필에 들어갔다 →
+지우고 `runas` 로 다시. (3) 부팅 트리거 등록이 승격되지 않은 창에서 `0x80070005`, 등록 뒤에는 배치 로그온 권한 부재
+(`2147943785`)로 봇이 뜨지 않았다 → `secedit`. (4) 3000 포트를 `SYSTEM` 의 다른 node 서비스가 쓰고 있어 `EACCES` →
+3100. 컷오버 뒤 `runtime_info`: `배포 대상: local`, 봇 커밋 `ec8f906 (production)`, 워커 `ec8f906`, "같아요". 다른 PC 에서
+`Test-NetConnection 100.69.162.15 -Port 3100` 은 `False`(루프백 바인드 확인).
 
 ## 6. 롤백(문제가 생겼을 때 — 역순)
 
@@ -226,7 +277,7 @@ A 의 클론·`.env`·작업 정의는 그대로 둔다 — 다음 시도에 다
 - **소유자 DM 의 PC 작업**: 소유자 DM 은 여전히 "그 소유자의 개인 워커"로 라우팅되는데, 개인 PC 워커는 루프백 허브에
   붙을 수 없다 — 그래서 소유자 DM 에서는 PC 작업이 안 되고 **서버 채널에서** 공유 워커(관리자 스코프)로 한다. 소유자
   DM 을 공유 워커의 관리자 스코프로 보내는 변경(설계 §6)은 5단계의 몫이다.
-- **`/health`·`/files`·`/worker`** 는 전부 `127.0.0.1:3000` 에만 있다. 밖에서 확인할 길이 없는 것이 정상이다.
+- **`/health`·`/files`·`/worker`** 는 전부 `127.0.0.1:3100` 에만 있다. 밖에서 확인할 길이 없는 것이 정상이다.
 - **Railway 의 `RAILWAY_GIT_*` 변수는 이제 없다** — `runtime_info` 의 봇 커밋은 A 클론의 `git rev-parse HEAD` 다.
 
 ## 8. 보안 체크리스트(설계 §9)
@@ -239,7 +290,7 @@ A 의 클론·`.env`·작업 정의는 그대로 둔다 — 다음 시도에 다
 - [ ] `C:\asahi-worker\.env` 에 `WORKER_ID`·`WORKER_TOKEN`·`HUB_URL`·`WORKER_ROOTS`·`WORKER_SENTINEL` 외의 비밀이 없다 —
   `DATABASE_URL`·`CLAUDE_CODE_OAUTH_TOKEN`·`GITHUB_*`·`DISCORD_TOKEN` 이 있으면 안 된다.
 - [ ] B 에 깃허브 로그인·SSH 키·브라우저 저장 암호가 없다(`gh auth status` 가 로그인 없음).
-- [ ] `HUB_BIND=127.0.0.1` 이고 다른 PC 에서 3000 포트가 닿지 않는다.
+- [ ] `HUB_BIND=127.0.0.1` 이고 다른 PC 에서 봇 포트(3100)가 닿지 않는다.
 - [ ] 윈도우 방화벽이 켜져 있고 인바운드 규칙에 node.exe 허용을 **추가하지 않았다**(루프백에는 규칙이 필요 없다 —
   Windows 가 "허용하시겠습니까" 창을 띄우면 취소한다).
 - [ ] Windows Update 자동, BitLocker(장치 암호화) 켜짐 — 기계를 들고 나가면 `.env` 가 같이 나간다.
