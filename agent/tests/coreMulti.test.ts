@@ -68,7 +68,7 @@ async function setup(over: {
     deployTarget: "local",
     // 타입 검사를 켜면서 드러난 누락 — Config 의 필수 필드인데 가짜에 없었다. 코어는 model 을
     // runTurn 요청에, httpPort 를 워커 허브 리스너에 쓴다.
-    model: "claude-opus-4-8", httpPort: 3000,
+    model: "claude-opus-5", httpPort: 3000,
     // 기본은 미설정(빈 객체) — 조사 결과가 명령을 친 곳으로 폴백하는 경로다.
     // 지정 채널로 보내는 경로는 over.config 로 덮어써 따로 검증한다.
     digestChannels: {},

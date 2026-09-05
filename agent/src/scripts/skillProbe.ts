@@ -57,7 +57,7 @@ const base = {
   cwd: os.tmpdir(),
   systemPrompt: "너는 진단용 도우미다. 한국어로 짧게 답한다.",
   permissionMode: "default",
-  model: "claude-opus-4-8",
+  model: "claude-opus-5",
   maxTurns: 5,
   plugins: [{ type: "local", path: root }],
 };
