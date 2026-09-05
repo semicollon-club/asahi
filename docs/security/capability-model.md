@@ -710,3 +710,23 @@ pm2 jlist 가 돌려주는 명령은 이제 회원이 실제로 실행한 값이
 사용자별 격리" describe 블록이 회귀 가드다. 스케줄 재진입 가드·일일 재시도 상한(최종 리뷰
 3차 FIX1·FIX2, 정기 게시 자체의 실행 빈도·비용 문제)은 이 능력 계층 문제와 별개 축이라
 `agent/tests/digestRunner.test.ts` 가 따로 검증한다.
+
+## 하네스 턴 — 세션 러너와 인증 프록시(풀 하네스 2단계, 2026-09-06)
+
+`HARNESS_OWNER=true` 인 봇은 조건이 맞는 **소유자 턴**(DM·서버, 이미지 없음, 무인 아님, 워커가 `WORKER_MODE=harness`)을 자기
+세션이 아니라 **워커(계정 B)의 Claude Code** 에 맡긴다(`core/agent.ts` 의 `decideHarnessDispatch` → `hub.startTurn` →
+`remote/sessionRunner.ts`). 그 턴의 능력은 위 표와 다른 세계다.
+
+- **도구**: Claude Code 내장 도구 전부(Read/Write/Edit/Glob/Grep/Bash/WebSearch/WebFetch/Task) — 봇의 `mcp__asahi__*` 는
+  하나도 없다(기억·DB·접근관리·`send_file`·PR 생성). 4단계 MCP 허브가 다시 잇기 전까지의 한계이고, 능력 안내(`persona.ts` 의
+  `buildHarnessCapabilityBlock`)가 모델에게 그 사실을 말한다 — 기억 블록도 그 턴에는 빠진다.
+- **경계**: 작업 폴더는 워커 `roots[0]`(워크스페이스 루트, 관리자 스코프). 경로 게이트(`allowed_dirs`·`checkPath`)는 이 턴에
+  적용되지 않는다 — 내장 도구가 그 기계의 계정 B 권한으로 직접 돈다. 소유자에게 `sh_exec` 가 이미 열려 있었으므로 **새 능력이
+  아니다**(같은 계정, 같은 권한). 손님 프로필(5단계)이 이 경로를 탈 때는 작업 폴더를 그 부원 폴더로 좁히고 Task 를 막는다
+  (`core/profiles.ts`) — 다만 그것은 모델에 대한 지시·옵션이지 OS 경계가 아니라는 점은 `sh_exec` 와 같다(설계 §5).
+- **자격증명**: 세션 환경에는 `ANTHROPIC_BASE_URL`(A 의 루프백 `/llm`), `ANTHROPIC_AUTH_TOKEN`(작업 토큰 — HMAC, 2시간, 부원·
+  대화·채널), `CLAUDE_CONFIG_DIR`(부원별), `GIT_CONFIG_*`(단기 깃허브 토큰 — `sh_exec` 와 같은 수명·범위)만 간다. 구독 OAuth·
+  디스코드·DB·App 키는 A 를 떠나지 않는다. 프록시(`core/llmProxy.ts`)는 `/llm/v1/messages`(+count_tokens)만 전달하고 토큰
+  없으면 401, 자격증명 없으면 503, 그 밖 경로는 404 다. 작업 토큰이 새면 그 만료까지 **이 루프백 프록시로 모델 호출**만 가능하고
+  미니PC 밖에서는 쓸 수 없다(`HUB_BIND=127.0.0.1`). 모델 고정·사용량 기록·부원별 상한은 3단계.
+- **되돌리기**: `HARNESS_OWNER` 를 지우고 봇을 재시작하면 모든 턴이 옛 경로다. 워커 모드는 그대로 둬도 된다.

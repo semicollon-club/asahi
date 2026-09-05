@@ -30,6 +30,13 @@ export const FILE_NAME_HEADER = "x-asahi-file-name";
 // 같은 http 서버(index.ts)의 두 경로라 호스트가 갈릴 수 없고, 봇이 URL 을 실어 보내면 모델이 그 값을
 // 정할 여지를 두는 셈이다 — 워커가 자기 설정에서만 만든다.
 export function fileReturnUrlOf(hubUrl: string): string | null {
+  const base = httpBaseOfHub(hubUrl);
+  return base === null ? null : `${base}${FILE_RETURN_PATH}`;
+}
+
+// HUB_URL(ws[s]://host[:port]/worker) → 같은 서버의 HTTP 기본 주소(http[s]://host[:port]). 파일 반환(/files)과 인증 프록시
+// (/llm, remote/sessionRunner.ts)가 같은 규칙을 쓴다 — 허브·/files·/llm 은 index.ts 의 한 http 서버라 호스트가 갈릴 수 없다.
+export function httpBaseOfHub(hubUrl: string): string | null {
   let u: URL;
   try {
     u = new URL(hubUrl);
@@ -40,7 +47,7 @@ export function fileReturnUrlOf(hubUrl: string): string | null {
   const scheme = proto[u.protocol];
   if (!scheme) return null;
   const base = u.pathname.replace(/\/worker\/?$/, "").replace(/\/+$/, "");
-  return `${scheme}//${u.host}${base}${FILE_RETURN_PATH}`;
+  return `${scheme}//${u.host}${base}`;
 }
 
 export function bearerTokenOf(header: string | string[] | undefined): string | null {

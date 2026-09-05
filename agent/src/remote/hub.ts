@@ -1,5 +1,5 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { encodeFrame, parseFrame, type Frame } from "./protocol.js";
+import { encodeFrame, parseFrame, type Frame, type WorkerMode, type TurnStartFrame } from "./protocol.js";
 import { hashWorkerToken } from "../store/workersRepo.js";
 
 // 실제 ws 소켓을 감싸는 최소 인터페이스. 이 추상화 덕에 소켓 없이 허브 로직을 테스트한다
@@ -12,9 +12,19 @@ export type HubSocket = {
 };
 
 type Pending = { resolve: (r: { ok: boolean; content: string }) => void; timer: ReturnType<typeof setTimeout> };
-type Conn = { socket: HubSocket; roots: string[]; pending: Map<string, Pending>; pingTimer: ReturnType<typeof setInterval>; commit?: string; connectedAt: number };
+// 세션 러너 턴(2단계). 도구 호출과 달리 결과 전에 이벤트가 여럿 온다 — onEvent 는 봇의 onProgress 로 이어진다.
+export type TurnOutcome = { ok: boolean; text: string; sessionId?: string; error?: string };
+export type TurnStartInput = Omit<TurnStartFrame, "type" | "id">;
+type TurnPending = { resolve: (r: TurnOutcome) => void; onEvent: (e: Record<string, unknown>) => void; timer: ReturnType<typeof setTimeout> };
+type Conn = {
+  socket: HubSocket; roots: string[]; pending: Map<string, Pending>; turns: Map<string, TurnPending>;
+  pingTimer: ReturnType<typeof setInterval>; commit?: string; mode?: WorkerMode; connectedAt: number;
+};
 
 const DEFAULT_CALL_TIMEOUT_MS = 120_000;
+// 세션 한 턴의 상한. 도구 호출(2분)보다 훨씬 길다 — 한 턴 안에서 모델이 도구를 30번까지 부른다(maxTurns). 이 시간을
+// 넘기면 러너가 죽었거나 매달린 것이라 실패 결과로 끝내고, 러너에는 turn.cancel 을 보낸다.
+const DEFAULT_TURN_TIMEOUT_MS = 30 * 60_000;
 
 // 유휴 연결을 살려 두기 위한 keepalive 주기.
 //
@@ -112,16 +122,18 @@ export class WorkerHub {
   private registry: WorkerRegistry;
   private now: () => number;
   private callTimeoutMs: number;
+  private turnTimeoutMs: number;
   private helloTimeoutMs: number;
   private pingIntervalMs: number;
 
   constructor(opts: {
     registry: WorkerRegistry; now?: () => number;
-    callTimeoutMs?: number; helloTimeoutMs?: number; pingIntervalMs?: number;
+    callTimeoutMs?: number; turnTimeoutMs?: number; helloTimeoutMs?: number; pingIntervalMs?: number;
   }) {
     this.registry = opts.registry;
     this.now = opts.now ?? Date.now;
     this.callTimeoutMs = opts.callTimeoutMs ?? DEFAULT_CALL_TIMEOUT_MS;
+    this.turnTimeoutMs = opts.turnTimeoutMs ?? DEFAULT_TURN_TIMEOUT_MS;
     this.helloTimeoutMs = opts.helloTimeoutMs ?? DEFAULT_HELLO_TIMEOUT_MS;
     this.pingIntervalMs = opts.pingIntervalMs ?? DEFAULT_PING_INTERVAL_MS;
   }
@@ -204,7 +216,7 @@ export class WorkerHub {
 
             this.clearHelloTimer(socket);
             this.dropExisting(id);
-            this.conns.set(id, { socket, roots, pending: new Map(), pingTimer: this.startPing(socket), commit: frame.commit, connectedAt: this.now() });
+            this.conns.set(id, { socket, roots, pending: new Map(), turns: new Map(), pingTimer: this.startPing(socket), commit: frame.commit, mode: frame.mode, connectedAt: this.now() });
             state = "authed";
             workerId = id;
             socket.send(encodeFrame({ type: "ready" }));
@@ -231,6 +243,25 @@ export class WorkerHub {
         conn.pending.delete(frame.id);
         clearTimeout(p.timer);
         p.resolve({ ok: frame.ok, content: frame.content });
+      } else if (frame.type === "turn.event") {
+        // 모르는 id 는 무시한다 — 타임아웃·취소 뒤 늦게 온 이벤트가 다른 턴에 섞이지 않게(result 프레임과 같은 규칙).
+        const t = conn.turns.get(frame.id);
+        if (!t) return;
+        try {
+          t.onEvent(frame.event);
+        } catch (e) {
+          console.error("[hub] turn.event 처리 오류:", e);
+        }
+      } else if (frame.type === "turn.result") {
+        const t = conn.turns.get(frame.id);
+        if (!t) return;
+        conn.turns.delete(frame.id);
+        clearTimeout(t.timer);
+        t.resolve({
+          ok: frame.ok, text: frame.text,
+          ...(frame.sessionId !== undefined ? { sessionId: frame.sessionId } : {}),
+          ...(frame.error !== undefined ? { error: frame.error } : {}),
+        });
       } else if (frame.type === "ping") {
         socket.send(encodeFrame({ type: "pong" }));
       }
@@ -249,7 +280,68 @@ export class WorkerHub {
       this.conns.delete(workerId);
       clearInterval(conn.pingTimer);
       this.failAllPending(conn, "워커 연결이 끊겼어요.");
+      this.failAllTurns(conn, "워커 연결이 끊겼어요.");
     });
+  }
+
+  // 이 워커가 세션 러너인가(hello 의 mode). 봇의 하네스 디스패치(core/agent.ts 의 decideHarnessDispatch)가 본다 —
+  // 도구 전용 워커에 turn.start 를 보내면 즉시 실패 결과가 돌아오지만, 애초에 보내지 않는 것이 옳다.
+  isHarness(workerId: string): boolean {
+    return this.conns.get(workerId)?.mode === "harness";
+  }
+
+  // 세션 한 턴을 러너에 맡긴다(풀 하네스 설계 §7). call() 과 같은 계약이다 — 어떤 경우에도 reject 하지 않고 실패는
+  // ok:false 결과로 돌려준다. onEvent 는 러너의 turn.event 마다 불린다(봇이 onProgress 로 잇는다). cancel() 은 러너에
+  // turn.cancel 을 보내되 결과 프로미스는 그대로 둔다 — 러너가 중단 뒤 보내는 turn.result(또는 타임아웃)가 끝을 정한다.
+  startTurn(
+    workerId: string,
+    start: TurnStartInput,
+    onEvent: (e: Record<string, unknown>) => void,
+  ): { id: string; result: Promise<TurnOutcome>; cancel(): void } {
+    const conn = this.conns.get(workerId);
+    const id = String(++this.seq);
+    if (!conn) {
+      return { id, result: Promise.resolve({ ok: false, text: "", error: "워커가 연결돼 있지 않아요." }), cancel: () => {} };
+    }
+    const result = new Promise<TurnOutcome>((resolve) => {
+      const timer = setTimeout(() => {
+        conn.turns.delete(id);
+        this.sendSafely(conn, { type: "turn.cancel", id });
+        resolve({ ok: false, text: "", error: `워커가 ${this.turnTimeoutMs}ms 안에 응답하지 않았어요(턴 결과 없음).` });
+      }, this.turnTimeoutMs);
+      conn.turns.set(id, { resolve, onEvent, timer });
+      try {
+        conn.socket.send(encodeFrame({ type: "turn.start", id, ...start } satisfies Frame));
+      } catch (e) {
+        conn.turns.delete(id);
+        clearTimeout(timer);
+        resolve({ ok: false, text: "", error: `워커로 전송하지 못했어요: ${e instanceof Error ? e.message : String(e)}` });
+      }
+    });
+    return {
+      id,
+      result,
+      cancel: () => {
+        if (conn.turns.has(id)) this.sendSafely(conn, { type: "turn.cancel", id });
+      },
+    };
+  }
+
+  // 닫힌 소켓에 보내다 던져도 호출측이 죽지 않게 한다(ping 과 같은 방어).
+  private sendSafely(conn: Conn, frame: Frame): void {
+    try {
+      conn.socket.send(encodeFrame(frame));
+    } catch (e) {
+      console.error("[hub] 프레임 전송 실패:", e);
+    }
+  }
+
+  private failAllTurns(conn: Conn, message: string): void {
+    for (const [, t] of conn.turns) {
+      clearTimeout(t.timer);
+      t.resolve({ ok: false, text: "", error: message });
+    }
+    conn.turns.clear();
   }
 
   isConnected(workerId: string): boolean {
@@ -263,8 +355,8 @@ export class WorkerHub {
   // 연결된 워커들의 버전 정보. DB 를 쓰지 않는 이유는 이것을 읽는 쪽(runtime_info)과 알림을
   // 내는 쪽이 모두 이 프로세스 안에 있기 때문이다. 봇이 재배포되면 초기화되지만 그때는
   // 어차피 새로운 비교가 시작되므로 무해하다.
-  workersInfo(): Array<{ workerId: string; commit?: string; connectedAt: number }> {
-    return [...this.conns.entries()].map(([workerId, c]) => ({ workerId, commit: c.commit, connectedAt: c.connectedAt }));
+  workersInfo(): Array<{ workerId: string; commit?: string; mode?: WorkerMode; connectedAt: number }> {
+    return [...this.conns.entries()].map(([workerId, c]) => ({ workerId, commit: c.commit, mode: c.mode, connectedAt: c.connectedAt }));
   }
 
   // 도구 호출 하나를 워커로 보내고 결과를 기다린다. 어떤 경우에도 reject 하지 않는다 —
@@ -309,6 +401,7 @@ export class WorkerHub {
       // 타이머를 먼저 끊는다 — 남겨 두면 이벤트 루프가 계속 살아 있어 종료가 막힌다.
       clearInterval(conn.pingTimer);
       this.failAllPending(conn, "봇이 종료돼 작업을 마치지 못했어요.");
+      this.failAllTurns(conn, "봇이 종료돼 작업을 마치지 못했어요.");
       conn.socket.close();
       this.conns.delete(workerId);
     }
@@ -323,6 +416,7 @@ export class WorkerHub {
     // 30초까지 늦게 오고(이 파일 위쪽 I1b 주석), 그 사이 밀려난 소켓으로 ping 이 계속 나간다.
     clearInterval(prev.pingTimer);
     this.failAllPending(prev, "워커가 다시 연결돼 이전 작업이 취소됐어요.");
+    this.failAllTurns(prev, "워커가 다시 연결돼 이전 작업이 취소됐어요.");
     prev.socket.close();
   }
 

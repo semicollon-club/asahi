@@ -839,3 +839,50 @@ describe("buildSystemPrompt — 소유자가 직접 지시하는 기계 유지�
     }
   });
 });
+
+// 풀 하네스 2단계(2026-09-05 밤): 소유자 턴이 세션 러너(계정 B 의 Claude Code)에서 돌 때의 능력 안내. 그 턴에는
+// 봇의 인프로세스 MCP 도구(fs_*/sh_exec/remember/recall/db_*/…)가 없고 Claude Code 내장 도구(Read/Write/Edit/Bash/
+// Glob/Grep/WebSearch…)가 있다 — 안내가 그 사실을 따라야 한다("안내와 실제 도구가 어긋남" 을 결함으로 다루는 이 파일의
+// 원칙). 기억 블록도 빼야 한다: remember/recall 을 쓰라고 해 놓고 도구를 안 주면 모델이 시도하다 실패를 사용자에게 전한다.
+describe("buildSystemPrompt — 하네스 턴(소유자, 세션 러너)", () => {
+  const harness = { cwd: "C:\asahi-workspace" };
+  const owners = ALL_IDENTITIES.filter((i) => i.ctx.isOwner);
+
+  it("소유자 두 분기에서 내장 도구와 작업 폴더를 안내하고, 원격 도구·기억 도구 이름은 쓰지 않는다", () => {
+    for (const { ctx } of owners) {
+      const p = buildSystemPrompt({ ...ctx, workerConnected: true, harness });
+      const cap = capabilitySection(p);
+      expect(cap).toMatch(/Bash/);
+      expect(cap).toMatch(/Read/);
+      expect(cap).toContain("C:\asahi-workspace");
+      expect(cap).not.toMatch(/fs_read|sh_exec|proc_start|send_file/);
+      expect(cap).not.toMatch(/db_query|runtime_info|manage_access/);
+      // 기억 블록 자체가 빠진다 — remember/recall 이 이 턴에 없다.
+      expect(p).not.toMatch(/## 기억/);
+      expect(cap).not.toMatch(/remember|recall/);
+    }
+  });
+
+  it("기억 도구가 이 턴에 없다는 사실을 말한다 — 기억 요청을 받으면 그렇게 안내하게", () => {
+    const cap = capabilitySection(buildSystemPrompt({ role: "owner", isPrivate: true, isOwner: true, workerConnected: true, harness }));
+    expect(cap).toMatch(/기억/);
+  });
+
+  it("git 자격증명이 자동으로 붙는다는 것과 표준 절차를 알린다(githubReady 일 때)", () => {
+    const cap = capabilitySection(buildSystemPrompt({ role: "owner", isPrivate: true, isOwner: true, workerConnected: true, githubReady: true, harness }));
+    expect(cap).toMatch(/git/);
+    expect(cap).toMatch(/PR|풀 리퀘스트/);
+  });
+
+  it("harness 가 없으면 예전 안내 그대로다(회귀 없음)", () => {
+    const p = buildSystemPrompt({ role: "owner", isPrivate: true, isOwner: true, workerConnected: true });
+    expect(capabilitySection(p)).toMatch(/fs_read/);
+    expect(p).toMatch(/## 기억/);
+  });
+
+  it("손님에게 harness 를 줘도 무시한다 — 2단계는 소유자만 새 경로다", () => {
+    const p = buildSystemPrompt({ role: "allowed", isPrivate: false, isOwner: false, workerConnected: true, harness });
+    expect(capabilitySection(p)).toMatch(/fs_read/);
+    expect(capabilitySection(p)).not.toMatch(/\bBash\b/);
+  });
+});

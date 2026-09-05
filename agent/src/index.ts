@@ -29,6 +29,7 @@ import { PrTracker } from "./core/prTracker.js";
 import { DiscordAdapter } from "./adapters/discord.js";
 import { makeJobTokenMinter, newJobTokenSecret } from "./core/jobToken.js";
 import { makeFileReturnHandler, FILE_RETURN_PATH } from "./core/fileReturn.js";
+import { makeLlmProxyHandler, LLM_PROXY_PREFIX } from "./core/llmProxy.js";
 import { defaultRunGit, resolveBotVersion } from "./remote/gitCommit.js";
 import { EXIT_CODE_UPDATE } from "./remote/workerShutdown.js";
 
@@ -85,6 +86,11 @@ async function main() {
   // 검증한다(core/jobToken.ts). 받은 바이트는 디스크에 쓰지 않고 assistant_file 이벤트로 어댑터에 넘긴다.
   const jobTokens = makeJobTokenMinter(newJobTokenSecret());
   const fileReturn = makeFileReturnHandler({ verify: (t) => jobTokens.verify(t), publish: (e) => bus.publish(e), now: Date.now });
+  // 인증 프록시(풀 하네스 2단계): 세션 러너의 Claude Code 가 ANTHROPIC_BASE_URL 로 삼는 /llm. 같은 작업 토큰으로 인증하고
+  // 진짜 구독 OAuth 를 끼운다(core/llmProxy.ts). 자격증명은 이 프로세스(계정 A)의 .env 에만 있다.
+  const llmProxy = makeLlmProxyHandler({ verify: (t) => jobTokens.verify(t), credential: () => config.claudeOauthToken });
+  const harnessOwner = config.harnessOwner === true;
+  if (harnessOwner) console.log("[index] HARNESS_OWNER=true — 소유자 턴은 harness 모드 워커의 세션 러너로 보냅니다.");
 
   // FIX9(사소): 예전엔 모든 경로·메서드에 무조건 200 "ok" 를 돌려줘, 이 서버가 뭘 하는 프로세스인지
   // 외부에서 스캔하기 쉬웠다. 헬스체크 전용 경로만 응답하고 나머지는 404 한다 — /worker 는 ws 가
@@ -99,6 +105,11 @@ async function main() {
     // 파일 반환 엔드포인트 — 토큰 없는 요청은 본문을 읽기 전에 401 로 끊는다(core/fileReturn.ts).
     if (req.method === "POST" && req.url === FILE_RETURN_PATH) {
       void fileReturn(req, res);
+      return;
+    }
+    // 인증 프록시 — 경로 허용 목록·토큰 검증은 핸들러 안에서(core/llmProxy.ts).
+    if (req.url !== undefined && (req.url === LLM_PROXY_PREFIX || req.url.startsWith(`${LLM_PROXY_PREFIX}/`))) {
+      llmProxy(req, res);
       return;
     }
     res.writeHead(404);
@@ -149,7 +160,7 @@ async function main() {
   // 에이전트 cwd 는 소스가 아닌 데이터 영역에 둔다 — 에이전트가 소스 트리를 훑지 않도록(1단계 점검 지적).
   const agentCwd = path.resolve(config.dataDir, "..", "agent-cwd");
   fs.mkdirSync(agentCwd, { recursive: true });
-  const runTurn = makeRunAgentTurn({ memories: repos.memories, users: repos.users, allowedDirs: repos.allowedDirs, introspect: repos.introspect, projects: repos.projects, pullRequests: repos.pullRequests }, config.deployTarget, config.model, repos.workers, hub, config.github, Date.now, { jobTokens, botVersion });
+  const runTurn = makeRunAgentTurn({ memories: repos.memories, users: repos.users, allowedDirs: repos.allowedDirs, introspect: repos.introspect, projects: repos.projects, pullRequests: repos.pullRequests }, config.deployTarget, config.model, repos.workers, hub, config.github, Date.now, { jobTokens, botVersion, harness: { enabled: harnessOwner } });
 
   // 정기 게시(조사) 실행기. runTurn·agentCwd 는 core 와 동일한 것을 공유한다 —
   // 별도 프로세스가 아니라 같은 봇 안에서 같은 방식으로 LLM 턴을 돌리는 또 하나의 진입점이다.
