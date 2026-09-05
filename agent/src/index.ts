@@ -29,6 +29,8 @@ import { PrTracker } from "./core/prTracker.js";
 import { DiscordAdapter } from "./adapters/discord.js";
 import { makeJobTokenMinter, newJobTokenSecret } from "./core/jobToken.js";
 import { makeFileReturnHandler, FILE_RETURN_PATH } from "./core/fileReturn.js";
+import { defaultRunGit, resolveBotVersion } from "./remote/gitCommit.js";
+import { EXIT_CODE_UPDATE } from "./remote/workerShutdown.js";
 
 // 비밀값(.env)은 리포 루트(agent/ 바깥, data/ 와 같은 위치)에서 읽는다.
 dotenv.config({ path: path.resolve("..", ".env") });
@@ -44,6 +46,9 @@ const DIGEST_CHANNEL_ENV_VAR: Record<DigestTopic, string> = {
 
 async function main() {
   const config = loadConfig();
+  // 봇 자기 커밋·브랜치(runtime_info 용). 미니PC 단일 호스트(1단계)에서는 git 에서, Railway 에서는 주입 변수에서
+  // 온다 — remote/gitCommit.ts 의 resolveBotVersion. 기동 시 한 번만 읽는다(갱신은 재시작을 동반한다).
+  const botVersion = await resolveBotVersion(process.env, defaultRunGit);
 
   const db = await openDb(config.databaseUrl);
 
@@ -134,12 +139,17 @@ async function main() {
     };
     hub.handleConnection(socket);
   });
-  httpServer.listen(config.httpPort, () => console.log(`워커 허브 대기 중: 포트 ${config.httpPort}`));
+  // HUB_BIND(1단계, 미니PC 단일 호스트): 주면 그 주소에만 묶는다(미니PC 는 127.0.0.1 — 같은 기계의 워커만 루프백으로
+  // 붙고 밖에서는 포트가 보이지 않는다). 없으면 지금까지처럼 listen(port) 그대로다 — Railway 가 IPv6 사설망으로
+  // 닿으므로 여기서 0.0.0.0 을 기본값으로 쓰면 그쪽이 깨진다(config.ts 의 hubBind 주석).
+  const onListening = () => console.log(`워커 허브 대기 중: 포트 ${config.httpPort}${config.hubBind ? ` (바인드 ${config.hubBind})` : ""}`);
+  if (config.hubBind) httpServer.listen(config.httpPort, config.hubBind, onListening);
+  else httpServer.listen(config.httpPort, onListening);
 
   // 에이전트 cwd 는 소스가 아닌 데이터 영역에 둔다 — 에이전트가 소스 트리를 훑지 않도록(1단계 점검 지적).
   const agentCwd = path.resolve(config.dataDir, "..", "agent-cwd");
   fs.mkdirSync(agentCwd, { recursive: true });
-  const runTurn = makeRunAgentTurn({ memories: repos.memories, users: repos.users, allowedDirs: repos.allowedDirs, introspect: repos.introspect, projects: repos.projects, pullRequests: repos.pullRequests }, config.deployTarget, config.model, repos.workers, hub, config.github, Date.now, { jobTokens });
+  const runTurn = makeRunAgentTurn({ memories: repos.memories, users: repos.users, allowedDirs: repos.allowedDirs, introspect: repos.introspect, projects: repos.projects, pullRequests: repos.pullRequests }, config.deployTarget, config.model, repos.workers, hub, config.github, Date.now, { jobTokens, botVersion });
 
   // 정기 게시(조사) 실행기. runTurn·agentCwd 는 core 와 동일한 것을 공유한다 —
   // 별도 프로세스가 아니라 같은 봇 안에서 같은 방식으로 LLM 턴을 돌리는 또 하나의 진입점이다.
@@ -248,7 +258,11 @@ async function main() {
     }
   }, 5 * 60_000);
 
-  const shutdown = async () => {
+  // 두 번 들어오지 않게 막는다 — 센티넬(아래)과 시그널이 겹치거나 시그널이 연타되면 drain·stop 이 중복 실행된다.
+  let shuttingDown = false;
+  const shutdown = async (exitCode = 0) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     console.log("종료 중...");
     clearInterval(idleTimer);
     clearInterval(staleTimer);
@@ -264,10 +278,26 @@ async function main() {
     hub.closeAll();
     await new Promise<void>((resolve) => httpServer.close(() => resolve()));
     await db.end();         // pg Pool 연결 정리
-    process.exit(0);
+    process.exit(exitCode);
   };
   process.on("SIGINT", () => void shutdown());
   process.on("SIGTERM", () => void shutdown());
+
+  // 자동 갱신 센티넬(1단계, 미니PC 단일 호스트). 워커(worker.ts)와 같은 방식이다 — 파일이 생기면 진행 중인 턴을
+  // 마치고(shutdown 의 core.drain) 스스로 내려간다. deploy/update-service.ps1 이 그 파일을 만들고, 프로세스가
+  // 사라진 뒤 갱신하고, Start-ScheduledTask 로 다시 띄운다. 종료 코드는 워커와 같은 EXIT_CODE_UPDATE(10) —
+  // 작업 스케줄러의 LastTaskResult 에서 "사람이 내린 것(0)"과 구별된다. 옵트인: BOT_SENTINEL 이 없으면(Railway·
+  // 개인 PM2) 감시 자체를 하지 않는다. fs.watch 대신 주기 확인을 쓰는 이유도 worker.ts 와 같다(윈도우의 watch 는
+  // 파일 생성에 대해 플랫폼마다 다르게 동작해 왔다 — 15초 지연은 5분 주기 업데이터에게 아무 문제가 아니다).
+  if (config.sentinelPath !== undefined) {
+    const sentinel = config.sentinelPath;
+    const sentinelTimer = setInterval(() => {
+      if (!fs.existsSync(sentinel)) return;
+      clearInterval(sentinelTimer);
+      console.log("갱신을 위해 봇을 종료합니다...");
+      void shutdown(EXIT_CODE_UPDATE);
+    }, 15_000);
+  }
 
   console.log("상주 비서가 시작되었습니다.");
 }

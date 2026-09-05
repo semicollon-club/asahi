@@ -352,9 +352,22 @@ export async function runtimeInfoHandler(ctx: ToolCtx): Promise<string> {
   // 부족하다 — 다른 SHA 두 개가 나란히 있고 아무 말도 없으면, 보는 사람이 그 자리에서 스스로
   // 대조하며 같은 오해를 다시 만든다. 반대로 화면에 SHA 가 하나뿐이면 설명할 대상 자체가 없다.
   const bothShown = r.botCommit !== undefined && r.workers.some((w) => w.commit !== undefined);
-  const compareNote = bothShown
-    ? ["※ 봇은 배포 브랜치의 커밋을, 워커는 자기 클론의 커밋을 보고해요 — 서로 다른 갈래라 대조하지 않아요."]
-    : [];
+  // 미니PC 단일 호스트 1단계(2026-09-05): local 에서는 봇도 자기 클론의 커밋을 git 으로 읽는다(remote/gitCommit.ts 의
+  // resolveBotVersion) — 봇·워커가 같은 기계에서 같은 브랜치(production)의 클론을 따르므로 두 값은 같은 갈래고,
+  // 2026-09-03 에 대조를 걷어낸 사유("갈래가 다르다")가 이 배치에는 해당하지 않는다. 그래서 local 에서는 같음/다름을
+  // 사실로 말한다 — 단 "갱신 필요"라고 단정하지 않는다: 두 클론은 각자 5분 주기로 갱신되므로 그 사이의 어긋남은
+  // 정상이다. cloud(Railway)는 예전 그대로다 — 봇은 배포 커밋, 워커는 클론 HEAD 라 대조가 성립하지 않는다.
+  let compareNote: string[] = [];
+  if (bothShown) {
+    if (r.deployTarget === "cloud") {
+      compareNote = ["※ 봇은 배포 브랜치의 커밋을, 워커는 자기 클론의 커밋을 보고해요 — 서로 다른 갈래라 대조하지 않아요."];
+    } else {
+      const allSame = r.workers.filter((w) => w.commit !== undefined).every((w) => w.commit === r.botCommit);
+      compareNote = allSame
+        ? ["※ 봇과 워커 커밋이 같아요."]
+        : ["※ 봇과 워커 커밋이 달라요 — 같은 브랜치를 따르는 한 기계(미니PC 단일 호스트)라면 자동 갱신 한 회차(5분) 안에 같아져야 해요. 계속 다르면 각 클론의 갱신 로그(update-*.log)를 확인하세요."];
+    }
+  }
   return [
     `모델(설정): ${r.model}`,
     `SDK: @anthropic-ai/claude-agent-sdk@${r.sdkVersion}`,
