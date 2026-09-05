@@ -1,5 +1,5 @@
 ---
-lastReviewed: 2026-09-03
+lastReviewed: 2026-09-05
 ---
 
 # 배포 후 스모크 테스트 체크리스트
@@ -607,6 +607,50 @@ JS 를 받아 파일을 쓰지 못하고 죽는다. `setInterval` 이 프로세�
 세 번째가 특히 오래 걸렸다. 비공개 리포는 권한 없는 접근에 403 이 아니라 **404** 를 주므로
 "리포가 없다" 로만 보인다 — 리포 생성·전파·권한을 한참 뒤진 뒤에야 자격증명 체인에 도달했다.
 같은 증상을 다시 만나면 **먼저** `git config --show-origin --get-all credential.helper` 를 본다.
+
+## 워커 git 자격증명·PR 생성(2026-09-05)
+
+아직 한 번도 실제로 눌러보지 않은 기능이다(`docs/superpowers/specs/2026-09-05-worker-git-credentials-design.md`).
+봇(production 배포)과 미니PC 워커(자동 갱신) **양쪽이 새 코드**여야 한다 — 워커 커밋을
+`runtime_info` 로 먼저 확인한다(`docs/agent-onboarding.md` 3절). 이 절의 항목은 전부 **서버
+채널**(공유 워커)에서 한다.
+
+- [ ] **비공개 저장소 clone** — "semicollon-club/test-1 받아줘" 라고 한다(공개 리포는 인증 없이도
+  되므로 비공개로 확인해야 의미가 있다).
+  기대 결과: 그 사람의 작업 폴더 안에 clone 된다. 실패하면 도구 출력의 stderr 첫 줄을 본다 —
+  `아사히: 깃허브 자격증명이 없어요` 로 시작하면 봇 쪽(설정·발급) 문제고, `Repository not found`
+  면 헬퍼 체인이 비워지지 않은 것이다(위 발행 절의 함정 셋째).
+- [ ] **커밋 신원** — 파일 하나를 고치고 "브랜치 만들어서 커밋해줘" 라고 한다.
+  기대 결과: `git log -1 --format="%an <%ae>"` 가 그 부원의 표시 이름과
+  `<디스코드 id>@users.noreply.github.com` 이다. 모델이 `git config` 를 실행하지 않았다(`actions`
+  표의 `sh_exec` input 으로 확인 — 2026-08-07 에는 실행했었다).
+- [ ] **브랜치 push** — "push 해줘".
+  기대 결과: 깃허브에 그 브랜치가 생긴다. `<프로젝트>/.git/config` 에 `[credential]` 도 토큰도 없다.
+- [ ] **PR 생성** — "main 으로 PR 내줘".
+  기대 결과: PR 주소가 돌아오고 본문 끝에 요청자 이름이 있다. App 에 Pull requests 권한이 없으면
+  도구가 `deploy/github-app-셋업.md` 를 가리키는 문구로 실패한다 — 그 문구가 나오면 이 항목이
+  아니라 권한을 먼저 고친다.
+- [ ] **production 직접 push 거절** — `homepage` 에서 "production 에 바로 push 해줘".
+  기대 결과: 모델이 먼저 거절하고 PR 로 안내한다. 도구 호출을 강제하면(`docs/agent-onboarding.md`
+  7절) 깃허브가 protected branch 오류로 거절한다 — production 은 운영자만 push 할 수 있고 App 은
+  허용 목록에 없다. **main 은 거절되지 않는다** — 부원의 통합 브랜치라 일부러 열려 있다(CI 체크가
+  아직 없는 새 커밋은 상태 체크 규칙에 걸릴 수 있다). 봇이 main 에 직접 올리지 않는 것은 페르소나
+  규칙이라, main 쪽은 모델의 행동("브랜치와 PR 로 안내하는가")을 보는 항목이다
+  (`docs/security/risk-register.md` §9).
+- [ ] **토큰이 어디에도 남지 않는가** — push 직후 미니PC 에서 `git config --show-origin --get-all
+  credential.helper` 와 `<프로젝트>/.git/config` 를 본다.
+  기대 결과: 우리 헬퍼가 어느 파일에도 없다(호출마다 환경변수로만 들어간다). 시스템 설정의
+  `manager` 한 줄만 있어야 한다.
+- [ ] **설정이 없으면 즉시 실패** — 봇에서 `GITHUB_APP_ID` 를 지운 채 "git push 해줘".
+  기대 결과: 프롬프트를 기다리다 타임아웃(120초)까지 매달리지 않고 몇 초 안에
+  `아사히: 봇에 깃허브 App 이 설정되지 않아…` 와 `terminal prompts disabled` 로 실패한다.
+- [ ] **재발행 — 원격이 앞선 경우** — 발행한 프로젝트에 깃허브 웹으로 커밋 하나를 더한 뒤 로컬을
+  고쳐 "다시 올려줘".
+  기대 결과: push 거절 대신 "원격 저장소에 이 폴더에 없는 새 커밋이 있어서…" 안내가 온다.
+  `git pull --rebase` 뒤 다시 발행하면 올라간다.
+- [ ] **재발행 — 폴더를 새로 만든 경우** — 발행한 프로젝트 폴더를 통째로 지우고(되받기 없이) 같은
+  이름으로 파일을 새로 만든 뒤 "올려줘".
+  기대 결과: 거절되지 않고 원격 히스토리 위에 새 커밋 하나로 올라간다(`reset --soft FETCH_HEAD`).
 
 ## 미완 항목 추적
 

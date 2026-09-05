@@ -1,6 +1,6 @@
 ---
 title: 프로젝트 현재 상태
-lastReviewed: 2026-09-03
+lastReviewed: 2026-09-05
 ---
 
 # 현재 상태
@@ -157,6 +157,24 @@ lastReviewed: 2026-09-03
   그 과정에서 결함 넷이 드러나 전부 고쳤다(도구 미노출·committer 신원 누락·자격증명 헬퍼 체인·
   clone 의 config 영구 기록 — `deploy/smoke-test.md` 의 검증 기록 참고).
   **아직 안 눌러본 것**: 남의 프로젝트 이름 거절(음성 테스트), 설정이 없을 때 조용히 없는가.
+- **워커 git 자격증명·PR 생성(2026-09-05, 미검증)** — 부원이 디스코드만으로 동아리 저장소를
+  clone → 브랜치 작업 → 커밋 → push → main 에 PR 까지 한다. 그전에는 발행·되받기 두 도구가
+  아사히가 만든 리포에만 닿아 기존 저장소 작업은 반만 됐다(셸의 `git push` 는 자격증명이 없어
+  항상 실패). 이제 봇이 `sh_exec` 호출마다 조직 전체·`contents:write`·1시간 설치 토큰과 그
+  사람의 커밋 신원을 `git` 인자로 실어 보내고, 워커는 그것을 그 셸 프로세스의 환경변수로만
+  얹는다(`agent/src/remote/gitEnv.ts`, `agent/src/github/shellToken.ts` — 봇이 약 50분 캐시).
+  디스크에는 아무것도 남지 않고 워커 `.env` 도 그대로다. PR 은 봇이 REST 로 만든다
+  (`create_pull_request` — base 기본 `main`, `production` 은 소유자만, 병합은 하지 않는다).
+  발행도 이제 push 전에 fetch 해 원격이 앞서면 멈추고 안내하며, 폴더를 새로 만든 경우는 원격
+  히스토리 위에 얹는다(`agent/src/remote/gitPublish.ts` 의 `alignWithRemote`). 토큰이 없으면
+  git 은 프롬프트를 기다리지 않고 한국어 사유와 함께 즉시 실패한다(2026-09-05 운영자 PC 실측).
+  **실환경에서는 아직 하나도 눌러보지 않았다** — `deploy/smoke-test.md` "워커 git 자격증명·PR
+  생성" 절. **운영자가 해야 하는 것**: App 의 `Pull requests: Read and write` 권한을 조직 설치에서
+  승인(App 쪽은 2026-09-05 에 추가됐고 설치 승인이 남았다 — `deploy/github-app-셋업.md`), 미니PC
+  Git 2.31 이상 확인. **브랜치 정책**(깃허브가 집행, 확인됨): `production` 은 운영자만 push — 봇
+  토큰도 못 올린다. `main` 은 부원이 PR 로 자유롭게 쌓는 통합 브랜치(CI 필수). 봇 자신은 어느
+  쪽에도 직접 push 하지 않고 PR 까지만 한다 — 그건 페르소나 규칙이다(`docs/security/risk-register.md`
+  §9). 설계: `docs/superpowers/specs/2026-09-05-worker-git-credentials-design.md`.
 - **모델**: 기본 Opus 계열 최신 모델로 고정, 환경변수로 재정의 가능.
 
 ## 테스트
@@ -230,9 +248,20 @@ skip 3건의 성격은 서로 다르다. 1건은 Postgres READ ONLY 트랜잭션
   2026-08-05~08-06 캐릭터 페르소나 제거 이후에는 활발한 DM 이 resume 된 세션의 옛 프롬프트를
   그대로 쥐고 있을 수 있다는 뜻이 더해졌다(`deploy/smoke-test.md` 참고).
 - 손님·서버 채널에서의 한도·프라이버시 스코프 체감(유닛 테스트는 순수 로직만 커버).
+- **워커 git 자격증명·PR 생성 전부(2026-09-05)** — 비공개 리포 clone·커밋 신원·브랜치 push·PR
+  생성·토큰 잔류 없음·설정 없을 때 즉시 실패·재발행 두 경우. 유닛 테스트는 env 의 모양과 이 PC 의
+  실제 git 이 그 env 를 읽는 것까지만 본다 — 미니PC 의 Git 버전(2.31 이상 필요)·cmd.exe 경유·
+  App 권한(PR)은 실환경에서만 확인된다(`deploy/smoke-test.md` 해당 절).
 
 ## 알려진 한계
 
+- **봇이 main 에 직접 push 하지 않는 것은 코드가 아니라 페르소나 규칙이다**: 부원의 셸 git 에
+  자격증명이 붙으면서(2026-09-05) 기술적으로는 그 토큰으로 main 에 직접 push 할 수 있다 — main 은
+  부원의 통합 브랜치라 일부러 열려 있다(CI 필수·강제 push 금지만). `production` 은 깃허브 push
+  제한이 봇 토큰도 막는다. 셸 명령을 검사해 거르는 시늉은 하지 않는다(`docs/security/risk-register.md`
+  §9). 조직이 Free 플랜이라 비공개 리포에는 어떤 브랜치 보호도 걸 수 없다. 그 토큰은 `sh_exec` 로
+  읽을 수 있고 한 시간 동안 디스코드 밖에서도 쓰인다 — 디스코드 안에서 이미 허용한 것과 같은
+  능력이라 받아들였다.
 - **전송 유실 가능성**: 하드 크래시가 디스코드 응답 전송 도중 발생하면 그 응답 1건은 재전송되지 않는다
   (생성된 텍스트 자체는 이벤트 로그에 보존된다). 정상적인 그레이스풀 종료는 flush로 처리되어 유실이
   없다.

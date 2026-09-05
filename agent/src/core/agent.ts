@@ -12,6 +12,7 @@ import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { buildTools, allowedToolsFor, TOOL_SERVER, type ToolCtx, type RuntimeInfo } from "./tools.js";
+import { makeShellTokenSource } from "../github/shellToken.js";
 import { resolveWorkerSelector } from "./workerSelect.js";
 import type { ImageInput } from "./images.js";
 import { skillPluginDirFrom, resolveSkillsEnabled, skillPluginsFor } from "./skills.js";
@@ -323,11 +324,16 @@ export function makeRunAgentTurn(
   github: GithubAppConfig | null = null,
   now: () => number = Date.now,
 ): TurnRunner {
+  // sh_exec 의 git 이 쓸 단기 토큰 공급원(2026-09-05). 턴이 아니라 이 러너의 수명으로 하나만 만든다 —
+  // 캐시가 턴을 넘어 살아야 sh_exec 호출마다 깃허브 API 를 두드리지 않는다(shellToken.ts). 깃허브
+  // 설정이 없으면 만들지 않고, 그러면 remoteTools.ts 가 토큰 대신 사유를 워커에 실어 보낸다.
+  const shellTokens = github === null ? undefined : makeShellTokenSource({ config: github });
   return async (req) => {
     // botBranch: 봇 커밋이 어느 갈래의 것인지. 워커 커밋과 나란히 놓인 두 SHA 가 왜 다른지를
     // runtime_info 가 한 화면에서 설명하게 해 준다 — Railway 밖(로컬 PM2)에서는 없다.
     const runtime: RuntimeInfo = { model, sdkVersion: SDK_VERSION, deployTarget, maxTurns: 30, botCommit: process.env.RAILWAY_GIT_COMMIT_SHA, botBranch: process.env.RAILWAY_GIT_BRANCH, workers: hub?.workersInfo() ?? [] };
     const ctx: ToolCtx = buildToolCtx(repos, req.context, runtime, github, now);
+    if (shellTokens) ctx.shellTokens = shellTokens;
 
     // Task 7: "어느 기계를, 그것이 있기는 한가"를 여기 한 곳에서만 정한다 — resolveTurnWorker 가
     // resolveWorkerSelector(위치 기반 선택)로 개인/공유를 가르고, registry 로 실제 workerId 를

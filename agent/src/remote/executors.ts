@@ -18,6 +18,7 @@ import { parsePm2List, renderProcList, procNameFor, parseProcName, type ProcInfo
 import { isDiscordCdnUrl } from "../core/attachments.js";
 import { defaultRunGit, type RunGit } from "./gitCommit.js";
 import { runPublish, runRestore } from "./gitPublish.js";
+import { shellGitEnv, shellGitOf } from "./gitEnv.js";
 
 export type ExecResult = { ok: boolean; content: string };
 export type Executors = Record<string, (args: Record<string, unknown>) => Promise<ExecResult>>;
@@ -684,8 +685,13 @@ export function makeExecutors(
       const command = str(args.command);
       if (!command) return { ok: false, content: "command 인자가 필요해요." };
       const timeoutMs = num(args.timeoutMs) ?? SH_DEFAULT_TIMEOUT_MS;
+      // 2026-09-05: 봇이 실어 보낸 git 자격증명·신원(args.git, core/remoteTools.ts 의 shellGitArgs)을
+      // 이 자식의 환경으로만 옮긴다(gitEnv.ts). 토큰은 디스크에도 명령줄에도 남지 않고 이 프로세스
+      // 트리가 끝나면 사라진다. git 인자가 없어도(옛 봇) 대화형 프롬프트만은 끈다 — 자격증명 없는
+      // git 이 입력을 기다리며 타임아웃까지 매달리지 않게. 명령 문자열 자체는 건드리지 않는다.
+      const env = { ...process.env, ...shellGitEnv(shellGitOf(args.git)) };
       return new Promise<ExecResult>((resolve) => {
-        const child = spawn(command, { cwd: roots[0], shell: true });
+        const child = spawn(command, { cwd: roots[0], shell: true, env });
         let out = "";
         let timedOut = false;
         let settled = false;

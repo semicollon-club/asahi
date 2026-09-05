@@ -86,11 +86,14 @@ describe("원격 도구", () => {
     expect(await remoteToolHandler(failCtx, "sh_exec", { command: "false" })).toEqual({ content: "(실패했지만 내용이 없어요)", ok: false });
   });
 
-  it("호출한 도구 이름과 인자를 그대로 허브에 전달한다", async () => {
+  it("호출한 도구 이름과 인자를 허브에 전달한다(sh_exec 는 git 자격증명 인자가 덧붙는다 — 아래 describe 참고)", async () => {
     const seen: Array<{ tool: string; args: Record<string, unknown> }> = [];
     const ctx = ctxWith({ call: async (tool, args) => { seen.push({ tool, args }); return { ok: true, content: "" }; } });
     await remoteToolHandler(ctx, "sh_exec", { command: "ls" });
-    expect(seen).toEqual([{ tool: "sh_exec", args: { command: "ls" } }]);
+    expect(seen).toHaveLength(1);
+    expect(seen[0].tool).toBe("sh_exec");
+    expect(seen[0].args).toMatchObject({ command: "ls" });
+    expect(Object.keys(seen[0].args).sort()).toEqual(["command", "git"]);
   });
 });
 
@@ -402,11 +405,13 @@ describe("FIX1(치명, 최종 리뷰) — path 생략 시 허브로 나가는 ar
     expect(seen).toEqual([{ path: "/w/proj/a.txt" }]);
   });
 
-  it("sh_exec 는 이 주입 대상이 아니다(경로 인자 자체가 없다) — args 를 그대로 전달한다(회귀 없음)", async () => {
+  it("sh_exec 는 이 경로 주입 대상이 아니다(경로 인자 자체가 없다) — path 가 생기지 않는다(회귀 없음)", async () => {
     const seen: Array<Record<string, unknown>> = [];
     const ctx = withDirs(["/w/proj"], { call: async (_tool, args) => { seen.push(args); return { ok: true, content: "" }; } });
     await remoteToolHandler(ctx, "sh_exec", { command: "ls" });
-    expect(seen).toEqual([{ command: "ls" }]);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatchObject({ command: "ls" });
+    expect(seen[0].path).toBeUndefined();
   });
 });
 
@@ -987,5 +992,69 @@ describe("proc_start — path 인자로 프로젝트 하위 폴더를 지정할 
     expect(out.ok).toBe(false);
     expect(out.content).toContain("허용된 폴더 밖");
     expect(calls.filter((c) => c.tool === "proc_start")).toHaveLength(0);
+  });
+});
+
+// 2026-09-05: sh_exec 의 git 에 자격증명을 붙인다. 봇이 호출마다 단기 토큰과 커밋 신원을 git
+// 인자로 실어 보내고, 워커(executors.ts)가 그것을 자식 프로세스의 환경으로만 옮긴다(gitEnv.ts).
+// 모델은 이 인자를 정하지 않는다 — proc_* 의 name·cwd 와 같은 "주입"이다. 워커에는 영구
+// 자격증명이 없다는 전제(worker-셋업.md)는 그대로다: 토큰은 봇 메모리에서 와서 그 프로세스의
+// 환경으로만 살다 사라진다.
+describe("sh_exec 의 git 자격증명 주입", () => {
+  const seenArgs = () => {
+    const seen: Array<Record<string, unknown>> = [];
+    const call = async (_tool: string, args: Record<string, unknown>) => { seen.push(args); return { ok: true, content: "" }; };
+    return { seen, call };
+  };
+
+  it("토큰 공급원이 있으면 토큰·신원을 git 인자로 싣는다", async () => {
+    const { seen, call } = seenArgs();
+    const ctx = ctxWith({ call }, {
+      userId: "owner", now: () => 5,
+      shellTokens: { get: async (now: number) => (now === 5 ? { token: "ghs_1" } : { error: "시각이 다르다" }) },
+      repos: { users: { displayNames: async () => ({ owner: "홍길동" }) } },
+    });
+    await remoteToolHandler(ctx, "sh_exec", { command: "git push" });
+    expect(seen[0].git).toEqual({ token: "ghs_1", userName: "홍길동", userEmail: "owner@users.noreply.github.com" });
+  });
+
+  // 발행의 author 폴백과 같은 자리다 — 이름 하나 때문에 셸이 멈추면 안 된다.
+  it("표시 이름이 없거나 조회가 실패하면 userId 로 폴백한다", async () => {
+    const { seen, call } = seenArgs();
+    const ctx = ctxWith({ call }, {
+      userId: "u1", now: () => 0, shellTokens: { get: async () => ({ token: "t" }) },
+      repos: { users: { displayNames: async () => { throw new Error("db down"); } } },
+    });
+    await remoteToolHandler(ctx, "sh_exec", { command: "git commit" });
+    expect(seen[0].git).toMatchObject({ userName: "u1", userEmail: "u1@users.noreply.github.com" });
+  });
+
+  it("토큰 공급원이 없으면(깃허브 미설정) 토큰 없이 사유만 싣고 명령은 그대로 실행한다", async () => {
+    const { seen, call } = seenArgs();
+    const ctx = ctxWith({ call }, { userId: "u1" });
+    const r = await remoteToolHandler(ctx, "sh_exec", { command: "ls" });
+    expect(r.ok).toBe(true);
+    const git = seen[0].git as Record<string, unknown>;
+    expect(git.token).toBeUndefined();
+    expect(String(git.tokenError)).toContain("설정");
+  });
+
+  // 대부분의 셸 명령은 git 과 무관하다 — 깃허브가 죽었다고 npm test 까지 막을 이유가 없다.
+  it("발급이 실패해도 명령은 실행하고 사유를 싣는다", async () => {
+    const { seen, call } = seenArgs();
+    const ctx = ctxWith({ call }, { userId: "u1", now: () => 0, shellTokens: { get: async () => ({ error: "Bad credentials" }) } });
+    const r = await remoteToolHandler(ctx, "sh_exec", { command: "ls" });
+    expect(r.ok).toBe(true);
+    expect(String((seen[0].git as Record<string, unknown>).tokenError)).toContain("Bad credentials");
+  });
+
+  it("다른 도구에는 git 인자를 싣지 않는다", async () => {
+    const seen: Array<Record<string, unknown>> = [];
+    const ctx = ctxWith(
+      { call: async (_t, args) => { seen.push(args); return { ok: true, content: "" }; } },
+      { userId: "owner", now: () => 0, shellTokens: { get: async () => ({ token: "t" }) }, repos: { allowedDirs: { list: async () => ["/w"] } } },
+    );
+    await remoteToolHandler(ctx, "fs_read", { path: "/w/a" });
+    expect(seen[0].git).toBeUndefined();
   });
 });
