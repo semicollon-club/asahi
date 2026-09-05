@@ -305,3 +305,16 @@ describe("renderCommandHelp — 오래 도는 프로세스를 안내한다", () 
     expect(renderCommandHelp(true)).toMatch(/한 사람당 하나/);
   });
 });
+
+// 파일 반환(2026-09-05): /help 도 페르소나와 같은 축(워커 연결)으로 "만든 파일이 디스코드로 돌아온다"를
+// 알린다 — 도구가 있어도 그렇게 물어봐도 되는 줄 모르면 안 쓰인다(위 개발서버 안내와 같은 이유).
+describe("renderCommandHelp — 파일 보내기를 안내한다", () => {
+  it("워커가 연결돼 있으면 첨부로 보내 준다는 안내가 있다", () => {
+    expect(renderCommandHelp(true)).toMatch(/첨부/);
+    expect(renderCommandHelp(true)).toMatch(/8\s?MB/);
+  });
+
+  it("워커가 연결돼 있지 않으면 안내하지 않는다", () => {
+    expect(renderCommandHelp(false)).not.toMatch(/첨부/);
+  });
+});

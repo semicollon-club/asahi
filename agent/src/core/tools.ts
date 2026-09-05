@@ -17,6 +17,7 @@ import { listInstallationRepos, formatRepoList } from "../github/repos.js";
 import { fetchPrFeedback, formatPrFeedback, formatKst, type WorkflowRun } from "../github/pulls.js";
 import { mintTrackerToken, inspectPullRequest, planPrUpdate, type TrackerToken } from "./prTracker.js";
 import type { ShellTokenSource } from "../github/shellToken.js";
+import type { JobTokenMinter } from "./jobToken.js";
 import { normalizeRepoName, decideOwnership, publishSourceDir } from "./publish.js";
 import { scopeDirs } from "./workerSelect.js";
 import { memoryScopeFor, SHARED_MEMORY_MAX_LEN, SHARED_MEMORY_TITLE_MAX_LEN, renderMemories } from "./memoryScope.js";
@@ -66,6 +67,12 @@ export type ToolCtx = {
   // sh_exec 의 git 이 쓸 단기 토큰 공급원(github/shellToken.ts, agent.ts 가 프로세스당 하나 만든다).
   // 깃허브 설정이 없으면 없다 — 그러면 remoteTools.ts 의 shellGitArgs 가 토큰 대신 사유를 실어 보낸다.
   shellTokens?: ShellTokenSource;
+  // 파일 반환(2026-09-05): 이 대화의 디스코드 채널. send_file 의 작업 토큰이 "첨부를 어느 채널로 보낼지"를
+  // 이 값으로 정한다(remoteTools.ts). 대화 턴(core.ts)은 항상 채우고, 없는 호출측에서는 send_file 이 거부된다.
+  channelRef?: string;
+  // 작업 토큰 발급기(core/jobToken.ts). index.ts 가 프로세스당 하나 만들어 agent.ts 를 통해 내려준다 —
+  // 검증은 같은 인스턴스가 POST /files 에서 한다. 없으면 send_file 은 열려 있어도 거부된다.
+  jobTokens?: JobTokenMinter;
   // 깃허브 API 호출에 쓸 fetch. 테스트가 실제 네트워크 없이 토큰 발급·PR 생성 경로를 끝까지 태우기
   // 위한 이음매다 — 없으면 전역 fetch 다(appToken.ts 의 fetchImpl 기본값).
   githubFetch?: FetchLike;
@@ -521,7 +528,7 @@ const textResult = (text: string, isError = false) => ({
   ...(isError ? { isError: true } : {}),
 });
 
-// 원격 도구 11개의 공통 배선. remoteToolHandler 가 돌려주는 { content, ok } 의 ok 를 그대로
+// 원격 도구 12개의 공통 배선. remoteToolHandler 가 돌려주는 { content, ok } 의 ok 를 그대로
 // isError 로 뒤집어 싣는다 — 이 한 줄이 "워커가 계산한 성패"와 "모델·표시·기록이 보는 성패"를
 // 잇는 이음매다(예전엔 여기서 문자열만 받아 ok 가 버려졌다).
 const remoteResult = async (ctx: ToolCtx, tool: string, args: Record<string, unknown>) => {
@@ -1081,6 +1088,16 @@ export function buildToolDefinitions(ctx: ToolCtx) {
       "워커 PC 에서 셸 명령을 실행합니다. 명령이 끝날 때까지 기다렸다가 출력을 돌려주므로, 개발서버처럼 계속 도는 명령에는 쓰지 마세요 — 그건 proc_start 입니다. 강력한 도구이니 신중히 쓰세요.",
       { command: z.string().describe("실행할 셸 명령"), timeoutMs: z.number().optional().describe("타임아웃(밀리초)") },
       async (args) => remoteResult(ctx, "sh_exec", args),
+    ),
+    // 파일 반환(2026-09-05, 풀 하네스 0단계). 스키마에 path 하나만 있는 것은 proc_* 의 name·cwd 와 같은
+    // 이유다 — 업로드 주소는 워커 설정에서, 토큰은 remoteToolHandler 의 주입에서 오고 모델은 둘 다 정하지
+    // 않는다. 설명에 "경로만 말하지 말라"를 넣은 이유: 이 도구가 없던 시절 모델은 산출물을 만들고 경로를
+    // 알려 주는 것으로 끝냈는데, 디스코드에서 그 경로는 사용자가 열 수 없는 문자열이다.
+    tool(
+      "send_file",
+      "워커 PC 의 파일 하나를 지금 이 대화에 디스코드 첨부로 보냅니다. 만든 이미지·PDF·캡처·문서 같은 산출물을 사용자에게 실제로 전달할 때 쓰세요 — 경로만 말해 주는 것으로는 사용자가 파일을 받을 수 없습니다. 파일 하나에 8MB 까지 보낼 수 있습니다.",
+      { path: z.string().describe("보낼 파일의 절대경로") },
+      async (args) => remoteResult(ctx, "send_file", args),
     ),
     // proc_* 넷의 스키마에 name·cwd 가 없거나 "(소유자 전용)"으로만 있는 것은 실수가 아니다 —
     // 이 값들은 모델이 정하지 않고 remoteToolHandler 가 주입한다(거기 주석 참고). 스키마에 열어

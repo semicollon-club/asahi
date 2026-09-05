@@ -187,6 +187,18 @@ export class DiscordAdapter {
       this.enqueueInbound(message.channelId, () => this.onMessage(message));
     });
 
+    this.subscribeBus();
+
+    this.client.on("clientReady", () => {
+      console.log(`[discord] 로그인 완료: ${this.client.user?.tag}`);
+    });
+
+    await this.client.login(this.config.discordToken);
+  }
+
+  // 이벤트버스 구독 배선. start() 에서 떼어 낸 이유는 테스트다 — 로그인 없이 구독만 걸어 이벤트 → 전송
+  // 경로를 실제 버스로 검증한다(discordFileSend.test.ts). 배선 자체는 start() 가 부르는 것 하나뿐이다.
+  private subscribeBus(): void {
     this.bus.subscribe("progress", (e) => {
       this.enqueueStatus(e.channelRef, () => this.handleProgress(e.channelRef, e.text));
     });
@@ -198,12 +210,13 @@ export class DiscordAdapter {
       const statusDone = this.enqueueStatus(e.channelRef, () => this.finishStatus(e.channelRef));
       this.enqueueSendAfter(e.channelRef, statusDone, `⚠️ ${e.text}`);
     });
-
-    this.client.on("clientReady", () => {
-      console.log(`[discord] 로그인 완료: ${this.client.user?.tag}`);
+    // 파일 반환(2026-09-05): 첨부는 턴 도중 도구 호출(send_file)로 나가는 부수 전송이다 — finishStatus 를
+    // 타면(상태 메시지 삭제·⏳→✅) 아직 진행 중인 턴이 끝난 것처럼 보이고, 뒤에 올 답변 본문이 그 ⏳ 를
+    // 잃는다. 그래서 상태 체인은 건드리지 않고 전송 체인에만 합류한다 — 같은 채널에서 먼저 발행된 첨부가
+    // 나중 발행된 본문보다 앞에 나가는 순서 보장은 enqueueSendAfter 와 같은 sendChains 가 준다.
+    this.bus.subscribe("assistant_file", (e) => {
+      this.enqueueFileSend(e.channelRef, e.name, e.data);
     });
-
-    await this.client.login(this.config.discordToken);
   }
 
   private async onMessage(message: Message): Promise<void> {
@@ -462,6 +475,39 @@ export class DiscordAdapter {
       await trigger.react(DONE_REACTION);
     } catch (err) {
       console.error("[discord] 완료 반응 실패:", err);
+    }
+  }
+
+  // 첨부 전송을 그 채널의 전송 체인에 잇는다(enqueueSendAfter 와 같은 체인, 상태 정리 대기는 없다 —
+  // subscribeBus 의 assistant_file 주석 참고).
+  private enqueueFileSend(channelRef: string, name: string, data: Buffer): void {
+    const prev = this.sendChains.get(channelRef) ?? Promise.resolve();
+    const next = prev.then(() => this.sendFile(channelRef, name, data)).catch(() => {});
+    this.sendChains.set(channelRef, next);
+  }
+
+  // 디스코드가 첨부를 거부하면(등급별 상한·형식 등) 조용히 넘어가지 않는다 — 워커의 send_file 은 봇이 200
+  // 을 준 시점에 이미 "보냈어요"라고 모델에게 답했으므로, 여기서 침묵하면 사용자는 있다고 들은 파일을
+  // 받지 못한 채 끝난다. 그 자리에 실패 안내를 텍스트로 보낸다(send() 의 빈 본문 폴백과 같은 방어선).
+  private async sendFile(channelRef: string, name: string, data: Buffer): Promise<void> {
+    let channel: Awaited<ReturnType<Client["channels"]["fetch"]>>;
+    try {
+      channel = await this.client.channels.fetch(channelRef);
+    } catch (err) {
+      console.error("[discord] 첨부 채널 조회 실패:", err);
+      return;
+    }
+    if (!channel || !channel.isSendable()) return;
+    try {
+      await channel.send({ files: [{ attachment: data, name }] });
+    } catch (err) {
+      console.error(`[discord] 첨부 전송 실패 — ${name}(${data.length} 바이트), 채널 ${channelRef}:`, err);
+      const reason = err instanceof Error ? err.message : String(err);
+      try {
+        await channel.send(`⚠️ 파일 ${name} 을(를) 디스코드에 보내지 못했어요(${reason.slice(0, 200)}).`);
+      } catch (err2) {
+        console.error("[discord] 첨부 실패 안내 전송도 실패:", err2);
+      }
     }
   }
 

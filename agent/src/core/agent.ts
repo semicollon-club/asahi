@@ -14,6 +14,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { buildTools, allowedToolsFor, TOOL_SERVER, type ToolCtx, type RuntimeInfo } from "./tools.js";
 import { makeShellTokenSource } from "../github/shellToken.js";
+import type { JobTokenMinter } from "./jobToken.js";
 import { resolveWorkerSelector } from "./workerSelect.js";
 import type { ImageInput } from "./images.js";
 import { skillPluginDirFrom, resolveSkillsEnabled, skillPluginsFor } from "./skills.js";
@@ -31,7 +32,9 @@ const SKILL_PLUGINS = skillPluginsFor({ pluginDir: PLUGIN_DIR, exists: fs.exists
 if (SKILL_PLUGINS.length === 0) console.warn(`[agent] 스킬 폴더가 없어 스킬 없이 돕니다: ${PLUGIN_DIR}`);
 
 // 현재 턴의 상대·대화 컨텍스트. 이걸로 role·is_private 별 도구셋(allowedTools)을 정한다(§7.1).
-export type TurnContext = { role: Role; isPrivate: boolean; isOwner: boolean; userId: string; conversationId: number };
+// channelRef(2026-09-05, 파일 반환): 이 대화의 디스코드 채널. send_file 의 작업 토큰이 첨부를 보낼 채널을
+// 이 값으로 정한다 — 대화 턴(core.ts)은 항상 채우고, 채우지 않는 호출측에서는 send_file 이 거부된다.
+export type TurnContext = { role: Role; isPrivate: boolean; isOwner: boolean; userId: string; conversationId: number; channelRef?: string };
 // 턴 처리 중 진행 상황(판별 유니온). 표시용 텍스트로 바꾸는 건 core.ts 의 formatProgress 가 맡는다.
 export type ProgressUpdate =
   | { kind: "tool"; name: string; input?: string }
@@ -223,6 +226,7 @@ export function buildToolCtx(
     repos, role: context.role, isPrivate: context.isPrivate,
     isOwner: context.isOwner, userId: context.userId, conversationId: context.conversationId,
     runtime, github, now,
+    ...(context.channelRef !== undefined ? { channelRef: context.channelRef } : {}),
   };
 }
 
@@ -326,6 +330,10 @@ export function makeRunAgentTurn(
   },
   github: GithubAppConfig | null = null,
   now: () => number = Date.now,
+  // 파일 반환(2026-09-05): 작업 토큰 발급기(core/jobToken.ts). index.ts 가 프로세스당 하나 만들어 넘기고,
+  // 같은 인스턴스의 verify 를 POST /files 에 배선한다 — 발급과 검증이 한 비밀을 본다. 없으면(테스트·다른
+  // 호출측) send_file 은 remoteToolHandler 가 거부한다.
+  extras: { jobTokens?: JobTokenMinter } = {},
 ): TurnRunner {
   // sh_exec 의 git 이 쓸 단기 토큰 공급원(2026-09-05). 턴이 아니라 이 러너의 수명으로 하나만 만든다 —
   // 캐시가 턴을 넘어 살아야 sh_exec 호출마다 깃허브 API 를 두드리지 않는다(shellToken.ts). 깃허브
@@ -337,6 +345,7 @@ export function makeRunAgentTurn(
     const runtime: RuntimeInfo = { model, sdkVersion: SDK_VERSION, deployTarget, maxTurns: 30, botCommit: process.env.RAILWAY_GIT_COMMIT_SHA, botBranch: process.env.RAILWAY_GIT_BRANCH, workers: hub?.workersInfo() ?? [] };
     const ctx: ToolCtx = buildToolCtx(repos, req.context, runtime, github, now);
     if (shellTokens) ctx.shellTokens = shellTokens;
+    if (extras.jobTokens) ctx.jobTokens = extras.jobTokens;
 
     // Task 7: "어느 기계를, 그것이 있기는 한가"를 여기 한 곳에서만 정한다 — resolveTurnWorker 가
     // resolveWorkerSelector(위치 기반 선택)로 개인/공유를 가르고, registry 로 실제 workerId 를

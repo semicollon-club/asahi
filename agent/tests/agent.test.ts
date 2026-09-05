@@ -31,9 +31,11 @@ async function repos(): Promise<ToolRepos> {
 describe("buildToolCtx — makeRunAgentTurn 의 ToolCtx 구성", () => {
   it("TurnContext 의 필드를 ToolCtx 로 빠짐없이 복사한다", async () => {
     const r = await repos();
-    const context: TurnContext = { role: "allowed", isPrivate: true, isOwner: false, userId: "guest", conversationId: 7 };
+    // channelRef(2026-09-05, 파일 반환): send_file 의 작업 토큰이 "어느 채널로 첨부를 보낼지"를 이 값으로
+    // 정한다 — 빠지면 remoteToolHandler 가 send_file 을 거부한다(워커까지 가서 401 을 받는 대신).
+    const context: TurnContext = { role: "allowed", isPrivate: true, isOwner: false, userId: "guest", conversationId: 7, channelRef: "chan-7" };
     const ctx = buildToolCtx(r, context, testRuntime);
-    expect(ctx).toMatchObject({ role: "allowed", isPrivate: true, isOwner: false, userId: "guest", conversationId: 7 });
+    expect(ctx).toMatchObject({ role: "allowed", isPrivate: true, isOwner: false, userId: "guest", conversationId: 7, channelRef: "chan-7" });
   });
 
   it("buildToolCtx 는 introspect 리포와 runtime 을 ctx 로 옮긴다", async () => {

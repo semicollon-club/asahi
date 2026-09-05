@@ -33,7 +33,7 @@ describe("워커 실행기", () => {
   });
   afterEach(() => fs.rmSync(root, { recursive: true, force: true }));
 
-  it("도구 15개를 정확히 노출한다", () => {
+  it("도구 16개를 정확히 노출한다", () => {
     // Task 8: fs_mkdir 추가. 모델이 부르는 도구 목록(REMOTE_TOOL_NAMES)에는 안 들어가지만, 워커
     // 실행기 자체는 다른 fs_* 와 나란히 이 객체에 존재한다.
     // Task 4: fs_tree 추가 — 폴더 구조 전용 조회 도구(모델이 부르는 목록에도 들어간다).
@@ -44,10 +44,13 @@ describe("워커 실행기", () => {
     // 깃허브 발행 Task 6: git_publish·git_restore 추가 — file_fetch 와 같은 이유로
     // REMOTE_TOOL_NAMES 밖이다. 모델이 cloneUrl·token 을 정하게 하면 워커가 임의 원격으로
     // 푸시하는 표면이 열리므로, 봇이 계산해 hub.call 로 직접 부른다.
+    // 파일 반환(2026-09-05, 풀 하네스 0단계): send_file 추가 — 모델이 부르는 도구다(REMOTE_TOOL_NAMES
+    // 안). 업로드 토큰은 봇이 주입하고(sh_exec 의 git 과 같은 자리), 업로드 주소는 워커가 HUB_URL 에서
+    // 스스로 유도한다 — 어느 쪽도 모델이 정하지 않는다.
     expect(Object.keys(ex).sort()).toEqual([
       "file_fetch", "fs_edit", "fs_glob", "fs_grep", "fs_mkdir", "fs_read", "fs_tree", "fs_write",
       "git_publish", "git_restore",
-      "proc_list", "proc_logs", "proc_start", "proc_stop", "sh_exec",
+      "proc_list", "proc_logs", "proc_start", "proc_stop", "send_file", "sh_exec",
     ]);
   });
 
@@ -411,6 +414,130 @@ describe("워커 실행기", () => {
       expect(r.ok).toBe(false);
       expect(r.content).toContain("받아오지 못했어요");
       await expect(fsp.access(path.join(root, "stuck.pdf"))).rejects.toThrow();
+    });
+  });
+
+  // 파일 반환(풀 하네스 설계 §8, 0단계 0.3). 워커 → 봇 방향의 유일한 바이트 통로다: 경로 게이트를 통과한
+  // 파일을 봇의 POST /files 에 올린다. 봇이 준 토큰(args.upload.token)을 Authorization 에 싣고, 주소는
+  // makeExecutors 의 fileReturnUrl(worker.ts 가 HUB_URL 에서 유도)이다 — 모델은 둘 다 정하지 못한다.
+  describe("send_file — 워커 파일을 봇의 /files 로 올린다", () => {
+    type Seen = { url: string; method?: string; headers: Record<string, string>; body: Buffer };
+    const capture = (status = 200, respBody = '{"ok":true}') => {
+      const seen: Seen[] = [];
+      const fetchImpl = (async (url: string, init?: RequestInit) => {
+        const h = init?.headers as Record<string, string>;
+        const body = init?.body;
+        seen.push({
+          url, method: init?.method, headers: Object.fromEntries(Object.entries(h ?? {}).map(([k, v]) => [k.toLowerCase(), v])),
+          body: Buffer.isBuffer(body) ? body : Buffer.from(body as Uint8Array),
+        });
+        return new Response(respBody, { status });
+      }) as unknown as typeof fetch;
+      return { seen, fetchImpl };
+    };
+    const UPLOAD_URL = "https://bot.example/files";
+    const upload = { token: "asahi-job.x.y" };
+
+    it("허용 폴더 밖 경로는 HTTP 를 치기 전에 거부한다", async () => {
+      const { seen, fetchImpl } = capture();
+      const ex = makeExecutors([root], { fetchImpl, fileReturnUrl: UPLOAD_URL });
+      const r = await ex.send_file({ path: path.join(root, "..", "outside.txt"), upload });
+      expect(r.ok).toBe(false);
+      expect(r.content).toContain("워커 작업 폴더 밖");
+      expect(seen).toHaveLength(0);
+    });
+
+    it("봇이 토큰을 주지 않았으면(옛 봇·미설정) 올리지 않고 그 사유를 말한다", async () => {
+      const { seen, fetchImpl } = capture();
+      const ex = makeExecutors([root], { fetchImpl, fileReturnUrl: UPLOAD_URL });
+      const r = await ex.send_file({ path: path.join(root, "a.txt") });
+      expect(r.ok).toBe(false);
+      expect(r.content).toContain("토큰");
+      expect(seen).toHaveLength(0);
+    });
+
+    it("업로드 주소를 모르는 워커(HUB_URL 유도 실패)는 올리지 않고 그 사유를 말한다", async () => {
+      const { seen, fetchImpl } = capture();
+      const ex = makeExecutors([root], { fetchImpl });
+      const r = await ex.send_file({ path: path.join(root, "a.txt"), upload });
+      expect(r.ok).toBe(false);
+      expect(r.content).toContain("업로드 주소");
+      expect(seen).toHaveLength(0);
+    });
+
+    it("없는 파일·폴더는 올리지 않는다", async () => {
+      const { seen, fetchImpl } = capture();
+      const ex = makeExecutors([root], { fetchImpl, fileReturnUrl: UPLOAD_URL });
+      expect((await ex.send_file({ path: path.join(root, "nope.txt"), upload })).ok).toBe(false);
+      const dir = await ex.send_file({ path: path.join(root, "sub"), upload });
+      expect(dir.ok).toBe(false);
+      expect(dir.content).toContain("폴더");
+      expect(seen).toHaveLength(0);
+    });
+
+    it("상한(8MB)을 넘는 파일은 읽지도 올리지도 않고 크기를 말한다", async () => {
+      const { seen, fetchImpl } = capture();
+      const ex = makeExecutors([root], { fetchImpl, fileReturnUrl: UPLOAD_URL, sendFileMaxBytes: 4 });
+      fs.writeFileSync(path.join(root, "big.bin"), Buffer.alloc(5));
+      const r = await ex.send_file({ path: path.join(root, "big.bin"), upload });
+      expect(r.ok).toBe(false);
+      expect(r.content).toContain("상한");
+      expect(seen).toHaveLength(0);
+    });
+
+    it("바이트를 그대로, 이름은 percent-encoding 해 헤더에, 토큰은 Bearer 로 싣는다", async () => {
+      const { seen, fetchImpl } = capture();
+      const ex = makeExecutors([root], { fetchImpl, fileReturnUrl: UPLOAD_URL });
+      const bytes = Buffer.from([0, 1, 2, 255, 128]);
+      fs.writeFileSync(path.join(root, "결과 그림.png"), bytes);
+      const r = await ex.send_file({ path: path.join(root, "결과 그림.png"), upload });
+      expect(r.ok).toBe(true);
+      expect(r.content).toContain("결과 그림.png");
+      expect(seen).toHaveLength(1);
+      expect(seen[0].url).toBe(UPLOAD_URL);
+      expect(seen[0].method).toBe("POST");
+      expect(seen[0].headers.authorization).toBe("Bearer asahi-job.x.y");
+      expect(seen[0].headers["x-asahi-file-name"]).toBe(encodeURIComponent("결과 그림.png"));
+      expect(seen[0].headers["content-type"]).toBe("application/octet-stream");
+      expect(seen[0].body.equals(bytes)).toBe(true);
+    });
+
+    it("봇이 413 을 주면 상한을, 401 을 주면 토큰 거부를 말한다 — 둘 다 실패다", async () => {
+      fs.writeFileSync(path.join(root, "f.bin"), Buffer.alloc(3));
+      const big = makeExecutors([root], { fetchImpl: capture(413).fetchImpl, fileReturnUrl: UPLOAD_URL });
+      const r413 = await big.send_file({ path: path.join(root, "f.bin"), upload });
+      expect(r413.ok).toBe(false);
+      expect(r413.content).toContain("상한");
+      const denied = makeExecutors([root], { fetchImpl: capture(401).fetchImpl, fileReturnUrl: UPLOAD_URL });
+      const r401 = await denied.send_file({ path: path.join(root, "f.bin"), upload });
+      expect(r401.ok).toBe(false);
+      expect(r401.content).toContain("토큰");
+      const other = makeExecutors([root], { fetchImpl: capture(500).fetchImpl, fileReturnUrl: UPLOAD_URL });
+      const r500 = await other.send_file({ path: path.join(root, "f.bin"), upload });
+      expect(r500.ok).toBe(false);
+      expect(r500.content).toContain("500");
+    });
+
+    it("fetch 가 던져도(봇 연결 불가) 예외가 아니라 실패로 돌아오고, 토큰은 어떤 문구에도 섞이지 않는다", async () => {
+      fs.writeFileSync(path.join(root, "f.bin"), Buffer.alloc(3));
+      const throwing = (async () => { throw new Error("ECONNREFUSED"); }) as unknown as typeof fetch;
+      const ex = makeExecutors([root], { fetchImpl: throwing, fileReturnUrl: UPLOAD_URL });
+      const r = await ex.send_file({ path: path.join(root, "f.bin"), upload: { token: "SECRET-TOKEN-VALUE" } });
+      expect(r.ok).toBe(false);
+      expect(r.content).toContain("ECONNREFUSED");
+      expect(r.content).not.toContain("SECRET-TOKEN-VALUE");
+    });
+
+    it("봇이 응답하지 않으면 타임아웃으로 실패한다(무기한 대기하지 않는다)", async () => {
+      fs.writeFileSync(path.join(root, "f.bin"), Buffer.alloc(3));
+      const hanging = ((_url: string, init?: { signal?: AbortSignal }) =>
+        new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(new DOMException("The operation was aborted.", "AbortError")));
+        })) as unknown as typeof fetch;
+      const ex = makeExecutors([root], { fetchImpl: hanging, fileReturnUrl: UPLOAD_URL, sendFileTimeoutMs: 20 });
+      const r = await ex.send_file({ path: path.join(root, "f.bin"), upload });
+      expect(r.ok).toBe(false);
+      expect(r.content).toContain("보내지 못했어요");
     });
   });
 });

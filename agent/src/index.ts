@@ -27,6 +27,8 @@ import { DigestRunner, DIGEST_TOPICS, type DigestTopic } from "./core/digest.js"
 import { decideMissingAlerts, type SeenState } from "./core/staleWorker.js";
 import { PrTracker } from "./core/prTracker.js";
 import { DiscordAdapter } from "./adapters/discord.js";
+import { makeJobTokenMinter, newJobTokenSecret } from "./core/jobToken.js";
+import { makeFileReturnHandler, FILE_RETURN_PATH } from "./core/fileReturn.js";
 
 // 비밀값(.env)은 리포 루트(agent/ 바깥, data/ 와 같은 위치)에서 읽는다.
 dotenv.config({ path: path.resolve("..", ".env") });
@@ -71,6 +73,14 @@ async function main() {
   // 인증을 통과하지 못하면 즉시 끊는다.
   const hub = new WorkerHub({ registry: repos.workers });
 
+  const bus = new EventBus();
+
+  // 파일 반환(2026-09-05, 풀 하네스 0단계): 워커의 send_file 이 파일 바이트를 올리는 POST /files. 인증은 작업
+  // 토큰 — 부팅마다 난수 비밀로 이 프로세스가 발급(아래 makeRunAgentTurn 으로 내려간다)하고 같은 인스턴스가
+  // 검증한다(core/jobToken.ts). 받은 바이트는 디스크에 쓰지 않고 assistant_file 이벤트로 어댑터에 넘긴다.
+  const jobTokens = makeJobTokenMinter(newJobTokenSecret());
+  const fileReturn = makeFileReturnHandler({ verify: (t) => jobTokens.verify(t), publish: (e) => bus.publish(e), now: Date.now });
+
   // FIX9(사소): 예전엔 모든 경로·메서드에 무조건 200 "ok" 를 돌려줘, 이 서버가 뭘 하는 프로세스인지
   // 외부에서 스캔하기 쉬웠다. 헬스체크 전용 경로만 응답하고 나머지는 404 한다 — /worker 는 ws 가
   // 'upgrade' 이벤트로 별도 처리하므로(아래 wss) 이 제한과 무관하게 그대로 동작한다.
@@ -79,6 +89,11 @@ async function main() {
     if (req.method === "GET" && req.url === HEALTH_PATH) {
       res.writeHead(200);
       res.end("ok");
+      return;
+    }
+    // 파일 반환 엔드포인트 — 토큰 없는 요청은 본문을 읽기 전에 401 로 끊는다(core/fileReturn.ts).
+    if (req.method === "POST" && req.url === FILE_RETURN_PATH) {
+      void fileReturn(req, res);
       return;
     }
     res.writeHead(404);
@@ -121,11 +136,10 @@ async function main() {
   });
   httpServer.listen(config.httpPort, () => console.log(`워커 허브 대기 중: 포트 ${config.httpPort}`));
 
-  const bus = new EventBus();
   // 에이전트 cwd 는 소스가 아닌 데이터 영역에 둔다 — 에이전트가 소스 트리를 훑지 않도록(1단계 점검 지적).
   const agentCwd = path.resolve(config.dataDir, "..", "agent-cwd");
   fs.mkdirSync(agentCwd, { recursive: true });
-  const runTurn = makeRunAgentTurn({ memories: repos.memories, users: repos.users, allowedDirs: repos.allowedDirs, introspect: repos.introspect, projects: repos.projects, pullRequests: repos.pullRequests }, config.deployTarget, config.model, repos.workers, hub, config.github);
+  const runTurn = makeRunAgentTurn({ memories: repos.memories, users: repos.users, allowedDirs: repos.allowedDirs, introspect: repos.introspect, projects: repos.projects, pullRequests: repos.pullRequests }, config.deployTarget, config.model, repos.workers, hub, config.github, Date.now, { jobTokens });
 
   // 정기 게시(조사) 실행기. runTurn·agentCwd 는 core 와 동일한 것을 공유한다 —
   // 별도 프로세스가 아니라 같은 봇 안에서 같은 방식으로 LLM 턴을 돌리는 또 하나의 진입점이다.

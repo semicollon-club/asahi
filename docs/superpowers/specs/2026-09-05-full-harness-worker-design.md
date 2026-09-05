@@ -253,6 +253,14 @@ Remove-Item Env:ASAHI_PROBE_TOKEN
 - 얇은 워커 기간에는 `send_file` 을 원격 도구로 하나 더 만들어 같은 엔드포인트를 쓴다. 풀 하네스에서는 세션
   쪽 인프로세스 MCP 도구가 된다 — 엔드포인트는 같다.
 
+**구현(2026-09-05 저녁, 0단계):** 작업 토큰은 `core/jobToken.ts`(HMAC-SHA256·부팅마다 난수 비밀·2시간·클레임은
+작업 id·부원·대화·채널·만료). `POST /files` 는 `core/fileReturn.ts` — 토큰 없으면 본문을 읽기 전에 401, 상한(8MB,
+첨부 올리기와 같은 `FILE_LIMITS.maxBytes`)은 `content-length` 와 스트림 양쪽에서 413, 성공 시 `assistant_file`
+이벤트(다섯째 이벤트 — 유일하게 바이트를 나른다). 첨부를 보낼 채널은 요청이 아니라 토큰의 `channelRef` 가 정한다.
+어댑터는 첨부만 보내고 진행 표시는 끝내지 않는다. 워커의 `send_file` 은 경로 게이트 뒤 `stat` 으로 상한을 먼저
+거르고, 토큰은 `upload.token`(봇 주입 — 모델이 끼운 값은 덮어쓴다), 주소는 `HUB_URL` 에서 `fileReturnUrlOf` 로 유도한다
+(`wss://h/worker` → `https://h/files`). 이 토큰 형식은 2단계의 `ANTHROPIC_AUTH_TOKEN` 에 그대로 쓴다.
+
 ## 9. 위협 판단 — 토큰 탈취를 중심으로
 
 | 경로 | 결과 |
