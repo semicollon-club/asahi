@@ -1711,3 +1711,33 @@ describe("allowedToolsFor / allowedToolDefinitions — send_file 노출", () => 
     expect(def!.description).toMatch(/8\s?MB/);
   });
 });
+
+// 미니PC 단일 호스트 1단계(2026-09-05): local 에서는 봇도 자기 클론의 커밋을 git 으로 읽으므로(remote/gitCommit.ts 의
+// resolveBotVersion) 봇·워커 커밋이 같은 갈래(둘 다 production 클론)다 — 2026-09-03 에 대조를 걷어낸 사유("갈래가
+// 다르다")가 이 배치에는 해당하지 않는다. 그래서 local 에서 두 커밋이 함께 보이면 같음/다름을 사실로 말한다 —
+// 단, "갱신 필요"라고 단정하지는 않는다(5분 주기 갱신 사이의 정상적인 어긋남이 있다). cloud(Railway)는 예전 그대로다.
+describe("runtime_info — 단일 호스트(local)에서는 봇·워커 커밋을 견준다", () => {
+  const rt = (deployTarget: "local" | "cloud", botCommit: string, workerCommit: string) => ({
+    model: "m", sdkVersion: "s", deployTarget, maxTurns: 30, botCommit, botBranch: "production",
+    workers: [{ workerId: "semicolon-shared", commit: workerCommit, connectedAt: 1 }],
+  });
+
+  it("local 에서 두 커밋이 같으면 같다고 말한다", async () => {
+    const out = await runtimeInfoHandler(await ctx({ isOwner: true, isPrivate: true, runtime: rt("local", "abc1234def", "abc1234def") }));
+    expect(out).toContain("같아요");
+    expect(out).not.toContain("대조하지 않아요");
+  });
+
+  it("local 에서 두 커밋이 다르면 다르다고 말하되 갱신 로그를 보라고 안내한다", async () => {
+    const out = await runtimeInfoHandler(await ctx({ isOwner: true, isPrivate: true, runtime: rt("local", "abc1234def", "ffa3ed6bbb") }));
+    expect(out).toContain("달라요");
+    expect(out).toMatch(/로그/);
+    expect(out).not.toContain("대조하지 않아요");
+  });
+
+  it("cloud(Railway)는 예전 그대로 대조하지 않는다", async () => {
+    const out = await runtimeInfoHandler(await ctx({ isOwner: true, isPrivate: true, runtime: rt("cloud", "abc1234def", "ffa3ed6bbb") }));
+    expect(out).toContain("대조하지 않아요");
+    expect(out).not.toContain("달라요");
+  });
+});

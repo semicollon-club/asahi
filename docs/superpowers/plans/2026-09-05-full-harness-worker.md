@@ -25,6 +25,15 @@ lastReviewed: 2026-09-05
 
 ## 1단계 — 봇 이사(미니PC 계정 A)
 
+**상태(2026-09-05 밤): 1.1~1.4 완료, 1.5(컷오버·스모크)는 운영자 절차 — `deploy/minipc-단일호스트-셋업.md`.**
+계획과 다른 점 둘 — (1) `HUB_BIND` 의 기본값은 `0.0.0.0` 이 아니라 "지정 없음"(Node 의 `listen(port)` 그대로, IPv6 포함)이다.
+Railway 는 IPv6 사설망으로 컨테이너에 닿으므로 IPv4 전용 바인드를 기본값으로 박으면 컷오버 전의 Railway 배포가 깨진다.
+(2) 커밋 읽기는 새 `core/gitCommit.ts` 가 아니라 이미 있던 `remote/gitCommit.ts`(워커의 `readCommit`)에 `readBranch`·
+`resolveBotVersion` 을 더해 쓴다 — 같은 일을 하는 모듈을 둘 두지 않는다. 우선순위는 `ASAHI_GIT_*` → git → `RAILWAY_GIT_*`.
+추가된 것: 봇 센티넬(`BOT_SENTINEL`, `index.ts` — 갱신 스크립트가 봇을 내릴 유일한 방법), `runtime_info` 가 local 에서
+봇·워커 커밋을 견주는 문장(1.5 의 완료 기준을 화면에서 읽을 수 있게), `update-worker.ps1` 은 `update-service.ps1` 의
+래퍼로 남겨 미니PC 의 등록된 작업 정의를 건드리지 않는다.
+
 코드는 최소, 절차가 본체다.
 
 | # | 태스크 | 파일 | 테스트 | 완료 기준 |

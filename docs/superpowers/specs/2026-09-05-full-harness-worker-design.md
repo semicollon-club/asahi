@@ -321,10 +321,11 @@ Railway 배치와 정확히 하나 다르다: **미니PC 의 관리자 권한이
 ## 12. 운영자가 해야 하는 것(코드 밖)
 
 1. **§4.4 프로브**를 미니PC 나 운영자 PC 에서 구독 토큰으로 한 번 돌린다 — 2단계 착수의 전제.
-2. **미니PC 준비(1단계 전)**: 표준 계정 `asahi-bot` 생성, Node 22 확인, `C:\asahi-bot` 에 리포 클론(B 의
-   `C:\asahi-worker` 와 별개), A 프로필 폴더에 `.env`(Railway 변수 이관: 디스코드·DB·깃허브 App·구독 토큰,
-   `HUB_BIND=127.0.0.1`), 작업 스케줄러에 `asahi-bot`(시작 시)·`asahi-bot-update`(5분) 등록. 절차는 1단계에서
-   `deploy/minipc-단일호스트-셋업.md` 로 쓴다.
+2. **미니PC 준비(1단계 전)**: 표준 계정 `asahi-bot` 생성, Node 22 확인, **A 의 프로필 폴더 안**
+   `C:\Users\asahi-bot\asahi-bot` 에 리포 클론(B 의 `C:\asahi-worker` 와 별개 — `C:\` 루트에 두면 윈도우 기본 ACL 로
+   B 가 `.env` 를 읽는다), 같은 곳에 `.env`(Railway 변수 이관: 디스코드·DB·깃허브 App·구독 토큰, `HUB_BIND=127.0.0.1`,
+   `BOT_SENTINEL`), 작업 스케줄러에 `asahi-bot`(시작 시)·`asahi-bot-update`(5분) 등록. 절차는
+   `deploy/minipc-단일호스트-셋업.md`(2026-09-05 밤 작성).
 3. **컷오버**(1단계): Railway `asahi` 서비스 정지 → A 작업 시작 → 디스코드에서 `runtime_info` 확인. 문제면 역순.
 4. **기계 보안**(§9): A·B 모두 표준 계정, 관리자 계정 분리, 윈도우 업데이트 자동, BitLocker 권장.
 5. **동시 실행 상한** 값(5단계) — 미니PC 사양(RAM·CPU)을 보고 정한다. 시작은 2.
