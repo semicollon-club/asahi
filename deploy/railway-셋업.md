@@ -1,5 +1,9 @@
 # Railway로 Asahi 상시 구동하기
 
+> **2026-09-05 — 봇은 동아리 미니PC 로 이사한다**(풀 하네스 1단계). 절차는
+> [deploy/minipc-단일호스트-셋업.md](minipc-단일호스트-셋업.md). 컷오버 전까지 이 문서의 Railway 배포가 그대로
+> 돌고, 컷오버 뒤에는 롤백 수단으로만 남는다(배포 없이 서비스·Variables 만 유지). Railway 정리는 5단계의 몫이다.
+
 로컬 PC(PM2) 대신 Railway(클라우드)에서 봇을 24/7 띄우는 절차. 코드는 GitHub(`wwoosshh/asahi`)
 리포를 그대로 쓰고, `agent/Dockerfile`(멀티스테이지)로 빌드한다. 실제 데이터(유저·대화·기억)는
 Supabase Postgres에 있으므로 컨테이너 자체는 상태를 갖지 않는다(stateless) — 재배포돼도 데이터가

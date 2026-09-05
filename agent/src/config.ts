@@ -43,6 +43,14 @@ export type Config = {
   // PR 추적(2026-09-05): 봇이 만든 새 PR 을 운영자에게 알릴 채널. 없으면 소유자 DM 으로 간다 —
   // 선택값이라 비어 있어도 기동에 지장이 없다(core/prTracker.ts).
   prNotifyChannelId?: string;
+  // 미니PC 단일 호스트 1단계(2026-09-05): 허브(/worker)·/files 를 붙일 주소. 없으면 지금까지처럼
+  // listen(port) — Node 기본(모든 인터페이스, IPv6 포함)이다. 기본값을 0.0.0.0 으로 박지 않는 이유: Railway 는
+  // IPv6 사설망으로 컨테이너에 닿으므로 IPv4 전용 바인드는 그쪽 배포를 깨뜨린다. 미니PC 는 127.0.0.1 로 묶어
+  // 같은 기계의 워커(계정 B)만 루프백으로 붙게 하고 밖에서는 포트 자체가 보이지 않게 한다(설계 §3·§9).
+  hubBind?: string;
+  // 봇 자동 갱신 센티넬(BOT_SENTINEL). 워커의 WORKER_SENTINEL 과 같은 방식·같은 옵트인 — 파일이 생기면 봇이
+  // 진행 중인 턴을 마치고 스스로 내려가고, deploy/update-service.ps1 이 갱신한 뒤 다시 띄운다.
+  sentinelPath?: string;
 };
 
 // 깃허브 발행 설정. 개인키는 base64 한 줄로 받는다 — 줄바꿈이 든 PEM 은 .env 파서·배포
@@ -95,6 +103,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     },
     github: loadGithubConfig(env),
     prNotifyChannelId: env.PR_NOTIFY_CHANNEL_ID || undefined,
+    hubBind: env.HUB_BIND?.trim() || undefined,
+    sentinelPath: env.BOT_SENTINEL || undefined,
   };
 }
 

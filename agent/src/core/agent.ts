@@ -15,6 +15,7 @@ import path from "node:path";
 import { buildTools, allowedToolsFor, TOOL_SERVER, type ToolCtx, type RuntimeInfo } from "./tools.js";
 import { makeShellTokenSource } from "../github/shellToken.js";
 import type { JobTokenMinter } from "./jobToken.js";
+import type { BotVersion } from "../remote/gitCommit.js";
 import { resolveWorkerSelector } from "./workerSelect.js";
 import type { ImageInput } from "./images.js";
 import { skillPluginDirFrom, resolveSkillsEnabled, skillPluginsFor } from "./skills.js";
@@ -333,7 +334,9 @@ export function makeRunAgentTurn(
   // 파일 반환(2026-09-05): 작업 토큰 발급기(core/jobToken.ts). index.ts 가 프로세스당 하나 만들어 넘기고,
   // 같은 인스턴스의 verify 를 POST /files 에 배선한다 — 발급과 검증이 한 비밀을 본다. 없으면(테스트·다른
   // 호출측) send_file 은 remoteToolHandler 가 거부한다.
-  extras: { jobTokens?: JobTokenMinter } = {},
+  // botVersion(1단계, 미니PC 단일 호스트): index.ts 가 기동 시 resolveBotVersion(remote/gitCommit.ts)으로 읽은
+  // 봇 자기 커밋·브랜치. 없으면 예전처럼 Railway 주입 변수를 그대로 본다(아래 runtime).
+  extras: { jobTokens?: JobTokenMinter; botVersion?: BotVersion } = {},
 ): TurnRunner {
   // sh_exec 의 git 이 쓸 단기 토큰 공급원(2026-09-05). 턴이 아니라 이 러너의 수명으로 하나만 만든다 —
   // 캐시가 턴을 넘어 살아야 sh_exec 호출마다 깃허브 API 를 두드리지 않는다(shellToken.ts). 깃허브
@@ -341,8 +344,14 @@ export function makeRunAgentTurn(
   const shellTokens = github === null ? undefined : makeShellTokenSource({ config: github });
   return async (req) => {
     // botBranch: 봇 커밋이 어느 갈래의 것인지. 워커 커밋과 나란히 놓인 두 SHA 가 왜 다른지를
-    // runtime_info 가 한 화면에서 설명하게 해 준다 — Railway 밖(로컬 PM2)에서는 없다.
-    const runtime: RuntimeInfo = { model, sdkVersion: SDK_VERSION, deployTarget, maxTurns: 30, botCommit: process.env.RAILWAY_GIT_COMMIT_SHA, botBranch: process.env.RAILWAY_GIT_BRANCH, workers: hub?.workersInfo() ?? [] };
+    // runtime_info 가 한 화면에서 설명하게 해 준다. 1단계(2026-09-05)부터 값은 extras.botVersion(git 에서 읽은
+    // 것)이 우선이고, 없을 때만 Railway 주입 변수로 떨어진다 — 미니PC 에는 그 변수가 없다.
+    const runtime: RuntimeInfo = {
+      model, sdkVersion: SDK_VERSION, deployTarget, maxTurns: 30,
+      botCommit: extras.botVersion?.commit ?? process.env.RAILWAY_GIT_COMMIT_SHA,
+      botBranch: extras.botVersion?.branch ?? process.env.RAILWAY_GIT_BRANCH,
+      workers: hub?.workersInfo() ?? [],
+    };
     const ctx: ToolCtx = buildToolCtx(repos, req.context, runtime, github, now);
     if (shellTokens) ctx.shellTokens = shellTokens;
     if (extras.jobTokens) ctx.jobTokens = extras.jobTokens;

@@ -306,3 +306,31 @@ describe("깃허브 발행 설정", () => {
     expect(loadConfig(blank as NodeJS.ProcessEnv).github).toBeNull();
   });
 });
+
+// 미니PC 단일 호스트 1단계(2026-09-05): 봇이 미니PC 계정 A 로 이사한다. 허브·/files 는 같은 기계의 계정 B(워커)만
+// 붙으므로 루프백에만 묶는다 — HUB_BIND. 기본값은 "지정 없음"(Node 의 listen(port) 그대로, 모든 인터페이스) —
+// Railway 는 IPv6 사설망으로 컨테이너에 닿으므로 기본값을 0.0.0.0 으로 바꾸면 그쪽이 깨진다.
+describe("봇 설정 — HUB_BIND(허브 바인드 주소)", () => {
+  it("없으면 undefined 다(지금까지의 listen(port) 그대로)", () => {
+    expect(loadConfig(base).hubBind).toBeUndefined();
+    expect(loadConfig({ ...base, HUB_BIND: "" }).hubBind).toBeUndefined();
+  });
+
+  it("주면 다듬어 그대로 싣는다 — 미니PC 는 127.0.0.1", () => {
+    expect(loadConfig({ ...base, HUB_BIND: "127.0.0.1" }).hubBind).toBe("127.0.0.1");
+    expect(loadConfig({ ...base, HUB_BIND: " 127.0.0.1 " }).hubBind).toBe("127.0.0.1");
+  });
+});
+
+// 봇도 워커와 같은 센티넬 방식으로 자동 갱신된다(deploy/update-service.ps1). 옵트인 — Railway·개인 PM2 에는 없다.
+describe("봇 설정 — BOT_SENTINEL(자동 갱신 센티넬)", () => {
+  it("없으면 sentinelPath 는 undefined 다", () => {
+    expect(loadConfig(base).sentinelPath).toBeUndefined();
+    expect(loadConfig({ ...base, BOT_SENTINEL: "" }).sentinelPath).toBeUndefined();
+  });
+
+  it("주면 그 경로가 실린다", () => {
+    expect(loadConfig({ ...base, BOT_SENTINEL: "C:/Users/asahi-bot/asahi-bot/update.flag" }).sentinelPath)
+      .toBe("C:/Users/asahi-bot/asahi-bot/update.flag");
+  });
+});
