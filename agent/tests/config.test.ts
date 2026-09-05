@@ -338,7 +338,9 @@ describe("봇 설정 — BOT_SENTINEL(자동 갱신 센티넬)", () => {
 // 풀 하네스 2단계(2026-09-05 밤): 워커 모드. tools(지금까지의 얇은 워커)가 기본이고, harness 면 세션 러너도 켠다 —
 // 도구 실행기는 두 모드 모두 그대로 돈다(전환 기간 공존). 세션 폴더(부원별 CLAUDE_CONFIG_DIR 의 루트)는 선택이다.
 describe("워커 설정 — WORKER_MODE·WORKER_SESSION_DIR", () => {
-  const base = { WORKER_ID: "w", WORKER_TOKEN: "t", HUB_URL: "ws://127.0.0.1:3100/worker", WORKER_ROOTS: "C:/ws" };
+  // 플랫폼마다 "모호하지 않은 절대경로"의 모양이 다르다 — 위 얇은 워커 설정 describe 와 같은 기준(CI 는 리눅스·윈도우 둘 다 돈다).
+  const ROOT = process.platform === "win32" ? "C:\\ws" : "/ws";
+  const base = { WORKER_ID: "w", WORKER_TOKEN: "t", HUB_URL: "ws://127.0.0.1:3100/worker", WORKER_ROOTS: ROOT };
   it("기본은 tools 다", () => {
     expect(loadWorkerConfig(base).mode).toBe("tools");
     expect(loadWorkerConfig({ ...base, WORKER_MODE: "" }).mode).toBe("tools");
