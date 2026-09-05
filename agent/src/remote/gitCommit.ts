@@ -29,3 +29,6 @@ export async function readCommit(runGit: RunGit): Promise<string | undefined> {
     return undefined;
   }
 }
+
+// 워커가 hello 에 싣는 commit 은 이 HEAD 다. 봇은 Railway 가 주입한 RAILWAY_GIT_COMMIT_SHA 를 보고하므로,
+// 두 값이 같으려면 봇과 워커가 같은 브랜치(production)의 같은 커밋으로 배포돼야 한다.
