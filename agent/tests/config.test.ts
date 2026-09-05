@@ -179,10 +179,10 @@ describe("얇은 워커 설정(Task 7 — 워커는 DB·모델·세션을 다루
   });
 });
 
-describe("model 구성(Opus 4.8 기본, 봇 설정 전용 — 워커는 더 이상 model 을 다루지 않는다)", () => {
+describe("model 구성(Opus 5 기본, 봇 설정 전용 — 워커는 더 이상 model 을 다루지 않는다)", () => {
   const base = { DISCORD_TOKEN: "t", DISCORD_OWNER_ID: "1", DATABASE_URL: "postgres://x" };
-  it("loadConfig: 기본 모델은 claude-opus-4-8, ANTHROPIC_MODEL 로 재정의된다", () => {
-    expect(loadConfig({ ...base } as NodeJS.ProcessEnv).model).toBe("claude-opus-4-8");
+  it("loadConfig: 기본 모델은 claude-opus-5, ANTHROPIC_MODEL 로 재정의된다", () => {
+    expect(loadConfig({ ...base } as NodeJS.ProcessEnv).model).toBe("claude-opus-5");
     expect(loadConfig({ ...base, ANTHROPIC_MODEL: "claude-sonnet-5" } as NodeJS.ProcessEnv).model).toBe("claude-sonnet-5");
   });
 });

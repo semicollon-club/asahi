@@ -21,7 +21,7 @@ import { skillPluginDirFrom, resolveSkillsEnabled, skillPluginsFor } from "./ski
 // 자기인지(§Task5): SDK_VERSION 은 package.json 의 @anthropic-ai/claude-agent-sdk 버전과 동기화한다.
 // DEFAULT_MODEL 은 makeRunAgentTurn 의 model 인자가 없을 때 쓰는 기본 모델이다.
 const SDK_VERSION = "0.3.207"; // package.json 과 동기화
-const DEFAULT_MODEL = "claude-opus-4-8";
+const DEFAULT_MODEL = "claude-opus-5";
 
 // 프로세스 수명 동안 바뀌지 않으므로 턴마다 다시 계산하지 않는다. 존재 확인도 여기서 한 번만
 // 한다 — 턴마다 디스크를 보는 것은 낭비이고, 스킬 폴더는 배포 산출물이라 도는 중에 생기거나

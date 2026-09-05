@@ -87,7 +87,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     maxTurnsPerHourGlobal: positiveNumberEnv(env, "MAX_TURNS_PER_HOUR_GLOBAL", 40),
     ownerReserve: positiveNumberEnv(env, "OWNER_RESERVE", 10),
     deployTarget: env.DEPLOY_TARGET === "cloud" ? "cloud" : "local",
-    model: env.ANTHROPIC_MODEL || "claude-opus-4-8",
+    model: env.ANTHROPIC_MODEL || "claude-opus-5",
     httpPort: positiveNumberEnv(env, "PORT", 3000),
     digestChannels: {
       ...(env.DIGEST_CONTEST_CHANNEL_ID ? { contest: env.DIGEST_CONTEST_CHANNEL_ID } : {}),

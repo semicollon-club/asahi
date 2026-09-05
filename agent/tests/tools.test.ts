@@ -33,7 +33,7 @@ async function ctx(over: CtxOver = {}): Promise<ToolCtx> {
   return {
     repos: { memories: new MemoriesRepo(db), users: new UsersRepo(db), allowedDirs: new AllowedDirsRepo(db), introspect: new IntrospectRepo(db), projects: new ProjectsRepo(db), pullRequests: new PullRequestsRepo(db) },
     role: "allowed", isPrivate: true, isOwner: false, userId: "guest", conversationId: 1,
-    runtime: { model: "claude-opus-4-8", sdkVersion: "0.3.207", deployTarget: "local", maxTurns: 30, workers: [] },
+    runtime: { model: "claude-opus-5", sdkVersion: "0.3.207", deployTarget: "local", maxTurns: 30, workers: [] },
     // 발행 미설정이 기본이다 — 발행을 시험하는 케이스만 over.github 로 채운다.
     github: null,
     now: () => 1_000_000,
@@ -55,7 +55,7 @@ async function ownerCtx(over = {}) {
   return {
     repos: { memories: new MemoriesRepo(db), users: new UsersRepo(db), allowedDirs: new AllowedDirsRepo(db), introspect: new IntrospectRepo(db), projects: new ProjectsRepo(db), pullRequests: new PullRequestsRepo(db) },
     role: "owner", isPrivate: true, isOwner: true, userId: "owner", conversationId: 1,
-    runtime: { model: "claude-opus-4-8", sdkVersion: "0.3.207", deployTarget: "local", maxTurns: 30, workers: [] },
+    runtime: { model: "claude-opus-5", sdkVersion: "0.3.207", deployTarget: "local", maxTurns: 30, workers: [] },
     ...over,
   } as any;
 }
@@ -483,7 +483,7 @@ describe("allow_dir/revoke_dir/list_dir 도구(§원격개발 A2, FIX2: 워커 r
     // 기준이다 — 그래서 userId 는 두 컨텍스트에서 동일하게 두고 workerId 만 다르게 준다.
     const db = await openTestDb();
     const repos = { memories: new MemoriesRepo(db), users: new UsersRepo(db), allowedDirs: new AllowedDirsRepo(db) };
-    const runtime = { model: "claude-opus-4-8", sdkVersion: "0.3.207", deployTarget: "local" as const, maxTurns: 30, workers: [] };
+    const runtime = { model: "claude-opus-5", sdkVersion: "0.3.207", deployTarget: "local" as const, maxTurns: 30, workers: [] };
     const call = async () => ({ ok: true, content: "" });
     const ownerA: ToolCtx = { repos, role: "owner", isPrivate: true, isOwner: true, userId: "owner", conversationId: 1, runtime, remote: { roots: [os.tmpdir()], call, workerId: "owner-laptop" } } as unknown as ToolCtx;
     const ownerB: ToolCtx = { repos, role: "owner", isPrivate: true, isOwner: true, userId: "owner", conversationId: 1, runtime, remote: { roots: [os.tmpdir()], call, workerId: "semicolon-shared" } } as unknown as ToolCtx;
@@ -798,7 +798,7 @@ describe("runtime_info", () => {
   it("소유자에게 모델·배포·maxTurns 를 보고한다", async () => {
     const ctx = await ownerCtx();
     const out = await runtimeInfoHandler(ctx);
-    expect(out).toMatch(/claude-opus-4-8/);
+    expect(out).toMatch(/claude-opus-5/);
     expect(out).toMatch(/local/);
     expect(out).toMatch(/30/);
   });
@@ -813,7 +813,7 @@ describe("runtime_info", () => {
   // 도구가 서로 다른 장소를 요구하던 셈이라 실제로 사람을 오진으로 몰았다.
   it("소유자면 서버 채널에서도 답한다(공유 기계 작업 중 버전 확인)", async () => {
     const out = await runtimeInfoHandler(await ownerCtx({ isPrivate: false }));
-    expect(out).toMatch(/claude-opus-4-8/);
+    expect(out).toMatch(/claude-opus-5/);
     expect(out).not.toMatch(/할 수 있어요/); // 거부 문구가 아니어야 한다
   });
 

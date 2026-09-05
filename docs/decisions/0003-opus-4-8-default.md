@@ -1,9 +1,14 @@
 ---
-status: Accepted
-lastReviewed: 2026-07-13
+status: Superseded
+supersededBy: 0008-opus-5-default
+lastReviewed: 2026-09-05
 ---
 
 # 0003. `claude-opus-4-8` 기본 모델
+
+> **대체됨(2026-09-05)**: 이 ADR 의 기본값(`claude-opus-4-8`)은 [0008](./0008-opus-5-default.md)로
+> 바뀌었다 — 설정 모델과 SDK 실측 모델을 분리해 드리프트를 감지하는 구조는 0008 이 그대로
+> 이어받는다. 아래 본문은 2026-07 시점의 기록이다.
 
 ## 맥락
 
