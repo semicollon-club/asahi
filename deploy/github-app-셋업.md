@@ -1,5 +1,5 @@
 ---
-lastReviewed: 2026-08-07
+lastReviewed: 2026-09-05
 ---
 
 # GitHub App 셋업 — 깃허브 발행용
@@ -41,14 +41,24 @@ lastReviewed: 2026-08-07
 
 ### 권한 (Repository permissions)
 
-두 개만 켠다. 나머지는 전부 `No access` 로 둔다.
+세 개만 켠다. 나머지는 전부 `No access` 로 둔다.
 
 | 권한 | 값 | 왜 |
 |---|---|---|
-| **Contents** | Read and write | git push. 이 기능의 본체다 |
+| **Contents** | Read and write | git push. 이 기능의 본체다. 2026-09-05 부터는 `sh_exec` 의 git(clone·fetch·push)도 이 권한의 단기 토큰을 쓴다 |
 | **Administration** | Read and write | 리포 자동 생성(`POST /orgs/{org}/repos`)에만 쓰인다 |
+| **Pull requests** | Read and write | PR 생성(`create_pull_request`, 2026-09-05). 부원이 브랜치를 올린 뒤 main 에 PR 을 내는 마지막 조각이다 |
 
 `Metadata: Read-only` 는 자동으로 켜진다 — 정상이다.
+
+> **이미 만든 App 에 권한을 더하려면**(2026-09-05 기준 `asahi-publisher` 설치에는 `Pull requests`
+> 가 없다 — 설치 권한이 `administration`·`contents`·`metadata` 셋뿐인 것을 API 로 확인했다):
+> App 설정 → **Permissions & events** → Repository permissions 에서 **Pull requests: Read and
+> write** → 아래 **Save changes**. 그다음 **조직 쪽에서 승인**해야 실제로 반영된다 — 조직
+> Settings → **GitHub Apps** → `asahi-publisher` 옆 **Configure** 에 "새 권한 요청" 배너가 뜨고
+> **Review request → Accept new permissions**. 승인 전까지 설치 토큰은 옛 권한으로만 발급되고,
+> `create_pull_request` 는 깃허브의 "permissions requested are not granted" 문구에 이 문서를
+> 덧붙여 실패한다. git push 는 영향받지 않는다(셸 토큰은 `contents` 만 요청한다).
 
 > **Administration 을 빼고 싶다면** 뺄 수 있다. 대신 리포를 사람이 미리 만들어 둬야 하고
 > 봇은 푸시만 한다. 권한이 줄어 더 안전하지만 부원이 새 프로젝트를 만들 때마다 운영자를
@@ -124,7 +134,37 @@ Railway 대시보드 → 해당 서비스 → **Variables** 에서 넷을 넣는
 ## 7. 확인
 
 배포 후 소유자 DM 에서 발행을 한 번 시켜 본다. 자세한 기대 결과는 `deploy/smoke-test.md` 의
-발행 항목에서 추적한다.
+발행 항목에서 추적한다. 셸 git·PR 생성은 같은 문서의 "워커 git 자격증명·PR 생성" 절이다 — 그쪽은
+봇뿐 아니라 **미니PC 워커도 새 코드**여야 한다(`deploy/worker-셋업.md` "자동 갱신").
+
+## 8. 브랜치 보호 — 실제 정책(2026-09-05 확인)
+
+부원이 디스코드로 브랜치를 push 하고 PR 을 낼 수 있게 되면서, 브랜치 규칙은 **깃허브 쪽 설정**이
+집행한다. 봇은 셸 명령을 검사해 거르지 않는다(`docs/security/risk-register.md` §9) — 봇 자신은
+main·production 에 직접 push 하지도 병합하지도 않고 PR 까지만 하지만, 그건 페르소나 규칙이다.
+
+운영자가 정한 브랜치 정책은 이렇다(`asahi`·`homepage` 둘 다 같은 모양, API 로 확인):
+
+| 브랜치 | 걸린 것 | 뜻 |
+|---|---|---|
+| `production` | push 가능자를 `wwoosshh` 로 제한 | 병합·배포는 운영자만. App(`asahi-publisher`)은 허용 목록에 없어 **봇 토큰으로도 올릴 수 없다** |
+| `main` | CI 상태 체크 필수 + 강제 push 금지 | **부원이 자유롭게 PR 로 쌓는 통합 브랜치.** 검증 뒤 운영자가 production 으로 올린다. PR 필수·병합자 제한은 일부러 걸지 않았다 |
+
+즉 "main 에 PR 필수를 걸어야 한다"는 요구는 없다 — 이 문서의 이전 판이 그렇게 권했는데 운영자의
+의도와 달랐다. 새 리포를 만들 때 이 모양을 그대로 따른다.
+
+**비공개 리포는 Free 플랜에서 어떤 브랜치 보호도 걸 수 없다.** 발행으로 생기는 부원 프로젝트
+리포가 여기 해당한다 — 그 리포는 그 부원의 것이라 지킬 브랜치가 없지만, 비공개 리포에
+production 같은 배포 브랜치를 두게 되면 그때는 공개로 바꾸거나 GitHub Team 으로 올려야 한다.
+이건 결함이 아니라 플랜의 한계다.
+
+**권한 승인 페이지를 헷갈리지 않는다.** 조직 Settings 의 "Third-party application access
+policy"(OAuth application policy)는 이 App 과 무관한 OAuth 앱 정책이다 — 거기서 "Setup
+application access restrictions" 를 켜면 `gh`·Vercel 같은 OAuth 앱이 조직 데이터를 못 보게 돼
+운영자 자신이 잠길 수 있다. App 의 새 권한을 승인하는 곳은 **Third-party Access → GitHub Apps →
+asahi-publisher → Configure** 이고, 설치 번호를 알면 주소로 바로 간다
+(`https://github.com/organizations/semicollon-club/settings/installations/<설치 번호>` —
+번호는 4단계에서 적어 둔 `GITHUB_APP_INSTALLATION_ID`).
 
 ## 개인키를 다뤄야 할 때
 
@@ -160,5 +200,6 @@ HTTP 204 로 성공했다). 유출된 키를 쥔 사람은 조직의 리포를 �
 ## 관련 문서
 
 - 설계 배경·위협 모델: `docs/superpowers/specs/2026-08-07-github-publish-design.md`
-- 왜 워커에 자격증명을 두지 않는가: `docs/security/risk-register.md` §2·§5
+- 셸 git 자격증명·PR 생성(2026-09-05): `docs/superpowers/specs/2026-09-05-worker-git-credentials-design.md`
+- 왜 워커에 영구 자격증명을 두지 않는가: `docs/security/risk-register.md` §2·§5·§9
 - 미니PC 전제조건: `deploy/worker-셋업.md`

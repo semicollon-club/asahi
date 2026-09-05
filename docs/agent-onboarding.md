@@ -1,6 +1,6 @@
 ---
 title: 에이전트 온보딩 — 이 프로젝트에서 일하는 법
-lastReviewed: 2026-09-03
+lastReviewed: 2026-09-05
 ---
 
 # 에이전트 온보딩
@@ -36,8 +36,11 @@ lastReviewed: 2026-09-03
   실행해 결과를 돌려준다. **디스코드에도 DB에도 붙지 않는다**
 - **Supabase Postgres** — 봇만 접속하는 정본 상태 저장소
 
-핵심 불변식 하나: **미니PC 워커는 `DATABASE_URL` 을 절대 갖지 않는다.** 워커의 유일한
-자격증명은 `WORKER_TOKEN` 이다.
+핵심 불변식 하나: **미니PC 워커는 `DATABASE_URL` 을 절대 갖지 않는다.** 워커가 디스크에 갖는
+유일한 자격증명은 `WORKER_TOKEN` 이다. 2026-09-05 부터 부원의 셸 git 에 붙는 깃허브 자격증명은
+이 불변식의 예외가 아니다 — 봇이 `sh_exec` 호출마다 1시간짜리 토큰을 그 셸 프로세스의 환경으로만
+넘기고, 미니PC 의 파일·git 설정·`.env` 에는 아무것도 남지 않는다(`agent/src/remote/gitEnv.ts`,
+[능력 계층 모델](security/capability-model.md) "워커의 git 자격증명" 절).
 
 ## 작업 방식
 

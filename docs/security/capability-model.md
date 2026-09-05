@@ -1,5 +1,5 @@
 ---
-lastReviewed: 2026-08-06
+lastReviewed: 2026-09-05
 ---
 
 # 능력 계층 모델 (Capability Model)
@@ -120,6 +120,40 @@ Asahi 비서는 대화·모델 호출·기억·세션을 전담하는 **봇** �
 
 내려받기(워커 → 디스코드, 모델이 고른 파일을 다시 디스코드로 보내는 방향)는 **아직 없다** —
 별도 계획의 몫이다(`docs/superpowers/specs/2026-08-01-file-transfer-design.md` §4.2).
+
+## 워커의 git 자격증명과 PR 생성(2026-09-05)
+
+부원이 디스코드만으로 동아리 저장소를 clone → 브랜치 작업 → 커밋 → push → main 에 PR 까지 하게
+하는 조각이다(`docs/superpowers/specs/2026-09-05-worker-git-credentials-design.md`). 발행의
+자격증명 모델(봇이 든다, 워커에는 단기 토큰만)을 `sh_exec` 의 git 까지 넓혔다.
+
+- **무엇이 워커에 가는가**: `sh_exec` 호출마다 봇이 `git` 인자에 조직 전체·`contents:write`·최대
+  1시간 설치 토큰과 그 사람의 커밋 신원(표시 이름 + noreply 주소)을 싣는다
+  (`agent/src/core/remoteTools.ts` 의 `shellGitArgs` — 모델이 준 값은 덮어쓴다). 워커는 그것을
+  **그 셸 프로세스 트리의 환경변수로만** 얹고(`agent/src/remote/gitEnv.ts`), 디스크·`.git/config`·
+  명령줄에는 아무것도 남기지 않는다. 토큰은 봇이 캐시해 약 50분 재사용한다
+  (`agent/src/github/shellToken.ts`). 워커 `.env` 는 바뀌지 않는다.
+- **신원으로 가르지 않는다**: 소유자·손님, DM·서버 구분 없이 `sh_exec` 를 받는 사람은 전부 같은
+  자격증명을 받는다 — `sh_exec` 자체가 이미 그렇다(위 능력 계층표).
+- **부원은 그 토큰을 읽을 수 있다** — `sh_exec` 로 환경변수를 찍으면 된다. 한 시간 동안 디스코드
+  밖에서 조직 리포에 `contents:write` 를 갖게 되는데, 이것은 디스코드 안에서 이미 허용한 것과 같은
+  능력이다(브랜치 push·강제 push·브랜치 삭제는 `sh_exec` 로 어차피 된다). 잃는 것은 `actions`
+  기록뿐이다. 받아들인 위험으로 `docs/security/risk-register.md` §9 에 적었다. 개인키의 천장
+  (리포 생성·삭제)은 변하지 않는다 — 키는 Railway 에만 있다.
+- **브랜치 규칙은 깃허브가 집행한다.** `production` 은 push 가능자가 운영자로 제한돼 있어 봇의
+  App 토큰으로도 올릴 수 없다(2026-09-05 확인 — `asahi`·`homepage`). `main` 은 부원이 PR 로
+  자유롭게 쌓는 통합 브랜치라 CI 필수·강제 push 금지만 있고 일부러 열려 있다. 봇 자신이 main 에
+  직접 push 하지 않는 것은 페르소나 안내(`agent/src/core/persona.ts` 의 `PUBLISH_LINES`)뿐이다 —
+  셸 명령을 검사해 막는 시늉은 하지 않는다(폴더 격리를 경계로 착각하지 말라는 것과 같은 이유).
+  조직은 Free 플랜이라 **비공개** 리포에는 어떤 브랜치 보호도 걸 수 없다.
+- **PR 생성(`create_pull_request`)** 은 봇이 REST 로 한다. 발행 도구와 같은 축(워커 연결 + 깃허브
+  설정)으로 열리고, 리포·브랜치 이름을 검증한 뒤 그 리포·`pull_requests:write` 로만 토큰을 발급한다.
+  base 기본은 `main` 이고 `production` 은 소유자만 지정할 수 있다. 병합은 봇이 하지 않는다 —
+  사람이 깃허브에서 한다(production 은 운영자만, `AGENTS.md`). App 에 `Pull requests: Read and
+  write` 권한이 있어야 하며, 없으면 발급 실패 문구에 셋업 문서를 덧붙인다(`deploy/github-app-셋업.md`).
+- **토큰이 없을 때**(깃허브 미설정·발급 실패·옛 봇) 헬퍼는 자격증명 대신 사유를 stderr 로 말하고
+  git 은 `GIT_TERMINAL_PROMPT=0` 으로 즉시 실패한다 — 프롬프트를 기다리며 `sh_exec` 타임아웃까지
+  매달리지 않는다.
 
 ## 손님·공유 기계 — 확장된 위협 표면
 

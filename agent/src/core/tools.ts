@@ -7,11 +7,12 @@ import type { AllowedDirsRepo } from "../store/allowedDirsRepo.js";
 import type { IntrospectRepo } from "../store/introspectRepo.js";
 import type { WorkerKind } from "../store/workersRepo.js";
 import { assertReadOnlySql, formatQueryResult } from "./sqlGuard.js";
-import { REMOTE_TOOL_NAMES, remoteToolHandler } from "./remoteTools.js";
+import { REMOTE_TOOL_NAMES, remoteToolHandler, displayNameOf, noreplyEmailOf } from "./remoteTools.js";
 import { isPathWithinAny, normalizeDir } from "./paths.js";
 import type { ProjectsRepo, ProjectRow } from "../store/projectsRepo.js";
-import type { GithubAppConfig } from "../github/appToken.js";
-import { mintInstallationToken, createOrgRepo } from "../github/appToken.js";
+import type { GithubAppConfig, FetchLike } from "../github/appToken.js";
+import { mintInstallationToken, createOrgRepo, createPullRequest } from "../github/appToken.js";
+import type { ShellTokenSource } from "../github/shellToken.js";
 import { normalizeRepoName, decideOwnership, publishSourceDir } from "./publish.js";
 import { scopeDirs } from "./workerSelect.js";
 import { memoryScopeFor, SHARED_MEMORY_MAX_LEN, SHARED_MEMORY_TITLE_MAX_LEN, renderMemories } from "./memoryScope.js";
@@ -55,6 +56,12 @@ export type ToolCtx = {
   github: GithubAppConfig | null;
   // 시각 주입. 토큰 발급의 JWT iat/exp 와 projects.last_push_ts 에 쓴다.
   now: () => number;
+  // sh_exec 의 git 이 쓸 단기 토큰 공급원(github/shellToken.ts, agent.ts 가 프로세스당 하나 만든다).
+  // 깃허브 설정이 없으면 없다 — 그러면 remoteTools.ts 의 shellGitArgs 가 토큰 대신 사유를 실어 보낸다.
+  shellTokens?: ShellTokenSource;
+  // 깃허브 API 호출에 쓸 fetch. 테스트가 실제 네트워크 없이 토큰 발급·PR 생성 경로를 끝까지 태우기
+  // 위한 이음매다 — 없으면 전역 fetch 다(appToken.ts 의 fetchImpl 기본값).
+  githubFetch?: FetchLike;
   // 원격 워커 호출 통로. 워커가 연결돼 있을 때만 주입된다(index.ts 배선, agent.ts 의
   // buildRemoteCtx). roots 는 그 워커가 hello 프레임으로 알려온 실제 작업 폴더 목록 —
   // allowDirHandler(아래)가 이 값으로 등록 요청을 재검증한다(FIX2: 봇 프로세스 자신의
@@ -440,7 +447,11 @@ export function allowedToolsFor(
   // 덕에 사람이 지켜보지 않는 턴(요약·정기 게시)이 자동으로 닫힌다: 그 둘은 noRemoteTools 로
   // 이 축을 이미 끄고 있다(core.ts 의 summarizeAndClose, digest.ts). 별도 축을 새로 만들면
   // 그 축을 끄는 것을 잊은 새 무인 턴이 생겼을 때 조용히 열린다.
-  const publishTools = workerConnected && githubReady ? [t("publish_project"), t("restore_project")] : [];
+  // create_pull_request 도 같은 축이다(2026-09-05) — 워커 없이는 올릴 브랜치를 만들 방법이 없고, 사람이
+  // 지켜보지 않는 턴에서 조직 리포에 PR 이 생기면 안 되는 것도 발행과 같다.
+  const publishTools = workerConnected && githubReady
+    ? [t("publish_project"), t("restore_project"), t("create_pull_request")]
+    : [];
   const dirTools = workerConnected ? [t("allow_dir"), t("revoke_dir"), t("list_dirs")] : [];
   const webTools = webToolsEnabled ? WEB_TOOLS : [];
   // Important 4 — remember 는 네 분기 모두 이 배열 하나로만 열고 닫는다. memoryWriteEnabled
@@ -544,17 +555,8 @@ async function resolveTarget(ctx: ToolCtx, rawName: string): Promise<Target> {
   return { ok: true, repoName, dir: publishSourceDir({ workspaceDir, repoName }), existing };
 }
 
-// 커밋 author 에 쓸 이름. 조회가 실패하거나 이름이 비어 있으면 userId 로 폴백한다 — 발행이
-// 표시 이름 하나 때문에 멈추면 안 된다(recall 의 "(작성자 미상)" 폴백과 같은 자리다).
-async function authorNameOf(ctx: ToolCtx): Promise<string> {
-  try {
-    const names = await ctx.repos.users.displayNames();
-    return names[ctx.userId] || ctx.userId;
-  } catch {
-    return ctx.userId;
-  }
-}
-
+// 커밋 author 에 쓸 이름은 remoteTools.ts 의 displayNameOf 가 정한다(sh_exec 의 커밋 신원과 같은
+// 규칙 — 조회 실패·빈 이름이면 userId 로 폴백).
 function cloneUrlFor(org: string, repoName: string): string {
   return `https://github.com/${org}/${repoName}.git`;
 }
@@ -606,8 +608,8 @@ export async function publishHandler(ctx: ToolCtx, args: { name: string; message
     cloneUrl: cloneUrlFor(github.org, t.repoName),
     token,
     message: args.message ?? "아사히를 통해 발행",
-    authorName: await authorNameOf(ctx),
-    authorEmail: `${ctx.userId}@users.noreply.github.com`,
+    authorName: await displayNameOf(ctx),
+    authorEmail: noreplyEmailOf(ctx.userId),
   });
 
   if (!r.ok) return r;
@@ -642,6 +644,83 @@ export async function restoreHandler(ctx: ToolCtx, args: { name: string; discard
     token,
     discardLocal: args.discard_local === true,
   });
+}
+
+// ── PR 생성(2026-09-05) ──────────────────────────────────────────────────────
+// 부원이 sh_exec 의 git 으로 브랜치를 올린 뒤 main 에 PR 을 내는 마지막 조각. 리포·브랜치 이름은
+// 깃허브 API 경로와 JSON 본문으로만 나간다(워커 파일시스템에 닿지 않는다). 그래도 경로 구분자·상위
+// 이동·공백을 거절하는 이유는 publish.ts 의 normalizeRepoName 과 같다 — 고쳐 쓰면 무엇으로 고쳐졌는지
+// 사람도 모델도 모른다. 기존 리포 이름에는 점이 들어갈 수 있어(예: x.y) 점만은 허용한다.
+const PR_REPO_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
+// git check-ref-format 의 규칙 중 이 자리에서 실제로 걸리는 것만: 공백·제어문자 없음, "-" 로 시작 안
+// 함, ".." 없음, 슬래시로 나뉜 조각이 비지 않음.
+const PR_BRANCH_PATTERN = /^[A-Za-z0-9_][A-Za-z0-9._-]*(\/[A-Za-z0-9_][A-Za-z0-9._-]*)*$/;
+const PR_BRANCH_MAX_LEN = 200;
+const PR_TITLE_MAX_LEN = 200;
+
+function validRepoName(s: string): boolean {
+  return PR_REPO_PATTERN.test(s) && !s.includes("..");
+}
+function validBranchName(s: string): boolean {
+  return s.length <= PR_BRANCH_MAX_LEN && PR_BRANCH_PATTERN.test(s) && !s.includes("..");
+}
+
+export async function createPullRequestHandler(
+  ctx: ToolCtx,
+  args: { repo: string; head: string; base?: string; title: string; body?: string },
+): Promise<{ ok: boolean; content: string }> {
+  // 워커 연결 + 깃허브 설정은 노출 조건(allowedToolsFor 의 publishTools)과 같다 — 여기서 다시 확인하는
+  // 이유는 resolveTarget 과 같다(노출 판정과 실행 판정이 갈리면 조용히 새는 자리다).
+  if (!ctx.remote) return { ok: false, content: "지금은 워커가 연결돼 있지 않아 할 수 없어요." };
+  const github = ctx.github;
+  if (!github) return { ok: false, content: "깃허브 발행이 아직 설정되지 않았어요. 관리자에게 알려주세요." };
+
+  const repo = (args.repo ?? "").trim();
+  const head = (args.head ?? "").trim();
+  const base = (args.base ?? "main").trim();
+  const title = (args.title ?? "").trim();
+  if (!validRepoName(repo)) {
+    return { ok: false, content: "저장소 이름은 조직 안의 리포 이름 하나여야 해요(영문·숫자·점·하이픈·밑줄 — 조직 이름이나 주소는 빼고)." };
+  }
+  if (!validBranchName(head) || !validBranchName(base)) {
+    return { ok: false, content: "브랜치 이름에 공백이나 '..' 이 들어 있거나 형식이 맞지 않아요." };
+  }
+  if (head === base) return { ok: false, content: "head 와 base 가 같은 브랜치예요. 작업 브랜치를 head 로, 받을 브랜치를 base 로 주세요." };
+  if (title.length === 0 || title.length > PR_TITLE_MAX_LEN) return { ok: false, content: `PR 제목은 1~${PR_TITLE_MAX_LEN}자여야 해요.` };
+  // production 은 실서비스 배포 브랜치다 — 거기로 가는 PR 은 운영자가 main 에서 직접 낸다(AGENTS.md).
+  // 소유자 우회를 여기 하나 두는 이유: 그 PR 을 디스코드로 내는 사람은 운영자뿐이고, 그것을 막으면
+  // 운영자는 깃허브 웹으로 가야 한다. 병합은 어느 쪽이든 이 도구가 하지 않는다.
+  if (base === "production" && !ctx.isOwner) {
+    return { ok: false, content: "production 브랜치로 가는 PR 은 운영자만 만들 수 있어요. main 으로 PR 을 내 주세요." };
+  }
+
+  // 토큰은 그 리포 하나·pull_requests:write 로만 발급한다 — sh_exec 의 조직 전체 토큰과 달리 대상이
+  // 정해져 있으므로 좁힐 수 있고, 좁힐 수 있으면 좁힌다(발행 설계 §3).
+  let token: string;
+  try {
+    token = (await mintInstallationToken({
+      config: github, repoNames: [repo], permissions: { pull_requests: "write" }, nowMs: ctx.now(), fetchImpl: ctx.githubFetch,
+    })).token;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    // 깃허브는 App 에 없는 권한을 요청하면 발급 자체를 거절한다 — 그 문구("permissions requested are not
+    // granted")만으로는 어디를 고쳐야 하는지 알 수 없다. 2026-09-05 기준 asahi-publisher App 에는 이
+    // 권한이 없으므로 셋업 문서로 안내한다.
+    const hint = /permission/i.test(msg)
+      ? " 깃허브 App(asahi-publisher)에 Pull requests: Read and write 권한을 추가하고 조직 설치에서 승인해야 해요 — deploy/github-app-셋업.md 참고."
+      : "";
+    return { ok: false, content: msg + hint };
+  }
+
+  // PR 의 깃허브 작성자는 App 이라 그것만으로는 누가 냈는지 안 보인다 — 본문 끝에 요청자를 남긴다.
+  const requester = await displayNameOf(ctx);
+  const body = `${(args.body ?? "").trim()}\n\n---\n아사히를 통해 ${requester} 님이 요청한 PR 입니다.`.trim();
+  try {
+    const pr = await createPullRequest({ config: github, token, repoName: repo, head, base, title, body, fetchImpl: ctx.githubFetch });
+    return { ok: true, content: `PR 을 만들었어요: ${pr.url}` };
+  } catch (err) {
+    return { ok: false, content: err instanceof Error ? err.message : String(err) };
+  }
 }
 
 // 도구 선언 목록을 buildTools 에서 분리해 내보낸다. 이 배열 자체가 "핸들러의 반환을 MCP 결과로
@@ -689,6 +768,18 @@ export function buildToolDefinitions(ctx: ToolCtx) {
         discard_local: z.boolean().optional().describe("로컬을 버리고 새로 받을지(사용자가 명시적으로 요청했을 때만)"),
       },
       async (args) => { const r = await restoreHandler(ctx, args); return textResult(r.content, !r.ok); },
+    ),
+    tool(
+      "create_pull_request",
+      "동아리 깃허브 저장소에 풀 리퀘스트(PR)를 만듭니다. 먼저 sh_exec 의 git 으로 작업 브랜치를 push 해 두어야 합니다. base 는 기본 main 이고, production 은 운영자만 지정할 수 있습니다. 병합은 하지 않습니다 — 운영자가 합니다.",
+      {
+        repo: z.string().describe("조직 안의 저장소 이름(예: homepage). 조직 이름·주소는 빼세요"),
+        head: z.string().describe("push 해 둔 작업 브랜치 이름"),
+        base: z.string().optional().describe("받을 브랜치(기본 main)"),
+        title: z.string().describe("PR 제목"),
+        body: z.string().optional().describe("PR 설명(무엇을 왜 바꿨는지)"),
+      },
+      async (args) => { const r = await createPullRequestHandler(ctx, args); return textResult(r.content, !r.ok); },
     ),
     tool(
       "manage_access",

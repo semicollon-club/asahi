@@ -642,6 +642,18 @@ describe("깃허브 발행 안내", () => {
     expect(p).toContain("restore_project");
   });
 
+  // 2026-09-05: 기존 동아리 저장소는 sh_exec 의 git 으로 다루고(자격증명이 자동으로 붙는다),
+  // PR 은 create_pull_request 로 낸다. 도구가 있어도 있는 줄 모르면 쓰이지 않는다 — 그리고
+  // 봇이 main 에 직접 push 하지 않는다는 규칙은 코드가 아니라 이 안내가 유일한 장치다
+  // (production 은 깃허브 push 제한이 막지만 main 은 부원의 통합 브랜치라 일부러 열려 있다).
+  it("기존 저장소는 git 으로, PR 은 create_pull_request 로 안내하고 main·production 직접 push 를 금한다", () => {
+    const p = buildSystemPrompt({ ...base, workerConnected: true, githubReady: true });
+    expect(p).toContain("create_pull_request");
+    expect(p).toContain("git clone");
+    expect(p).toContain("production");
+    expect(p).toContain("git config");
+  });
+
   // 없는 도구를 쓰라고 안내하면 모델이 시도했다가 실패를 사용자에게 전달한다.
   it("깃허브 설정이 없으면 안내하지 않는다", () => {
     const p = buildSystemPrompt({ ...base, workerConnected: true, githubReady: false });
@@ -661,6 +673,7 @@ describe("깃허브 발행 안내", () => {
         const prompt = buildSystemPrompt({ role: "allowed", isPrivate, isOwner, workerConnected: true, githubReady });
         const tools = allowedToolsFor("allowed", isPrivate, isOwner, "local", { workerConnected: true, githubReady });
         expect(prompt.includes("publish_project")).toBe(tools.includes("mcp__asahi__publish_project"));
+        expect(prompt.includes("create_pull_request")).toBe(tools.includes("mcp__asahi__create_pull_request"));
       }
     }
   });

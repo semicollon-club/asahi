@@ -116,3 +116,31 @@ export async function createOrgRepo(o: {
   const body = (await res.json()) as { clone_url: string };
   return { cloneUrl: body.clone_url };
 }
+
+// PR 생성. 부원이 sh_exec 의 git 으로 브랜치를 올린 뒤 main 에 PR 을 내는 마지막 조각이다 — git 만으로는
+// PR 을 만들 수 없어 봇이 REST 로 만든다. 토큰은 호출측이 그 리포·pull_requests:write 로 좁혀 발급한다
+// (core/tools.ts 의 createPullRequestHandler). App 에 Pull requests: Read and write 권한이 있어야
+// 발급이 된다(deploy/github-app-셋업.md).
+export async function createPullRequest(o: {
+  config: GithubAppConfig;
+  token: string;
+  repoName: string;
+  head: string;
+  base: string;
+  title: string;
+  body?: string;
+  fetchImpl?: FetchLike;
+}): Promise<{ url: string; number: number }> {
+  const res = await fetchWithTimeout(
+    o.fetchImpl ?? fetch,
+    `https://api.github.com/repos/${o.config.org}/${o.repoName}/pulls`,
+    {
+      method: "POST",
+      headers: headers(o.token, true),
+      body: JSON.stringify({ title: o.title, head: o.head, base: o.base, body: o.body ?? "" }),
+    },
+  );
+  if (res.status !== 201) throw new Error(`PR 을 만들지 못했어요: ${await messageOf(res)}`);
+  const body = (await res.json()) as { html_url: string; number: number };
+  return { url: body.html_url, number: body.number };
+}
