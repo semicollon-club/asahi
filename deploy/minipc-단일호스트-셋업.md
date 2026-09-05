@@ -297,3 +297,32 @@ A 의 클론·`.env`·작업 정의는 그대로 둔다 — 다음 시도에 다
 - [ ] 미니PC 가 절전에 들어가지 않는다(전원 옵션 — 워커 때와 같다).
 - [ ] 작업 토큰(`/files`)은 A 프로세스 메모리의 부팅마다 난수 비밀로 서명되고 2시간이면 죽는다 — 별도 조치 없음.
   2단계에서 이 토큰이 세션의 `ANTHROPIC_AUTH_TOKEN` 이 될 때 위협 표(§9)를 다시 본다.
+
+## 9. 2단계 — 소유자 턴을 세션 러너로(선택, `HARNESS_OWNER`)
+
+컷오버가 끝난 뒤 켤 수 있는 스위치다(풀 하네스 2단계, 2026-09-06). 켜면 **소유자의 턴**(DM·서버 모두, 이미지 없는 것)이 봇의
+자기 세션이 아니라 **계정 B 의 Claude Code** 에서 돈다 — 내장 도구(Read/Write/Edit/Bash/Glob/Grep/WebSearch)·서브에이전트·
+스킬이 그 기계에서 그대로 실행되고, 모델 호출은 계정 A 의 루프백 프록시(`/llm`)를 거친다. B 에는 여전히 자격증명이 없다.
+손님·이미지 턴·무인 턴은 옛 경로 그대로다.
+
+**그 턴에는 봇의 MCP 도구가 없다** — 기억(remember/recall)·DB·접근관리·`send_file`·PR 생성. 4단계(MCP 허브)까지의 한계이고,
+능력 안내가 모델에게 그렇게 말해 준다. 그 도구가 필요한 요청은 플래그를 끄거나 손님 계정으로 하면 옛 경로다.
+
+1. **B(`asahi`) 먼저.** `asahi` 창(`runas /user:asahi powershell`)에서 `C:\asahi-worker\.env` 에 한 줄을 더하고 워커를 센티넬로
+   재시작한다(5절 3항의 절차). 봇 스위치를 켜기 전까지는 아무 턴도 새 경로로 오지 않으니 먼저 바꿔 두어도 안전하다.
+   ```
+   WORKER_MODE=harness
+   ```
+   워커 로그(`-Encoding UTF8`)의 시작 줄에 `모드=harness` 와 `[worker] 세션 러너 켬 — 프록시 http://127.0.0.1:3100/llm, 세션 폴더
+   C:\Users\asahi\.asahi-sessions` 가 나와야 한다.
+2. **A(`asahi-bot`).** `asahi-bot` 창에서 `C:\Users\asahi-bot\asahi-bot\.env` 에 `HARNESS_OWNER=true` 를 더하고 봇을 재시작한다 —
+   `New-Item C:\Users\asahi-bot\asahi-bot\update.flag` 로 내리고, 프로세스가 사라진 뒤 파일을 지우고 `schtasks /Run /TN asahi-bot`
+   (5-2 와 같은 확인). 봇 로그에 `[index] HARNESS_OWNER=true — 소유자 턴은 harness 모드 워커의 세션 러너로 보냅니다.` 가 있어야 한다.
+3. **확인.** 소유자로 "작업 폴더에 hello.txt 만들어" → 봇 로그에 `[agent] 하네스 턴 — 워커 semicolon-shared, 모델 claude-opus-5`,
+   진행 표시에 `Write`(내장 도구 이름). 이어서 "방금 만든 파일 이름이 뭐였지?" 로 resume 확인. 나머지는 `deploy/smoke-test.md`
+   의 2단계 항목 다섯.
+4. **되돌리기.** A 의 `.env` 에서 `HARNESS_OWNER` 줄을 지우고 봇을 재시작한다. 워커의 `WORKER_MODE=harness` 는 그대로 둬도 된다.
+
+세션 전사는 B 의 `C:\Users\asahi\.asahi-sessions\<userId>\` 에 남는다(`WORKER_SESSION_DIR` 로 바꿀 수 있다). `WORKER_ROOTS` 밖이라
+부원의 `fs_*` 로는 닿지 않지만 `sh_exec` 로는 닿는다 — 설계 §5 가 받아들인 위험이고, 소유자 세션의 전사에 자격증명은 없다
+(작업 토큰은 환경변수로만 가고 전사에 기록되지 않는다).

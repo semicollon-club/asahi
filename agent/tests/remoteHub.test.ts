@@ -717,3 +717,112 @@ describe("WorkerHub — keepalive ping", () => {
     hub.closeAll(); // 기본 간격 타이머가 남아 프로세스를 붙잡지 않게 정리한다
   });
 });
+
+// 풀 하네스 2단계(2026-09-05 밤): 허브가 세션 러너에게 턴을 맡긴다. 도구 호출(call/result)과 달리 턴은 여러
+// 이벤트(turn.event)를 흘리고 마지막에 turn.result 하나로 끝난다. 봇은 이 결과를 runTurn 의 결과와 같은 모양으로
+// 받는다 — 진행 표시·기록·resume 이 옛 경로와 같은 모양이어야 한다(계획 2.6).
+describe("WorkerHub — 세션 러너 턴(turn.*)", () => {
+  const registry = () => fakeRegistry({ w: hashWorkerToken("good") });
+  const startInput = {
+    userId: "u1", cwd: "/w", systemPrompt: "s", prompt: "p",
+    profile: { model: "claude-opus-5", maxTurns: 30, subagents: true }, token: "tok",
+  };
+
+  async function connected(hub: WorkerHub, mode?: "tools" | "harness") {
+    const s = fakeSocket();
+    hub.handleConnection(s.sock);
+    s.recv({ type: "hello", token: "good", workerId: "w", roots: ["/w"], ...(mode ? { mode } : {}) });
+    await flush();
+    return s;
+  }
+
+  it("hello 의 mode 를 기억한다 — isHarness 와 workersInfo 에 보인다", async () => {
+    const hub = new WorkerHub({ registry: registry() });
+    await connected(hub, "harness");
+    expect(hub.isHarness("w")).toBe(true);
+    expect(hub.workersInfo()[0]).toMatchObject({ workerId: "w", mode: "harness" });
+    const hub2 = new WorkerHub({ registry: registry() });
+    await connected(hub2);
+    expect(hub2.isHarness("w")).toBe(false);
+    expect(hub2.isHarness("없음")).toBe(false);
+  });
+
+  it("startTurn 은 turn.start 프레임을 보내고, turn.event 를 콜백으로, turn.result 를 결과로 돌려준다", async () => {
+    const hub = new WorkerHub({ registry: registry() });
+    const s = await connected(hub, "harness");
+    const events: Array<Record<string, unknown>> = [];
+    const t = hub.startTurn("w", startInput, (e) => events.push(e));
+    const sent = s.sent.find((f) => f.type === "turn.start");
+    expect(sent).toMatchObject({ type: "turn.start", id: t.id, ...startInput });
+    s.recv({ type: "turn.event", id: t.id, event: { kind: "tool", name: "Read" } });
+    s.recv({ type: "turn.event", id: t.id, event: { kind: "answering" } });
+    s.recv({ type: "turn.result", id: t.id, ok: true, text: "끝", sessionId: "sess" });
+    expect(await t.result).toEqual({ ok: true, text: "끝", sessionId: "sess" });
+    expect(events).toEqual([{ kind: "tool", name: "Read" }, { kind: "answering" }]);
+  });
+
+  it("모르는 id 의 turn.event/turn.result 는 무시한다 — 늦게 온 응답이 다른 턴에 섞이지 않는다", async () => {
+    const hub = new WorkerHub({ registry: registry() });
+    const s = await connected(hub, "harness");
+    const events: unknown[] = [];
+    const t = hub.startTurn("w", startInput, (e) => events.push(e));
+    s.recv({ type: "turn.event", id: "다른", event: { kind: "answering" } });
+    s.recv({ type: "turn.result", id: "다른", ok: true, text: "남의 것" });
+    s.recv({ type: "turn.result", id: t.id, ok: true, text: "내 것" });
+    expect(await t.result).toMatchObject({ text: "내 것" });
+    expect(events).toEqual([]);
+  });
+
+  it("실패 결과(error)도 그대로 전달한다 — 봇이 세션 없음 등을 판정할 수 있게", async () => {
+    const hub = new WorkerHub({ registry: registry() });
+    const s = await connected(hub, "harness");
+    const t = hub.startTurn("w", startInput, () => {});
+    s.recv({ type: "turn.result", id: t.id, ok: false, text: "", error: "No conversation found with session ID x" });
+    expect(await t.result).toEqual({ ok: false, text: "", error: "No conversation found with session ID x" });
+  });
+
+  it("연결이 없는 워커면 보내지 않고 즉시 실패 결과다", async () => {
+    const hub = new WorkerHub({ registry: registry() });
+    const t = hub.startTurn("없음", startInput, () => {});
+    expect(await t.result).toMatchObject({ ok: false, error: expect.stringContaining("연결") });
+  });
+
+  it("turn.result 전에 연결이 끊기면 실패 결과로 끝난다(영원히 기다리지 않는다)", async () => {
+    const hub = new WorkerHub({ registry: registry() });
+    const s = await connected(hub, "harness");
+    const t = hub.startTurn("w", startInput, () => {});
+    s.sock.close();
+    expect(await t.result).toMatchObject({ ok: false, error: expect.stringContaining("끊") });
+  });
+
+  it("cancel() 은 turn.cancel 을 보내고, 러너의 최종 결과는 여전히 기다린다", async () => {
+    const hub = new WorkerHub({ registry: registry() });
+    const s = await connected(hub, "harness");
+    const t = hub.startTurn("w", startInput, () => {});
+    t.cancel();
+    expect(s.sent.some((f) => f.type === "turn.cancel" && f.id === t.id)).toBe(true);
+    s.recv({ type: "turn.result", id: t.id, ok: false, text: "", error: "취소됨" });
+    expect(await t.result).toMatchObject({ ok: false, error: "취소됨" });
+  });
+
+  it("턴 타임아웃을 넘기면 실패 결과다 — 기본은 길지만 주입할 수 있다", async () => {
+    const hub = new WorkerHub({ registry: registry(), turnTimeoutMs: 20 });
+    await connected(hub, "harness");
+    const t = hub.startTurn("w", startInput, () => {});
+    expect(await t.result).toMatchObject({ ok: false, error: expect.stringContaining("응답하지 않았") });
+  });
+
+  it("도구 호출(call/result)은 턴과 나란히 그대로 동작한다 — 전환 기간 공존", async () => {
+    const hub = new WorkerHub({ registry: registry() });
+    const s = await connected(hub, "harness");
+    const t = hub.startTurn("w", startInput, () => {});
+    const call = hub.call("w", "fs_read", { path: "/w/a" });
+    const callFrame = s.sent.find((f) => f.type === "call");
+    expect(callFrame).toBeDefined();
+    if (callFrame?.type !== "call") throw new Error("unreachable");
+    s.recv({ type: "result", id: callFrame.id, ok: true, content: "본문" });
+    s.recv({ type: "turn.result", id: t.id, ok: true, text: "끝" });
+    expect(await call).toEqual({ ok: true, content: "본문" });
+    expect(await t.result).toMatchObject({ ok: true, text: "끝" });
+  });
+});

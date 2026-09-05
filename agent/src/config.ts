@@ -1,5 +1,6 @@
 import path from "node:path";
 import { isUnambiguousRoot } from "./remote/roots.js";
+import type { WorkerMode } from "./remote/protocol.js";
 import type { DigestChannels } from "./core/digest.js";
 import type { GithubAppConfig } from "./github/appToken.js";
 
@@ -51,6 +52,12 @@ export type Config = {
   // 봇 자동 갱신 센티넬(BOT_SENTINEL). 워커의 WORKER_SENTINEL 과 같은 방식·같은 옵트인 — 파일이 생기면 봇이
   // 진행 중인 턴을 마치고 스스로 내려가고, deploy/update-service.ps1 이 갱신한 뒤 다시 띄운다.
   sentinelPath?: string;
+  // 풀 하네스 2단계(2026-09-05 밤): 인증 프록시(/llm)가 끼울 구독 OAuth 토큰. SDK 도 같은 변수를 읽어 봇 자기 세션에 쓴다.
+  // 없으면 프록시는 503 을 낸다(봇 자기 세션은 SDK 가 따로 실패한다). 값은 로그·오류 문구 어디에도 싣지 않는다.
+  claudeOauthToken?: string;
+  // 소유자 턴을 세션 러너(계정 B 의 Claude Code)로 보내는 플래그. 정확히 "true" 일 때만 — 되돌리기는 이 값을 지우는 것이다.
+  // 선택 필드인 이유: Config 리터럴을 만드는 테스트 픽스처가 여럿이라, 없으면 false 로 읽는다(index.ts 는 === true 로 본다).
+  harnessOwner?: boolean;
 };
 
 // 깃허브 발행 설정. 개인키는 base64 한 줄로 받는다 — 줄바꿈이 든 PEM 은 .env 파서·배포
@@ -105,6 +112,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     prNotifyChannelId: env.PR_NOTIFY_CHANNEL_ID || undefined,
     hubBind: env.HUB_BIND?.trim() || undefined,
     sentinelPath: env.BOT_SENTINEL || undefined,
+    claudeOauthToken: env.CLAUDE_CODE_OAUTH_TOKEN?.trim() || undefined,
+    harnessOwner: env.HARNESS_OWNER === "true",
   };
 }
 
@@ -120,6 +129,11 @@ export type WorkerConfig = {
   // 미설정이면 감시 자체를 하지 않는다(옵트인). 자동 갱신용이라 기본값이 없다 — 부원 PC 모두가
   // 이 기능을 쓰는 게 아니다.
   sentinelPath?: string;
+  // 풀 하네스 2단계(2026-09-05 밤): WORKER_MODE. tools(기본)는 지금까지의 얇은 워커, harness 는 그 위에 세션 러너
+  // (remote/sessionRunner.ts)를 켠다 — 도구 실행기는 두 모드 모두 그대로 돈다(전환 기간 공존). hello 의 mode 로 봇에 알린다.
+  mode: WorkerMode;
+  // WORKER_SESSION_DIR — 부원별 CLAUDE_CONFIG_DIR 의 루트. 없으면 러너가 사용자 프로필 아래 기본 위치를 쓴다(worker.ts).
+  sessionDir?: string;
 };
 
 // Task 4: 워커는 이제 소유자가 누구인지 알 필요가 없다(신원·권한 판단은 허브 쪽에 있다) —
@@ -143,11 +157,19 @@ export function loadWorkerConfig(env: NodeJS.ProcessEnv = process.env): WorkerCo
       `WORKER_ROOTS 에 절대경로가 아닌 항목이 있습니다(윈도우는 드라이브 문자·UNC 필요): ${badRoots.join(", ")}`,
     );
   }
+  // 오타를 조용히 tools 로 떨어뜨리지 않는다 — "harnes" 라고 적은 워커가 도구 모드로 떠서 봇이 영원히 옛 경로만 타는
+  // 것은 증상이 없어 오래 간다.
+  const modeRaw = env.WORKER_MODE?.trim() || "tools";
+  if (modeRaw !== "tools" && modeRaw !== "harness") {
+    throw new Error(`WORKER_MODE 는 tools 또는 harness 여야 합니다 (현재 값: "${modeRaw}")`);
+  }
   return {
     workerId: env.WORKER_ID as string,
     workerToken: env.WORKER_TOKEN as string,
     hubUrl: env.HUB_URL as string,
     roots,
     sentinelPath: env.WORKER_SENTINEL || undefined,
+    mode: modeRaw,
+    sessionDir: env.WORKER_SESSION_DIR || undefined,
   };
 }

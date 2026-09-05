@@ -307,6 +307,28 @@ Register-ScheduledTask -TaskName "asahi-worker-update" -Action $action -Trigger 
 세 항목으로 한다 — PowerShell 스크립트와 작업 스케줄러 설정은 유닛 테스트가 닿지 않으므로
 첫 회차는 사람이 지켜봐야 한다.
 
+## 세션 러너 모드 — `WORKER_MODE=harness`(풀 하네스 2단계, 2026-09-06)
+
+워커의 `.env` 에 `WORKER_MODE=harness` 를 주면 이 워커는 도구 실행기에 더해 **세션 러너**(`agent/src/remote/sessionRunner.ts`)를
+켠다 — 봇이 보내는 `turn.start` 하나를 받아 그 작업 폴더에서 Claude Code(Agent SDK `query`)를 통째로 한 턴 돌리고, 진행을
+`turn.event` 로, 끝을 `turn.result` 로 돌려준다([설계](../docs/superpowers/specs/2026-09-05-full-harness-worker-design.md) §3·§7).
+도구 실행기(`fs_*`/`sh_exec`/…)는 그대로 돈다 — 봇이 새 경로로 보내지 않는 턴(손님·이미지·무인)은 여전히 도구 호출로 온다.
+
+**이 계정에는 여전히 자격증명이 없다.** 세션 환경에 들어가는 것은 셋이다: `ANTHROPIC_BASE_URL`(봇의 루프백 프록시 — `HUB_URL`
+에서 유도한 `http://127.0.0.1:<PORT>/llm`), `ANTHROPIC_AUTH_TOKEN`(봇이 턴마다 발급하는 작업 토큰 — 프록시만 알아본다, 2시간),
+`CLAUDE_CONFIG_DIR`(부원별 세션 폴더). 이 프로세스 환경에 `CLAUDE_CODE_OAUTH_TOKEN`·`ANTHROPIC_API_KEY` 가 있더라도 세션으로는
+가지 않는다(지운다). git 자격증명·신원은 `sh_exec` 와 같은 규약(`GIT_CONFIG_*`)으로 세션 환경에 얹혀 Bash 의 git 이 그대로
+인증한다.
+
+| 변수 | 값 |
+|---|---|
+| `WORKER_MODE` | `harness`. 비우면 `tools`(지금까지의 얇은 워커). 다른 값은 시작 시점에 실패한다 |
+| `WORKER_SESSION_DIR` | (선택) 부원별 `CLAUDE_CONFIG_DIR` 의 루트. 비우면 이 계정 프로필 아래 `.asahi-sessions`. **`WORKER_ROOTS` 밖에 둔다** — `fs_*` 로는 닿지 않게(`sh_exec` 는 같은 계정이라 닿는다 — 설계 §5 가 받아들인 위험) |
+
+`.env` 를 고친 뒤 워커를 재시작한다(센티넬 절차 — [minipc-단일호스트-셋업.md](minipc-단일호스트-셋업.md) 5절 3항). 로그의
+시작 줄에 `모드=harness` 와 `[worker] 세션 러너 켬 — 프록시 http://127.0.0.1:<PORT>/llm, 세션 폴더 …` 가 나와야 한다. 봇 쪽
+스위치(`HARNESS_OWNER=true`)를 켜기 전까지는 아무 턴도 이 경로로 오지 않는다 — 워커를 먼저 바꿔 두어도 안전하다.
+
 ## 실행
 
 ```powershell

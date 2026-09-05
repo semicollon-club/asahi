@@ -13,8 +13,10 @@ import { IntrospectRepo } from "../src/store/introspectRepo.js";
 import {
   buildToolCtx, buildMultimodalMessage, buildRemoteCtx, resolveTurnWorker,
   resolveWebToolsEnabled, resolveMemoryWriteEnabled, progressFromMessage,
+  makeRunAgentTurn, decideHarnessDispatch,
   type TurnContext, type ToolRepos, type PendingTool,
 } from "../src/core/agent.js";
+import { makeJobTokenMinter, newJobTokenSecret } from "../src/core/jobToken.js";
 import { allowDirHandler, allowedToolsFor, type RuntimeInfo } from "../src/core/tools.js";
 
 const testRuntime: RuntimeInfo = { model: "claude-opus-5", sdkVersion: "0.3.207", deployTarget: "local", maxTurns: 30, workers: [] };
@@ -88,15 +90,42 @@ describe("resolveTurnWorker — 이 턴이 실제로 쓸 워커를 정한다(Tas
     expect(worker).toEqual({ workerId: "shared-worker", kind: "shared" });
   });
 
-  it("소유자 DM 이어도 그 워커가 허브에 연결돼 있지 않으면 null", async () => {
+  it("소유자 DM 이어도 개인·공유 워커가 둘 다 허브에 연결돼 있지 않으면 null", async () => {
     const worker = await resolveTurnWorker({ context: { isOwner: true, isPrivate: true, userId: "owner" } }, registryStub(), disconnectedHub);
     expect(worker).toBeNull();
   });
 
-  it("registry 가 그 선택자에 해당하는 워커를 못 찾으면(등록되지 않음) null", async () => {
+  // 풀 하네스 2단계(2026-09-05 밤, 계획 2.5): 미니PC 단일 호스트에서 허브가 루프백에만 묶여 개인 PC 워커는 붙을 수 없다 —
+  // 소유자 DM 이 워커 없는 대화로 떨어지지 않게, 개인 워커가 없거나 끊겨 있으면 공유 워커(관리자 스코프)로 간다.
+  // 개인 워커가 실제로 붙어 있으면 여전히 그것이 우선이다(위 첫 케이스).
+  it("소유자 DM 에서 개인 워커가 등록되지 않았으면 공유 워커로 간다(관리자 스코프)", async () => {
     const worker = await resolveTurnWorker(
       { context: { isOwner: true, isPrivate: true, userId: "owner" } },
       registryStub({ personal: null }),
+      connectedHub,
+    );
+    expect(worker).toEqual({ workerId: "shared-worker", kind: "shared" });
+  });
+
+  it("소유자 DM 에서 개인 워커가 등록됐지만 끊겨 있고 공유 워커만 연결돼 있으면 공유 워커로 간다", async () => {
+    const sharedOnly = { isConnected: (id: string) => id === "shared-worker" };
+    const worker = await resolveTurnWorker({ context: { isOwner: true, isPrivate: true, userId: "owner" } }, registryStub(), sharedOnly);
+    expect(worker).toEqual({ workerId: "shared-worker", kind: "shared" });
+  });
+
+  it("소유자 DM 에서 개인 워커도 없고 공유 워커도 등록되지 않았으면 null", async () => {
+    const worker = await resolveTurnWorker(
+      { context: { isOwner: true, isPrivate: true, userId: "owner" } },
+      registryStub({ personal: null, shared: null }),
+      connectedHub,
+    );
+    expect(worker).toBeNull();
+  });
+
+  it("손님은 공유 워커가 없으면 null — 개인 워커로 떨어지지 않는다", async () => {
+    const worker = await resolveTurnWorker(
+      { context: { isOwner: false, isPrivate: true, userId: "guest" } },
+      registryStub({ shared: null }),
       connectedHub,
     );
     expect(worker).toBeNull();
@@ -444,5 +473,89 @@ describe("githubReady 가 allowedToolsFor 까지 실제로 전달되는가", () 
     for (const axis of ["workerConnected", "webToolsEnabled", "memoryWriteEnabled", "githubReady"]) {
       expect(args).toContain(axis);
     }
+  });
+});
+
+// 풀 하네스 2단계(2026-09-05 밤): 소유자 턴을 세션 러너(계정 B 의 Claude Code)로 보내는 디스패치. 판정은 순수 함수
+// decideHarnessDispatch 하나에 모아 두고(플래그·신원·워커 모드·이미지·무인 턴·토큰 발급기·채널), makeRunAgentTurn 은
+// 그 판정이 참이면 SDK query() 대신 hub.startTurn 을 부른다 — 진행 표시(onProgress)·결과(TurnResult)·resume(sessionId)
+// 은 옛 경로와 같은 모양이다(계획 2.6). 가짜 허브로 그 경로를 끝까지 태운다 — SDK 는 부르지 않는다.
+describe("decideHarnessDispatch — 어느 턴이 새 경로를 타는가", () => {
+  const ok = { enabled: true, isOwner: true, workerIsHarness: true, hasImages: false, noRemoteTools: false, hasJobTokens: true, hasChannelRef: true, hasCwd: true };
+  it("플래그·소유자·하네스 워커·토큰·채널·작업 폴더가 전부 있고 이미지·무인 턴이 아니면 참", () => {
+    expect(decideHarnessDispatch(ok)).toBe(true);
+  });
+  it("하나라도 빠지면 거짓 — 손님, 도구 모드 워커, 이미지 턴(프레임 상한), 무인 턴, 토큰 발급기·채널·폴더 없음", () => {
+    expect(decideHarnessDispatch({ ...ok, enabled: false })).toBe(false);
+    expect(decideHarnessDispatch({ ...ok, isOwner: false })).toBe(false);
+    expect(decideHarnessDispatch({ ...ok, workerIsHarness: false })).toBe(false);
+    expect(decideHarnessDispatch({ ...ok, hasImages: true })).toBe(false);
+    expect(decideHarnessDispatch({ ...ok, noRemoteTools: true })).toBe(false);
+    expect(decideHarnessDispatch({ ...ok, hasJobTokens: false })).toBe(false);
+    expect(decideHarnessDispatch({ ...ok, hasChannelRef: false })).toBe(false);
+    expect(decideHarnessDispatch({ ...ok, hasCwd: false })).toBe(false);
+  });
+});
+
+describe("makeRunAgentTurn — 하네스 디스패치(소유자, HARNESS_OWNER)", () => {
+  type Started = { input: Record<string, unknown>; onEvent: (e: Record<string, unknown>) => void };
+  function fakeHub(o: { harness: boolean; roots?: string[]; outcome?: { ok: boolean; text: string; sessionId?: string; error?: string }; events?: Array<Record<string, unknown>> }) {
+    const started: Started[] = [];
+    const hub = {
+      isConnected: () => true,
+      isHarness: () => o.harness,
+      rootsOf: () => o.roots ?? ["C:\\asahi-workspace"],
+      workersInfo: () => [],
+      call: async () => ({ ok: true, content: "" }),
+      startTurn: (_workerId: string, input: Record<string, unknown>, onEvent: (e: Record<string, unknown>) => void) => {
+        started.push({ input, onEvent });
+        for (const e of o.events ?? []) onEvent(e);
+        return { id: "t1", result: Promise.resolve(o.outcome ?? { ok: true, text: "끝", sessionId: "sess-h" }), cancel: () => {} };
+      },
+    };
+    return { hub, started };
+  }
+  const registry = { personalWorkerOf: async () => null, sharedWorkerId: async () => "shared-worker" };
+  const ownerCtx = { role: "owner" as const, isPrivate: true, isOwner: true, userId: "owner", conversationId: 3, channelRef: "chan-3" };
+
+  it("소유자 턴을 turn.start 로 보낸다 — 작업 토큰·프로필·작업 폴더·하네스용 시스템 프롬프트를 싣고, 이벤트는 onProgress 로, 결과는 TurnResult 로", async () => {
+    const r = await repos();
+    const minter = makeJobTokenMinter(newJobTokenSecret());
+    const { hub, started } = fakeHub({ harness: true, events: [{ kind: "tool", name: "Read", input: "a.ts" }, { kind: "answering" }, { kind: "bogus" }] });
+    const run = makeRunAgentTurn(r, "local", "claude-opus-5", registry, hub as never, null, () => 0, { jobTokens: minter, harness: { enabled: true } });
+    const progress: unknown[] = [];
+    const result = await run({ prompt: "사용자(운영자) 메시지: 파일 하나 만들어", systemPrompt: "봇용 프롬프트(무시된다)", cwd: "/bot", context: ownerCtx, onProgress: (u) => progress.push(u) });
+    expect(result).toEqual({ text: "끝", sessionId: "sess-h", ok: true });
+    expect(started).toHaveLength(1);
+    const input = started[0].input;
+    expect(input).toMatchObject({ userId: "owner", cwd: "C:\\asahi-workspace", prompt: "사용자(운영자) 메시지: 파일 하나 만들어", profile: { model: "claude-opus-5", subagents: true } });
+    // 토큰은 이 부원·이 대화·이 채널로 발급된 진짜 작업 토큰이다.
+    expect(minter.verify(input.token as string)).toMatchObject({ userId: "owner", conversationId: 3, channelRef: "chan-3" });
+    // 시스템 프롬프트는 봇용이 아니라 하네스용이다 — 내장 도구를 안내하고 원격 도구 이름은 없다.
+    expect(String(input.systemPrompt)).toMatch(/Bash/);
+    expect(String(input.systemPrompt)).not.toMatch(/fs_read|sh_exec/);
+    // git 인자는 sh_exec 와 같은 자리에서 만든다(깃허브 미설정이라 토큰 대신 사유).
+    expect(input.git).toMatchObject({ userName: expect.any(String), userEmail: "owner@users.noreply.github.com" });
+    // 모양이 맞는 이벤트만 진행 표시로 간다.
+    expect(progress).toEqual([{ kind: "tool", name: "Read", input: "a.ts" }, { kind: "answering" }]);
+  });
+
+  it("resume 을 실어 보내고, 러너가 세션 없음으로 실패하면 같은 문구로 던진다 — core 의 재시도 경로가 그대로 잡는다", async () => {
+    const r = await repos();
+    const minter = makeJobTokenMinter(newJobTokenSecret());
+    const { hub, started } = fakeHub({ harness: true, outcome: { ok: false, text: "", error: "No conversation found with session ID sess-old" } });
+    const run = makeRunAgentTurn(r, "local", "claude-opus-5", registry, hub as never, null, () => 0, { jobTokens: minter, harness: { enabled: true } });
+    await expect(run({ prompt: "p", systemPrompt: "s", cwd: "/bot", resume: "sess-old", context: ownerCtx })).rejects.toThrow(/No conversation found with session ID/);
+    expect(started[0].input.resume).toBe("sess-old");
+  });
+
+  it("그 밖의 실패는 던지지 않고 ok:false 결과다(봇이 '처리 중 오류' 안내로 바꾼다)", async () => {
+    const r = await repos();
+    const minter = makeJobTokenMinter(newJobTokenSecret());
+    const { hub } = fakeHub({ harness: true, outcome: { ok: false, text: "", error: "error_max_turns" } });
+    const run = makeRunAgentTurn(r, "local", "claude-opus-5", registry, hub as never, null, () => 0, { jobTokens: minter, harness: { enabled: true } });
+    const result = await run({ prompt: "p", systemPrompt: "s", cwd: "/bot", context: ownerCtx });
+    expect(result.ok).toBe(false);
+    expect(result.text).toContain("error_max_turns");
   });
 });

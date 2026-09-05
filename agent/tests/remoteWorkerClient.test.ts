@@ -238,3 +238,72 @@ describe("워커 클라이언트", () => {
     c.stop();
   });
 });
+
+// 풀 하네스 2단계(2026-09-05 밤): 워커 클라이언트가 turn.* 프레임을 세션 러너에 넘긴다. 러너가 없는 워커(도구
+// 모드)는 turn.start 를 받으면 즉시 실패 결과를 돌려준다 — 봇이 "이 워커는 러너가 아니다"를 알고 옛 경로로 간다.
+describe("워커 클라이언트 — 세션 러너(turn.*)", () => {
+  const startFrame: Frame = {
+    type: "turn.start", id: "t1", userId: "u1", cwd: "/w", systemPrompt: "s", prompt: "p",
+    profile: { model: "m", maxTurns: 30, subagents: true }, token: "tok",
+  };
+
+  it("mode 를 주면 hello 에 실어 보낸다", () => {
+    const s = fakeSocket();
+    const c = startWorkerClient({ connect: () => s.sock, token: "t", workerId: "w", roots: ["/w"], executors, mode: "harness" });
+    s.open();
+    expect(s.sent[0]).toEqual({ type: "hello", token: "t", workerId: "w", roots: ["/w"], mode: "harness" });
+    c.stop();
+  });
+
+  it("turn.start 를 러너에 넘기고, 러너가 send 로 낸 turn.event/turn.result 를 그대로 소켓으로 보낸다", async () => {
+    const s = fakeSocket();
+    const started: Frame[] = [];
+    const runner = {
+      start: (frame: Frame, send: (f: Frame) => void) => {
+        started.push(frame);
+        send({ type: "turn.event", id: "t1", event: { kind: "answering" } });
+        send({ type: "turn.result", id: "t1", ok: true, text: "끝", sessionId: "sess" });
+      },
+      cancel: vi.fn(),
+    };
+    const c = startWorkerClient({ connect: () => s.sock, token: "t", workerId: "w", roots: ["/w"], executors, mode: "harness", runner: runner as never });
+    s.open();
+    s.recv(startFrame);
+    await vi.waitFor(() => expect(s.sent.some((f) => f.type === "turn.result")).toBe(true));
+    expect(started).toEqual([startFrame]);
+    expect(s.sent.filter((f) => f.type === "turn.event")).toEqual([{ type: "turn.event", id: "t1", event: { kind: "answering" } }]);
+    expect(s.sent.find((f) => f.type === "turn.result")).toEqual({ type: "turn.result", id: "t1", ok: true, text: "끝", sessionId: "sess" });
+    c.stop();
+  });
+
+  it("러너가 없으면 turn.start 에 즉시 실패 결과를 돌려준다", async () => {
+    const s = fakeSocket();
+    const c = startWorkerClient({ connect: () => s.sock, token: "t", workerId: "w", roots: ["/w"], executors });
+    s.open();
+    s.recv(startFrame);
+    await vi.waitFor(() => expect(s.sent.some((f) => f.type === "turn.result")).toBe(true));
+    expect(s.sent.find((f) => f.type === "turn.result")).toMatchObject({ id: "t1", ok: false, error: expect.stringContaining("러너") });
+    c.stop();
+  });
+
+  it("turn.cancel 은 러너의 cancel 로 간다", () => {
+    const s = fakeSocket();
+    const runner = { start: vi.fn(), cancel: vi.fn() };
+    const c = startWorkerClient({ connect: () => s.sock, token: "t", workerId: "w", roots: ["/w"], executors, mode: "harness", runner: runner as never });
+    s.open();
+    s.recv({ type: "turn.cancel", id: "t9" });
+    expect(runner.cancel).toHaveBeenCalledWith("t9");
+    c.stop();
+  });
+
+  it("러너가 던져도 실패 결과로 답한다(프레임을 받고 침묵하지 않는다)", async () => {
+    const s = fakeSocket();
+    const runner = { start: () => { throw new Error("터짐"); }, cancel: vi.fn() };
+    const c = startWorkerClient({ connect: () => s.sock, token: "t", workerId: "w", roots: ["/w"], executors, mode: "harness", runner: runner as never });
+    s.open();
+    s.recv(startFrame);
+    await vi.waitFor(() => expect(s.sent.some((f) => f.type === "turn.result")).toBe(true));
+    expect(s.sent.find((f) => f.type === "turn.result")).toMatchObject({ id: "t1", ok: false, error: expect.stringContaining("터짐") });
+    c.stop();
+  });
+});
