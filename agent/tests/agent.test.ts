@@ -16,7 +16,7 @@ import {
 } from "../src/core/agent.js";
 import { allowDirHandler, allowedToolsFor, type RuntimeInfo } from "../src/core/tools.js";
 
-const testRuntime: RuntimeInfo = { model: "claude-opus-4-8", sdkVersion: "0.3.207", deployTarget: "local", maxTurns: 30, workers: [] };
+const testRuntime: RuntimeInfo = { model: "claude-opus-5", sdkVersion: "0.3.207", deployTarget: "local", maxTurns: 30, workers: [] };
 
 // buildToolCtx 를 makeRunAgentTurn 안의 인라인 리터럴이 아니라 별도 순수 함수로 뽑아 두면,
 // TurnContext → ToolCtx 변환에서 필드 하나가 조용히 빠지는 종류의 버그(과거 실제로 있었다 —
@@ -38,10 +38,10 @@ describe("buildToolCtx — makeRunAgentTurn 의 ToolCtx 구성", () => {
   it("buildToolCtx 는 introspect 리포와 runtime 을 ctx 로 옮긴다", async () => {
     const db = await openTestDb();
     const repos: ToolRepos = { memories: {} as any, users: {} as any, allowedDirs: {} as any, introspect: new IntrospectRepo(db), projects: new ProjectsRepo(db) };
-    const runtime: RuntimeInfo = { model: "claude-opus-4-8", sdkVersion: "0.3.207", deployTarget: "local", maxTurns: 30, workers: [] };
+    const runtime: RuntimeInfo = { model: "claude-opus-5", sdkVersion: "0.3.207", deployTarget: "local", maxTurns: 30, workers: [] };
     const ctx = buildToolCtx(repos, { role: "owner", isPrivate: true, isOwner: true, userId: "o", conversationId: 1 }, runtime);
     expect(ctx.repos.introspect).toBe(repos.introspect);
-    expect(ctx.runtime.model).toBe("claude-opus-4-8");
+    expect(ctx.runtime.model).toBe("claude-opus-5");
   });
 });
 
