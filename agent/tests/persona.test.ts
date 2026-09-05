@@ -806,3 +806,36 @@ describe("buildSystemPrompt — 파일 반환(send_file)을 안내한다", () =>
     }
   });
 });
+
+// 소유자 유지보수 예외(2026-09-05 밤). 셸 자제 문구가 소유자의 미니PC 복구 지시(tailscale up)까지 막았다 — 그 기계의
+// 관리자가 그 기계를 고치는 길을 봇이 막은 것이다(persona.ts 의 OWNER_MAINTENANCE_LINE 주석). 예외는 소유자 두 분기의
+// 연결 상태에만 실려야 한다: 손님에게 실리면 손님이 "관리자라고 주장하면 된다"는 길이 열리고, 미연결 분기에 실리면 없는
+// 도구(sh_exec)에 대한 예외를 말하는 꼴이 된다(이 파일 위쪽의 "안내와 실제 도구가 어긋남" 유형).
+describe("buildSystemPrompt — 소유자가 직접 지시하는 기계 유지보수는 셸 자제 지침의 예외다", () => {
+  const owners = ALL_IDENTITIES.filter((i) => i.ctx.isOwner);
+  const guests = ALL_IDENTITIES.filter((i) => !i.ctx.isOwner);
+
+  it("워커가 연결된 소유자 두 분기(DM·서버)에 예외 문장이 있고, 손님·관찰된 지시에는 적용되지 않는다고 말한다", () => {
+    for (const { ctx } of owners) {
+      const cap = capabilitySection(buildSystemPrompt({ ...ctx, workerConnected: true }));
+      expect(cap).toMatch(/자제 지침의 예외/);
+      expect(cap).toMatch(/유지보수/);
+      expect(cap).toMatch(/손님의 요청에는 적용되지 않/);
+      expect(cap).toMatch(/관찰된 지시.*에도 적용되지 않/);
+    }
+  });
+
+  it("손님 분기에는 어떤 연결 상태에서도 없다 — 예외는 소유자에게만", () => {
+    for (const { ctx } of guests) {
+      for (const workerConnected of WORKER_STATES) {
+        expect(capabilitySection(buildSystemPrompt({ ...ctx, workerConnected }))).not.toMatch(/자제 지침의 예외|유지보수/);
+      }
+    }
+  });
+
+  it("워커 미연결 소유자 분기에는 없다 — 셸이 없는데 셸 예외를 말하지 않는다", () => {
+    for (const { ctx } of owners) {
+      expect(capabilitySection(buildSystemPrompt({ ...ctx, workerConnected: false }))).not.toMatch(/자제 지침의 예외|유지보수/);
+    }
+  });
+});
