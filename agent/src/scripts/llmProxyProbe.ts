@@ -7,14 +7,22 @@
 //   ANTHROPIC_AUTH_TOKEN=worker-dummy                  ↑ ASAHI_PROBE_TOKEN(진짜 자격증명, 메모리에만)
 //   CLAUDE_CONFIG_DIR=빈 폴더(로컬 로그인 차단)
 //
-// 실행(agent/ 에서):
-//   npx tsx src/scripts/llmProxyProbe.ts                              # 전송 경로만 확인(진짜 토큰 없음 → 401 이 정상)
-//   ASAHI_PROBE_USE_LOCAL_LOGIN=1 npx tsx src/scripts/llmProxyProbe.ts   # 이 PC 의 Claude Code 로그인(~/.claude/.credentials.json)을 끼운다
-//   ASAHI_PROBE_TOKEN=<토큰> npx tsx src/scripts/llmProxyProbe.ts        # API 키나 setup-token 출력을 직접 끼운다
+// 실행(agent/ 에서). 윈도우 PowerShell 5.1 은 `VAR=값 명령` 문법이 없고 실행 정책이 npx.ps1 을 막으므로
+// npx.cmd 를 부른다. 토큰은 Read-Host 로 받아 쉘 히스토리에 남기지 않는다:
+//   $s = Read-Host "토큰" -AsSecureString
+//   $env:ASAHI_PROBE_TOKEN = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($s))
+//   npx.cmd tsx src/scripts/llmProxyProbe.ts
+//   Remove-Item Env:ASAHI_PROBE_TOKEN
+// 토큰 없이 돌리면 전송 경로만 확인한다(업스트림 401 이 정상). Git Bash 면
+//   ASAHI_PROBE_TOKEN=<토큰> npx tsx src/scripts/llmProxyProbe.ts
 //
-// 어느 종류의 자격증명이 프록시 뒤에서 받아들여지는지가 곧 자격증명 종류의 결정 근거다(스펙 §4.3). 이
-// 스크립트는 헤더 값을 어디에도 기록하지 않는다 — 이름·유무만 찍는다. 토큰은 터미널 세션의 환경변수로만
-// 주고 쉘 히스토리에 남기지 않도록 한다. 로컬 로그인 옵션은 운영자가 명시적으로 켰을 때만 그 파일을 읽는다.
+// 토큰은 봇이 Railway 에서 실제로 쓰는 CLAUDE_CODE_OAUTH_TOKEN(같은 종류·같은 값이라 가장 정확한 시험)이거나
+// `claude setup-token` 의 출력이다. 어느 종류의 자격증명이 프록시 뒤에서 받아들여지는지가 자격증명 결정의
+// 근거다(스펙 §4.3). 이 스크립트는 헤더 값을 어디에도 기록하지 않는다 — 이름·유무만 찍는다.
+//
+// ASAHI_PROBE_USE_LOCAL_LOGIN=1 은 ~/.claude/.credentials.json 의 계정 로그인(claudeAiOauth)을 읽는 옵션인데,
+// 2026-09-05 운영자 PC 실측으로 그 파일에는 MCP 서버 OAuth 항목만 있고 계정 로그인이 없었다 — Claude 데스크톱
+// 앱의 로그인은 이 파일에 저장되지 않는다. CLI 로 `claude login` 한 기계에서만 뜻이 있다.
 //
 // 2026-09-05 운영자 PC 실측(진짜 토큰 없이):
 // - 로컬 로그인이 있는데 base URL 만 바꾸면 CLI 는 `HEAD /` 만 보내고 "Not logged in" 으로 끝냈다 — base URL 을
@@ -42,7 +50,11 @@ function readLocalLogin(): string | undefined {
     const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as { claudeAiOauth?: { accessToken?: string } };
     const token = parsed.claudeAiOauth?.accessToken;
     if (typeof token === "string" && token.length > 0) return token;
-    console.error(`로컬 로그인 파일에 claudeAiOauth.accessToken 이 없어요: ${file}`);
+    console.error(
+      `로컬 로그인 파일에 계정 로그인(claudeAiOauth.accessToken)이 없어요: ${file}\n` +
+        "Claude 데스크톱 앱의 로그인은 이 파일에 저장되지 않아요. Railway 의 CLAUDE_CODE_OAUTH_TOKEN 값이나 " +
+        "`claude setup-token` 출력을 ASAHI_PROBE_TOKEN 으로 주세요(위 머리말의 Read-Host 절차).",
+    );
   } catch (err) {
     console.error(`로컬 로그인 파일을 읽지 못했어요(${file}): ${err instanceof Error ? err.message : String(err)}`);
   }

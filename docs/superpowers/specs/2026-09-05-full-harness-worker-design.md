@@ -159,13 +159,19 @@ Claude Code 지만, 한 구독으로 여러 사람을 서비스하는 것은 지
   "Not logged in" 을 싣고 끝난다.
 
 아직 못 본 것은 하나 — 프록시가 끼운 **구독 OAuth 토큰을 업스트림이 받는지.** 프록시가 보내는 요청은 CLI 가
-직접 보낼 때와 같은 모양이고 OAuth 토큰은 IP 에 묶이지 않으므로 받아들여질 가능성이 높지만, 실측이 1단계
-착수의 전제다. 이 스크립트는 운영자의 자격증명을 스스로 읽지 않으므로 운영자가 직접 돌린다:
+직접 보낼 때와 같은 모양이고 OAuth 토큰은 IP 에 묶이지 않으므로 받아들여질 가능성이 높지만, 실측이 2단계
+착수의 전제다. 이 스크립트는 운영자의 자격증명을 스스로 읽지 않으므로 운영자가 직접 돌린다. 토큰은 봇이
+Railway 에서 실제로 쓰는 `CLAUDE_CODE_OAUTH_TOKEN` 값이 가장 정확하다(같은 종류·같은 값). 운영자 PC 의
+`~/.claude/.credentials.json` 에는 계정 로그인이 없다는 것을 실측했다(데스크톱 앱 로그인은 거기 저장되지 않고
+MCP 서버 OAuth 항목만 있다) — 그래서 `ASAHI_PROBE_USE_LOCAL_LOGIN` 은 CLI 로 `claude login` 한 기계에서만
+뜻이 있다. PowerShell 에서는 토큰이 쉘 히스토리에 남지 않게 `Read-Host` 로 받는다:
 
-```
+```powershell
 cd agent
-ASAHI_PROBE_USE_LOCAL_LOGIN=1 npx tsx src/scripts/llmProxyProbe.ts        # 이 PC 의 Claude Code 로그인으로
-ASAHI_PROBE_TOKEN=<setup-token 출력> npx tsx src/scripts/llmProxyProbe.ts   # 또는 토큰을 직접
+$s = Read-Host "토큰" -AsSecureString
+$env:ASAHI_PROBE_TOKEN = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($s))
+npx.cmd tsx src/scripts/llmProxyProbe.ts
+Remove-Item Env:ASAHI_PROBE_TOKEN
 ```
 
 `verdict` 가 "성공" 이면 §4.1 이 실측된 것이다. 토큰은 메모리에만 있고 스크립트는 헤더 값을 기록하지 않는다.
