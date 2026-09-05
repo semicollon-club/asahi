@@ -25,7 +25,7 @@ lastReviewed: 2026-09-05
 
 ## 1단계 — 봇 이사(미니PC 계정 A)
 
-**상태(2026-09-05 밤): 1.1~1.4 완료, 1.5(컷오버·스모크)는 운영자 절차 — `deploy/minipc-단일호스트-셋업.md`.**
+**상태(2026-09-05 밤): 1.1~1.5 완료 — 컷오버 실행됨(봇: 미니PC `asahi-bot`, 포트 3100 루프백; `runtime_info` 봇·워커 커밋 `ec8f906` 동일). 남은 스모크: 재부팅 무인 기동·`send_file`·PR 추적·정기 게시 — `deploy/minipc-단일호스트-셋업.md`(실측 기록 포함)·`deploy/smoke-test.md`.**
 계획과 다른 점 둘 — (1) `HUB_BIND` 의 기본값은 `0.0.0.0` 이 아니라 "지정 없음"(Node 의 `listen(port)` 그대로, IPv6 포함)이다.
 Railway 는 IPv6 사설망으로 컨테이너에 닿으므로 IPv4 전용 바인드를 기본값으로 박으면 컷오버 전의 Railway 배포가 깨진다.
 (2) 커밋 읽기는 새 `core/gitCommit.ts` 가 아니라 이미 있던 `remote/gitCommit.ts`(워커의 `readCommit`)에 `readBranch`·

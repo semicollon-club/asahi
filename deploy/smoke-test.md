@@ -411,8 +411,8 @@ JS 를 받아 파일을 쓰지 못하고 죽는다. `setInterval` 이 프로세�
   워커가 영구히 멈춘다 — "다시 뜬다"만 보고 통과로 적으면 몇 분 뒤 이 상태를 놓친다.
 
 - [ ] **미니PC 단일 호스트(1단계, 2026-09-05) — 허브가 루프백에만 묶였는가** — 컷오버 뒤 미니PC 에서
-  `Test-NetConnection 127.0.0.1 -Port 3000` 은 `TcpTestSucceeded : True`, **다른 PC** 에서 `Test-NetConnection <미니PC IP>
-  -Port 3000` 은 `False` 여야 한다. 봇 로그(`C:\Users\asahi-bot\asahi-bot\logs\bot.log`)의 기동 줄에 `(바인드 127.0.0.1)` 이
+  `Test-NetConnection 127.0.0.1 -Port 3100` 은 `TcpTestSucceeded : True`, **다른 PC** 에서 `Test-NetConnection <미니PC IP>
+  -Port 3100` 은 `False` 여야 한다. 봇 로그(`C:\Users\asahi-bot\asahi-bot\logs\bot.log`)의 기동 줄에 `(바인드 127.0.0.1)` 이
   있어야 한다 — 없으면 `HUB_BIND` 가 비어 모든 인터페이스에 열린 것이다(`deploy/minipc-단일호스트-셋업.md` 3절).
 
 - [ ] **미니PC 단일 호스트 — 계정 B 가 A 의 `.env` 를 못 읽는가** — `asahi` 계정 창에서

@@ -70,7 +70,7 @@ npx tsx src/scripts/registerWorker.ts --id semicolon-shared --kind shared --labe
 |---|---|
 | `WORKER_ID` | 위 등록 절차의 `--id`와 정확히 같은 값. 이 워커 자신의 신원이다 |
 | `WORKER_TOKEN` | 등록(또는 재발급) 시 콘솔에 한 번 출력된 토큰. 사람이 정하지 않는다 |
-| `HUB_URL` | 봇의 `/worker` WebSocket 주소(예: `wss://<앱>.up.railway.app/worker`). 로컬 PM2 봇이면 그 봇이 여는 포트 기준 주소. **미니PC 단일 호스트**(봇이 같은 기계의 계정 `asahi-bot` 에서 도는 배치, [minipc-단일호스트-셋업.md](minipc-단일호스트-셋업.md))에서는 `ws://127.0.0.1:3000/worker` — `send_file` 이 올리는 `/files` 주소도 여기서 유도된다 |
+| `HUB_URL` | 봇의 `/worker` WebSocket 주소(예: `wss://<앱>.up.railway.app/worker`). 로컬 PM2 봇이면 그 봇이 여는 포트 기준 주소. **미니PC 단일 호스트**(봇이 같은 기계의 계정 `asahi-bot` 에서 도는 배치, [minipc-단일호스트-셋업.md](minipc-단일호스트-셋업.md))에서는 `ws://127.0.0.1:<봇 PORT>/worker`(동아리 미니PC 는 3100 — 3000 은 다른 서비스가 쓴다) — `send_file` 이 올리는 `/files` 주소도 여기서 유도된다 |
 | `WORKER_ROOTS` | 이 워커가 노출할 폴더(쉼표 구분, 절대경로 — 윈도우는 드라이브 문자 또는 UNC 필요). `fs_read`/`fs_write`/`fs_edit`/`fs_glob`/`fs_grep` 는 이 목록 밖 경로를 전부 거부한다 |
 
 **`DATABASE_URL`은 이 파일에 없다 — 의도적으로 없다.** 워커는 DB 자격증명도 Claude 구독
