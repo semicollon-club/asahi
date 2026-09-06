@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
-  llmProxyUrlOf, sessionDirFor, buildSessionEnv, buildQueryOptions, makeSessionRunner, type SessionQuery,
+  llmProxyUrlOf, mcpHubUrlOf, sessionDirFor, buildSessionEnv, buildQueryOptions, buildMcpServers, makeSessionRunner, type SessionQuery,
 } from "../src/remote/sessionRunner.js";
 import type { TurnStartFrame, Frame } from "../src/remote/protocol.js";
 
@@ -23,6 +23,27 @@ describe("llmProxyUrlOf — HUB_URL 에서 프록시 주소를 유도한다(file
   });
   it("URL 이 아니면 null", () => {
     expect(llmProxyUrlOf("nope")).toBeNull();
+  });
+});
+
+describe("mcpHubUrlOf·buildMcpServers — 허브 MCP(4단계 4.1)", () => {
+  it("HUB_URL 에서 /mcp 베이스를 유도한다(프록시와 같은 http 베이스)", () => {
+    expect(mcpHubUrlOf("ws://127.0.0.1:3100/worker")).toBe("http://127.0.0.1:3100/mcp");
+    expect(mcpHubUrlOf("wss://h/worker")).toBe("https://h/mcp");
+    expect(mcpHubUrlOf("nope")).toBeNull();
+  });
+
+  it("서버 이름마다 루프백 주소와 작업 토큰 헤더를 붙인다", () => {
+    const servers = buildMcpServers(["github"], "http://127.0.0.1:3100/mcp", "asahi-job.x.y");
+    expect(servers).toEqual({
+      github: { type: "http", url: "http://127.0.0.1:3100/mcp/github", headers: { Authorization: "Bearer asahi-job.x.y" } },
+    });
+  });
+
+  it("이름이 없거나 베이스가 없으면 undefined(옛 동작)", () => {
+    expect(buildMcpServers(undefined, "http://h/mcp", "t")).toBeUndefined();
+    expect(buildMcpServers([], "http://h/mcp", "t")).toBeUndefined();
+    expect(buildMcpServers(["github"], undefined, "t")).toBeUndefined();
   });
 });
 
@@ -85,6 +106,17 @@ describe("buildQueryOptions — 프로필을 SDK 옵션으로", () => {
   it("profile.tools 가 있으면 그대로 내장 도구 목록이 된다", () => {
     const opts = buildQueryOptions({ ...frame, profile: { ...frame.profile, tools: ["Read", "Grep"] } }, {}, []);
     expect(opts.tools).toEqual(["Read", "Grep"]);
+  });
+
+  it("profile.mcpHub·mcpBaseUrl 가 있으면 mcpServers 를 붙이고(작업 토큰 헤더), 없으면 안 붙인다(4단계 4.1)", () => {
+    const withMcp = buildQueryOptions({ ...frame, token: "asahi-job.t", profile: { ...frame.profile, mcpHub: ["github"] } }, {}, [], "http://127.0.0.1:3100/mcp");
+    expect(withMcp.mcpServers).toEqual({
+      github: { type: "http", url: "http://127.0.0.1:3100/mcp/github", headers: { Authorization: "Bearer asahi-job.t" } },
+    });
+    // 베이스가 없으면(러너에 mcpBaseUrl 미주입) 안 붙는다.
+    expect(buildQueryOptions({ ...frame, profile: { ...frame.profile, mcpHub: ["github"] } }, {}, []).mcpServers).toBeUndefined();
+    // 이름이 없으면 안 붙는다.
+    expect(buildQueryOptions(frame, {}, [], "http://127.0.0.1:3100/mcp").mcpServers).toBeUndefined();
   });
 });
 

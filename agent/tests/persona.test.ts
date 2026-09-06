@@ -874,6 +874,14 @@ describe("buildSystemPrompt — 하네스 턴(소유자, 세션 러너)", () => 
     expect(cap).toMatch(/PR|풀 리퀘스트/);
   });
 
+  it("githubReady 면 허브 GitHub 읽기 MCP 를 안내하고, 아니면 안 한다(4단계 4.1)", () => {
+    const withGh = capabilitySection(buildSystemPrompt({ role: "owner", isPrivate: true, isOwner: true, workerConnected: true, githubReady: true, harness }));
+    expect(withGh).toMatch(/mcp__github__list_repos/);
+    expect(withGh).toMatch(/mcp__github__get_pull_request/);
+    const withoutGh = capabilitySection(buildSystemPrompt({ role: "owner", isPrivate: true, isOwner: true, workerConnected: true, harness }));
+    expect(withoutGh).not.toMatch(/mcp__github/);
+  });
+
   it("harness 가 없으면 예전 안내 그대로다(회귀 없음)", () => {
     const p = buildSystemPrompt({ role: "owner", isPrivate: true, isOwner: true, workerConnected: true });
     expect(capabilitySection(p)).toMatch(/fs_read/);

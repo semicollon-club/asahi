@@ -717,9 +717,17 @@ pm2 jlist 가 돌려주는 명령은 이제 회원이 실제로 실행한 값이
 세션이 아니라 **워커(계정 B)의 Claude Code** 에 맡긴다(`core/agent.ts` 의 `decideHarnessDispatch` → `hub.startTurn` →
 `remote/sessionRunner.ts`). 그 턴의 능력은 위 표와 다른 세계다.
 
-- **도구**: Claude Code 내장 도구 전부(Read/Write/Edit/Glob/Grep/Bash/WebSearch/WebFetch/Task) — 봇의 `mcp__asahi__*` 는
-  하나도 없다(기억·DB·접근관리·`send_file`·PR 생성). 4단계 MCP 허브가 다시 잇기 전까지의 한계이고, 능력 안내(`persona.ts` 의
-  `buildHarnessCapabilityBlock`)가 모델에게 그 사실을 말한다 — 기억 블록도 그 턴에는 빠진다.
+- **도구**: Claude Code 내장 도구 전부(Read/Write/Edit/Glob/Grep/Bash/WebSearch/WebFetch/Task). 봇의 `mcp__asahi__*`(기억·DB·
+  접근관리·`send_file`·PR 생성)는 아직 없다 — 나머지 4단계 몫이고, 능력 안내(`persona.ts` 의 `buildHarnessCapabilityBlock`)가
+  그 사실을 말한다(기억 블록도 그 턴에는 빠진다).
+- **허브 MCP(4단계 4.1, 2026-09-06)**: 소유자 하네스 턴에 **`mcp__github__*`(읽기)** 가 붙는다. 비밀이 필요한 MCP 서버는 봇(계정 A)에서
+  띄우고 루프백 `/mcp/<이름>`(`core/mcpHub.ts`, stateless StreamableHTTP)로 노출한다. 세션(계정 B)은 `mcpServers` 에 그 주소를
+  **작업 토큰**(프록시·파일 반환과 같은 토큰)으로 붙는다 — 어느 서버를 어느 신원에 여는지는 프로필 한 곳(`core/profiles.ts` 의
+  `OWNER_MCP_HUB`, 지금 `["github"]`)이 정하고, 손님에게는 열지 않는다. **비밀(App 키)은 A 를 떠나지 않는다**: 세션은 이름만 알고
+  토큰으로 인증하며, 실제 깃허브 호출은 봇이 **읽기 스코프** 설치 토큰(`metadata/contents/pull_requests/issues: read`)으로 한다.
+  첫 서버 GitHub 는 봇의 기존 읽기 헬퍼(`src/github`)를 노출한다(`list_repos`·`get_pull_request`) — 쓰기(발행·push)는 여전히
+  기존 경로(`create_pull_request`·`sh_exec`)다. 허브가 `127.0.0.1` 에만 묶여(`HUB_BIND`) 미니PC 밖에서는 이 엔드포인트가 보이지
+  않는다. 4.2 에서 Supabase(읽기)·Railway 를 같은 레일에 더한다.
 - **경계**: 작업 폴더는 워커 `roots[0]`(워크스페이스 루트, 관리자 스코프). 경로 게이트(`allowed_dirs`·`checkPath`)는 이 턴에
   적용되지 않는다 — 내장 도구가 그 기계의 계정 B 권한으로 직접 돈다. 소유자에게 `sh_exec` 가 이미 열려 있었으므로 **새 능력이
   아니다**(같은 계정, 같은 권한). 손님 프로필(5단계)이 이 경로를 탈 때는 작업 폴더를 그 부원 폴더로 좁히고 Task 를 막는다

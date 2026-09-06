@@ -224,16 +224,22 @@ const GUEST_OWNER_ONLY_LINE =
 const HARNESS_GIT_LINES =
   "\n- **동아리 깃허브 저장소(semicollon-club) 작업은 Bash 의 git 으로 합니다.** clone·fetch·pull·push 에 자격증명과 커밋 신원이 이 세션의 환경으로 자동으로 붙습니다 — git config 를 바꾸거나 토큰을 묻지 마세요. 절차는 clone → 작업 브랜치 → 작업·커밋 → push 까지이고, main 으로의 풀 리퀘스트(PR) 생성은 이 턴의 도구로는 할 수 없으니 브랜치를 push 한 뒤 사용자에게 PR 을 열어 달라고 알립니다. 병합은 운영자가 합니다.";
 
+// 하네스 턴(소유자)의 허브 GitHub 읽기 MCP(4단계 4.1). 봇(계정 A)이 노출하는 읽기 전용 서버 — 세션은 작업 토큰으로 붙는다.
+// 코드는 위 git 으로 clone 해 읽는 게 빠르고, 이 도구는 목록·PR 리뷰 확인용이다. 쓰기(PR 생성 등)는 여전히 push 뒤 넘긴다.
+const HARNESS_GITHUB_READ_LINE =
+  "\n- 깃허브 조직을 **읽을** 수 있습니다: `mcp__github__list_repos`(저장소 목록), `mcp__github__get_pull_request`(PR 상태·리뷰·코멘트). 저장소 코드 자체는 위 git 으로 clone 해 보는 편이 빠르고, 이 도구는 저장소 목록과 PR 리뷰·코멘트 확인에 씁니다.";
+
 // 하네스 턴(소유자)의 능력 블록. 도구 이름은 Claude Code 내장 도구다 — 원격 도구 이름(fs_*/sh_exec/proc_*/send_file)과
 // 봇 MCP 이름(remember/recall/db_*/runtime_info/manage_access)은 한 번도 쓰지 않는다(persona.test 가 고정한다).
 function buildHarnessCapabilityBlock(ctx: PersonaContext, h: { cwd: string }): string {
   const where = ctx.isPrivate ? "소유자와의 1:1 비공개 대화" : "공개 채널(서버) 대화";
+  const githubRead = ctx.githubReady === true ? HARNESS_GITHUB_READ_LINE : "";
   const publish = ctx.githubReady === true ? HARNESS_GIT_LINES : "";
   return `## 능력
 - ${where}이고, 이 턴은 동아리 미니PC 의 작업 계정에서 Claude Code 로 직접 돕니다. 파일·셸·검색은 내장 도구(Read/Write/Edit/Glob/Grep/Bash/WebSearch/WebFetch, 필요하면 Task 서브에이전트)로 합니다 — 원격 도구 이름은 없습니다.
 - 작업 폴더는 \`${h.cwd}\` 입니다. 이 기계의 관리자 권한으로 폴더 제한 없이 다루되, 부원들의 작업 폴더(그 아래 숫자 이름 폴더)는 그 사람의 것임을 존중하세요. 프로젝트는 작업 폴더 바로 밑에 폴더 하나로 만들고 그 안에서 작업하세요.
 - 이 턴에는 봇의 기억·DB·접근관리 도구가 없습니다. 기억을 저장하거나 조회해 달라는 요청은 "이 방식의 턴에서는 아직 기억 도구를 쓸 수 없어요" 라고 답하세요 — 시도하지 마세요.
-- 만든 파일을 디스코드로 보내는 도구도 이 턴에는 없습니다 — 파일의 절대경로를 알려 주세요.${publish}
+- 만든 파일을 디스코드로 보내는 도구도 이 턴에는 없습니다 — 파일의 절대경로를 알려 주세요.${githubRead}${publish}
 - 특정 작업(예: UI 디자인)에는 전용 스킬이 있을 수 있습니다. 먼저 쓸 수 있는 스킬이 있는지 살펴보고, 있으면 그 지침을 따르세요.`;
 }
 

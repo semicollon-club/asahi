@@ -4,8 +4,8 @@
 // 그대로 쓰고, 그때 손님 기본값(§5 — 서브에이전트 끔·effort 낮음·Sonnet 5)이 "한 사람이 5시간 창을 비우지 못하게" 하는
 // 첫 지렛대가 된다(§4.3).
 //
-// 이 표에 없는 것: MCP 서버·플러그인 목록(4단계 — 허브 MCP 가 생길 때 필드를 더한다), 모델 고정의 집행(3단계 — 프록시가
-// 본문의 model 을 이 프로필과 대조한다). 지금 이 값은 세션 러너가 query() 의 model 로 넘기는 것까지다.
+// 모델 고정의 집행은 3단계(프록시가 본문 model 을 이 프로필과 대조)다. 허브 MCP 는 4단계 — 아래 mcpHub 로
+// "어느 봇 허브 MCP 서버를 이 신원에 여는가"를 정한다. 플러그인 목록은 아직(4.4).
 export type Effort = "low" | "medium" | "high" | "xhigh" | "max";
 
 export type HarnessProfile = {
@@ -17,7 +17,13 @@ export type HarnessProfile = {
   effort?: Effort;
   // 내장 도구 허용 목록. 없으면 Claude Code 기본 전부(§6 표의 "전부").
   tools?: string[];
+  // 봇 허브 MCP 서버 이름들(4단계 4.1). 소유자에게만 비밀 필요한 서버(GitHub 등)를 연다 — 손님은 열지 않는다
+  // (§6 표: 손님 허브는 "부원용으로 연 것만", 지금은 없음). 워커가 이름마다 루프백 주소·작업 토큰을 붙인다.
+  mcpHub?: string[];
 };
+
+// 소유자 하네스 턴에 여는 허브 MCP 서버(4단계 4.1). GitHub(읽기)가 첫 서버다. 4.2 에서 Supabase(읽기)·Railway 를 더한다.
+export const OWNER_MCP_HUB = ["github"] as const;
 
 export const GUEST_MODEL = "claude-sonnet-5";
 // 봇 자기 세션의 maxTurns(agent.ts)와 같은 값 — 하네스라고 한 턴이 더 길어질 이유는 없다.
@@ -28,7 +34,7 @@ export function profileFor(
   o: { ownerModel: string; maxTurns?: number },
 ): HarnessProfile {
   const maxTurns = o.maxTurns ?? DEFAULT_MAX_TURNS;
-  // 소유자는 DM·서버 구분 없이 전부다 — 운영자 모델(config.model, 기본 Opus 5)·기본 effort·서브에이전트 열림.
-  if (ctx.isOwner) return { model: o.ownerModel, maxTurns, subagents: true };
+  // 소유자는 DM·서버 구분 없이 전부다 — 운영자 모델(config.model, 기본 Opus 5)·기본 effort·서브에이전트 열림·허브 MCP.
+  if (ctx.isOwner) return { model: o.ownerModel, maxTurns, subagents: true, mcpHub: [...OWNER_MCP_HUB] };
   return { model: GUEST_MODEL, effort: "low", maxTurns, subagents: false };
 }
