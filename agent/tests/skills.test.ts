@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import path from "node:path";
-import { skillPluginDirFrom, resolveSkillsEnabled, skillPluginsFor } from "../src/core/skills.js";
+import { skillPluginDirFrom, resolveSkillsEnabled, skillPluginsFor, localPluginDirsFor } from "../src/core/skills.js";
 
 describe("skillPluginDirFrom — 실행 위치가 아니라 모듈 위치에서 계산한다", () => {
   it("개발(src/core)에서 agent/skill-plugin 을 가리킨다", () => {
@@ -58,5 +58,19 @@ describe("skillPluginsFor — 스킬 폴더가 없으면 플러그인을 아예 
     // 확실하다. 워커 커밋 읽기(readCommit 이 실패하면 undefined 를 돌려주고 워커는 그대로 뜬다)와
     // 같은 원칙이다.
     expect(skillPluginsFor({ pluginDir: "/app/skill-plugin", exists: false })).toEqual([]);
+  });
+});
+
+describe("localPluginDirsFor — 운영자 설치 플러그인(4단계 4.4)", () => {
+  it("존재하는 폴더만 local 플러그인으로, 없는 폴더·빈 값은 건너뛴다", () => {
+    const exists = (p: string) => p === "C:/plugins/a" || p === "C:/plugins/c";
+    expect(localPluginDirsFor(["C:/plugins/a", "C:/plugins/b", "", "C:/plugins/c"], exists)).toEqual([
+      { type: "local", path: "C:/plugins/a" },
+      { type: "local", path: "C:/plugins/c" },
+    ]);
+  });
+
+  it("목록이 비면 빈 배열(번들 스킬만 남는다)", () => {
+    expect(localPluginDirsFor([], () => true)).toEqual([]);
   });
 });
