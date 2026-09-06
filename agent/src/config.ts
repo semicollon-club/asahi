@@ -16,6 +16,17 @@ function positiveNumberEnv(env: NodeJS.ProcessEnv, key: string, def: number): nu
   return n;
 }
 
+// 0 을 허용한다(끄기용) — 3단계 토큰 창 상한처럼 "0 이면 비활성" 을 뜻하는 값에 쓴다.
+function nonNegativeNumberEnv(env: NodeJS.ProcessEnv, key: string, def: number): number {
+  const raw = env[key];
+  if (raw === undefined || raw === "") return def;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) {
+    throw new Error(`환경변수 ${key} 는 0 이상의 숫자여야 합니다 (현재 값: "${raw}")`);
+  }
+  return n;
+}
+
 export type Config = {
   discordToken: string;
   ownerId: string;
@@ -58,6 +69,14 @@ export type Config = {
   // 소유자 턴을 세션 러너(계정 B 의 Claude Code)로 보내는 플래그. 정확히 "true" 일 때만 — 되돌리기는 이 값을 지우는 것이다.
   // 선택 필드인 이유: Config 리터럴을 만드는 테스트 픽스처가 여럿이라, 없으면 false 로 읽는다(index.ts 는 === true 로 본다).
   harnessOwner?: boolean;
+  // 부원별 창 상한(3단계 3.3). 한 부원이 창(llmTokenWindowMs) 안에 이 토큰 수(입력+출력)에 닿으면 새 하네스
+  // 턴을 거절한다 — 구독 5시간 창을 부원끼리 나누는 공정 분배(turnsRepo.reserve 와 같은 축, llm_usage 합산).
+  // 소유자는 이 게이트를 거치지 않는다(소유자 우선). 0 이면 비활성. 부원 미개방(5단계) 전까지는 실질적으로
+  // 걸릴 일이 없으나, 열기 전에 값이 자리에 있어야 한다 — 실제 값은 운영자가 미니PC 로 튜닝한다.
+  // 선택 필드인 이유는 harnessOwner 와 같다: Config 리터럴을 만드는 테스트 픽스처가 여럿이라, 없으면
+  // 코어가 비활성(0)·기본 창으로 읽는다. loadConfig 는 항상 채운다.
+  maxLlmTokensPerWindowPerUser?: number;
+  llmTokenWindowMs?: number;
 };
 
 // 깃허브 발행 설정. 개인키는 base64 한 줄로 받는다 — 줄바꿈이 든 PEM 은 .env 파서·배포
@@ -114,6 +133,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     sentinelPath: env.BOT_SENTINEL || undefined,
     claudeOauthToken: env.CLAUDE_CODE_OAUTH_TOKEN?.trim() || undefined,
     harnessOwner: env.HARNESS_OWNER === "true",
+    maxLlmTokensPerWindowPerUser: nonNegativeNumberEnv(env, "MAX_LLM_TOKENS_PER_WINDOW_PER_USER", 1_500_000),
+    llmTokenWindowMs: positiveNumberEnv(env, "LLM_TOKEN_WINDOW_HOURS", 5) * 60 * 60 * 1000,
   };
 }
 

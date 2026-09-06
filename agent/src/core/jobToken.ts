@@ -18,6 +18,10 @@ export type JobTokenClaims = {
   userId: string;
   conversationId: number;
   channelRef: string;
+  // 이 작업의 고정 모델(3단계 3.1). 하네스 턴이 발급하는 토큰에만 실린다 — 프록시가 본문의 `model`
+  // 을 이 값에 고정해(§4.2), 부원이 프롬프트로 더 비싼 모델로 바꾸는 경로를 막는다. 파일 반환(send_file)
+  // 토큰은 /llm 에 가지 않으므로 이 값이 없다(선택). 없으면 프록시는 고정을 건너뛴다(옛 토큰 호환).
+  model?: string;
   // 만료 시각(ms since epoch). `now >= exp` 면 만료다 — 경계에서 유효하지 않다(jobToken.test.ts).
   exp: number;
 };
@@ -57,6 +61,7 @@ function isClaims(v: unknown): v is JobTokenClaims {
     typeof o.userId === "string" &&
     typeof o.conversationId === "number" && Number.isInteger(o.conversationId) &&
     typeof o.channelRef === "string" &&
+    (o.model === undefined || typeof o.model === "string") &&
     typeof o.exp === "number" && Number.isFinite(o.exp)
   );
 }
@@ -81,8 +86,12 @@ export function verifyJobToken(secret: Buffer, token: string, now: number): JobT
   }
   if (!isClaims(parsed)) return null;
   if (now >= parsed.exp) return null;
-  // 알려진 필드만 돌려준다 — payload 에 덧붙은 키가 호출측으로 새지 않게.
-  return { jobId: parsed.jobId, userId: parsed.userId, conversationId: parsed.conversationId, channelRef: parsed.channelRef, exp: parsed.exp };
+  // 알려진 필드만 돌려준다 — payload 에 덧붙은 키가 호출측으로 새지 않게. model 은 있을 때만 싣는다.
+  return {
+    jobId: parsed.jobId, userId: parsed.userId, conversationId: parsed.conversationId, channelRef: parsed.channelRef,
+    ...(typeof parsed.model === "string" ? { model: parsed.model } : {}),
+    exp: parsed.exp,
+  };
 }
 
 // 발급기. tools.ts 의 ToolCtx 가 드는 것은 이 mint 하나뿐이다 — 검증은 index.ts 가 POST /files 에 배선한다.

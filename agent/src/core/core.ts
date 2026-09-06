@@ -17,6 +17,7 @@ import type { TurnsRepo } from "../store/turnsRepo.js";
 import type { AllowedDirsRepo } from "../store/allowedDirsRepo.js";
 import type { ProjectsRepo } from "../store/projectsRepo.js";
 import type { ActionsRepo } from "../store/actionsRepo.js";
+import type { LlmUsageRepo } from "../store/llmUsageRepo.js";
 import type { WorkerKind } from "../store/workersRepo.js";
 import { scopeDirs } from "./workerSelect.js";
 import { pathFlavorOf } from "./paths.js";
@@ -142,6 +143,9 @@ export type CoreRepos = {
   // 깃허브 발행의 소유권 정본. 모델이 리포를 고르지 못하게 하는 장치라, 발행 경로는 반드시
   // 이 표를 거쳐 대상을 정한다(publish.ts 의 decideOwnership).
   projects: ProjectsRepo;
+  // LLM 사용량(3단계 3.2·3.3). 부원별 창 상한 검사가 이 저장소로 창 안 토큰 합을 읽는다. 선택인 이유는
+  // 테스트 픽스처가 여럿이라서다 — 없으면 토큰 상한 검사를 건너뛴다(턴 빈도 한도만 적용).
+  llmUsage?: LlmUsageRepo;
 };
 
 // 대화(conversation)별 세션 + 대화 키별 직렬락으로 동작하는 코어.
@@ -481,6 +485,18 @@ export class AgentCore {
       // 한도: 소유자는 어떤 한도도 받지 않는다(예약 생략 → turns 미기록 → 손님 카운트에도 영향 없음).
       // 손님만 유저별+전역 한도로 원자 예약한다(구독 보호는 손님에게만 적용). 실패면 안내 후 종료.
       if (!isOwner) {
+        // 부원별 창 상한(3단계 3.3): 창 안 토큰 합(입력+출력)이 상한에 닿으면 새 하네스 턴을 거절한다.
+        // 이 블록은 손님만 타므로 소유자는 이 게이트를 거치지 않는다(소유자 우선 — §4.3). 읽기만 하니
+        // 아래 턴 예약(INSERT)보다 먼저 봐, 막힐 요청에 턴 슬롯을 쓰지 않는다. llmUsage·상한이 없으면 건너뛴다.
+        const tokenCap = this.config.maxLlmTokensPerWindowPerUser ?? 0;
+        if (tokenCap > 0 && this.repos.llmUsage) {
+          const windowMs = this.config.llmTokenWindowMs ?? 5 * 60 * 60 * 1000;
+          const used = await this.repos.llmUsage.sumTokensForUserSince(userId, this.now() - windowMs);
+          if (used >= tokenCap) {
+            await this.notify(conv, "지금은 공유 구독의 사용량이 이번 창에서 가득 찼어요. 잠시 뒤 다시 시도해 주세요.");
+            return;
+          }
+        }
         const reserved = await this.repos.turns.reserve({
           userId, conversationId: conv.id, kind: "message", ts: this.now(),
           perUserLimit: this.config.maxTurnsPerHourPerUser, globalLimit: this.config.maxTurnsPerHourGlobal,
