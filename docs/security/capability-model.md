@@ -717,9 +717,15 @@ pm2 jlist 가 돌려주는 명령은 이제 회원이 실제로 실행한 값이
 세션이 아니라 **워커(계정 B)의 Claude Code** 에 맡긴다(`core/agent.ts` 의 `decideHarnessDispatch` → `hub.startTurn` →
 `remote/sessionRunner.ts`). 그 턴의 능력은 위 표와 다른 세계다.
 
-- **도구**: Claude Code 내장 도구 전부(Read/Write/Edit/Glob/Grep/Bash/WebSearch/WebFetch/Task). 봇의 `mcp__asahi__*`(기억·DB·
-  접근관리·`send_file`·PR 생성)는 아직 없다 — 나머지 4단계 몫이고, 능력 안내(`persona.ts` 의 `buildHarnessCapabilityBlock`)가
-  그 사실을 말한다(기억 블록도 그 턴에는 빠진다).
+- **도구**: Claude Code 내장 도구 전부(Read/Write/Edit/Glob/Grep/Bash/WebSearch/WebFetch/Task). 봇의 `mcp__asahi__*` 중 기억·
+  접근관리·PR 생성은 아직 없다 — 나머지 4단계 몫이고, 능력 안내(`persona.ts` 의 `buildHarnessCapabilityBlock`)가 그 사실을
+  말한다(기억 블록도 그 턴에는 빠진다). DB 읽기(4.2)와 파일 반환(4.5)은 아래처럼 다시 열렸다.
+- **파일 반환(4단계 4.5, 2026-09-06)**: 하네스 세션에 **`mcp__file__send_file`(인프로세스 MCP)** 이 붙는다. 얇은 워커 시절의
+  원격 도구 `send_file` 과 같은 엔드포인트(봇 `POST /files`, 작업 토큰)를 쓰지만, 하네스 턴에는 원격 도구가 없으므로 세션 안에서
+  도는 인프로세스 MCP 도구로 만든다(`mcp/sendFileServer.ts`, 세션 러너가 턴마다 `createSdkMcpServer` 로 생성). 비밀은 없다 —
+  주소(HUB_URL 에서 유도한 `/files`)와 이 턴의 작업 토큰만 안다. **경로는 작업 폴더 서브트리로 스코프**(임의 절대경로로 계정 B 의
+  아무 파일이나 내보내지 못하게), 첨부가 나갈 채널은 토큰의 `channelRef` 가 정한다 — 경로도 채널도 모델이 바꿀 수 없다. 크기 상한
+  (`FILE_RETURN_MAX_BYTES`, 8MB)을 `stat` 으로 먼저 거른다.
 - **허브 MCP(4단계 4.1·4.2, 2026-09-06)**: 소유자 하네스 턴에 **`mcp__github__*`(읽기)** 와 **`mcp__supabase__*`(읽기)** 가 붙는다.
   비밀이 필요한 MCP 서버는 봇(계정 A)에서 띄우고 루프백 `/mcp/<이름>`(`core/mcpHub.ts`, stateless StreamableHTTP)로 노출한다.
   세션(계정 B)은 `mcpServers` 에 그 주소를 **작업 토큰**(프록시·파일 반환과 같은 토큰)으로 붙는다. **비밀(App 키·DB 접속 문자열)은

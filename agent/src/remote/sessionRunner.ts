@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { progressFromMessage, type PendingTool } from "../core/sdkEvents.js";
 import { httpBaseOfHub } from "../core/fileReturn.js";
+import { makeSendFileServer } from "../mcp/sendFileServer.js";
 import { shellGitEnv, shellGitOf } from "./gitEnv.js";
 import { isValidUserId } from "./proc.js";
 import type { TurnStartFrame, TurnEventFrame, TurnResultFrame } from "./protocol.js";
@@ -74,10 +75,14 @@ export function buildSessionEnv(o: {
 // 프로필(core/profiles.ts) → SDK query 옵션. 권한은 묻지 않는다(bypassPermissions) — 디스코드 너머에서 사람이 승인
 // 프롬프트에 답할 방법이 없고, 봇 세션도 원격 도구를 사전 승인으로 돌렸다. 서브에이전트가 꺼진 프로필은 Task 도구를
 // 막는다 — 한 턴이 여러 모델 호출을 병렬로 벌리는 가장 빠른 길을 손님에게서 닫는다(§5).
-export function buildQueryOptions(frame: TurnStartFrame, env: Record<string, string>, plugins: unknown[], mcpBaseUrl?: string): Record<string, unknown> {
+export function buildQueryOptions(frame: TurnStartFrame, env: Record<string, string>, plugins: unknown[], mcpBaseUrl?: string, localMcpServers?: Record<string, unknown>): Record<string, unknown> {
   const p = frame.profile;
-  // 허브 MCP(4단계 4.1): 프로필이 연 서버 이름마다 루프백 주소·작업 토큰 헤더를 붙여 mcpServers 로 넣는다.
-  const mcpServers = buildMcpServers(p.mcpHub, mcpBaseUrl, frame.token);
+  // 허브 MCP(4단계 4.1·4.2): 프로필이 연 서버 이름마다 루프백 주소·작업 토큰 헤더를 붙여 넣는다.
+  const hubServers = buildMcpServers(p.mcpHub, mcpBaseUrl, frame.token);
+  // 로컬 인프로세스 MCP(4단계 4.5, 예: send_file)는 세션 러너가 만들어 넘긴다 — 허브 서버와 한 mcpServers 로 합친다.
+  const mcpServers = hubServers !== undefined || localMcpServers !== undefined
+    ? { ...(hubServers ?? {}), ...(localMcpServers ?? {}) }
+    : undefined;
   return {
     cwd: frame.cwd,
     env,
@@ -108,6 +113,8 @@ export function makeSessionRunner(o: {
   llmBaseUrl: string;
   // 허브 MCP 기본 주소(<http base>/mcp, 4단계 4.1). 없으면 mcpServers 를 안 붙인다(옛 동작 그대로).
   mcpBaseUrl?: string;
+  // 봇의 파일 반환 주소(<http base>/files, 4단계 4.5). 있으면 턴마다 인프로세스 send_file MCP 를 붙인다.
+  fileReturnUrl?: string;
   sessionRootDir: string;
   baseEnv?: NodeJS.ProcessEnv;
   plugins?: unknown[];
@@ -144,7 +151,11 @@ export function makeSessionRunner(o: {
         return;
       }
       const env = buildSessionEnv({ baseEnv: o.baseEnv ?? process.env, llmBaseUrl: o.llmBaseUrl, token: frame.token, configDir, git: frame.git });
-      const options = buildQueryOptions(frame, env, o.plugins ?? [], o.mcpBaseUrl);
+      // 인프로세스 send_file MCP(4.5): 이 턴의 작업 토큰·작업 폴더로 만든다. 봇 /files 주소가 있을 때만.
+      const localMcp = o.fileReturnUrl !== undefined
+        ? { file: makeSendFileServer({ fileReturnUrl: o.fileReturnUrl, token: frame.token, cwd: frame.cwd }) }
+        : undefined;
+      const options = buildQueryOptions(frame, env, o.plugins ?? [], o.mcpBaseUrl, localMcp);
       const abort = options.abortController as AbortController;
       // 진단(2026-09-06): resume 이 매 턴 새 세션으로 떨어지는 원인 추적. 봇이 보낸 resume id 를 이
       // 워커가 실제로 받았는지, 세션폴더(CLAUDE_CONFIG_DIR)·cwd 가 턴마다 같은지 본다 — 전사는

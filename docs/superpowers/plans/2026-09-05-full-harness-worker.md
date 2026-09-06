@@ -83,7 +83,7 @@ Railway 는 IPv6 사설망으로 컨테이너에 닿으므로 IPv4 전용 바인
 | 4.2 | Supabase(읽기 전용 역할)·Railway 허브 서버 — 소유자 프로필만 | 디스코드에서 표 조회 | ✅ **Supabase 완료** — `mcp/supabaseReadServer.ts`(db_schema·db_query, 봇의 READ ONLY 가드 재사용), 프로필 `OWNER_MCP_HUB=["github","supabase"]`. 경계 강화: 작업 토큰에 허용 서버 목록(mcpHub 클레임) → 허브가 서버별 403. **Railway 보류** — 봇에 Railway API 자격증명 없음(호스트로만 씀), 서비스 삭제·5단계 종료 예정. 필요 시 토큰 받아 추가 |
 | 4.3 | B 의 공유 브라우저 MCP(Playwright 서버 하나, 세션별 컨텍스트) + `send_file` 로 캡처 반환 | localhost 화면이 첨부로 |
 | 4.4 | 플러그인 설치 절차(B 계정) + 프로필의 플러그인 목록 | 공개 플러그인 하나가 손님 프로필에서 돈다 |
-| 4.5 | `send_file` 을 세션 쪽 인프로세스 MCP 도구로(엔드포인트 동일) | 얇은 도구 없이 파일 반환 |
+| 4.5 | `send_file` 을 세션 쪽 인프로세스 MCP 도구로(엔드포인트 동일) | 얇은 도구 없이 파일 반환 | ✅ `mcp/sendFileServer.ts`(createSdkMcpServer, `mcp__file__send_file`) — 봇 `POST /files`(작업 토큰) 그대로, 경로는 작업 폴더 스코프. 세션 러너가 턴마다 생성(worker 가 fileReturnUrl 주입). 하네스 턴이 파일을 디스코드로 돌려줄 수 있게 됨(4.3 캡처 반환의 전제) |
 
 ## 5단계 — 부원 개방 + 자원 관리 + Railway 종료
 
