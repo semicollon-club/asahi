@@ -855,9 +855,10 @@ describe("buildSystemPrompt — 하네스 턴(소유자, 세션 러너)", () => 
       expect(cap).toMatch(/Bash/);
       expect(cap).toMatch(/Read/);
       expect(cap).toContain("C:\asahi-workspace");
-      expect(cap).not.toMatch(/fs_read|sh_exec|proc_start|send_file/);
-      // 봇의 접근관리·runtime_info 는 이 턴에 없다. (DB 읽기는 4.2 에서 mcp__supabase__db_query 로 열렸으므로
-      // db_query 는 이제 등장한다 — 아래 별도 테스트가 확인한다.)
+      // 원격 도구 이름(fs_*/sh_exec/proc_*)은 안 쓴다 — 내장 도구로 한다. (send_file 은 4.5 에서 인프로세스 MCP
+      // mcp__file__send_file 로 열렸으므로 이제 등장한다 — 아래 별도 테스트가 확인한다.)
+      expect(cap).not.toMatch(/fs_read|sh_exec|proc_start/);
+      // 봇의 접근관리·runtime_info 는 이 턴에 없다. (DB 읽기는 4.2 에서 mcp__supabase__db_query 로 열렸다.)
       expect(cap).not.toMatch(/runtime_info|manage_access/);
       // 기억 블록 자체가 빠진다 — remember/recall 이 이 턴에 없다.
       expect(p).not.toMatch(/## 기억/);
@@ -871,6 +872,12 @@ describe("buildSystemPrompt — 하네스 턴(소유자, 세션 러너)", () => 
     expect(cap).toMatch(/mcp__supabase__db_query/);
     // 읽기 전용임을 분명히 한다.
     expect(cap).toMatch(/읽기/);
+  });
+
+  it("파일 반환(4단계 4.5)은 mcp__file__send_file 로 안내한다(더 이상 '보내는 도구가 없다'고 하지 않는다)", () => {
+    const cap = capabilitySection(buildSystemPrompt({ role: "owner", isPrivate: true, isOwner: true, workerConnected: true, harness }));
+    expect(cap).toMatch(/mcp__file__send_file/);
+    expect(cap).not.toMatch(/보내는 도구도 이 턴에는 없습니다/);
   });
 
   it("기억 도구가 이 턴에 없다는 사실을 말한다 — 기억 요청을 받으면 그렇게 안내하게", () => {
