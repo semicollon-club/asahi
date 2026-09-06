@@ -188,7 +188,8 @@ describe("makeSessionRunner — turn.start 하나를 query() 한 번으로", () 
     await vi.waitFor(() => expect(out.some((f) => f.type === "turn.result")).toBe(true));
     const mcp = seen[0].options.mcpServers as Record<string, unknown>;
     expect(Object.keys(mcp).sort()).toEqual(["browser", "file"]);
-    expect(mcp.browser).toEqual({ command: "npx", args: ["-y", "@playwright/mcp@latest"] });
+    // alwaysLoad: 브라우저 stdio 는 늦게 떠서, 붙을 때까지 기다렸다 도구를 싣게 한다(4.3).
+    expect(mcp.browser).toEqual({ command: "npx", args: ["-y", "@playwright/mcp@latest"], alwaysLoad: true });
     fs.rmSync(root, { recursive: true, force: true });
   });
 
