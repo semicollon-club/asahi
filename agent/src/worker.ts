@@ -11,7 +11,7 @@ import { readCommit, defaultRunGit } from "./remote/gitCommit.js";
 import { planShutdown } from "./remote/workerShutdown.js";
 import { fileReturnUrlOf } from "./core/fileReturn.js";
 import { makeSessionRunner, llmProxyUrlOf, mcpHubUrlOf, type SessionQuery, type SessionRunner } from "./remote/sessionRunner.js";
-import { skillPluginDirFrom, skillPluginsFor } from "./core/skills.js";
+import { skillPluginDirFrom, skillPluginsFor, localPluginDirsFor } from "./core/skills.js";
 
 // 로컬 워커(1단계 얇은 워커): 디스코드에도 DB에도 붙지 않고, Railway 허브로 아웃바운드
 // WebSocket 을 열어 도구 호출만 받아 실행한다. 판단·기억·세션은 전부 허브(봇) 쪽에 있다.
@@ -78,11 +78,16 @@ async function main() {
       // 파일 반환 주소(4단계 4.5)는 위에서 이미 유도한 fileReturnUrl 을 그대로 쓴다 — 세션 인프로세스 send_file 이 여기로 올린다.
       const sessionRootDir = config.sessionDir ?? path.join(os.homedir(), ".asahi-sessions");
       const pluginDir = skillPluginDirFrom(path.join(path.dirname(fileURLToPath(import.meta.url)), "core"));
+      // 번들 스킬 플러그인(리포에 커밋) + 운영자가 계정 B 에 설치한 플러그인 디렉터리(4단계 4.4). 존재하는 것만 얹는다.
+      const bundledPlugins = skillPluginsFor({ pluginDir, exists: fs.existsSync(pluginDir) });
+      const extraPlugins = localPluginDirsFor(config.harnessPluginDirs, fs.existsSync);
+      const missingPlugins = config.harnessPluginDirs.filter((d) => !fs.existsSync(d));
+      if (missingPlugins.length > 0) console.warn(`[worker] 설정된 플러그인 폴더가 없어 건너뜁니다: ${missingPlugins.join(", ")}`);
       runner = makeSessionRunner({
         query: query as unknown as SessionQuery, llmBaseUrl, mcpBaseUrl, fileReturnUrl, browserMcp: config.browserMcp, sessionRootDir,
-        plugins: skillPluginsFor({ pluginDir, exists: fs.existsSync(pluginDir) }),
+        plugins: [...bundledPlugins, ...extraPlugins],
       });
-      console.log(`[worker] 세션 러너 켬 — 프록시 ${llmBaseUrl}, 허브 MCP ${mcpBaseUrl}, 파일 반환 ${fileReturnUrl}, 브라우저 ${config.browserMcp ? config.browserMcp.command : "없음"}, 세션 폴더 ${sessionRootDir}`);
+      console.log(`[worker] 세션 러너 켬 — 프록시 ${llmBaseUrl}, 허브 MCP ${mcpBaseUrl}, 파일 반환 ${fileReturnUrl}, 브라우저 ${config.browserMcp ? config.browserMcp.command : "없음"}, 플러그인 ${bundledPlugins.length + extraPlugins.length}개(설치 ${extraPlugins.length}), 세션 폴더 ${sessionRootDir}`);
     }
     // 갱신 종료(planShutdown)는 도구 호출과 세션 턴이 모두 끝나길 기다린다.
     const idle = () => Promise.all([executorsIdle(), runner ? runner.idle() : Promise.resolve()]).then(() => undefined);

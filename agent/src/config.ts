@@ -164,6 +164,9 @@ export type WorkerConfig = {
   // 설치된 Playwright MCP 등으로, 비밀이 없다(로컬). 없으면 안 붙인다(설치 전엔 우아하게 없음). 패키지에 하드코딩하지
   // 않는다: 운영자가 명령·인자를 그대로 정한다(예: command="npx", args="-y @playwright/mcp@latest --headless --output-dir C:\asahi-workspace").
   browserMcp?: { command: string; args: string[] };
+  // 운영자가 계정 B 에 설치한 Claude Code 플러그인 디렉터리들(4단계 4.4). HARNESS_PLUGIN_DIRS(쉼표 구분)로 준다. 번들
+  // 스킬 플러그인에 더해 하네스 세션에 로컬 플러그인으로 얹는다 — 없으면 번들만(옛 동작). 존재하지 않는 경로는 건너뛴다.
+  harnessPluginDirs: string[];
 };
 
 // Task 4: 워커는 이제 소유자가 누구인지 알 필요가 없다(신원·권한 판단은 허브 쪽에 있다) —
@@ -205,5 +208,7 @@ export function loadWorkerConfig(env: NodeJS.ProcessEnv = process.env): WorkerCo
     browserMcp: env.BROWSER_MCP_COMMAND?.trim()
       ? { command: env.BROWSER_MCP_COMMAND.trim(), args: (env.BROWSER_MCP_ARGS ?? "").split(/\s+/).filter((s) => s.length > 0) }
       : undefined,
+    // 경로는 쉼표로 나눈다(윈도우 경로에 쉼표는 없다). 존재 확인은 worker.ts 가 fs 로 한 번 한다.
+    harnessPluginDirs: (env.HARNESS_PLUGIN_DIRS ?? "").split(",").map((s) => s.trim()).filter((s) => s.length > 0),
   };
 }

@@ -35,3 +35,12 @@ export function resolveSkillsEnabled(req: { noSkills?: boolean }): boolean {
 export function skillPluginsFor(o: { pluginDir: string; exists: boolean }): Array<{ type: "local"; path: string }> {
   return o.exists ? [{ type: "local", path: o.pluginDir }] : [];
 }
+
+// 운영자가 계정 B 에 설치한 Claude Code 플러그인 디렉터리들(풀 하네스 4단계 4.4). 리포에 커밋한 번들 스킬
+// 플러그인(skillPluginsFor)에 더해, 세션에 그대로 로컬 플러그인으로 얹는다 — 리포 밖 공개 플러그인·라이선스가
+// 재배포를 막는 것을 기계 설치로만 다룰 수 있게 한다(설계 §6). 존재하지 않는 경로는 조용히 건너뛴다(skillPluginsFor
+// 와 같은 원칙: 없는 경로를 SDK 에 주지 않는다 — 부가 능력이 본 기능을 인질로 잡지 않는다). exists 를 인자로 받아
+// 순수하게 둔다(호출측이 fs 를 한 번 들여다보고 결과만 넘긴다).
+export function localPluginDirsFor(dirs: string[], exists: (p: string) => boolean): Array<{ type: "local"; path: string }> {
+  return dirs.filter((d) => d.length > 0 && exists(d)).map((d) => ({ type: "local", path: d }));
+}
