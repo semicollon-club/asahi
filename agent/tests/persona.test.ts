@@ -880,6 +880,14 @@ describe("buildSystemPrompt — 하네스 턴(소유자, 세션 러너)", () => 
     expect(cap).not.toMatch(/보내는 도구도 이 턴에는 없습니다/);
   });
 
+  it("브라우저(4단계 4.3)는 harness.browser 일 때만 mcp__browser__ 로 안내한다(안내와 실제 도구 일치)", () => {
+    const withBrowser = capabilitySection(buildSystemPrompt({ role: "owner", isPrivate: true, isOwner: true, workerConnected: true, harness: { cwd: harness.cwd, browser: true } }));
+    expect(withBrowser).toMatch(/mcp__browser__/);
+    // 기본 harness(browser 없음)에는 브라우저 안내가 없다 — 워커에 설치·구성되지 않았을 수 있으므로.
+    const withoutBrowser = capabilitySection(buildSystemPrompt({ role: "owner", isPrivate: true, isOwner: true, workerConnected: true, harness }));
+    expect(withoutBrowser).not.toMatch(/mcp__browser__/);
+  });
+
   it("기억 도구가 이 턴에 없다는 사실을 말한다 — 기억 요청을 받으면 그렇게 안내하게", () => {
     const cap = capabilitySection(buildSystemPrompt({ role: "owner", isPrivate: true, isOwner: true, workerConnected: true, harness }));
     expect(cap).toMatch(/기억/);

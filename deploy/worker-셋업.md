@@ -324,6 +324,7 @@ Register-ScheduledTask -TaskName "asahi-worker-update" -Action $action -Trigger 
 |---|---|
 | `WORKER_MODE` | `harness`. 비우면 `tools`(지금까지의 얇은 워커). 다른 값은 시작 시점에 실패한다 |
 | `WORKER_SESSION_DIR` | (선택) 부원별 `CLAUDE_CONFIG_DIR` 의 루트. 비우면 이 계정 프로필 아래 `.asahi-sessions`. **`WORKER_ROOTS` 밖에 둔다** — `fs_*` 로는 닿지 않게(`sh_exec` 는 같은 계정이라 닿는다 — 설계 §5 가 받아들인 위험) |
+| `BROWSER_MCP_COMMAND` / `BROWSER_MCP_ARGS` | (선택, 4단계 4.3) 있으면 하네스 세션에 로컬 stdio 브라우저 MCP(`mcp__browser__*`)를 붙인다. 패키지 무관 — 운영자가 명령·인자를 정한다. 권장(Playwright MCP): `BROWSER_MCP_COMMAND=npx`, `BROWSER_MCP_ARGS=-y @playwright/mcp@latest --headless --isolated --output-dir <작업 폴더>`. 캡처를 `send_file` 로 보내려면 `--output-dir` 을 작업 폴더(`WORKER_ROOTS[0]`)로. 계정 B 에 `@playwright/mcp` 와 브라우저 바이너리(`npx playwright install chromium`)를 먼저 설치한다. 봇에 `HARNESS_BROWSER=true` 를 함께 켜 능력 안내를 맞춘다 |
 
 `.env` 를 고친 뒤 워커를 재시작한다(센티넬 절차 — [minipc-단일호스트-셋업.md](minipc-단일호스트-셋업.md) 5절 3항). 로그의
 시작 줄에 `모드=harness` 와 `[worker] 세션 러너 켬 — 프록시 http://127.0.0.1:<PORT>/llm, 세션 폴더 …` 가 나와야 한다. 봇 쪽

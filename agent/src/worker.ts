@@ -79,10 +79,10 @@ async function main() {
       const sessionRootDir = config.sessionDir ?? path.join(os.homedir(), ".asahi-sessions");
       const pluginDir = skillPluginDirFrom(path.join(path.dirname(fileURLToPath(import.meta.url)), "core"));
       runner = makeSessionRunner({
-        query: query as unknown as SessionQuery, llmBaseUrl, mcpBaseUrl, fileReturnUrl, sessionRootDir,
+        query: query as unknown as SessionQuery, llmBaseUrl, mcpBaseUrl, fileReturnUrl, browserMcp: config.browserMcp, sessionRootDir,
         plugins: skillPluginsFor({ pluginDir, exists: fs.existsSync(pluginDir) }),
       });
-      console.log(`[worker] 세션 러너 켬 — 프록시 ${llmBaseUrl}, 허브 MCP ${mcpBaseUrl}, 파일 반환 ${fileReturnUrl}, 세션 폴더 ${sessionRootDir}`);
+      console.log(`[worker] 세션 러너 켬 — 프록시 ${llmBaseUrl}, 허브 MCP ${mcpBaseUrl}, 파일 반환 ${fileReturnUrl}, 브라우저 ${config.browserMcp ? config.browserMcp.command : "없음"}, 세션 폴더 ${sessionRootDir}`);
     }
     // 갱신 종료(planShutdown)는 도구 호출과 세션 턴이 모두 끝나길 기다린다.
     const idle = () => Promise.all([executorsIdle(), runner ? runner.idle() : Promise.resolve()]).then(() => undefined);

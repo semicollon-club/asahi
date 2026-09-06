@@ -176,6 +176,22 @@ describe("makeSessionRunner — turn.start 하나를 query() 한 번으로", () 
     fs.rmSync(root, { recursive: true, force: true });
   });
 
+  it("browserMcp·fileReturnUrl 이 있으면 로컬 MCP(browser·file)를 query 옵션의 mcpServers 에 넣는다(4.3·4.5)", async () => {
+    const seen: Array<{ prompt: string; options: Record<string, unknown> }> = [];
+    const root = tmpRoot();
+    const runner = makeSessionRunner({
+      query: fakeQuery([initMsg, resultMsg], seen), llmBaseUrl: "http://h/llm", sessionRootDir: root,
+      fileReturnUrl: "http://127.0.0.1:3100/files", browserMcp: { command: "npx", args: ["-y", "@playwright/mcp@latest"] },
+    });
+    const out: Frame[] = [];
+    runner.start(frame, (f) => out.push(f));
+    await vi.waitFor(() => expect(out.some((f) => f.type === "turn.result")).toBe(true));
+    const mcp = seen[0].options.mcpServers as Record<string, unknown>;
+    expect(Object.keys(mcp).sort()).toEqual(["browser", "file"]);
+    expect(mcp.browser).toEqual({ command: "npx", args: ["-y", "@playwright/mcp@latest"] });
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
   it("result 가 success 가 아니면 ok:false 와 사유를 돌려준다", async () => {
     const runner = makeSessionRunner({ query: fakeQuery([initMsg, { type: "result", subtype: "error_max_turns", session_id: "s" }], []), llmBaseUrl: "http://h/llm", sessionRootDir: tmpRoot() });
     const out: Frame[] = [];
