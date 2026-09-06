@@ -26,6 +26,16 @@ describe("작업 토큰 — mint/verify", () => {
     expect(verifyJobToken(secret, `${prefix}.${forged}.${sig}`, 0)).toBeNull();
   });
 
+  it("model 클레임(3단계 모델 고정)이 있으면 그대로 왕복하고, 없으면 필드 자체가 없다", () => {
+    const secret = newJobTokenSecret();
+    const withModel: JobTokenClaims = { ...claims, model: "claude-sonnet-5" };
+    expect(verifyJobToken(secret, mintJobToken(secret, withModel), 9_999)).toEqual(withModel);
+    // 파일 반환 토큰처럼 model 없이 발급하면 검증 결과에도 model 키가 없다(옛 토큰 호환).
+    const back = verifyJobToken(secret, mintJobToken(secret, claims), 9_999);
+    expect(back).toEqual(claims);
+    expect(back && "model" in back).toBe(false);
+  });
+
   it("서명 한 글자를 바꾸면 거절한다", () => {
     const secret = newJobTokenSecret();
     const token = mintJobToken(secret, claims);

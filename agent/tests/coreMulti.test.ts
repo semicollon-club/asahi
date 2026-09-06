@@ -11,6 +11,7 @@ import { TurnsRepo } from "../src/store/turnsRepo.js";
 import { AllowedDirsRepo } from "../src/store/allowedDirsRepo.js";
 import { ProjectsRepo } from "../src/store/projectsRepo.js";
 import { ActionsRepo } from "../src/store/actionsRepo.js";
+import { LlmUsageRepo } from "../src/store/llmUsageRepo.js";
 import { AgentCore } from "../src/core/core.js";
 import { filterFileAttachments, FILE_LIMITS } from "../src/core/attachments.js";
 import type { Config } from "../src/config.js";
@@ -58,6 +59,9 @@ async function setup(over: {
     allowedDirs: new AllowedDirsRepo(db),
     actions: new ActionsRepo(db),
     projects: new ProjectsRepo(db),
+    // 3단계 3.3: 부원별 창 토큰 상한 검사가 읽는다. 상한(maxLlmTokensPerWindowPerUser)이 기본 미설정이라
+    // 대부분 테스트에서는 tokenCap=0 으로 건너뛴다 — 아래 전용 테스트만 over.config 로 상한을 켠다.
+    llmUsage: new LlmUsageRepo(db),
   };
   await repos.users.upsert("owner", { role: "owner" });
   await repos.users.upsert("guest", { role: "allowed" });
@@ -285,6 +289,33 @@ describe("AgentCore — 멀티유저/멀티대화", () => {
     await t.core.drain();
     expect(t.calls.length).toBe(1);
     expect(t.published.find((e) => e.type === "system_notice")?.text).toContain("한도");
+  });
+
+  it("부원별 창 토큰 상한(3.3): 창 안 사용량이 상한에 닿은 손님은 LLM 을 호출하지 않고 안내한다", async () => {
+    const t = await setup({ config: { maxLlmTokensPerWindowPerUser: 100, llmTokenWindowMs: 60_000 } });
+    // 손님의 창 안 사용량을 상한 이상으로 심는다(입력 80 + 출력 40 = 120 ≥ 100).
+    await t.repos.llmUsage!.record({ ts: t.now(), jobId: "j", userId: "guest", conversationId: null, model: "m", inputTokens: 80, outputTokens: 40, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 });
+    pub(t.bus, dmHint("guest", "allowed"), "1", 1);
+    await t.core.drain();
+    expect(t.calls.length).toBe(0); // 상한에 닿아 LLM 을 부르지 않음
+    expect(t.published.find((e) => e.type === "system_notice")?.text).toContain("사용량");
+  });
+
+  it("부원별 창 토큰 상한(3.3): 소유자는 자기 사용량이 상한을 넘어도 게이트를 거치지 않는다(소유자 우선)", async () => {
+    const t = await setup({ config: { maxLlmTokensPerWindowPerUser: 100, llmTokenWindowMs: 60_000 } });
+    await t.repos.llmUsage!.record({ ts: t.now(), jobId: "j", userId: "owner", conversationId: null, model: "m", inputTokens: 999, outputTokens: 999, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 });
+    pub(t.bus, dmHint("owner", "owner"), "1", 1);
+    await t.core.drain();
+    expect(t.calls.length).toBe(1); // 소유자 턴은 돈다
+  });
+
+  it("부원별 창 토큰 상한(3.3): 창 밖(오래된) 사용량만 있으면 손님도 통과한다", async () => {
+    const t = await setup({ config: { maxLlmTokensPerWindowPerUser: 100, llmTokenWindowMs: 60_000 } });
+    // now=1_000_000, 창=60_000 → since=940_000. 창 밖(500_000)에 큰 사용량이 있어도 합산되지 않는다.
+    await t.repos.llmUsage!.record({ ts: 500_000, jobId: "j", userId: "guest", conversationId: null, model: "m", inputTokens: 900, outputTokens: 900, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 });
+    pub(t.bus, dmHint("guest", "allowed"), "1", 1);
+    await t.core.drain();
+    expect(t.calls.length).toBe(1); // 창 안 사용량 0 → 통과
   });
 
   it("소유자는 유저별·전역 한도를 전혀 받지 않는다(무제한)", async () => {
