@@ -19,6 +19,7 @@ import { TurnsRepo } from "./store/turnsRepo.js";
 import { AllowedDirsRepo } from "./store/allowedDirsRepo.js";
 import { ActionsRepo } from "./store/actionsRepo.js";
 import { LlmUsageRepo } from "./store/llmUsageRepo.js";
+import { BackupsRepo } from "./store/backupsRepo.js";
 import { WorkersRepo } from "./store/workersRepo.js";
 import { SettingsRepo } from "./store/settingsRepo.js";
 import { IntrospectRepo } from "./store/introspectRepo.js";
@@ -27,6 +28,7 @@ import { makeRunAgentTurn } from "./core/agent.js";
 import { DigestRunner, DIGEST_TOPICS, type DigestTopic } from "./core/digest.js";
 import { decideMissingAlerts, type SeenState } from "./core/staleWorker.js";
 import { PrTracker } from "./core/prTracker.js";
+import { makeBackupRunner } from "./core/backup.js";
 import { DiscordAdapter } from "./adapters/discord.js";
 import { makeJobTokenMinter, newJobTokenSecret } from "./core/jobToken.js";
 import { makeFileReturnHandler, FILE_RETURN_PATH } from "./core/fileReturn.js";
@@ -78,6 +80,8 @@ async function main() {
     actions: new ActionsRepo(db),
     // LLM 사용량(3단계 3.2) — 프록시가 모델 호출마다 한 행씩 남기고, 코어의 사전 게이트가 부원 창 합을 읽는다.
     llmUsage: new LlmUsageRepo(db),
+    // 백업 기록(부원 오픈 게이트 2D) — 내보낸 파일의 목록·상태.
+    backups: new BackupsRepo(db),
   };
   // 소유자를 users(owner)로 보장 — 게이트 통과 기본값.
   await users.upsert(config.ownerId, { role: "owner" });
@@ -270,11 +274,27 @@ async function main() {
 
   await core.recoverPending(); // 크래시로 남은 미처리 메시지 재개
 
-  // 유휴 세션 정리 + 정기 게시 확인 + PR 추적: 1분마다 같은 타이머에서 함께 확인한다(타이머를 새로 만들지 않는다).
+  // 기억 백업(부원 오픈 게이트 2D): 주기(기본 24시간)가 지났으면 기억 전체를 JSON 으로 내보내고 표에 남긴다.
+  // 실제 파일 쓰기만 여기서 주입한다 — 판정·조립·정리는 core/backup.ts 의 순수 함수다.
+  const backupRunner = makeBackupRunner({
+    memories: repos.memories, backups: repos.backups,
+    dir: config.backupDir ?? path.join(config.dataDir, "backups"),
+    keep: config.backupKeep, intervalMs: config.backupIntervalMs,
+    fs: {
+      mkdir: async (dir) => { await fs.promises.mkdir(dir, { recursive: true }); },
+      writeFile: (file, data) => fs.promises.writeFile(file, data, "utf8"),
+      readdir: (dir) => fs.promises.readdir(dir),
+      unlink: (file) => fs.promises.unlink(file),
+    },
+  });
+
+  // 유휴 세션 정리 + 정기 게시 확인 + PR 추적 + 백업: 1분마다 같은 타이머에서 함께 확인한다(타이머를 새로 만들지 않는다).
+  // 백업은 자기 주기를 스스로 보므로 매 분 불려도 실제 작업은 하루 한 번이다.
   const idleTimer = setInterval(() => {
     void core.closeIdleConversations().catch((err) => console.error("[core] 유휴 정리 오류:", err));
     void digest.checkAndRun().catch((err) => console.error("[digest] 스케줄 확인 오류:", err));
     void prTracker.tick().catch((err) => console.error("[prTracker] 확인 오류:", err));
+    void backupRunner.runIfDue().catch((err) => console.error("[backup] 확인 오류:", err));
   }, 60 * 1000);
 
   // 붙어 있던 워커가 사라지면 소유자에게 알린다(2026-08-01: 그 상태로 13시간 반이 지나갔다).

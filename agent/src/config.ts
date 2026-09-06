@@ -81,6 +81,12 @@ export type Config = {
   // BROWSER_MCP_COMMAND 를 넣고 브라우저를 설치했을 때 이 플래그를 함께 켠다 — 안내와 실제 도구가 어긋나지 않게.
   // 정확히 "true" 일 때만. 실제 도구를 붙이는 것은 워커의 browserMcp 다(이 플래그는 페르소나 문구만 켠다).
   harnessBrowser?: boolean;
+  // 기억 백업(부원 오픈 게이트 2D). 공용 기억은 부원이 쌓는 유일한 복구 불가 데이터인데 앱 차원의 내보내기
+  // 경로가 없었다. 봇이 주기마다 기억 전체를 JSON 으로 이 폴더에 쓰고 `backups` 표에 남긴다.
+  // 선택 필드인 이유는 harnessOwner 와 같다(Config 리터럴 픽스처가 여럿) — 없으면 코어가 기본값으로 읽는다.
+  backupDir?: string;
+  backupKeep?: number;
+  backupIntervalMs?: number;
 };
 
 // 깃허브 발행 설정. 개인키는 base64 한 줄로 받는다 — 줄바꿈이 든 PEM 은 .env 파서·배포
@@ -140,6 +146,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     maxLlmTokensPerWindowPerUser: nonNegativeNumberEnv(env, "MAX_LLM_TOKENS_PER_WINDOW_PER_USER", 1_500_000),
     llmTokenWindowMs: positiveNumberEnv(env, "LLM_TOKEN_WINDOW_HOURS", 5) * 60 * 60 * 1000,
     harnessBrowser: env.HARNESS_BROWSER === "true",
+    backupDir: env.BACKUP_DIR?.trim() || path.join(env.DATA_DIR || path.resolve("..", "data", "store"), "backups"),
+    backupKeep: nonNegativeNumberEnv(env, "BACKUP_KEEP", 14),
+    backupIntervalMs: positiveNumberEnv(env, "BACKUP_INTERVAL_HOURS", 24) * 60 * 60 * 1000,
   };
 }
 
