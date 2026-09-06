@@ -112,6 +112,26 @@ describe("renderCommandHelp — 안내문이 실제 예약어와 어긋나지 �
     // 고정하려는 사실("기억은 남는다")은 그대로다.
     expect(reset?.description).toMatch(/기억은 남습니다/);
   });
+
+  // 공용 기계 고지(ADR 0009). 부원끼리 서로의 기록을 가리지 않기로 했으므로 그 사실을 말하는 것이
+  // 결정의 나머지 절반이다 — /help 는 손님이 직접 읽는 유일한 안내라 여기가 그 자리다.
+  it("워커 연결 여부와 무관하게 공용 기계 고지를 낸다 — 대화 자체는 워커가 없어도 기록으로 남는다", () => {
+    for (const connected of [true, false]) {
+      const help = renderCommandHelp(connected);
+      expect(help).toMatch(/비공개가 아닙니다/);
+      expect(help).toMatch(/다른 부원이 볼 수 있습니다/);
+      expect(help).toMatch(/비밀번호·API 키/);
+    }
+  });
+
+  // 손님 DM 은 아예 받지 않는다(discord.ts 의 dm-declined) — 이 목록을 읽는 손님에게 DM 은 존재하지
+  // 않는 통로다. 없는 길을 알리면 "DM 으로도 되나" 로 읽힌다.
+  it("조사 예약어 설명이 DM 을 언급하지 않는다", () => {
+    for (const name of ["/대회", "/개발뉴스"]) {
+      const g = COMMAND_HELP.find((x) => x.commands.includes(name));
+      expect(g?.description).not.toMatch(/DM/);
+    }
+  });
 });
 
 describe("isChannelCommand — 대화 없이 일반 채널에서 처리할 수 있는 예약어", () => {
