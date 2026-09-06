@@ -1,4 +1,4 @@
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 
 // Postgres DDL. better-sqlite3 -> pg 이전(feat/postgres-supabase-store)에서
 // 기존 SQLite 스키마(db.ts 의 legacy SCHEMA + 이 파일의 NEW_SCHEMA)를 하나로 합쳤다.
@@ -270,4 +270,25 @@ CREATE TABLE IF NOT EXISTS pull_requests (
 );
 CREATE INDEX IF NOT EXISTS idx_pull_requests_state ON pull_requests(state);
 CREATE INDEX IF NOT EXISTS idx_pull_requests_requester ON pull_requests(requester_user_id, created_ts);
+
+-- LLM 사용량(풀 하네스 3단계 3.2). 인증 프록시(core/llmProxy.ts)가 하네스 세션의 모델 호출 하나마다
+-- SSE 의 usage(message_start 입력·캐시, message_delta 누적 출력)를 읽어 한 행씩 남긴다. 한 턴(job_id)은
+-- 도구 루프마다 모델을 여러 번 부르므로 job_id 당 여러 행이 정상이다 — "부원이 창 안에 얼마나 썼나"는
+-- user_id+ts 로 합산한다(부원별 창 상한 3.3, turnsRepo.reserve 와 같은 축). 소유자는 db_query·runtime_info
+-- 로 조회한다. 자격증명·프롬프트 본문은 저장하지 않는다 — 토큰 수와 모델·시각뿐이다.
+CREATE TABLE IF NOT EXISTS llm_usage (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  ts BIGINT NOT NULL,
+  job_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  conversation_id BIGINT,
+  model TEXT NOT NULL,
+  input_tokens BIGINT NOT NULL DEFAULT 0,
+  output_tokens BIGINT NOT NULL DEFAULT 0,
+  cache_creation_input_tokens BIGINT NOT NULL DEFAULT 0,
+  cache_read_input_tokens BIGINT NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_llm_usage_user_ts ON llm_usage(user_id, ts);
+CREATE INDEX IF NOT EXISTS idx_llm_usage_ts ON llm_usage(ts);
+CREATE INDEX IF NOT EXISTS idx_llm_usage_conv ON llm_usage(conversation_id, ts);
 `;

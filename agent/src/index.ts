@@ -18,6 +18,7 @@ import { PullRequestsRepo } from "./store/pullRequestsRepo.js";
 import { TurnsRepo } from "./store/turnsRepo.js";
 import { AllowedDirsRepo } from "./store/allowedDirsRepo.js";
 import { ActionsRepo } from "./store/actionsRepo.js";
+import { LlmUsageRepo } from "./store/llmUsageRepo.js";
 import { WorkersRepo } from "./store/workersRepo.js";
 import { SettingsRepo } from "./store/settingsRepo.js";
 import { IntrospectRepo } from "./store/introspectRepo.js";
@@ -70,6 +71,8 @@ async function main() {
     introspect: new IntrospectRepo(db),
     workers: new WorkersRepo(db),
     actions: new ActionsRepo(db),
+    // LLM 사용량(3단계 3.2) — 프록시가 모델 호출마다 한 행씩 남기고, 코어의 사전 게이트가 부원 창 합을 읽는다.
+    llmUsage: new LlmUsageRepo(db),
   };
   // 소유자를 users(owner)로 보장 — 게이트 통과 기본값.
   await users.upsert(config.ownerId, { role: "owner" });
@@ -88,7 +91,21 @@ async function main() {
   const fileReturn = makeFileReturnHandler({ verify: (t) => jobTokens.verify(t), publish: (e) => bus.publish(e), now: Date.now });
   // 인증 프록시(풀 하네스 2단계): 세션 러너의 Claude Code 가 ANTHROPIC_BASE_URL 로 삼는 /llm. 같은 작업 토큰으로 인증하고
   // 진짜 구독 OAuth 를 끼운다(core/llmProxy.ts). 자격증명은 이 프로세스(계정 A)의 .env 에만 있다.
-  const llmProxy = makeLlmProxyHandler({ verify: (t) => jobTokens.verify(t), credential: () => config.claudeOauthToken });
+  const llmProxy = makeLlmProxyHandler({
+    verify: (t) => jobTokens.verify(t),
+    credential: () => config.claudeOauthToken,
+    // 사용량 기록(3단계 3.2): 성공 응답의 SSE 에서 읽은 토큰을 llm_usage 에 한 행으로. 기록 실패는 로그만 —
+    // 모델 응답 스트림을 막지 않는다(부가 기능이 본 기능을 인질로 잡지 않는다).
+    recordUsage: (row) => {
+      void repos.llmUsage
+        .record({
+          ts: row.ts, jobId: row.jobId, userId: row.userId, conversationId: row.conversationId,
+          model: row.requestModel, inputTokens: row.inputTokens, outputTokens: row.outputTokens,
+          cacheCreationInputTokens: row.cacheCreationInputTokens, cacheReadInputTokens: row.cacheReadInputTokens,
+        })
+        .catch((err) => console.error("[index] LLM 사용량 기록 실패:", err instanceof Error ? err.message : String(err)));
+    },
+  });
   const harnessOwner = config.harnessOwner === true;
   if (harnessOwner) console.log("[index] HARNESS_OWNER=true — 소유자 턴은 harness 모드 워커의 세션 러너로 보냅니다.");
 

@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
-import { LLM_PROXY_PREFIX, OAUTH_BETA, decideLlmRoute, fixBetaHeader, makeLlmProxyHandler } from "../src/core/llmProxy.js";
+import { LLM_PROXY_PREFIX, OAUTH_BETA, decideLlmRoute, fixBetaHeader, makeLlmProxyHandler, createUsageSniffer, type LlmUsageRow } from "../src/core/llmProxy.js";
 
 // 풀 하네스 2단계(2026-09-05 밤): 봇(계정 A)의 인증 프록시 /llm/v1/*. 세션(계정 B)은 ANTHROPIC_BASE_URL 을 여기로,
 // ANTHROPIC_AUTH_TOKEN 을 작업 토큰으로 받는다. 프록시는 토큰을 검증하고 Authorization 을 진짜 구독 OAuth 로 바꿔
@@ -44,6 +44,8 @@ async function proxyServer(handler: (req: http.IncomingMessage, res: http.Server
 }
 
 const verify = (t: string) => (t === "good" ? { jobId: "j", userId: "u1", conversationId: 1, channelRef: "c", exp: 9e12 } : null);
+// 모델 고정(3.1) 테스트용 — 토큰에 고정 모델이 실려 있다.
+const verifyModel = (t: string) => (t === "good" ? { jobId: "j", userId: "u1", conversationId: 1, channelRef: "c", model: "claude-sonnet-5", exp: 9e12 } : null);
 
 describe("decideLlmRoute — 경로 허용 목록", () => {
   it("루트(HEAD/GET /llm, /llm/)는 연결 확인용 200", () => {
@@ -154,5 +156,69 @@ describe("makeLlmProxyHandler", () => {
     const base = await proxyServer(makeLlmProxyHandler({ verify: () => { throw new Error("boom"); }, credential: () => "real", upstream: up.url }));
     const r = await fetch(`${base}/llm/v1/messages`, { method: "POST", body: "{}", headers: { authorization: "Bearer good" } });
     expect(r.status).toBe(401);
+  });
+
+  it("모델 고정(3.1): 본문 모델이 토큰의 고정 모델과 다르면 400 이고 업스트림에 가지 않는다", async () => {
+    const up = await fakeUpstream((_c, res) => { res.writeHead(200); res.end("{}"); });
+    const base = await proxyServer(makeLlmProxyHandler({ verify: verifyModel, credential: () => "real", upstream: up.url }));
+    const r = await fetch(`${base}/llm/v1/messages`, { method: "POST", body: JSON.stringify({ model: "claude-opus-5" }), headers: { authorization: "Bearer good" } });
+    expect(r.status).toBe(400);
+    expect(up.captured).toHaveLength(0);
+  });
+
+  it("모델 고정(3.1): 본문 모델이 고정 모델과 같으면 통과한다", async () => {
+    const up = await fakeUpstream((_c, res) => { res.writeHead(200, { "content-type": "application/json" }); res.end('{"id":"ok"}'); });
+    const base = await proxyServer(makeLlmProxyHandler({ verify: verifyModel, credential: () => "real", upstream: up.url }));
+    const r = await fetch(`${base}/llm/v1/messages`, { method: "POST", body: JSON.stringify({ model: "claude-sonnet-5" }), headers: { authorization: "Bearer good" } });
+    expect(r.status).toBe(200);
+    expect(up.captured).toHaveLength(1);
+  });
+
+  it("모델 고정: 토큰에 모델이 없으면(파일 반환류·옛 토큰) 고정하지 않고 그대로 통과한다", async () => {
+    const up = await fakeUpstream((_c, res) => { res.writeHead(200); res.end("{}"); });
+    const base = await proxyServer(makeLlmProxyHandler({ verify, credential: () => "real", upstream: up.url }));
+    const r = await fetch(`${base}/llm/v1/messages`, { method: "POST", body: JSON.stringify({ model: "claude-opus-5" }), headers: { authorization: "Bearer good" } });
+    expect(r.status).toBe(200);
+    expect(up.captured).toHaveLength(1);
+  });
+
+  it("사용량 기록(3.2): SSE 의 message_start/message_delta 에서 usage 를 읽어 recordUsage 를 한 번 부른다", async () => {
+    const up = await fakeUpstream((_c, res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write('event: message_start\ndata: {"type":"message_start","message":{"model":"claude-sonnet-5","usage":{"input_tokens":100,"output_tokens":1,"cache_read_input_tokens":20}}}\n\n');
+      setTimeout(() => { res.write('event: message_delta\ndata: {"type":"message_delta","usage":{"output_tokens":55}}\n\n'); res.end(); }, 10);
+    });
+    const rows: LlmUsageRow[] = [];
+    const base = await proxyServer(makeLlmProxyHandler({ verify: verifyModel, credential: () => "real", upstream: up.url, recordUsage: (row) => rows.push(row), now: () => 12345 }));
+    await (await fetch(`${base}/llm/v1/messages`, { method: "POST", body: JSON.stringify({ model: "claude-sonnet-5" }), headers: { authorization: "Bearer good" } })).text();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ jobId: "j", userId: "u1", requestModel: "claude-sonnet-5", model: "claude-sonnet-5", inputTokens: 100, outputTokens: 55, cacheCreationInputTokens: 0, cacheReadInputTokens: 20, ts: 12345 });
+  });
+
+  it("사용량 기록: 오류 응답(429 등)에는 recordUsage 를 부르지 않는다", async () => {
+    const up = await fakeUpstream((_c, res) => { res.writeHead(429, { "content-type": "application/json" }); res.end('{"type":"error"}'); });
+    const rows: LlmUsageRow[] = [];
+    const base = await proxyServer(makeLlmProxyHandler({ verify: verifyModel, credential: () => "real", upstream: up.url, recordUsage: (row) => rows.push(row) }));
+    const r = await fetch(`${base}/llm/v1/messages`, { method: "POST", body: JSON.stringify({ model: "claude-sonnet-5" }), headers: { authorization: "Bearer good" } });
+    expect(r.status).toBe(429);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(rows).toHaveLength(0);
+  });
+});
+
+describe("createUsageSniffer — SSE usage 파싱", () => {
+  it("조각이 줄 중간에서 끊겨도 message_start 입력 + message_delta 누적 출력을 합친다", () => {
+    const s = createUsageSniffer();
+    s.push('event: message_start\ndata: {"type":"message_start","mess');
+    s.push('age":{"model":"m","usage":{"input_tokens":30,"output_tokens":1,"cache_creation_input_tokens":8}}}\n\n');
+    s.push('event: message_delta\ndata: {"type":"message_delta","usage":{"output_tokens":42}}\n\n');
+    expect(s.result()).toEqual({ inputTokens: 30, outputTokens: 42, cacheCreationInputTokens: 8, cacheReadInputTokens: 0, model: "m" });
+  });
+
+  it("SSE 이벤트를 하나도 못 보면(비스트리밍 JSON 등) null", () => {
+    const s = createUsageSniffer();
+    s.push('{"id":"msg","usage":{"input_tokens":5}}');
+    expect(s.result()).toBeNull();
   });
 });
