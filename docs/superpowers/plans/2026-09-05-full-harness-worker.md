@@ -75,14 +75,18 @@ Railway 는 IPv6 사설망으로 컨테이너에 닿으므로 IPv4 전용 바인
 **메모(3.2 조회 경로)**: 사용량 조회는 `db_query`(소유자 전용, 읽기 전용 SQL)로 `SELECT ... FROM llm_usage` 가 그대로 된다.
 `runtime_info` 에 창 사용량 한 줄을 얹는 것은 `ToolRepos`·`buildToolCtx`·창 길이 배선이 필요해, 값이 실제로 필요해질 때(부원 개방) 붙인다.
 
-## 4단계 — MCP 허브·브라우저·플러그인·파일 반환 로컬화
+## 4단계 — MCP 허브·브라우저·플러그인·파일 반환 로컬화 — **완료(2026-09-06, Railway 제외)**
+
+4.1·4.2·4.3·4.5 는 실사용 검증까지 끝났고 4.4 는 구현 완료다. 소유자 하네스 턴에 `mcp__github__*`·`mcp__supabase__*`·
+`mcp__browser__*`·`mcp__file__send_file` 이 붙는다. **Railway 허브 서버만 보류** — 봇에 Railway API 자격증명이 없고
+(호스트로만 썼다) `asahi` 서비스는 삭제됐으며 5단계에서 Railway 종료가 예정이라, 필요해지면 토큰을 받아 같은 레일에 더한다.
 
 | # | 태스크 | 완료 기준 | 상태 |
 |---|---|---|---|
 | 4.1 | MCP 허브(계정 A): stdio 서버를 루프백 HTTP MCP 로(`/mcp/<이름>`, 작업 토큰) — 첫 서버 GitHub(읽기) | 소유자 세션에서 `mcp__github__*` | ✅ 봇 루프백 허브(`core/mcpHub.ts`, stateless StreamableHTTP·작업 토큰), GitHub 읽기 서버(`mcp/githubReadServer.ts` — `list_repos`·`get_pull_request`, 읽기 스코프 토큰), 프로필 `mcpHub`(소유자만)·워커가 주소·토큰 조립(`sessionRunner.buildMcpServers`). 실제 MCP 클라이언트 왕복 테스트 |
 | 4.2 | Supabase(읽기 전용 역할)·Railway 허브 서버 — 소유자 프로필만 | 디스코드에서 표 조회 | ✅ **Supabase 완료** — `mcp/supabaseReadServer.ts`(db_schema·db_query, 봇의 READ ONLY 가드 재사용), 프로필 `OWNER_MCP_HUB=["github","supabase"]`. 경계 강화: 작업 토큰에 허용 서버 목록(mcpHub 클레임) → 허브가 서버별 403. **Railway 보류** — 봇에 Railway API 자격증명 없음(호스트로만 씀), 서비스 삭제·5단계 종료 예정. 필요 시 토큰 받아 추가 |
-| 4.3 | B 의 공유 브라우저 MCP(Playwright 서버 하나, 세션별 컨텍스트) + `send_file` 로 캡처 반환 | localhost 화면이 첨부로 | ✅ 코드 완료 — 워커가 `BROWSER_MCP_COMMAND`(패키지 무관·운영자 구성) 있으면 세션에 로컬 stdio 브라우저 MCP(`mcp__browser__*`) 부착, 봇 `HARNESS_BROWSER` 로 능력 안내. 캡처는 `--output-dir`→작업 폴더→`send_file`. **운영자 설치(계정 B 에 @playwright/mcp + 브라우저) 후 실검증.** 공유 서버 1개·세션별 컨텍스트는 5단계 |
-| 4.4 | 플러그인 설치 절차(B 계정) + 프로필의 플러그인 목록 | 공개 플러그인 하나가 손님 프로필에서 돈다 |
+| 4.3 | B 의 공유 브라우저 MCP(Playwright 서버 하나, 세션별 컨텍스트) + `send_file` 로 캡처 반환 | localhost 화면이 첨부로 | ✅ **실사용 검증 완료** — 워커가 `BROWSER_MCP_COMMAND`(패키지 무관·운영자 구성) 있으면 세션에 로컬 stdio 브라우저 MCP(`mcp__browser__*`) 부착, 봇 `HARNESS_BROWSER` 로 능력 안내. 실측 권장값은 `cmd /c npx -y @playwright/mcp@latest --headless --isolated --browser msedge --output-dir <작업 폴더>`(시스템 Edge 채널 — 다운로드 없음). **함정**: stdio 는 늦게 떠서 비차단 MCP 시작이 도구를 놓친다 → `alwaysLoad` 로 최대 5초 대기(붙음 여부는 `[runner] MCP 서버:` 로그). 공유 서버 1개·세션별 컨텍스트는 5단계 |
+| 4.4 | 플러그인 설치 절차(B 계정) + 프로필의 플러그인 목록 | 공개 플러그인 하나가 손님 프로필에서 돈다 | ✅ 구현 완료 — 워커 `HARNESS_PLUGIN_DIRS`(쉼표 구분)의 플러그인 디렉터리를 번들 스킬 플러그인에 얹어 세션 `plugins` 로(`skills.localPluginDirsFor`, 없는 경로는 경고 후 건너뜀). 리포 밖 공개 플러그인·재배포 금지 스킬을 기계 설치로만 다룰 수 있다. 프로필별 선택은 5단계(손님 개방) |
 | 4.5 | `send_file` 을 세션 쪽 인프로세스 MCP 도구로(엔드포인트 동일) | 얇은 도구 없이 파일 반환 | ✅ `mcp/sendFileServer.ts`(createSdkMcpServer, `mcp__file__send_file`) — 봇 `POST /files`(작업 토큰) 그대로, 경로는 작업 폴더 스코프. 세션 러너가 턴마다 생성(worker 가 fileReturnUrl 주입). 하네스 턴이 파일을 디스코드로 돌려줄 수 있게 됨(4.3 캡처 반환의 전제) |
 
 ## 5단계 — 부원 개방 + 자원 관리 + Railway 종료

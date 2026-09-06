@@ -324,7 +324,8 @@ Register-ScheduledTask -TaskName "asahi-worker-update" -Action $action -Trigger 
 |---|---|
 | `WORKER_MODE` | `harness`. 비우면 `tools`(지금까지의 얇은 워커). 다른 값은 시작 시점에 실패한다 |
 | `WORKER_SESSION_DIR` | (선택) 부원별 `CLAUDE_CONFIG_DIR` 의 루트. 비우면 이 계정 프로필 아래 `.asahi-sessions`. **`WORKER_ROOTS` 밖에 둔다** — `fs_*` 로는 닿지 않게(`sh_exec` 는 같은 계정이라 닿는다 — 설계 §5 가 받아들인 위험) |
-| `BROWSER_MCP_COMMAND` / `BROWSER_MCP_ARGS` | (선택, 4단계 4.3) 있으면 하네스 세션에 로컬 stdio 브라우저 MCP(`mcp__browser__*`)를 붙인다. 패키지 무관 — 운영자가 명령·인자를 정한다. 권장(Playwright MCP): `BROWSER_MCP_COMMAND=npx`, `BROWSER_MCP_ARGS=-y @playwright/mcp@latest --headless --isolated --output-dir <작업 폴더>`. 캡처를 `send_file` 로 보내려면 `--output-dir` 을 작업 폴더(`WORKER_ROOTS[0]`)로. 계정 B 에 `@playwright/mcp` 와 브라우저 바이너리(`npx playwright install chromium`)를 먼저 설치한다. 봇에 `HARNESS_BROWSER=true` 를 함께 켜 능력 안내를 맞춘다 |
+| `BROWSER_MCP_COMMAND` / `BROWSER_MCP_ARGS` | (선택, 4단계 4.3) 있으면 하네스 세션에 로컬 stdio 브라우저 MCP(`mcp__browser__*`)를 붙인다. 패키지 무관 — 운영자가 명령·인자를 정한다. **미니PC 실측 권장값**: `BROWSER_MCP_COMMAND=cmd`, `BROWSER_MCP_ARGS=/c npx -y @playwright/mcp@latest --headless --isolated --browser msedge --output-dir <작업 폴더>`. `--browser msedge` 는 **이미 설치된 시스템 Edge** 를 몰아 브라우저 다운로드가 필요 없다(Playwright 는 시스템 크롬·파이어폭스를 직접 쓰지 않는다 — `chromium`/`firefox` 는 자기 빌드를 내려받고 시스템 브라우저는 `msedge`/`chrome` 채널로만 몬다). 캡처를 `send_file` 로 보내려면 `--output-dir` 을 작업 폴더(`WORKER_ROOTS[0]`)로. 봇에 `HARNESS_BROWSER=true` 를 함께 켜 능력 안내를 맞춘다. 붙었는지는 워커 로그의 `[runner] MCP 서버: browser=connected, …` 로 확인한다(stdio 는 늦게 떠서 코드가 `alwaysLoad` 로 최대 5초 기다린다) |
+| `HARNESS_PLUGIN_DIRS` | (선택, 4단계 4.4) 계정 B 에 설치한 Claude Code 플러그인 디렉터리들(쉼표 구분). 리포에 커밋한 번들 스킬 플러그인에 더해 세션에 얹는다 — 리포 밖 공개 플러그인·재배포 금지 스킬을 기계 설치로만 다룰 수 있다. 각 경로는 플러그인 루트(그 아래 `skills/`·`commands/`·`agents/` 를 SDK 가 스캔). 없는 경로는 경고 후 건너뛴다. 시작 로그의 `플러그인 N개(설치 M)` 로 확인 |
 
 `.env` 를 고친 뒤 워커를 재시작한다(센티넬 절차 — [minipc-단일호스트-셋업.md](minipc-단일호스트-셋업.md) 5절 3항). 로그의
 시작 줄에 `모드=harness` 와 `[worker] 세션 러너 켬 — 프록시 http://127.0.0.1:<PORT>/llm, 세션 폴더 …` 가 나와야 한다. 봇 쪽
