@@ -433,7 +433,7 @@ export function makeRunAgentTurn(
       role: req.context.role, isPrivate: req.context.isPrivate, isOwner: req.context.isOwner, deployTarget,
       workerConnected: true, githubReady: github !== null, harness: { cwd },
     });
-    console.log(`[agent] 하네스 턴 — 워커 ${worker.workerId}, 모델 ${profile.model}, resume ${req.resume ? "있음" : "없음"}`);
+    console.log(`[agent] 하네스 턴 — 워커 ${worker.workerId}, 모델 ${profile.model}, resume ${req.resume ? req.resume.slice(0, 8) : "없음"}`);
     const turn = h.startTurn!(worker.workerId, {
       userId: req.context.userId, cwd, systemPrompt, prompt: req.prompt, profile, token, git,
       ...(req.resume !== undefined ? { resume: req.resume } : {}),
@@ -441,6 +441,10 @@ export function makeRunAgentTurn(
       if (req.onProgress && isProgressUpdate(e)) req.onProgress(e);
     });
     const out = await turn.result;
+    // 진단(2026-09-06): resume 이 매 턴 새 세션으로 떨어지는 원인을 좁히려면 "무엇을 resume 했고
+    // 무엇이 돌아왔는가"를 봐야 한다. id 는 앞 8자만 — 비밀이 아니고 대조에는 충분하다. 다음 턴의
+    // resume(위 줄)이 이 새 세션 id 와 같으면 저장은 정상, 다르면 core 의 저장이 stale 한 것이다.
+    console.log(`[agent] 하네스 결과 — ok=${out.ok}, 새 세션 ${out.sessionId ? out.sessionId.slice(0, 8) : "없음"}${out.error !== undefined ? `, 오류 ${out.error}` : ""}`);
     if (!out.ok && out.error !== undefined && isSessionNotFound(new Error(out.error))) throw new Error(out.error);
     return {
       text: out.ok ? out.text : `(에이전트 오류: ${out.error ?? "알 수 없음"})`,
