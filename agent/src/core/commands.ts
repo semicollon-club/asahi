@@ -70,8 +70,11 @@ export const COMMAND_HELP: ReadonlyArray<{ commands: readonly string[]; descript
   // 지정 채널(DIGEST_CONTEST_CHANNEL_ID 등)이 설정돼 있지 않으면 명령을 친 곳에 그대로 온다
   // (core.ts 의 startDigestCommand). 조건부 목적지를 그대로 반영해 안내문이 실제 동작과 어긋나지
   // 않게 한다.
-  { commands: ["/대회"], description: "코딩·CTF 대회 소식을 지금 조사합니다. 지정 채널이 있으면 그리로, DM이거나 없으면 여기로 옵니다" },
-  { commands: ["/개발뉴스"], description: "개발 관련 소식을 지금 조사합니다. 지정 채널이 있으면 그리로, DM이거나 없으면 여기로 옵니다" },
+  // "DM이거나" 를 뺐다(2026-09-07): 손님 DM 은 아예 받지 않으므로(discord.ts 의 dm-declined) 이 목록을
+  // 읽는 손님에게 DM 은 존재하지 않는 통로다. 소유자에게는 여전히 참이지만, 없는 길을 알리는 쪽이 해롭다.
+  // "지정 채널이 없으면 여기로" 는 두 신원 모두에게 참이라 그대로 둔다.
+  { commands: ["/대회"], description: "코딩·CTF 대회 소식을 지금 조사합니다. 지정 채널이 있으면 그리로, 없으면 여기로 옵니다" },
+  { commands: ["/개발뉴스"], description: "개발 관련 소식을 지금 조사합니다. 지정 채널이 있으면 그리로, 없으면 여기로 옵니다" },
   { commands: [...HELP_COMMANDS], description: "이 목록을 보여드립니다" },
 ];
 
@@ -102,6 +105,17 @@ const GUEST_TIPS = [
   "- 그 파일 보내줘 / 만든 그림 보여줘 — 본인 폴더의 파일을 이 대화에 첨부로(파일 하나 8MB 까지)",
 ].join("\n");
 
+// 공용 기계 고지(ADR 0009 / risk-register §10). 부원끼리 서로의 기록을 가리지 않기로 했으므로 **그 사실을
+// 말하는 것이 그 결정의 나머지 절반**이다. /help 는 손님이 직접 읽는 유일한 안내라 여기가 그 자리다.
+//
+// 워커 연결 여부와 무관하게 항상 나간다 — 위 GUEST_TIPS 는 파일·명령 작업이 가능할 때만 나가지만, 대화
+// 자체는 워커가 없어도 기록으로 남는다. 조건을 붙이면 "지금은 비공개인가?" 로 읽힌다.
+//
+// DM 은 언급하지 않는다: 손님 DM 은 아예 받지 않으므로(2026-09-07, discord.ts 의 dm-declined) 손님에게
+// "DM 은 다르다" 를 설명할 이유가 없고, 설명하면 없는 통로를 있는 것처럼 알리게 된다.
+const SHARED_MACHINE_NOTICE =
+  "여기서 나눈 대화와 시킨 작업은 동아리 공용 PC 에 기록으로 남고 다른 부원이 볼 수 있습니다 — 비공개가 아닙니다. 비밀번호·API 키 같은 비밀은 넣지 마세요.";
+
 // 워커가 없을 때 GUEST_TIPS 대신 나가는 한 줄. 침묵하지 않는 이유: /help 를 친 사람은 "무엇을
 // 시킬 수 있나"를 물은 것이고, 아무 말도 없으면 원래 그런 기능이 없는 줄 안다. persona.ts 의
 // 미연결 분기들도 같은 방식으로 "지금은 안 되고, 연결되면 된다"를 명시한다.
@@ -123,5 +137,5 @@ export function renderCommandHelp(workerConnected: boolean): string {
   const lines = COMMAND_HELP.map((g) => `- ${g.commands.join(" · ")} — ${g.description}`);
   // 예약어 목록 자체는 워커와 무관하므로 어느 경우에도 그대로 나온다.
   const capability = workerConnected ? GUEST_TIPS : NO_WORKER_TIP;
-  return `쓸 수 있는 명령어입니다.\n\n${lines.join("\n")}\n\n${capability}\n\n그 외에는 그냥 말 걸어 주세요.`;
+  return `쓸 수 있는 명령어입니다.\n\n${lines.join("\n")}\n\n${capability}\n\n${SHARED_MACHINE_NOTICE}\n\n그 외에는 그냥 말 걸어 주세요.`;
 }

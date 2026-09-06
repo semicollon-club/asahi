@@ -919,3 +919,29 @@ describe("buildSystemPrompt — 하네스 턴(소유자, 세션 러너)", () => 
     expect(capabilitySection(p)).not.toMatch(/\bBash\b/);
   });
 });
+
+// 공용 기계 고지(ADR 0009 / risk-register §10). 부원끼리 서로의 기록을 가리지 않기로 했으므로 **그 사실을
+// 말하는 것이 그 결정의 나머지 절반**이다. 도구 이름이 없어 얇은 워커에서도 하네스에서도 그대로 참이라,
+// 5단계 전환 때 다시 쓰지 않아도 되는 형태로 고정한다.
+describe("buildSystemPrompt — 손님에게 공용 기계임을 알린다", () => {
+  it("손님 서버 분기는 워커 연결 여부와 무관하게 고지를 낸다", () => {
+    for (const workerConnected of [true, false]) {
+      const p = buildSystemPrompt({ role: "allowed", isPrivate: false, isOwner: false, workerConnected });
+      expect(p).toMatch(/비공개가 아닙니다/);
+      expect(p).toMatch(/다른 부원이 볼 수 있습니다/);
+    }
+  });
+
+  it("비밀을 받았을 때 무엇을 하라고까지 말한다 — 판단은 값이 도착한 뒤에 일어나므로 그다음이 있어야 한다", () => {
+    const p = buildSystemPrompt({ role: "allowed", isPrivate: false, isOwner: false, workerConnected: true });
+    // 파일·명령줄에 쓰지 말 것(기록을 한 겹 더 늘리지 않는다) + 사람에게 알릴 것.
+    expect(p).toMatch(/파일이나 명령줄에 쓰지 말고/);
+  });
+
+  it("소유자 분기에는 넣지 않는다 — 소유자에게는 자기 기계다", () => {
+    for (const isPrivate of [true, false]) {
+      const p = buildSystemPrompt({ role: "owner", isPrivate, isOwner: true, workerConnected: true });
+      expect(p).not.toMatch(/다른 부원이 볼 수 있습니다/);
+    }
+  });
+});
