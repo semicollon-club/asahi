@@ -29,7 +29,10 @@ export type Pong = { type: "pong" };
 // 소켓으로 둘이 함께 흐르고, 6단계에서 도구 프레임을 지운다. turn.start 하나가 세션 한 턴이고, 러너는 그 턴의 진행을
 // turn.event(봇의 ProgressUpdate 와 같은 모양 — core/sdkEvents.ts)로 흘린 뒤 turn.result 하나로 끝낸다.
 // git 은 sh_exec 의 git 인자(gitEnv.ts 의 ShellGit)와 같은 값이다 — 러너가 세션 환경으로 옮긴다.
-export type TurnProfile = { model: string; maxTurns: number; subagents: boolean; effort?: string; tools?: string[] };
+// mcpHub(4단계 4.1): 이 턴에 열 봇 허브 MCP 서버 이름들(예: ["github"]). 봇이 프로필로 정하고, 워커가
+// 이름마다 루프백 주소(<허브 http 베이스>/mcp/<이름>)와 작업 토큰 헤더를 붙여 세션의 mcpServers 로 넣는다.
+// 비밀은 봇(계정 A)을 떠나지 않는다 — 세션은 이름만 받고 토큰으로 인증해 붙는다.
+export type TurnProfile = { model: string; maxTurns: number; subagents: boolean; effort?: string; tools?: string[]; mcpHub?: string[] };
 export type TurnStartFrame = {
   type: "turn.start"; id: string; userId: string; cwd: string; systemPrompt: string; prompt: string;
   resume?: string; profile: TurnProfile; token: string; git?: Record<string, unknown>;
@@ -94,12 +97,14 @@ export function parseFrame(raw: string): Frame | null {
       if (!isObj(p) || !isStr(p.model) || typeof p.maxTurns !== "number" || typeof p.subagents !== "boolean") return null;
       if (p.effort !== undefined && !isStr(p.effort)) return null;
       if (p.tools !== undefined && !isStrArray(p.tools)) return null;
+      if (p.mcpHub !== undefined && !isStrArray(p.mcpHub)) return null;
       if (v.resume !== undefined && !isStr(v.resume)) return null;
       if (v.git !== undefined && !isObj(v.git)) return null;
       const profile: TurnProfile = {
         model: p.model, maxTurns: p.maxTurns, subagents: p.subagents,
         ...(isStr(p.effort) ? { effort: p.effort } : {}),
         ...(isStrArray(p.tools) ? { tools: p.tools } : {}),
+        ...(isStrArray(p.mcpHub) ? { mcpHub: p.mcpHub } : {}),
       };
       return {
         type: "turn.start", id: v.id, userId: v.userId, cwd: v.cwd, systemPrompt: v.systemPrompt, prompt: v.prompt, profile, token: v.token,
