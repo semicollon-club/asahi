@@ -124,6 +124,10 @@ export function makeSessionRunner(o: {
       const env = buildSessionEnv({ baseEnv: o.baseEnv ?? process.env, llmBaseUrl: o.llmBaseUrl, token: frame.token, configDir, git: frame.git });
       const options = buildQueryOptions(frame, env, o.plugins ?? []);
       const abort = options.abortController as AbortController;
+      // 진단(2026-09-06): resume 이 매 턴 새 세션으로 떨어지는 원인 추적. 봇이 보낸 resume id 를 이
+      // 워커가 실제로 받았는지, 세션폴더(CLAUDE_CONFIG_DIR)·cwd 가 턴마다 같은지 본다 — 전사는
+      // <세션폴더>/projects/<cwd 슬러그>/<id>.jsonl 에 저장되므로 셋이 어긋나면 resume 이 못 찾는다.
+      console.log(`[runner] 턴 시작 — user ${frame.userId}, cwd ${frame.cwd}, 세션폴더 ${configDir}, resume ${frame.resume ? frame.resume.slice(0, 8) : "없음"}`);
       running.set(frame.id, { userId: frame.userId, abort });
       busyUsers.add(frame.userId);
 
@@ -152,11 +156,16 @@ export function makeSessionRunner(o: {
               }
             }
           }
+          console.log(`[runner] 턴 끝 — ok=${ok}, 세션 ${sessionId ? sessionId.slice(0, 8) : "없음"}${error !== undefined ? `, 오류 ${error}` : ""}`);
           send({ type: "turn.result", id: frame.id, ok, text, ...(sessionId !== undefined ? { sessionId } : {}), ...(error !== undefined ? { error } : {}) });
         } catch (err) {
           // SDK 가 던지는 것(세션 없음·프로세스 오류·취소)을 그대로 error 로 싣는다 — 봇이 isSessionNotFound 로 판정해
-          // 새 세션으로 재시도하는 경로가 옛 runTurn 과 같은 문구에 걸린다.
-          send({ type: "turn.result", id: frame.id, ok: false, text: "", error: err instanceof Error ? err.message : String(err) });
+          // 새 세션으로 재시도하는 경로가 옛 runTurn 과 같은 문구에 걸린다. 진단: 못 찾은 세션 id 가
+          // 이 메시지("No conversation found with session ID: <id>")에 그대로 들어 있어, 봇이 resume 하려던
+          // id 와 대조된다 — 로그로 그 id 를 남긴다(비밀 아님).
+          const msg = err instanceof Error ? err.message : String(err);
+          console.log(`[runner] 턴 예외 — id ${frame.id}, ${msg}`);
+          send({ type: "turn.result", id: frame.id, ok: false, text: "", error: msg });
         } finally {
           finish(frame.id);
         }
