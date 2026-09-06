@@ -22,6 +22,11 @@ export type JobTokenClaims = {
   // 을 이 값에 고정해(§4.2), 부원이 프롬프트로 더 비싼 모델로 바꾸는 경로를 막는다. 파일 반환(send_file)
   // 토큰은 /llm 에 가지 않으므로 이 값이 없다(선택). 없으면 프록시는 고정을 건너뛴다(옛 토큰 호환).
   model?: string;
+  // 이 토큰으로 붙을 수 있는 허브 MCP 서버 이름들(4단계 4.2, 설계 §9). 하네스 세션은 Bash 로 임의 루프백
+  // 요청을 할 수 있어 세션의 mcpServers 설정만으로는 경계가 못 된다 — 허브(core/mcpHub.ts)가 요청한 서버
+  // 이름이 이 목록에 있는지 검사해 없으면 거부한다(403). 프로필의 mcpHub 를 그대로 담는다. 없으면 빈 목록
+  // 취급(어떤 허브 서버도 못 씀) — /llm·/files 토큰은 이 값이 없다(그쪽은 /mcp 를 안 탄다).
+  mcpHub?: string[];
   // 만료 시각(ms since epoch). `now >= exp` 면 만료다 — 경계에서 유효하지 않다(jobToken.test.ts).
   exp: number;
 };
@@ -62,6 +67,7 @@ function isClaims(v: unknown): v is JobTokenClaims {
     typeof o.conversationId === "number" && Number.isInteger(o.conversationId) &&
     typeof o.channelRef === "string" &&
     (o.model === undefined || typeof o.model === "string") &&
+    (o.mcpHub === undefined || (Array.isArray(o.mcpHub) && o.mcpHub.every((s) => typeof s === "string"))) &&
     typeof o.exp === "number" && Number.isFinite(o.exp)
   );
 }
@@ -86,10 +92,11 @@ export function verifyJobToken(secret: Buffer, token: string, now: number): JobT
   }
   if (!isClaims(parsed)) return null;
   if (now >= parsed.exp) return null;
-  // 알려진 필드만 돌려준다 — payload 에 덧붙은 키가 호출측으로 새지 않게. model 은 있을 때만 싣는다.
+  // 알려진 필드만 돌려준다 — payload 에 덧붙은 키가 호출측으로 새지 않게. model·mcpHub 는 있을 때만 싣는다.
   return {
     jobId: parsed.jobId, userId: parsed.userId, conversationId: parsed.conversationId, channelRef: parsed.channelRef,
     ...(typeof parsed.model === "string" ? { model: parsed.model } : {}),
+    ...(Array.isArray(parsed.mcpHub) ? { mcpHub: parsed.mcpHub } : {}),
     exp: parsed.exp,
   };
 }

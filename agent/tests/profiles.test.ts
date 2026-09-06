@@ -7,13 +7,13 @@ import { profileFor, GUEST_MODEL, OWNER_MCP_HUB } from "../src/core/profiles.js"
 describe("profileFor", () => {
   const owner = { ownerModel: "claude-opus-5" };
 
-  it("소유자(DM·서버)는 운영자 모델·기본 effort·서브에이전트 열림·허브 MCP(GitHub)", () => {
+  it("소유자(DM·서버)는 운영자 모델·기본 effort·서브에이전트 열림·허브 MCP(GitHub·Supabase)", () => {
     for (const isPrivate of [true, false]) {
       const p = profileFor({ isOwner: true, isPrivate, role: "owner" }, owner);
-      expect(p).toEqual({ model: "claude-opus-5", maxTurns: 30, subagents: true, mcpHub: ["github"] });
+      expect(p).toEqual({ model: "claude-opus-5", maxTurns: 30, subagents: true, mcpHub: ["github", "supabase"] });
     }
-    // 4단계 4.1: 소유자만 허브 GitHub 를 연다. 상수와 어긋나지 않게 대조한다.
-    expect([...OWNER_MCP_HUB]).toEqual(["github"]);
+    // 4단계 4.1·4.2: 소유자만 허브 GitHub·Supabase 를 연다. 상수와 어긋나지 않게 대조한다.
+    expect([...OWNER_MCP_HUB]).toEqual(["github", "supabase"]);
   });
 
   it("손님(DM·서버)은 Sonnet 5·낮은 effort·서브에이전트 끔·허브 MCP 없음", () => {

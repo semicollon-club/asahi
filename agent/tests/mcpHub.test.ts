@@ -5,6 +5,8 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { decideMcpRoute, makeMcpHubHandler, MCP_HUB_PREFIX } from "../src/core/mcpHub.js";
 import { makeGithubReadServer } from "../src/mcp/githubReadServer.js";
+import { makeSupabaseReadServer } from "../src/mcp/supabaseReadServer.js";
+import type { IntrospectRepo } from "../src/store/introspectRepo.js";
 
 // 허브 MCP(풀 하네스 4단계 4.1) — 봇(계정 A)의 /mcp/<이름>. 세션(계정 B)의 Claude Code 가 작업 토큰으로 붙어
 // mcp__<이름>__* 로 쓴다. 여기서는 실제 MCP 클라이언트로 허브에 붙어 핸드셰이크·인증·도구 왕복을 끝까지 본다
@@ -13,8 +15,18 @@ import { makeGithubReadServer } from "../src/mcp/githubReadServer.js";
 const closers: Array<() => Promise<void>> = [];
 afterEach(async () => { while (closers.length) await closers.pop()!(); });
 
-// verify: "good" 만 통과(작업 토큰 자리).
-const verify = (t: string) => (t === "good" ? { jobId: "j", userId: "u1", conversationId: 1, channelRef: "c", exp: 9e12 } : null);
+// verify: "good" 은 github·supabase 둘 다 허용, "gh-only" 는 github 만 허용(토큰 허용 목록 강제 확인용), 그 외는 null.
+const claimsFor = (mcpHub: string[]) => ({ jobId: "j", userId: "u1", conversationId: 1, channelRef: "c", mcpHub, exp: 9e12 });
+const verify = (t: string) => (t === "good" ? claimsFor(["github", "supabase"]) : t === "gh-only" ? claimsFor(["github"]) : null);
+
+// 가짜 IntrospectRepo — Supabase 서버가 부르는 두 메서드만 구현한다.
+const fakeIntrospect = {
+  schema: async () => "public.users(id text, role text)",
+  readOnlyQuery: async (sql: string) => {
+    if (/drop|delete|insert|update/i.test(sql)) throw new Error("READ ONLY 트랜잭션이 거부했어요");
+    return { rows: [{ id: "owner", role: "owner" }], truncated: 0 };
+  },
+} as unknown as IntrospectRepo;
 
 // 봇의 GitHub 읽기 헬퍼가 치는 엔드포인트에만 답하는 가짜 fetch.
 const fakeFetch = (async (url: string | URL) => {
@@ -61,7 +73,10 @@ describe("decideMcpRoute — /mcp/<이름> 만", () => {
 });
 
 describe("makeMcpHubHandler — 허브 MCP 왕복", () => {
-  const githubServers = { github: () => makeGithubReadServer({ org: "semicollon-club", token: async () => "gh-token", fetchImpl: fakeFetch }) };
+  const githubServers = {
+    github: () => makeGithubReadServer({ org: "semicollon-club", token: async () => "gh-token", fetchImpl: fakeFetch }),
+    supabase: () => makeSupabaseReadServer({ introspect: fakeIntrospect }),
+  };
 
   it("작업 토큰이 없으면 붙지 못한다(401)", async () => {
     const base = await hubServer(githubServers);
@@ -90,5 +105,32 @@ describe("makeMcpHubHandler — 허브 MCP 왕복", () => {
     const text = (out.content as Array<{ type: string; text: string }>)[0].text;
     expect(text).toContain("테스트 PR");
     expect(out.isError).toBeFalsy();
+  });
+
+  it("Supabase 서버(4.2)는 db_schema·db_query(읽기)를 노출한다", async () => {
+    const base = await hubServer(githubServers);
+    const client = await connect(base, "supabase", "good");
+    const tools = (await client.listTools()).tools.map((t) => t.name).sort();
+    expect(tools).toEqual(["db_query", "db_schema"]);
+    const schema = await client.callTool({ name: "db_schema", arguments: {} });
+    expect((schema.content as Array<{ text: string }>)[0].text).toContain("public.users");
+    const rows = await client.callTool({ name: "db_query", arguments: { sql: "SELECT id, role FROM users" } });
+    expect((rows.content as Array<{ text: string }>)[0].text).toContain("owner");
+  });
+
+  it("db_query 의 쓰기·다중문은 거부된다(1차 가드)", async () => {
+    const base = await hubServer(githubServers);
+    const client = await connect(base, "supabase", "good");
+    const out = await client.callTool({ name: "db_query", arguments: { sql: "DELETE FROM users" } });
+    expect(out.isError).toBe(true);
+  });
+
+  it("토큰 허용 목록에 없는 서버는 붙지 못한다(403) — 세션이 mcpServers 설정을 우회해도 경계가 선다", async () => {
+    const base = await hubServer(githubServers);
+    // "gh-only" 토큰은 github 만 허용 — supabase 에 붙으려 하면 거부된다.
+    await expect(connect(base, "supabase", "gh-only")).rejects.toThrow();
+    // 같은 토큰으로 github 는 여전히 붙는다(허용 목록에 있으므로).
+    const client = await connect(base, "github", "gh-only");
+    expect((await client.listTools()).tools.length).toBeGreaterThan(0);
   });
 });
