@@ -15,9 +15,18 @@ describe("decideRoute", () => {
     expect(decideRoute(inc({ isThread: true }), "blocked", true)).toEqual({ kind: "ignore" });
   });
 
-  it("허용 사용자의 DM 은 그 사용자 DM 대화로 간다", () => {
+  it("소유자의 DM 은 그 사용자 DM 대화로 간다 — 관리와 개인 워커 경로가 거기서 돈다", () => {
     expect(decideRoute(inc({ isDM: true }), "owner", false)).toEqual({ kind: "dm" });
-    expect(decideRoute(inc({ isDM: true }), "allowed", false)).toEqual({ kind: "dm" });
+  });
+
+  // 2026-09-07 운영자 결정(위험 등록부 §10): 아사히는 부원별 비서가 아니라 동아리 작업을 총괄하는 하나의
+  // 에이전트다. 추적되지 않는 통로를 안내문으로 덮는 대신 통로 자체를 닫는다.
+  it("손님의 DM 은 안내만 하고 끝낸다 — 대화도 턴도 만들지 않는다", () => {
+    expect(decideRoute(inc({ isDM: true }), "allowed", false)).toEqual({ kind: "dm-declined" });
+  });
+
+  it("손님 DM 은 이미 대화 행이 있어도 이어가지 않는다 — 전에 열린 DM 대화가 우회로가 되면 안 된다", () => {
+    expect(decideRoute(inc({ isDM: true }), "allowed", true)).toEqual({ kind: "dm-declined" });
   });
 
   it("이미 대화 행이 있는 스레드 안 메시지는 멘션 없이도 이어간다", () => {

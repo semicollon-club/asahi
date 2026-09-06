@@ -48,18 +48,21 @@ function makeAdapter(role: "owner" | "allowed" | "blocked") {
   return { view, upserts, roleChecks };
 }
 
-// onMessage(discord.ts)가 message 에서 실제로 읽는 필드만 채운 최소 가짜다. DM 으로 만드는
-// 이유는 decideRoute 가 멘션 여부와 무관하게 곧장 통과시키는 가장 단순한 경로이기 때문이다.
+// onMessage(discord.ts)가 message 에서 실제로 읽는 필드만 채운 최소 가짜다.
+//
+// 서버 채널 + 봇 멘션으로 만든다. 예전엔 DM 이었는데("멘션 여부와 무관하게 곧장 통과하는 가장 단순한 경로"),
+// 2026-09-07 부터 손님 DM 은 dm-declined 로 즉시 끊겨 표시 이름 갱신 지점에 닿지 않는다 — 그 경로로는 이
+// 테스트가 재는 것을 잴 수 없다. 멘션 있는 채널 메시지가 손님이 실제로 봇에게 말을 거는 경로다.
 function makeMessage(over: { id?: string; displayName?: string; username?: string } = {}) {
   return {
     author: { bot: false, id: over.id ?? "111", displayName: over.displayName, username: over.username ?? "wwoosshh" },
     channelId: "c1",
     id: "m1",
     content: "안녕",
-    guildId: null,
-    channel: { isThread: () => false, type: 1 }, // ChannelType.DM === 1
+    guildId: "g1",
+    channel: { isThread: () => false, type: 0 }, // ChannelType.GuildText === 0
     attachments: new Map(),
-    mentions: { has: () => false },
+    mentions: { has: () => true },
   };
 }
 

@@ -335,6 +335,10 @@ function buildCapabilityBlock(ctx: PersonaContext): string {
   // 불일치가 생기므로, guestPcLine 과 같은 방식으로 한 곳에서 만들어 양쪽에서 공유한다.
   const guestSkillLine =
     "\n- 특정 작업(예: UI 디자인)에는 전용 스킬이 있을 수 있습니다. 먼저 쓸 수 있는 스킬이 있는지 살펴보고, 있으면 그 지침을 따르세요.";
+  // 2026-09-07 부터 이 분기는 **실행되지 않는다** — 어댑터(discord.ts 의 decideRoute)가 손님 DM 을 dm-declined
+  // 로 끊어 코어까지 오지 않는다. 지우지 않고 두는 이유는 profiles.ts 가 아직 쓰이지 않는 손님 값을 미리
+  // 정의해 둔 것과 같다: 정책을 되돌리면 그대로 살아난다. 다만 **여기 문구를 고쳐도 아무 데도 안 보인다** —
+  // 손님 안내를 손볼 일이 생기면 아래 서버 분기가 유일한 실물이다.
   if (ctx.isPrivate) {
     return `## 능력
 - 대화와 본인 기억(remember/recall)만 사용할 수 있습니다.${GUEST_OWNER_ONLY_LINE}${guestPcLine}${guestSkillLine}`;
