@@ -36,6 +36,12 @@ export function chunkMessage(text: string, max = 2000): string[] {
 // 모드라 표정이 사라져도 이 방어선은 남긴다.
 export const SEND_EMPTY_FALLBACK = "이번엔 드릴 답을 만들지 못했어요. 다시 한 번 말씀해 주세요.";
 
+// 손님 DM 에 돌려주는 한 줄(decideRoute 의 dm-declined). 조용히 무시하지 않는 이유는 SEND_EMPTY_FALLBACK 과
+// 같다 — 아무 반응이 없으면 사람은 봇이 고장 났다고 읽는다. 이유까지 한 문장에 담아 "왜 안 되는지 물어보러
+// 또 DM 하는" 왕복을 없앤다. LLM 턴도 대화 행도 만들지 않으므로 비용은 메시지 하나뿐이다.
+export const DM_DECLINED_NOTICE =
+  "DM 으로는 답하지 않아요. 동아리 서버 채널에서 저를 불러 주세요 — 제가 하는 일은 동아리 작업이라 다들 보이는 곳에 남아야 하거든요.";
+
 // 텍스트를 디스코드 상한에 맞춰 나눈다. send() 는 이 결과를 그대로 실행만 한다 —
 // 판단을 여기로 몰아야 디스코드 채널 없이 테스트할 수 있다.
 export function planSend(text: string): { chunks: string[] } {
@@ -58,6 +64,7 @@ export type Incoming = {
 export type RouteDecision =
   | { kind: "ignore" }            // 게이트 탈락 / 관심 없는 메시지
   | { kind: "dm" }                // 그 사용자 DM 대화
+  | { kind: "dm-declined" }       // 손님 DM — 한 줄 안내만 하고 끝(대화도 턴도 만들지 않는다)
   | { kind: "thread-existing" }   // 이미 conversations 행이 있는 스레드(또는 폴백 채널)
   | { kind: "thread-create" }     // 일반 채널 @멘션 → 새 스레드 생성
   | { kind: "adopt-thread" }      // 아직 대화 아닌 스레드에서 @멘션 → 그 스레드 채택
@@ -66,7 +73,13 @@ export type RouteDecision =
 export function decideRoute(i: Incoming, role: Role, hasConversation: boolean): RouteDecision {
   // 응답 게이트: owner/allowed 만. 미등록·blocked·컨텍스트 작성자 불문 무시.
   if (role !== "owner" && role !== "allowed") return { kind: "ignore" };
-  if (i.isDM) return { kind: "dm" };
+  // 손님 DM 은 받지 않는다(2026-09-07 운영자 결정, 위험 등록부 §10). 아사히는 부원별 비서가 아니라 동아리
+  // 작업을 총괄하는 하나의 에이전트다 — 그렇다면 작업은 다들 보이는 곳에 남아야 하고, 운영자가 "무슨 대화를
+  // 얼마나 했는지" 추적할 수 없는 통로를 열어 둘 이유가 없다. 디스코드 DM 창은 그 자체로 "둘만 본다"는 신호를
+  // 주는데(그래서 사람들이 거기에 키·비밀번호를 붙여 넣는다) 실제로는 공용 기계에 전사가 남으므로, 안내문으로
+  // 그 신호를 정정하는 대신 **통로 자체를 닫는다** — 얕은 벽을 세우고 설명하는 것보다 문을 없애는 쪽이다.
+  // 소유자 DM 은 그대로다: 관리(manage_access·db_query)와 개인 워커 경로가 거기서 돈다.
+  if (i.isDM) return role === "owner" ? { kind: "dm" } : { kind: "dm-declined" };
   if (i.isThread) {
     if (hasConversation) return { kind: "thread-existing" }; // 봇 대화 지속(멘션 불필요)
     if (i.mentionsBot) return { kind: "adopt-thread" };
@@ -254,6 +267,13 @@ export class DiscordAdapter {
     const decision = decideRoute(incoming, role, existing !== null);
     if (decision.kind === "ignore") return;
     if (role === "blocked") return; // 타입 좁히기용 방어(decideRoute 가 이미 걸러냄)
+    // 손님 DM: 한 줄만 돌려주고 끝낸다. 여기서 끊어야 대화 행도, 세션 전사도, LLM 턴도 생기지 않는다 —
+    // 아래 표시 이름 갱신·타이핑 표시·버스 발행 어느 것도 타지 않는다. 전송 실패는 삼킨다(DM 차단 등).
+    if (decision.kind === "dm-declined") {
+      // "send" in channel — 위 타이핑 표시와 같은 관용구다(그룹 DM 등 보낼 수 없는 채널 타입이 섞여 있다).
+      if ("send" in message.channel) await message.channel.send(DM_DECLINED_NOTICE).catch(() => {});
+      return;
+    }
 
     // 표시 이름을 여기서 함께 갱신한다 — proc_list 가 사람 이름을 보여주려면 봇이 먼저 이름을
     // 알아야 하는데, users.display_name 은 컬럼과 upsert 파라미터가 있는데도 값을 넘기는 코드가
@@ -305,7 +325,7 @@ export class DiscordAdapter {
 
   // 라우팅 결정을 실제 대화 매핑 힌트로 바꾼다. thread-create 만 부수효과(스레드 생성)가 있다.
   private async resolveHint(
-    decision: Exclude<RouteDecision, { kind: "ignore" }>,
+    decision: Exclude<RouteDecision, { kind: "ignore" } | { kind: "dm-declined" }>,
     i: Incoming,
     role: "owner" | "allowed",
     message: Message,
