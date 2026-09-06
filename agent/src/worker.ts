@@ -75,13 +75,14 @@ async function main() {
       if (llmBaseUrl === null) throw new Error(`HUB_URL 에서 프록시 주소를 유도하지 못했습니다: ${config.hubUrl}`);
       // 허브 MCP 기본 주소(4단계 4.1) — 프록시와 같은 http 베이스의 /mcp. 유도 실패는 프록시에서 이미 걸리므로 여기선 없다.
       const mcpBaseUrl = mcpHubUrlOf(config.hubUrl) ?? undefined;
+      // 파일 반환 주소(4단계 4.5)는 위에서 이미 유도한 fileReturnUrl 을 그대로 쓴다 — 세션 인프로세스 send_file 이 여기로 올린다.
       const sessionRootDir = config.sessionDir ?? path.join(os.homedir(), ".asahi-sessions");
       const pluginDir = skillPluginDirFrom(path.join(path.dirname(fileURLToPath(import.meta.url)), "core"));
       runner = makeSessionRunner({
-        query: query as unknown as SessionQuery, llmBaseUrl, mcpBaseUrl, sessionRootDir,
+        query: query as unknown as SessionQuery, llmBaseUrl, mcpBaseUrl, fileReturnUrl, sessionRootDir,
         plugins: skillPluginsFor({ pluginDir, exists: fs.existsSync(pluginDir) }),
       });
-      console.log(`[worker] 세션 러너 켬 — 프록시 ${llmBaseUrl}, 허브 MCP ${mcpBaseUrl}, 세션 폴더 ${sessionRootDir}`);
+      console.log(`[worker] 세션 러너 켬 — 프록시 ${llmBaseUrl}, 허브 MCP ${mcpBaseUrl}, 파일 반환 ${fileReturnUrl}, 세션 폴더 ${sessionRootDir}`);
     }
     // 갱신 종료(planShutdown)는 도구 호출과 세션 턴이 모두 끝나길 기다린다.
     const idle = () => Promise.all([executorsIdle(), runner ? runner.idle() : Promise.resolve()]).then(() => undefined);

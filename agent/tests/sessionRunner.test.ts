@@ -118,6 +118,18 @@ describe("buildQueryOptions — 프로필을 SDK 옵션으로", () => {
     // 이름이 없으면 안 붙는다.
     expect(buildQueryOptions(frame, {}, [], "http://127.0.0.1:3100/mcp").mcpServers).toBeUndefined();
   });
+
+  it("로컬 인프로세스 MCP(4.5 send_file)를 허브 서버와 한 mcpServers 로 합친다", () => {
+    const local = { file: { type: "sdk", name: "file", instance: {} } };
+    // 허브 서버 + 로컬 서버 → 둘 다 mcpServers 에.
+    const both = buildQueryOptions({ ...frame, token: "t", profile: { ...frame.profile, mcpHub: ["github"] } }, {}, [], "http://h/mcp", local);
+    expect(Object.keys(both.mcpServers as Record<string, unknown>).sort()).toEqual(["file", "github"]);
+    // 허브가 없어도 로컬만으로 mcpServers 가 붙는다.
+    const onlyLocal = buildQueryOptions(frame, {}, [], undefined, local);
+    expect(onlyLocal.mcpServers).toEqual(local);
+    // 둘 다 없으면 undefined.
+    expect(buildQueryOptions(frame, {}, []).mcpServers).toBeUndefined();
+  });
 });
 
 // 가짜 query: 메시지 배열을 순서대로 낸다. 옵션은 기록해 둔다.
