@@ -426,8 +426,12 @@ export function makeRunAgentTurn(
     h: NonNullable<typeof hub>,
   ): Promise<TurnResult> {
     const profile = profileFor(req.context, { ownerModel: model });
-    // 작업 토큰에 이 턴의 고정 모델을 싣는다(3단계 3.1) — 프록시가 본문 model 을 여기에 고정한다.
-    const token = jobTokens.mint({ userId: req.context.userId, conversationId: req.context.conversationId, channelRef: req.context.channelRef!, model: profile.model });
+    // 작업 토큰에 이 턴의 고정 모델(3단계 3.1)과 허용 허브 MCP 서버 목록(4단계 4.2)을 싣는다 — 프록시가 본문
+    // model 을 여기에 고정하고, 허브가 요청한 서버가 이 목록에 있는지 검사한다(세션이 Bash 로 우회해도 경계가 선다).
+    const token = jobTokens.mint({
+      userId: req.context.userId, conversationId: req.context.conversationId, channelRef: req.context.channelRef!,
+      model: profile.model, ...(profile.mcpHub !== undefined ? { mcpHub: profile.mcpHub } : {}),
+    });
     // git 자격증명·신원은 sh_exec 와 같은 자리(shellGitArgs)에서 같은 수명으로 만든다 — 세션 환경으로 옮겨지는 것만 다르다.
     const git = (await shellGitArgs(ctx)) as unknown as Record<string, unknown>;
     const systemPrompt = buildSystemPrompt({

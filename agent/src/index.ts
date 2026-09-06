@@ -33,6 +33,7 @@ import { makeFileReturnHandler, FILE_RETURN_PATH } from "./core/fileReturn.js";
 import { makeLlmProxyHandler, LLM_PROXY_PREFIX } from "./core/llmProxy.js";
 import { makeMcpHubHandler, MCP_HUB_PREFIX } from "./core/mcpHub.js";
 import { makeGithubReadServer } from "./mcp/githubReadServer.js";
+import { makeSupabaseReadServer } from "./mcp/supabaseReadServer.js";
 import { makeShellTokenSource } from "./github/shellToken.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { defaultRunGit, resolveBotVersion } from "./remote/gitCommit.js";
@@ -129,6 +130,10 @@ async function main() {
       },
     });
   }
+  // Supabase 읽기(4.2): 봇은 늘 DB 에 붙으므로 무조건 노출한다. 접속 문자열은 A 를 떠나지 않고, 쿼리는 봇의 기존
+  // 읽기 가드(READ ONLY 트랜잭션)를 그대로 탄다 — db_schema·db_query. 소유자 프로필(OWNER_MCP_HUB)만 이름을 받고,
+  // 토큰 허용 목록(mcpHub 클레임)이 서버 접근을 한 번 더 강제한다(core/mcpHub.ts).
+  mcpServers.supabase = () => makeSupabaseReadServer({ introspect: repos.introspect });
   const mcpHub = makeMcpHubHandler({ verify: (t) => jobTokens.verify(t), servers: mcpServers });
 
   // FIX9(사소): 예전엔 모든 경로·메서드에 무조건 200 "ok" 를 돌려줘, 이 서버가 뭘 하는 프로세스인지

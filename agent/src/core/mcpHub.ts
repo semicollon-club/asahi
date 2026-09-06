@@ -61,6 +61,13 @@ export function makeMcpHubHandler(deps: McpHubDeps): (req: http.IncomingMessage,
       replyJson(res, 401, "작업 토큰이 없거나 만료됐어요.");
       return;
     }
+    // 신원별 허용 목록(설계 §9): 토큰이 이 서버를 열도록 발급됐는지 본다. 세션이 mcpServers 설정을 우회해
+    // (Bash 로 직접) 다른 서버에 붙으려 해도, 토큰에 그 이름이 없으면 거부한다 — 손님 프로필이 Supabase 를
+    // 열지 않는다는 경계가 프로필뿐 아니라 토큰에서도 선다.
+    if (!(claims.mcpHub ?? []).includes(route.name)) {
+      replyJson(res, 403, "이 세션은 그 MCP 서버를 쓸 수 없어요.");
+      return;
+    }
 
     void (async () => {
       const server = deps.servers[route.name]();

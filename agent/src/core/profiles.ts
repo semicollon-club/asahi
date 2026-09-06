@@ -22,8 +22,9 @@ export type HarnessProfile = {
   mcpHub?: string[];
 };
 
-// 소유자 하네스 턴에 여는 허브 MCP 서버(4단계 4.1). GitHub(읽기)가 첫 서버다. 4.2 에서 Supabase(읽기)·Railway 를 더한다.
-export const OWNER_MCP_HUB = ["github"] as const;
+// 소유자 하네스 턴에 여는 허브 MCP 서버(4단계). GitHub(읽기, 4.1)·Supabase(읽기, 4.2). Railway 는 보류 —
+// 봇에 Railway API 자격증명이 없고(호스트로만 썼다) 5단계에서 종료 예정이라, 필요해지면 토큰을 받아 더한다.
+export const OWNER_MCP_HUB = ["github", "supabase"] as const;
 
 export const GUEST_MODEL = "claude-sonnet-5";
 // 봇 자기 세션의 maxTurns(agent.ts)와 같은 값 — 하네스라고 한 턴이 더 길어질 이유는 없다.

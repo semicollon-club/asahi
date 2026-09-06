@@ -36,6 +36,15 @@ describe("작업 토큰 — mint/verify", () => {
     expect(back && "model" in back).toBe(false);
   });
 
+  it("mcpHub 클레임(4단계 허브 허용 목록)이 있으면 그대로 왕복하고, 문자열 배열이 아니면 거절한다", () => {
+    const secret = newJobTokenSecret();
+    const withHub: JobTokenClaims = { ...claims, mcpHub: ["github", "supabase"] };
+    expect(verifyJobToken(secret, mintJobToken(secret, withHub), 9_999)).toEqual(withHub);
+    // 서명이 맞아도 mcpHub 모양이 틀리면(숫자 배열) isClaims 가 거른다 — 올바른 서명으로 발급해도 null.
+    const forged = mintJobToken(secret, { ...claims, mcpHub: [1, 2] } as unknown as JobTokenClaims);
+    expect(verifyJobToken(secret, forged, 9_999)).toBeNull();
+  });
+
   it("서명 한 글자를 바꾸면 거절한다", () => {
     const secret = newJobTokenSecret();
     const token = mintJobToken(secret, claims);
