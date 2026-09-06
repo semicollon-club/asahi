@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { resolveWorkerSelector, scopeDirs } from "../src/core/workerSelect.js";
+import { resolveWorkerSelector, scopeDirs, harnessCwdFor } from "../src/core/workerSelect.js";
 import { joinUnderRoot, isPathWithin } from "../src/core/paths.js";
 
 describe("resolveWorkerSelector — 어디서 말하느냐가 어느 기계냐를 정한다", () => {
@@ -96,5 +96,30 @@ describe("scopeDirs — 공유 기계 안에서 사용자별로 가른다", () =
   // try/catch 로 감싸고 있어 fail closed 로 이어진다 — remoteTools.test.ts 참고).
   it("크래프트한 userId(상위 참조 등)가 들어와도 예외를 던져 격리를 깨지 않는다", () => {
     expect(() => scopeDirs(dirs, { workerKind: "shared", isOwner: false, userId: "../222" })).toThrow();
+  });
+});
+
+// 하네스 세션의 작업 폴더(위험 등록부 §11). 4단계까지 runHarnessTurn 은 신원과 무관하게 워커 루트의
+// 첫 폴더를 줬다 — 5단계에서 손님을 열면 워크스페이스 루트에서 시작해 남의 폴더가 바로 옆에 보인다.
+// 규칙은 얇은 워커와 같아야 한다(scopeDirs) — 한 사람이 두 경로에서 다른 폴더를 받으면 안 된다.
+describe("harnessCwdFor — 하네스 세션이 어디서 시작하는가", () => {
+  const roots = ["C:\\workspace", "D:\\projects"];
+
+  it("소유자는 워커 루트에서 시작한다(관리자 스코프 — 좁히지 않는다)", () => {
+    expect(harnessCwdFor(roots, { workerKind: "shared", isOwner: true, userId: "owner" })).toBe("C:\\workspace");
+  });
+
+  it("손님은 자기 폴더에서 시작한다 — 얇은 워커의 scopeDirs 와 같은 경로여야 한다", () => {
+    const cwd = harnessCwdFor(roots, { workerKind: "shared", isOwner: false, userId: "123" });
+    expect(cwd).toBe("C:\\workspace\\123");
+    expect(cwd).toBe(scopeDirs(roots, { workerKind: "shared", isOwner: false, userId: "123" })[0]);
+  });
+
+  it("루트가 없으면 undefined — 호출측이 하네스로 보내지 않는다", () => {
+    expect(harnessCwdFor([], { workerKind: "shared", isOwner: false, userId: "123" })).toBeUndefined();
+  });
+
+  it("크래프트한 userId 는 undefined 로 닫는다 — 좁힐 수 없을 때 루트로 넓히지 않는다", () => {
+    expect(harnessCwdFor(roots, { workerKind: "shared", isOwner: false, userId: "../222" })).toBeUndefined();
   });
 });

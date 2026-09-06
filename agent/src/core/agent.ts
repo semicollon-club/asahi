@@ -16,7 +16,7 @@ import { buildTools, allowedToolsFor, TOOL_SERVER, type ToolCtx, type RuntimeInf
 import { makeShellTokenSource } from "../github/shellToken.js";
 import type { JobTokenMinter } from "./jobToken.js";
 import type { BotVersion } from "../remote/gitCommit.js";
-import { resolveWorkerSelector } from "./workerSelect.js";
+import { resolveWorkerSelector, harnessCwdFor } from "./workerSelect.js";
 import type { ImageInput } from "./images.js";
 import { skillPluginDirFrom, resolveSkillsEnabled, skillPluginsFor } from "./skills.js";
 import { progressFromMessage, isProgressUpdate, type PendingTool, type ProgressUpdate } from "./sdkEvents.js";
@@ -310,7 +310,12 @@ export function makeRunAgentTurn(
     // 풀 하네스 2단계(계획 2.6): 조건이 맞는 소유자 턴은 봇 자기 세션(아래 query)이 아니라 세션 러너로 간다. 시스템
     // 프롬프트는 core.ts 가 만든 것(원격 도구·기억 도구 안내)이 아니라 하네스용으로 다시 만든다 — 그 턴의 도구는
     // Claude Code 내장 도구다. 프롬프트(컨텍스트 블록 + 화자 표기 + 메시지)·resume·onProgress 는 그대로 쓴다.
-    const harnessCwd = worker !== null ? hub?.rootsOf(worker.workerId)[0] : undefined;
+    // 작업 폴더는 신원으로 좁힌다(위험 등록부 §11) — 얇은 워커의 `fs_*` 와 같은 규칙(scopeDirs)이라
+    // 한 사람이 두 경로에서 같은 폴더를 받는다. 지금은 하네스가 소유자 전용이라 값이 워커 루트 그대로지만
+    // (소유자는 좁히지 않는다), 5단계에서 손님을 여는 순간 이 한 줄이 "남의 폴더 옆에서 시작"을 막는다.
+    const harnessCwd = worker !== null
+      ? harnessCwdFor(hub?.rootsOf(worker.workerId) ?? [], { workerKind: worker.kind, isOwner: req.context.isOwner, userId: req.context.userId })
+      : undefined;
     if (decideHarnessDispatch({
       enabled: extras.harness?.enabled === true,
       isOwner: req.context.isOwner,

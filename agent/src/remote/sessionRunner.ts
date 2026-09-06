@@ -4,6 +4,7 @@ import { progressFromMessage, type PendingTool } from "../core/sdkEvents.js";
 import { httpBaseOfHub } from "../core/fileReturn.js";
 import { makeSendFileServer } from "../mcp/sendFileServer.js";
 import { shellGitEnv, shellGitOf } from "./gitEnv.js";
+import { checkPath } from "./roots.js";
 import { isValidUserId } from "./proc.js";
 import type { TurnStartFrame, TurnEventFrame, TurnResultFrame } from "./protocol.js";
 
@@ -118,6 +119,9 @@ export function makeSessionRunner(o: {
   // 로컬 브라우저 MCP(4단계 4.3). 있으면 세션에 stdio 브라우저 MCP(계정 B 에 설치된 것)를 붙인다. 없으면 안 붙인다.
   browserMcp?: { command: string; args: string[] };
   sessionRootDir: string;
+  // 워커의 작업 루트(WORKER_ROOTS). 있으면 turn.start 의 cwd 를 이 안으로 한정하고(checkPath, 심볼릭 링크
+  // 해소 포함) 없으면 만든다 — 아래 start() 참고. 없으면 판정도 생성도 하지 않는다(테스트 픽스처).
+  workerRoots?: string[];
   baseEnv?: NodeJS.ProcessEnv;
   plugins?: unknown[];
   now?: () => number;
@@ -152,28 +156,46 @@ export function makeSessionRunner(o: {
         fail("이 부원의 세션이 이미 진행 중이에요 — 끝나면 다시 시도해요.");
         return;
       }
+      // 작업 폴더 관문(위험 등록부 §11). 봇이 신원에 맞게 좁혀 보내지만(harnessCwdFor), 그 값을 그대로 믿고
+      // cwd 로 쓰면 프레임 하나로 이 기계의 아무 폴더에서나 세션이 열린다 — 루트의 최종 권한은 파일시스템을
+      // 가진 이 프로세스에 있다(얇은 워커의 `fs_*` 가 checkPath 를 거치는 것과 같은 자리). 심볼릭 링크·정션도
+      // 여기서 해소된다(§7). 통과한 실경로를 cwd 로 쓰고, 없으면 만든다 — 손님의 첫 턴은 폴더가 아직 없다.
+      let cwd = frame.cwd;
+      if (o.workerRoots !== undefined) {
+        const check = checkPath(frame.cwd, o.workerRoots);
+        if (!check.ok) {
+          fail(check.message);
+          return;
+        }
+        cwd = check.path;
+      }
       const env = buildSessionEnv({ baseEnv: o.baseEnv ?? process.env, llmBaseUrl: o.llmBaseUrl, token: frame.token, configDir, git: frame.git });
       // 로컬 인프로세스·stdio MCP: send_file(4.5, 봇 /files 주소가 있을 때)와 브라우저(4.3, 워커에 구성됐을 때). 둘 다 계정 B
       // 안에서 돌고 비밀이 없다. 하나도 없으면 undefined(옛 동작).
       const localMcp: Record<string, unknown> = {};
-      if (o.fileReturnUrl !== undefined) localMcp.file = makeSendFileServer({ fileReturnUrl: o.fileReturnUrl, token: frame.token, cwd: frame.cwd });
+      // send_file 의 스코프도 관문을 통과한 cwd 다 — 프레임의 값을 그대로 쓰면 검사한 폴더와 첨부로 나가는
+      // 폴더가 갈린다.
+      if (o.fileReturnUrl !== undefined) localMcp.file = makeSendFileServer({ fileReturnUrl: o.fileReturnUrl, token: frame.token, cwd });
       // alwaysLoad(4.3): 브라우저는 stdio 라 npx→node 로 뜨는 데 시간이 걸린다. 기본(비차단)이면 그 턴의 도구 목록이
       // 정해질 때 아직 안 붙어 브라우저 도구가 빠진다(허브 HTTP 서버는 이미 뜬 봇에 즉시 붙어 문제없다). alwaysLoad 는
       // 붙을 때까지 최대 5초 기다렸다 도구를 싣게 한다 — 그래야 첫 턴부터 mcp__browser__* 가 보인다.
       if (o.browserMcp !== undefined) localMcp.browser = { command: o.browserMcp.command, args: o.browserMcp.args, alwaysLoad: true };
       const localMcpServers = Object.keys(localMcp).length > 0 ? localMcp : undefined;
-      const options = buildQueryOptions(frame, env, o.plugins ?? [], o.mcpBaseUrl, localMcpServers);
+      const options = buildQueryOptions({ ...frame, cwd }, env, o.plugins ?? [], o.mcpBaseUrl, localMcpServers);
       const abort = options.abortController as AbortController;
       // 진단(2026-09-06): resume 이 매 턴 새 세션으로 떨어지는 원인 추적. 봇이 보낸 resume id 를 이
       // 워커가 실제로 받았는지, 세션폴더(CLAUDE_CONFIG_DIR)·cwd 가 턴마다 같은지 본다 — 전사는
       // <세션폴더>/projects/<cwd 슬러그>/<id>.jsonl 에 저장되므로 셋이 어긋나면 resume 이 못 찾는다.
-      console.log(`[runner] 턴 시작 — user ${frame.userId}, cwd ${frame.cwd}, 세션폴더 ${configDir}, resume ${frame.resume ? frame.resume.slice(0, 8) : "없음"}`);
+      console.log(`[runner] 턴 시작 — user ${frame.userId}, cwd ${cwd}, 세션폴더 ${configDir}, resume ${frame.resume ? frame.resume.slice(0, 8) : "없음"}`);
       running.set(frame.id, { userId: frame.userId, abort });
       busyUsers.add(frame.userId);
 
       void (async () => {
         try {
           fs.mkdirSync(configDir, { recursive: true });
+          // 손님의 첫 턴은 자기 폴더가 아직 없다 — 없는 cwd 로는 세션이 뜨지 않는다. 루트 안이라고 판정된
+          // 경로에서만 만든다(위 관문) — 루트를 안 넘긴 구성에서는 프레임의 값을 그대로 믿고 만들지 않는다.
+          if (o.workerRoots !== undefined) fs.mkdirSync(cwd, { recursive: true });
           const pending = new Map<string, PendingTool>();
           let sessionId: string | undefined;
           let text = "";
