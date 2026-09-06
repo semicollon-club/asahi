@@ -675,6 +675,9 @@ describe("fs_tree 실행기", () => {
 
   // depth 상한과 항목 수 상한이 같은 호출에서 동시에 걸리는 경우 — 안내 문구는 실제로 일어난
   // 것만 말해야 한다. 하나만 골라 보여주면 나머지 하나는 조용히 잘린 것과 같아진다.
+  // 타임아웃 30초: 바로 위 "항목 수 상한" 테스트와 같은 이유다 — TREE_MAX_ENTRIES(500)개의 실제
+  // 파일을 만드는 I/O 바운드 테스트라, GitHub Actions 윈도우 러너에서 기본 5초를 넘겨 플래키하게
+  // 실패한다(2026-09-06 CI 에서 실측: 같은 커밋이 브랜치 PR·ubuntu 에서는 통과, 윈도우 push 에서만 타임아웃).
   it("depth 상한과 항목 수 상한이 둘 다 걸리면 안내 문구가 둘 다 드러낸다(거짓 안내 방지)", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "asahi-tree-both-"));
     // "0_deep" 가지 — 이름이 숫자로 시작해 아래 f### 파일들보다 항상 먼저 정렬·처리된다.
@@ -699,7 +702,7 @@ describe("fs_tree 실행기", () => {
     // 안내 문구는 두 사실을 모두 드러내야 한다.
     expect(r.content).toContain("depth");
     expect(r.content).toContain("항목");
-  });
+  }, 30_000);
 
   // 리뷰 지적(Minor) — depth 가 음수면 tools.ts 의 zod 스키마가 하한을 안 둬 그대로 실행기까지
   // 온다. 예전 코드는 최상위(depth0)에서 바로 depth 초과로 판정해 entries 를 하나도 못 채우고,
