@@ -115,6 +115,8 @@ export function makeSessionRunner(o: {
   mcpBaseUrl?: string;
   // 봇의 파일 반환 주소(<http base>/files, 4단계 4.5). 있으면 턴마다 인프로세스 send_file MCP 를 붙인다.
   fileReturnUrl?: string;
+  // 로컬 브라우저 MCP(4단계 4.3). 있으면 세션에 stdio 브라우저 MCP(계정 B 에 설치된 것)를 붙인다. 없으면 안 붙인다.
+  browserMcp?: { command: string; args: string[] };
   sessionRootDir: string;
   baseEnv?: NodeJS.ProcessEnv;
   plugins?: unknown[];
@@ -151,11 +153,13 @@ export function makeSessionRunner(o: {
         return;
       }
       const env = buildSessionEnv({ baseEnv: o.baseEnv ?? process.env, llmBaseUrl: o.llmBaseUrl, token: frame.token, configDir, git: frame.git });
-      // 인프로세스 send_file MCP(4.5): 이 턴의 작업 토큰·작업 폴더로 만든다. 봇 /files 주소가 있을 때만.
-      const localMcp = o.fileReturnUrl !== undefined
-        ? { file: makeSendFileServer({ fileReturnUrl: o.fileReturnUrl, token: frame.token, cwd: frame.cwd }) }
-        : undefined;
-      const options = buildQueryOptions(frame, env, o.plugins ?? [], o.mcpBaseUrl, localMcp);
+      // 로컬 인프로세스·stdio MCP: send_file(4.5, 봇 /files 주소가 있을 때)와 브라우저(4.3, 워커에 구성됐을 때). 둘 다 계정 B
+      // 안에서 돌고 비밀이 없다. 하나도 없으면 undefined(옛 동작).
+      const localMcp: Record<string, unknown> = {};
+      if (o.fileReturnUrl !== undefined) localMcp.file = makeSendFileServer({ fileReturnUrl: o.fileReturnUrl, token: frame.token, cwd: frame.cwd });
+      if (o.browserMcp !== undefined) localMcp.browser = { command: o.browserMcp.command, args: o.browserMcp.args };
+      const localMcpServers = Object.keys(localMcp).length > 0 ? localMcp : undefined;
+      const options = buildQueryOptions(frame, env, o.plugins ?? [], o.mcpBaseUrl, localMcpServers);
       const abort = options.abortController as AbortController;
       // 진단(2026-09-06): resume 이 매 턴 새 세션으로 떨어지는 원인 추적. 봇이 보낸 resume id 를 이
       // 워커가 실제로 받았는지, 세션폴더(CLAUDE_CONFIG_DIR)·cwd 가 턴마다 같은지 본다 — 전사는

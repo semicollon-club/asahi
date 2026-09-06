@@ -105,6 +105,21 @@ describe("얇은 워커 설정(Task 7 — 워커는 DB·모델·세션을 다루
     expect(w).not.toHaveProperty("databaseUrl");
   });
 
+  it("워커 BROWSER_MCP_COMMAND 가 있으면 browserMcp 로 파싱하고(인자 공백 분리), 없으면 undefined(4단계 4.3)", () => {
+    const w = loadWorkerConfig({
+      WORKER_ID: "o", HUB_URL: "wss://h/worker", WORKER_TOKEN: "wt", WORKER_ROOTS: ROOT_A,
+      BROWSER_MCP_COMMAND: "npx", BROWSER_MCP_ARGS: "-y @playwright/mcp@latest --headless",
+    } as NodeJS.ProcessEnv);
+    expect(w.browserMcp).toEqual({ command: "npx", args: ["-y", "@playwright/mcp@latest", "--headless"] });
+    const none = loadWorkerConfig({ WORKER_ID: "o", HUB_URL: "wss://h/worker", WORKER_TOKEN: "wt", WORKER_ROOTS: ROOT_A } as NodeJS.ProcessEnv);
+    expect(none.browserMcp).toBeUndefined();
+  });
+
+  it("봇 HARNESS_BROWSER=true 면 harnessBrowser, 아니면 false(4단계 4.3)", () => {
+    expect(loadConfig({ ...base, HARNESS_BROWSER: "true" } as NodeJS.ProcessEnv).harnessBrowser).toBe(true);
+    expect(loadConfig(base as NodeJS.ProcessEnv).harnessBrowser).toBe(false);
+  });
+
   // FIX10: 예전엔 세 필수값(HUB_URL·WORKER_TOKEN·WORKER_ROOTS)을 한꺼번에 빼고 그 중 아무거나
   // 하나라도 메시지에 나오면 통과하는 정규식 하나로 검사했다 — 구현이 그중 두 개를 빠뜨려도 초록불일
   // 수 있었다(나머지 하나만 걸려도 통과). 키마다 나머지 둘은 채운 채로 하나씩만 빼서, 그 키가 실제로

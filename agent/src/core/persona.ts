@@ -33,7 +33,7 @@ export type PersonaContext = {
   // MCP(fs_*/sh_exec/remember/recall/db_*/…)가 아니라 Claude Code 내장 도구다 — 능력 안내와 기억 블록이 그 사실을 따라야
   // 한다(안내와 실제 도구가 어긋나면 모델이 없는 도구를 시도하다 실패를 사용자에게 전한다). cwd 는 세션의 작업 폴더.
   // 소유자에게만 뜻이 있다 — 손님은 2단계에서 새 경로를 타지 않으므로 무시한다(buildCapabilityBlock).
-  harness?: { cwd: string };
+  harness?: { cwd: string; browser?: boolean };
 };
 
 // ── 블록 ① 정체성과 불가침 규칙 ─────────────────────────────────────────────
@@ -231,16 +231,20 @@ const HARNESS_GITHUB_READ_LINE =
 
 // 하네스 턴(소유자)의 능력 블록. 도구 이름은 Claude Code 내장 도구다 — 원격 도구 이름(fs_*/sh_exec/proc_*/send_file)과
 // 봇 MCP 이름(remember/recall/db_*/runtime_info/manage_access)은 한 번도 쓰지 않는다(persona.test 가 고정한다).
-function buildHarnessCapabilityBlock(ctx: PersonaContext, h: { cwd: string }): string {
+const HARNESS_BROWSER_LINE =
+  "\n- 로컬 개발서버나 웹페이지를 브라우저로 열어 화면을 확인·조작·캡처할 수 있습니다(`mcp__browser__*`). UI 를 고쳐 가며 실제 화면으로 확인할 때 쓰고, 캡처한 이미지를 작업 폴더에 저장한 뒤 위 `mcp__file__send_file` 로 사용자에게 보낼 수 있습니다.";
+
+function buildHarnessCapabilityBlock(ctx: PersonaContext, h: { cwd: string; browser?: boolean }): string {
   const where = ctx.isPrivate ? "소유자와의 1:1 비공개 대화" : "공개 채널(서버) 대화";
   const githubRead = ctx.githubReady === true ? HARNESS_GITHUB_READ_LINE : "";
+  const browser = h.browser === true ? HARNESS_BROWSER_LINE : "";
   const publish = ctx.githubReady === true ? HARNESS_GIT_LINES : "";
   return `## 능력
 - ${where}이고, 이 턴은 동아리 미니PC 의 작업 계정에서 Claude Code 로 직접 돕니다. 파일·셸·검색은 내장 도구(Read/Write/Edit/Glob/Grep/Bash/WebSearch/WebFetch, 필요하면 Task 서브에이전트)로 합니다 — 원격 도구 이름은 없습니다.
 - 작업 폴더는 \`${h.cwd}\` 입니다. 이 기계의 관리자 권한으로 폴더 제한 없이 다루되, 부원들의 작업 폴더(그 아래 숫자 이름 폴더)는 그 사람의 것임을 존중하세요. 프로젝트는 작업 폴더 바로 밑에 폴더 하나로 만들고 그 안에서 작업하세요.
 - 이 턴에는 봇의 기억·접근관리 도구가 없습니다. 기억을 저장하거나 조회해 달라는 요청은 "이 방식의 턴에서는 아직 기억 도구를 쓸 수 없어요" 라고 답하세요 — 시도하지 마세요.
 - DB 는 **읽기**만 됩니다: \`mcp__supabase__db_schema\`(테이블·컬럼 구조), \`mcp__supabase__db_query\`(읽기 전용 SELECT/WITH 한 문장). 쓰기·다중문은 거부됩니다 — 추측 대신 실측으로 답할 때 씁니다.
-- 만든 파일(이미지·PDF·캡처 등)은 \`mcp__file__send_file\` 로 디스코드 대화에 첨부해 보낼 수 있습니다 — path 는 작업 폴더 안의 파일입니다. 디스코드 첨부 상한을 넘으면 그 사실을 알립니다.${githubRead}${publish}
+- 만든 파일(이미지·PDF·캡처 등)은 \`mcp__file__send_file\` 로 디스코드 대화에 첨부해 보낼 수 있습니다 — path 는 작업 폴더 안의 파일입니다. 디스코드 첨부 상한을 넘으면 그 사실을 알립니다.${browser}${githubRead}${publish}
 - 특정 작업(예: UI 디자인)에는 전용 스킬이 있을 수 있습니다. 먼저 쓸 수 있는 스킬이 있는지 살펴보고, 있으면 그 지침을 따르세요.`;
 }
 

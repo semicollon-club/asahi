@@ -77,6 +77,10 @@ export type Config = {
   // 코어가 비활성(0)·기본 창으로 읽는다. loadConfig 는 항상 채운다.
   maxLlmTokensPerWindowPerUser?: number;
   llmTokenWindowMs?: number;
+  // 하네스 능력 안내에 로컬 브라우저 MCP(4단계 4.3)를 알릴지. 봇은 워커의 설치 상태를 모르므로, 운영자가 워커에
+  // BROWSER_MCP_COMMAND 를 넣고 브라우저를 설치했을 때 이 플래그를 함께 켠다 — 안내와 실제 도구가 어긋나지 않게.
+  // 정확히 "true" 일 때만. 실제 도구를 붙이는 것은 워커의 browserMcp 다(이 플래그는 페르소나 문구만 켠다).
+  harnessBrowser?: boolean;
 };
 
 // 깃허브 발행 설정. 개인키는 base64 한 줄로 받는다 — 줄바꿈이 든 PEM 은 .env 파서·배포
@@ -135,6 +139,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     harnessOwner: env.HARNESS_OWNER === "true",
     maxLlmTokensPerWindowPerUser: nonNegativeNumberEnv(env, "MAX_LLM_TOKENS_PER_WINDOW_PER_USER", 1_500_000),
     llmTokenWindowMs: positiveNumberEnv(env, "LLM_TOKEN_WINDOW_HOURS", 5) * 60 * 60 * 1000,
+    harnessBrowser: env.HARNESS_BROWSER === "true",
   };
 }
 
@@ -155,6 +160,10 @@ export type WorkerConfig = {
   mode: WorkerMode;
   // WORKER_SESSION_DIR — 부원별 CLAUDE_CONFIG_DIR 의 루트. 없으면 러너가 사용자 프로필 아래 기본 위치를 쓴다(worker.ts).
   sessionDir?: string;
+  // 로컬 브라우저 MCP(4단계 4.3). BROWSER_MCP_COMMAND 가 있으면 하네스 세션에 stdio 브라우저 MCP 를 붙인다 — 계정 B 에
+  // 설치된 Playwright MCP 등으로, 비밀이 없다(로컬). 없으면 안 붙인다(설치 전엔 우아하게 없음). 패키지에 하드코딩하지
+  // 않는다: 운영자가 명령·인자를 그대로 정한다(예: command="npx", args="-y @playwright/mcp@latest --headless --output-dir C:\asahi-workspace").
+  browserMcp?: { command: string; args: string[] };
 };
 
 // Task 4: 워커는 이제 소유자가 누구인지 알 필요가 없다(신원·권한 판단은 허브 쪽에 있다) —
@@ -192,5 +201,9 @@ export function loadWorkerConfig(env: NodeJS.ProcessEnv = process.env): WorkerCo
     sentinelPath: env.WORKER_SENTINEL || undefined,
     mode: modeRaw,
     sessionDir: env.WORKER_SESSION_DIR || undefined,
+    // 인자는 공백으로 나눈다(개별 인자에 공백이 있으면 래퍼 스크립트로 감싸도록 안내한다 — 흔치 않다).
+    browserMcp: env.BROWSER_MCP_COMMAND?.trim()
+      ? { command: env.BROWSER_MCP_COMMAND.trim(), args: (env.BROWSER_MCP_ARGS ?? "").split(/\s+/).filter((s) => s.length > 0) }
+      : undefined,
   };
 }

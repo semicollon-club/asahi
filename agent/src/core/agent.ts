@@ -261,7 +261,7 @@ export function makeRunAgentTurn(
   // botVersion(1단계, 미니PC 단일 호스트): index.ts 가 기동 시 resolveBotVersion(remote/gitCommit.ts)으로 읽은
   // 봇 자기 커밋·브랜치. 없으면 예전처럼 Railway 주입 변수를 그대로 본다(아래 runtime).
   // harness(2단계): HARNESS_OWNER 플래그. 켜져 있고 조건이 맞는 소유자 턴은 아래 runHarnessTurn 으로 간다.
-  extras: { jobTokens?: JobTokenMinter; botVersion?: BotVersion; harness?: { enabled: boolean } } = {},
+  extras: { jobTokens?: JobTokenMinter; botVersion?: BotVersion; harness?: { enabled: boolean; browser?: boolean } } = {},
 ): TurnRunner {
   // sh_exec 의 git 이 쓸 단기 토큰 공급원(2026-09-05). 턴이 아니라 이 러너의 수명으로 하나만 만든다 —
   // 캐시가 턴을 넘어 살아야 sh_exec 호출마다 깃허브 API 를 두드리지 않는다(shellToken.ts). 깃허브
@@ -436,7 +436,7 @@ export function makeRunAgentTurn(
     const git = (await shellGitArgs(ctx)) as unknown as Record<string, unknown>;
     const systemPrompt = buildSystemPrompt({
       role: req.context.role, isPrivate: req.context.isPrivate, isOwner: req.context.isOwner, deployTarget,
-      workerConnected: true, githubReady: github !== null, harness: { cwd },
+      workerConnected: true, githubReady: github !== null, harness: { cwd, browser: extras.harness?.browser === true },
     });
     console.log(`[agent] 하네스 턴 — 워커 ${worker.workerId}, 모델 ${profile.model}, resume ${req.resume ? req.resume.slice(0, 8) : "없음"}`);
     const turn = h.startTurn!(worker.workerId, {

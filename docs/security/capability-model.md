@@ -720,6 +720,13 @@ pm2 jlist 가 돌려주는 명령은 이제 회원이 실제로 실행한 값이
 - **도구**: Claude Code 내장 도구 전부(Read/Write/Edit/Glob/Grep/Bash/WebSearch/WebFetch/Task). 봇의 `mcp__asahi__*` 중 기억·
   접근관리·PR 생성은 아직 없다 — 나머지 4단계 몫이고, 능력 안내(`persona.ts` 의 `buildHarnessCapabilityBlock`)가 그 사실을
   말한다(기억 블록도 그 턴에는 빠진다). DB 읽기(4.2)와 파일 반환(4.5)은 아래처럼 다시 열렸다.
+- **로컬 브라우저 MCP(4단계 4.3, 2026-09-06)**: 하네스 세션에 **`mcp__browser__*`(로컬 stdio MCP)** 가 붙을 수 있다 — 로컬
+  개발서버·웹페이지를 열어 화면을 확인·조작·캡처한다. **허브 MCP 와 다르다**: 봇(A)이 아니라 세션 계정(B)에서 도는 로컬 서버로,
+  비밀이 없다(브라우저는 자격증명을 쥐지 않는다). 그래서 작업 토큰 인증도 없다 — 세션의 서브프로세스로 뜬다. 봇은 워커의 설치
+  상태를 모르므로 두 곳을 함께 켠다: 워커의 `BROWSER_MCP_COMMAND`(실제 명령 — 패키지에 하드코딩하지 않고 운영자가 정한다,
+  예: `npx -y @playwright/mcp@latest --headless --output-dir <작업 폴더>`)와 봇의 `HARNESS_BROWSER=true`(능력 안내만 켠다). 캡처는
+  `--output-dir` 을 작업 폴더로 두면 파일로 남고, 위 `send_file`(작업 폴더 스코프)로 디스코드에 보낸다. 소유자 전용이다(하네스가
+  소유자 전용이므로). 공유 브라우저 하나·세션별 컨텍스트 최적화는 5단계(§5 자원 관리) 몫 — 지금은 턴마다 stdio 로 띄운다.
 - **파일 반환(4단계 4.5, 2026-09-06)**: 하네스 세션에 **`mcp__file__send_file`(인프로세스 MCP)** 이 붙는다. 얇은 워커 시절의
   원격 도구 `send_file` 과 같은 엔드포인트(봇 `POST /files`, 작업 토큰)를 쓰지만, 하네스 턴에는 원격 도구가 없으므로 세션 안에서
   도는 인프로세스 MCP 도구로 만든다(`mcp/sendFileServer.ts`, 세션 러너가 턴마다 `createSdkMcpServer` 로 생성). 비밀은 없다 —
