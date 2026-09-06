@@ -157,7 +157,10 @@ export function makeSessionRunner(o: {
       // 안에서 돌고 비밀이 없다. 하나도 없으면 undefined(옛 동작).
       const localMcp: Record<string, unknown> = {};
       if (o.fileReturnUrl !== undefined) localMcp.file = makeSendFileServer({ fileReturnUrl: o.fileReturnUrl, token: frame.token, cwd: frame.cwd });
-      if (o.browserMcp !== undefined) localMcp.browser = { command: o.browserMcp.command, args: o.browserMcp.args };
+      // alwaysLoad(4.3): 브라우저는 stdio 라 npx→node 로 뜨는 데 시간이 걸린다. 기본(비차단)이면 그 턴의 도구 목록이
+      // 정해질 때 아직 안 붙어 브라우저 도구가 빠진다(허브 HTTP 서버는 이미 뜬 봇에 즉시 붙어 문제없다). alwaysLoad 는
+      // 붙을 때까지 최대 5초 기다렸다 도구를 싣게 한다 — 그래야 첫 턴부터 mcp__browser__* 가 보인다.
+      if (o.browserMcp !== undefined) localMcp.browser = { command: o.browserMcp.command, args: o.browserMcp.args, alwaysLoad: true };
       const localMcpServers = Object.keys(localMcp).length > 0 ? localMcp : undefined;
       const options = buildQueryOptions(frame, env, o.plugins ?? [], o.mcpBaseUrl, localMcpServers);
       const abort = options.abortController as AbortController;
@@ -181,7 +184,14 @@ export function makeSessionRunner(o: {
             for (const u of progressFromMessage(m as { type: string; message?: unknown }, pending, o.now)) {
               send({ type: "turn.event", id: frame.id, event: u as unknown as Record<string, unknown> });
             }
-            if (m.type === "system" && m.subtype === "init" && typeof m.session_id === "string") sessionId = m.session_id;
+            if (m.type === "system" && m.subtype === "init") {
+              if (typeof m.session_id === "string") sessionId = m.session_id;
+              // 진단(4.3): 이 턴에 어느 MCP 서버가 붙었는지 — 브라우저가 connected 인지 failed 인지 여기서 갈린다.
+              const servers = (m as { mcp_servers?: Array<{ name?: unknown; status?: unknown }> }).mcp_servers;
+              if (Array.isArray(servers) && servers.length > 0) {
+                console.log(`[runner] MCP 서버: ${servers.map((s) => `${String(s.name)}=${String(s.status)}`).join(", ")}`);
+              }
+            }
             if (m.type === "result") {
               if (typeof m.session_id === "string") sessionId = m.session_id;
               if (m.subtype === "success") {
