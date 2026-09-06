@@ -77,9 +77,9 @@ Railway 는 IPv6 사설망으로 컨테이너에 닿으므로 IPv4 전용 바인
 
 ## 4단계 — MCP 허브·브라우저·플러그인·파일 반환 로컬화
 
-| # | 태스크 | 완료 기준 |
-|---|---|---|
-| 4.1 | MCP 허브(계정 A): stdio 서버를 루프백 HTTP MCP 로(`/mcp/<이름>`, 작업 토큰) — 첫 서버 GitHub(읽기) | 소유자 세션에서 `mcp__github__*` |
+| # | 태스크 | 완료 기준 | 상태 |
+|---|---|---|---|
+| 4.1 | MCP 허브(계정 A): stdio 서버를 루프백 HTTP MCP 로(`/mcp/<이름>`, 작업 토큰) — 첫 서버 GitHub(읽기) | 소유자 세션에서 `mcp__github__*` | ✅ 봇 루프백 허브(`core/mcpHub.ts`, stateless StreamableHTTP·작업 토큰), GitHub 읽기 서버(`mcp/githubReadServer.ts` — `list_repos`·`get_pull_request`, 읽기 스코프 토큰), 프로필 `mcpHub`(소유자만)·워커가 주소·토큰 조립(`sessionRunner.buildMcpServers`). 실제 MCP 클라이언트 왕복 테스트 |
 | 4.2 | Supabase(읽기 전용 역할)·Railway 허브 서버 — 소유자 프로필만 | 디스코드에서 표 조회 |
 | 4.3 | B 의 공유 브라우저 MCP(Playwright 서버 하나, 세션별 컨텍스트) + `send_file` 로 캡처 반환 | localhost 화면이 첨부로 |
 | 4.4 | 플러그인 설치 절차(B 계정) + 프로필의 플러그인 목록 | 공개 플러그인 하나가 손님 프로필에서 돈다 |

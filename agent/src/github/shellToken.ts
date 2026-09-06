@@ -34,10 +34,14 @@ export function makeShellTokenSource(o: {
   mint?: Mint;
   minRemainingMs?: number;
   errorCooldownMs?: number;
+  // 발급 권한. 기본은 sh_exec 의 git push 용 contents:write. 4단계 허브 GitHub MCP 는 읽기 스코프로 넘긴다
+  // (최소 권한) — 같은 캐시·동시성 로직을 그대로 쓰되 토큰의 권한만 좁힌다.
+  permissions?: Record<string, string>;
 }): ShellTokenSource {
   const mint = o.mint ?? mintInstallationToken;
   const minRemaining = o.minRemainingMs ?? SHELL_TOKEN_MIN_REMAINING_MS;
   const cooldown = o.errorCooldownMs ?? SHELL_TOKEN_ERROR_COOLDOWN_MS;
+  const permissions = o.permissions ?? { ...SHELL_TOKEN_PERMISSIONS };
 
   let cached: { token: string; expiresAtMs: number } | null = null;
   let lastError: { error: string; untilMs: number } | null = null;
@@ -51,7 +55,7 @@ export function makeShellTokenSource(o: {
       if (inflight) return inflight;
       inflight = (async (): Promise<ShellTokenResult> => {
         try {
-          const r = await mint({ config: o.config, repoNames: [], permissions: { ...SHELL_TOKEN_PERMISSIONS }, nowMs });
+          const r = await mint({ config: o.config, repoNames: [], permissions, nowMs });
           const expiresAtMs = Date.parse(r.expiresAt);
           // 만료를 모르는 토큰은 이 호출에만 쓰고 캐시하지 않는다 — 언제 죽을지 모르는 값을 재사용하면
           // 죽은 토큰을 50분 동안 나눠 주게 된다.

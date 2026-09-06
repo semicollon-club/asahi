@@ -10,7 +10,7 @@ import { startWorkerClient, type ClientSocket } from "./remote/workerClient.js";
 import { readCommit, defaultRunGit } from "./remote/gitCommit.js";
 import { planShutdown } from "./remote/workerShutdown.js";
 import { fileReturnUrlOf } from "./core/fileReturn.js";
-import { makeSessionRunner, llmProxyUrlOf, type SessionQuery, type SessionRunner } from "./remote/sessionRunner.js";
+import { makeSessionRunner, llmProxyUrlOf, mcpHubUrlOf, type SessionQuery, type SessionRunner } from "./remote/sessionRunner.js";
 import { skillPluginDirFrom, skillPluginsFor } from "./core/skills.js";
 
 // 로컬 워커(1단계 얇은 워커): 디스코드에도 DB에도 붙지 않고, Railway 허브로 아웃바운드
@@ -73,13 +73,15 @@ async function main() {
     if (config.mode === "harness") {
       const llmBaseUrl = llmProxyUrlOf(config.hubUrl);
       if (llmBaseUrl === null) throw new Error(`HUB_URL 에서 프록시 주소를 유도하지 못했습니다: ${config.hubUrl}`);
+      // 허브 MCP 기본 주소(4단계 4.1) — 프록시와 같은 http 베이스의 /mcp. 유도 실패는 프록시에서 이미 걸리므로 여기선 없다.
+      const mcpBaseUrl = mcpHubUrlOf(config.hubUrl) ?? undefined;
       const sessionRootDir = config.sessionDir ?? path.join(os.homedir(), ".asahi-sessions");
       const pluginDir = skillPluginDirFrom(path.join(path.dirname(fileURLToPath(import.meta.url)), "core"));
       runner = makeSessionRunner({
-        query: query as unknown as SessionQuery, llmBaseUrl, sessionRootDir,
+        query: query as unknown as SessionQuery, llmBaseUrl, mcpBaseUrl, sessionRootDir,
         plugins: skillPluginsFor({ pluginDir, exists: fs.existsSync(pluginDir) }),
       });
-      console.log(`[worker] 세션 러너 켬 — 프록시 ${llmBaseUrl}, 세션 폴더 ${sessionRootDir}`);
+      console.log(`[worker] 세션 러너 켬 — 프록시 ${llmBaseUrl}, 허브 MCP ${mcpBaseUrl}, 세션 폴더 ${sessionRootDir}`);
     }
     // 갱신 종료(planShutdown)는 도구 호출과 세션 턴이 모두 끝나길 기다린다.
     const idle = () => Promise.all([executorsIdle(), runner ? runner.idle() : Promise.resolve()]).then(() => undefined);

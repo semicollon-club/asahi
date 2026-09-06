@@ -31,6 +31,10 @@ import { DiscordAdapter } from "./adapters/discord.js";
 import { makeJobTokenMinter, newJobTokenSecret } from "./core/jobToken.js";
 import { makeFileReturnHandler, FILE_RETURN_PATH } from "./core/fileReturn.js";
 import { makeLlmProxyHandler, LLM_PROXY_PREFIX } from "./core/llmProxy.js";
+import { makeMcpHubHandler, MCP_HUB_PREFIX } from "./core/mcpHub.js";
+import { makeGithubReadServer } from "./mcp/githubReadServer.js";
+import { makeShellTokenSource } from "./github/shellToken.js";
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { defaultRunGit, resolveBotVersion } from "./remote/gitCommit.js";
 import { EXIT_CODE_UPDATE } from "./remote/workerShutdown.js";
 
@@ -109,6 +113,24 @@ async function main() {
   const harnessOwner = config.harnessOwner === true;
   if (harnessOwner) console.log("[index] HARNESS_OWNER=true — 소유자 턴은 harness 모드 워커의 세션 러너로 보냅니다.");
 
+  // 허브 MCP(4단계 4.1): 비밀이 필요한 MCP 서버를 봇(계정 A)에서 띄우고 /mcp/<이름> 으로 노출한다. 세션은 작업 토큰으로
+  // 인증해 붙는다(core/mcpHub.ts). 첫 서버는 GitHub 읽기 — 봇의 읽기 헬퍼(src/github)를 최소권한(읽기 스코프) 설치 토큰으로
+  // 노출한다. github 설정이 없으면 표가 비어 어떤 이름이든 404 다(소유자 프로필이 열어도 세션이 못 붙을 뿐, 무해).
+  const mcpServers: Record<string, () => McpServer> = {};
+  if (config.github !== null) {
+    const ghConfig = config.github;
+    const ghReadToken = makeShellTokenSource({ config: ghConfig, permissions: { metadata: "read", contents: "read", pull_requests: "read", issues: "read" } });
+    mcpServers.github = () => makeGithubReadServer({
+      org: ghConfig.org,
+      token: async () => {
+        const r = await ghReadToken.get(Date.now());
+        if ("token" in r) return r.token;
+        throw new Error(r.error);
+      },
+    });
+  }
+  const mcpHub = makeMcpHubHandler({ verify: (t) => jobTokens.verify(t), servers: mcpServers });
+
   // FIX9(사소): 예전엔 모든 경로·메서드에 무조건 200 "ok" 를 돌려줘, 이 서버가 뭘 하는 프로세스인지
   // 외부에서 스캔하기 쉬웠다. 헬스체크 전용 경로만 응답하고 나머지는 404 한다 — /worker 는 ws 가
   // 'upgrade' 이벤트로 별도 처리하므로(아래 wss) 이 제한과 무관하게 그대로 동작한다.
@@ -127,6 +149,11 @@ async function main() {
     // 인증 프록시 — 경로 허용 목록·토큰 검증은 핸들러 안에서(core/llmProxy.ts).
     if (req.url !== undefined && (req.url === LLM_PROXY_PREFIX || req.url.startsWith(`${LLM_PROXY_PREFIX}/`))) {
       llmProxy(req, res);
+      return;
+    }
+    // 허브 MCP(4단계 4.1) — /mcp/<이름>. 서버 이름·토큰 검증은 핸들러 안에서(core/mcpHub.ts).
+    if (req.url !== undefined && req.url.startsWith(`${MCP_HUB_PREFIX}/`)) {
+      mcpHub(req, res);
       return;
     }
     res.writeHead(404);

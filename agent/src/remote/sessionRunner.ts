@@ -27,6 +27,23 @@ export function llmProxyUrlOf(hubUrl: string): string | null {
   return base === null ? null : `${base}/llm`;
 }
 
+// HUB_URL → 허브 MCP 기본 주소(http://127.0.0.1:P/mcp). 4단계 4.1 — 서버 이름을 붙여 <base>/mcp/<이름> 이 된다.
+export function mcpHubUrlOf(hubUrl: string): string | null {
+  const base = httpBaseOfHub(hubUrl);
+  return base === null ? null : `${base}/mcp`;
+}
+
+// 프로필의 허브 MCP 서버 이름들 → SDK query() 의 mcpServers 설정(4단계 4.1). 이름마다 루프백 주소와 작업 토큰
+// 헤더를 붙인다 — 비밀은 봇(계정 A)이 쥐고, 세션은 이 토큰으로 인증해 붙는다. 이름·주소가 없으면 undefined.
+export function buildMcpServers(names: string[] | undefined, mcpBaseUrl: string | undefined, token: string): Record<string, unknown> | undefined {
+  if (!names || names.length === 0 || !mcpBaseUrl) return undefined;
+  const servers: Record<string, unknown> = {};
+  for (const name of names) {
+    servers[name] = { type: "http", url: `${mcpBaseUrl}/${name}`, headers: { Authorization: `Bearer ${token}` } };
+  }
+  return servers;
+}
+
 // 부원별 CLAUDE_CONFIG_DIR. userId 를 경로 조각으로 쓰므로 식별자 모양(디스코드 스노플레이크)만 받는다 — proc.ts 가
 // 프로세스 이름에 쓰는 것과 같은 규칙. 아니면 던진다(호출측 start 가 실패 결과로 바꾼다).
 export function sessionDirFor(rootDir: string, userId: string): string {
@@ -57,8 +74,10 @@ export function buildSessionEnv(o: {
 // 프로필(core/profiles.ts) → SDK query 옵션. 권한은 묻지 않는다(bypassPermissions) — 디스코드 너머에서 사람이 승인
 // 프롬프트에 답할 방법이 없고, 봇 세션도 원격 도구를 사전 승인으로 돌렸다. 서브에이전트가 꺼진 프로필은 Task 도구를
 // 막는다 — 한 턴이 여러 모델 호출을 병렬로 벌리는 가장 빠른 길을 손님에게서 닫는다(§5).
-export function buildQueryOptions(frame: TurnStartFrame, env: Record<string, string>, plugins: unknown[]): Record<string, unknown> {
+export function buildQueryOptions(frame: TurnStartFrame, env: Record<string, string>, plugins: unknown[], mcpBaseUrl?: string): Record<string, unknown> {
   const p = frame.profile;
+  // 허브 MCP(4단계 4.1): 프로필이 연 서버 이름마다 루프백 주소·작업 토큰 헤더를 붙여 mcpServers 로 넣는다.
+  const mcpServers = buildMcpServers(p.mcpHub, mcpBaseUrl, frame.token);
   return {
     cwd: frame.cwd,
     env,
@@ -69,6 +88,7 @@ export function buildQueryOptions(frame: TurnStartFrame, env: Record<string, str
     ...(p.effort !== undefined ? { effort: p.effort } : {}),
     ...(p.tools !== undefined ? { tools: p.tools } : {}),
     ...(p.subagents ? {} : { disallowedTools: ["Task"] }),
+    ...(mcpServers !== undefined ? { mcpServers } : {}),
     permissionMode: "bypassPermissions",
     plugins,
     skills: "all",
@@ -86,6 +106,8 @@ export type SessionRunner = {
 export function makeSessionRunner(o: {
   query: SessionQuery;
   llmBaseUrl: string;
+  // 허브 MCP 기본 주소(<http base>/mcp, 4단계 4.1). 없으면 mcpServers 를 안 붙인다(옛 동작 그대로).
+  mcpBaseUrl?: string;
   sessionRootDir: string;
   baseEnv?: NodeJS.ProcessEnv;
   plugins?: unknown[];
@@ -122,7 +144,7 @@ export function makeSessionRunner(o: {
         return;
       }
       const env = buildSessionEnv({ baseEnv: o.baseEnv ?? process.env, llmBaseUrl: o.llmBaseUrl, token: frame.token, configDir, git: frame.git });
-      const options = buildQueryOptions(frame, env, o.plugins ?? []);
+      const options = buildQueryOptions(frame, env, o.plugins ?? [], o.mcpBaseUrl);
       const abort = options.abortController as AbortController;
       // 진단(2026-09-06): resume 이 매 턴 새 세션으로 떨어지는 원인 추적. 봇이 보낸 resume id 를 이
       // 워커가 실제로 받았는지, 세션폴더(CLAUDE_CONFIG_DIR)·cwd 가 턴마다 같은지 본다 — 전사는

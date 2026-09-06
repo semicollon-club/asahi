@@ -88,7 +88,7 @@ describe("hello — commit 은 선택 필드다(옛 워커 호환)", () => {
 describe("프레임 — 세션 러너(turn.*)", () => {
   const start: Frame = {
     type: "turn.start", id: "t1", userId: "u1", cwd: "C:\\asahi-workspace", systemPrompt: "sys", prompt: "hi",
-    resume: "sess-1", profile: { model: "claude-opus-5", maxTurns: 30, subagents: true, effort: "high", tools: ["Read"] },
+    resume: "sess-1", profile: { model: "claude-opus-5", maxTurns: 30, subagents: true, effort: "high", tools: ["Read"], mcpHub: ["github"] },
     token: "asahi-job.x.y", git: { userName: "홍길동", userEmail: "u1@users.noreply.github.com", token: "ghs_1" },
   };
 
@@ -118,6 +118,9 @@ describe("프레임 — 세션 러너(turn.*)", () => {
     expect(parseFrame(JSON.stringify({ ...base, profile: { model: "m", subagents: true } }))).toBeNull();
     expect(parseFrame(JSON.stringify({ ...base, profile: { model: "m", maxTurns: "30", subagents: true } }))).toBeNull();
     expect(parseFrame(JSON.stringify({ ...base, profile: "opus" }))).toBeNull();
+    // mcpHub 는 문자열 배열이어야 한다(4단계 4.1). 모양이 틀리면 null.
+    expect(parseFrame(JSON.stringify({ ...base, profile: { ...base.profile, mcpHub: "github" } }))).toBeNull();
+    expect(parseFrame(JSON.stringify({ ...base, profile: { ...base.profile, mcpHub: [1, 2] } }))).toBeNull();
   });
 
   it("turn.event 는 event 가 객체여야 하고, turn.result 는 ok 가 boolean·text 가 문자열이어야 한다", () => {
