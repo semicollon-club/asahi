@@ -28,3 +28,27 @@ export function scopeDirs(
   if (o.workerKind === "personal" || o.isOwner) return dirs;
   return dirs.map((d) => joinUnderRoot(d, o.userId));
 }
+
+// 하네스 세션의 작업 폴더(풀 하네스 설계 §6, 위험 등록부 §11).
+// 얇은 워커의 `fs_*` 가 위 scopeDirs 로 좁혀지는 것과 **같은 규칙**을 세션 cwd 에도 적용한다 — 한 사람이
+// 두 경로(원격 도구·하네스)에서 서로 다른 폴더를 받으면 "내 폴더"라는 말의 뜻이 갈리고, 안내와 실제가
+// 어긋난다. 그래서 규칙을 새로 쓰지 않고 scopeDirs 를 그대로 쓴다.
+//
+// **이건 OS 경계가 아니다.** 세션의 내장 Bash 는 계정 B 가 읽는 곳이면 어디든 볼 수 있다(§11 의 "완화의
+// 한계"). 이 값이 정하는 것은 "어디서 시작하는가" 뿐 — 사고를 막는 첫 선이지 공격을 막는 벽이 아니다.
+//
+// 폴더를 정할 수 없으면 undefined. 호출측(agent.ts)은 그것을 "하네스로 보내지 않는다"로 읽는다 — 루트가
+// 없거나 식별자가 이상해 좁힐 수 없을 때 워크스페이스 루트로 떨어지는 것이 이 함수가 막으려는 바로 그
+// 일이므로, 실패는 넓히는 쪽이 아니라 닫는 쪽으로 간다.
+export function harnessCwdFor(
+  roots: string[],
+  o: { workerKind: "personal" | "shared"; isOwner: boolean; userId: string },
+): string | undefined {
+  try {
+    return scopeDirs(roots, o)[0];
+  } catch {
+    // scopeDirs 는 크래프트한 userId 에 예외를 던진다(joinUnderRoot). 삼키는 이유는 위와 같다 —
+    // 턴 전체를 죽이는 것보다 하네스를 건너뛰는 편이 낫다(옛 경로로 답은 나간다).
+    return undefined;
+  }
+}

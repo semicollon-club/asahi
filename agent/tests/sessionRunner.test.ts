@@ -268,3 +268,57 @@ describe("makeSessionRunner — turn.start 하나를 query() 한 번으로", () 
     expect(seen).toHaveLength(0);
   });
 });
+
+// 세션 cwd 관문(위험 등록부 §11, 2026-09-06). 봇이 신원에 맞게 폴더를 좁혀 보내지만(harnessCwdFor),
+// 워커가 그 값을 그대로 믿으면 프레임 하나로 이 기계의 아무 폴더에서나 세션이 열린다 — 얇은 워커의
+// `fs_*` 가 checkPath 를 거치는 것과 같은 자리에서 다시 판정한다.
+describe("makeSessionRunner — 작업 폴더 관문(workerRoots)", () => {
+  it("루트 밖 cwd 는 query 를 부르지도 않고 실패로 끝낸다", async () => {
+    const seen: Array<{ prompt: string; options: Record<string, unknown> }> = [];
+    const root = tmpRoot();
+    const ws = tmpRoot();
+    const runner = makeSessionRunner({
+      query: fakeQuery([initMsg, resultMsg], seen), llmBaseUrl: "http://h/llm", sessionRootDir: root, workerRoots: [ws],
+    });
+    const out: Frame[] = [];
+    runner.start({ ...frame, cwd: path.join(os.tmpdir(), "asahi-남의-폴더") }, (f) => out.push(f));
+    await vi.waitFor(() => expect(out.some((f) => f.type === "turn.result")).toBe(true));
+    expect(out.at(-1)).toMatchObject({ ok: false });
+    expect(String((out.at(-1) as { error?: string }).error)).toContain("작업 폴더 밖");
+    expect(seen).toHaveLength(0);
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(ws, { recursive: true, force: true });
+  });
+
+  it("루트 안이면 통과하고, 아직 없는 폴더는 만들어 준다 — 손님의 첫 턴", async () => {
+    const seen: Array<{ prompt: string; options: Record<string, unknown> }> = [];
+    const root = tmpRoot();
+    const ws = tmpRoot();
+    const mine = path.join(ws, "123456789012345678");
+    expect(fs.existsSync(mine)).toBe(false);
+    const runner = makeSessionRunner({
+      query: fakeQuery([initMsg, resultMsg], seen), llmBaseUrl: "http://h/llm", sessionRootDir: root, workerRoots: [ws],
+    });
+    const out: Frame[] = [];
+    runner.start({ ...frame, cwd: mine }, (f) => out.push(f));
+    await vi.waitFor(() => expect(out.some((f) => f.type === "turn.result")).toBe(true));
+    expect(out.at(-1)).toMatchObject({ ok: true });
+    expect(fs.existsSync(mine)).toBe(true);
+    // 실경로를 쓴다 — checkPath 가 심볼릭 링크·정션을 해소한 결과가 세션의 cwd 가 된다(§7).
+    expect(seen[0].options.cwd).toBe(fs.realpathSync(mine));
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(ws, { recursive: true, force: true });
+  });
+
+  it("루트를 안 넘긴 구성은 판정도 생성도 하지 않는다(옛 동작·테스트 픽스처)", async () => {
+    const seen: Array<{ prompt: string; options: Record<string, unknown> }> = [];
+    const root = tmpRoot();
+    const runner = makeSessionRunner({ query: fakeQuery([initMsg, resultMsg], seen), llmBaseUrl: "http://h/llm", sessionRootDir: root });
+    const out: Frame[] = [];
+    runner.start(frame, (f) => out.push(f));
+    await vi.waitFor(() => expect(out.some((f) => f.type === "turn.result")).toBe(true));
+    expect(seen[0].options.cwd).toBe("/w");
+    expect(fs.existsSync("/w")).toBe(false);
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+});

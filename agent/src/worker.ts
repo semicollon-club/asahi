@@ -85,6 +85,8 @@ async function main() {
       if (missingPlugins.length > 0) console.warn(`[worker] 설정된 플러그인 폴더가 없어 건너뜁니다: ${missingPlugins.join(", ")}`);
       runner = makeSessionRunner({
         query: query as unknown as SessionQuery, llmBaseUrl, mcpBaseUrl, fileReturnUrl, browserMcp: config.browserMcp, sessionRootDir,
+        // 세션 cwd 의 최종 판정자는 이 프로세스다(위험 등록부 §11) — 얇은 워커의 `fs_*` 와 같은 루트·같은 checkPath.
+        workerRoots: config.roots,
         plugins: [...bundledPlugins, ...extraPlugins],
       });
       console.log(`[worker] 세션 러너 켬 — 프록시 ${llmBaseUrl}, 허브 MCP ${mcpBaseUrl}, 파일 반환 ${fileReturnUrl}, 브라우저 ${config.browserMcp ? config.browserMcp.command : "없음"}, 플러그인 ${bundledPlugins.length + extraPlugins.length}개(설치 ${extraPlugins.length}), 세션 폴더 ${sessionRootDir}`);
