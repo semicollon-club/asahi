@@ -720,14 +720,21 @@ pm2 jlist 가 돌려주는 명령은 이제 회원이 실제로 실행한 값이
 - **도구**: Claude Code 내장 도구 전부(Read/Write/Edit/Glob/Grep/Bash/WebSearch/WebFetch/Task). 봇의 `mcp__asahi__*`(기억·DB·
   접근관리·`send_file`·PR 생성)는 아직 없다 — 나머지 4단계 몫이고, 능력 안내(`persona.ts` 의 `buildHarnessCapabilityBlock`)가
   그 사실을 말한다(기억 블록도 그 턴에는 빠진다).
-- **허브 MCP(4단계 4.1, 2026-09-06)**: 소유자 하네스 턴에 **`mcp__github__*`(읽기)** 가 붙는다. 비밀이 필요한 MCP 서버는 봇(계정 A)에서
-  띄우고 루프백 `/mcp/<이름>`(`core/mcpHub.ts`, stateless StreamableHTTP)로 노출한다. 세션(계정 B)은 `mcpServers` 에 그 주소를
-  **작업 토큰**(프록시·파일 반환과 같은 토큰)으로 붙는다 — 어느 서버를 어느 신원에 여는지는 프로필 한 곳(`core/profiles.ts` 의
-  `OWNER_MCP_HUB`, 지금 `["github"]`)이 정하고, 손님에게는 열지 않는다. **비밀(App 키)은 A 를 떠나지 않는다**: 세션은 이름만 알고
-  토큰으로 인증하며, 실제 깃허브 호출은 봇이 **읽기 스코프** 설치 토큰(`metadata/contents/pull_requests/issues: read`)으로 한다.
-  첫 서버 GitHub 는 봇의 기존 읽기 헬퍼(`src/github`)를 노출한다(`list_repos`·`get_pull_request`) — 쓰기(발행·push)는 여전히
-  기존 경로(`create_pull_request`·`sh_exec`)다. 허브가 `127.0.0.1` 에만 묶여(`HUB_BIND`) 미니PC 밖에서는 이 엔드포인트가 보이지
-  않는다. 4.2 에서 Supabase(읽기)·Railway 를 같은 레일에 더한다.
+- **허브 MCP(4단계 4.1·4.2, 2026-09-06)**: 소유자 하네스 턴에 **`mcp__github__*`(읽기)** 와 **`mcp__supabase__*`(읽기)** 가 붙는다.
+  비밀이 필요한 MCP 서버는 봇(계정 A)에서 띄우고 루프백 `/mcp/<이름>`(`core/mcpHub.ts`, stateless StreamableHTTP)로 노출한다.
+  세션(계정 B)은 `mcpServers` 에 그 주소를 **작업 토큰**(프록시·파일 반환과 같은 토큰)으로 붙는다. **비밀(App 키·DB 접속 문자열)은
+  A 를 떠나지 않는다**: 세션은 서버 이름만 알고 토큰으로 인증하며, 실제 호출은 봇이 한다.
+  - **GitHub(4.1)**: 봇의 읽기 헬퍼(`src/github`)를 **읽기 스코프** 설치 토큰(`metadata/contents/pull_requests/issues: read`)으로
+    노출한다 — `list_repos`·`get_pull_request`. 쓰기(발행·push)는 여전히 기존 경로(`create_pull_request`·`sh_exec`)다.
+  - **Supabase(4.2)**: 봇의 자기인지 도구(`db_schema`/`db_query`)와 같은 재료를 노출한다 — 1차 가드(`assertReadOnlySql`) + 핵심 방어선
+    (`IntrospectRepo.readOnlyQuery` 의 Postgres **READ ONLY** 트랜잭션). 쓰기는 구조적으로 불가능하다(DB 가 거부).
+  - **경계(설계 §9) — 두 겹**: (1) 어느 서버를 어느 신원에 여는지는 프로필 한 곳(`core/profiles.ts` 의 `OWNER_MCP_HUB=["github","supabase"]`)이
+    정하고 손님에게는 열지 않는다. (2) 하네스 세션은 Bash 로 임의 루프백 요청을 할 수 있어 프로필(세션의 `mcpServers`)만으로는 경계가
+    못 되므로, **작업 토큰에 허용 서버 목록(`mcpHub` 클레임)을 담아 허브가 요청 서버가 그 목록에 있는지 검사한다(없으면 403)**. 손님이
+    토큰을 들고 `/mcp/supabase` 를 직접 두드려도 그 토큰에 supabase 가 없으면 거부된다.
+  - 허브가 `127.0.0.1` 에만 묶여(`HUB_BIND`) 미니PC 밖에서는 이 엔드포인트가 보이지 않는다.
+  - **Railway 는 보류**: 봇에 Railway API 자격증명이 없고(호스트로만 썼다), `asahi` 서비스는 삭제됐으며 5단계에서 Railway 종료 예정이라,
+    필요해지면 API 토큰을 받아 같은 레일에 더한다.
 - **경계**: 작업 폴더는 워커 `roots[0]`(워크스페이스 루트, 관리자 스코프). 경로 게이트(`allowed_dirs`·`checkPath`)는 이 턴에
   적용되지 않는다 — 내장 도구가 그 기계의 계정 B 권한으로 직접 돈다. 소유자에게 `sh_exec` 가 이미 열려 있었으므로 **새 능력이
   아니다**(같은 계정, 같은 권한). 손님 프로필(5단계)이 이 경로를 탈 때는 작업 폴더를 그 부원 폴더로 좁히고 Task 를 막는다

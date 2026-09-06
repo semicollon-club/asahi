@@ -856,11 +856,21 @@ describe("buildSystemPrompt — 하네스 턴(소유자, 세션 러너)", () => 
       expect(cap).toMatch(/Read/);
       expect(cap).toContain("C:\asahi-workspace");
       expect(cap).not.toMatch(/fs_read|sh_exec|proc_start|send_file/);
-      expect(cap).not.toMatch(/db_query|runtime_info|manage_access/);
+      // 봇의 접근관리·runtime_info 는 이 턴에 없다. (DB 읽기는 4.2 에서 mcp__supabase__db_query 로 열렸으므로
+      // db_query 는 이제 등장한다 — 아래 별도 테스트가 확인한다.)
+      expect(cap).not.toMatch(/runtime_info|manage_access/);
       // 기억 블록 자체가 빠진다 — remember/recall 이 이 턴에 없다.
       expect(p).not.toMatch(/## 기억/);
       expect(cap).not.toMatch(/remember|recall/);
     }
+  });
+
+  it("DB 읽기(4단계 4.2)는 mcp__supabase__db_schema·db_query 로 안내한다(쓰기·기억은 여전히 없음)", () => {
+    const cap = capabilitySection(buildSystemPrompt({ role: "owner", isPrivate: true, isOwner: true, workerConnected: true, harness }));
+    expect(cap).toMatch(/mcp__supabase__db_schema/);
+    expect(cap).toMatch(/mcp__supabase__db_query/);
+    // 읽기 전용임을 분명히 한다.
+    expect(cap).toMatch(/읽기/);
   });
 
   it("기억 도구가 이 턴에 없다는 사실을 말한다 — 기억 요청을 받으면 그렇게 안내하게", () => {
