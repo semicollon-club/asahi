@@ -365,6 +365,49 @@ describe("AgentCore — 멀티유저/멀티대화", () => {
     expect(t.published.find((e) => e.type === "system_notice" && e.text.includes("오류"))).toBeUndefined();
   });
 
+  // 2026-09-17 회귀: 턴이 실패하면 그 턴의 세션 id 가 통째로 버려졌다. core.ts 의 `if (!result.ok)`
+  // 가 바로 return 해서 아래 setSession 에 닿지 못했기 때문이다 — 값이 없어서가 아니라(agent.ts 는
+  // subtype 과 무관하게 session_id 를 먼저 담는다) 받아 놓고 쓰지 않았다. 그 결과 다음 턴의 resume 이
+  // "마지막으로 성공한 턴"으로 돌아갔고, 실패한 턴이 한 작업은 사람이 "이어서 진행" 이라고 말해도
+  // 이어지지 않았다(실측: 파일 13개를 고치는 작업이 maxTurns 초과로 세 번 끊겼는데, 재개할 때마다
+  // 작업 내역 없는 세션을 이어받아 처음부터 다시 파악해야 했다).
+  it("턴이 maxTurns 초과로 실패해도 그 턴의 세션을 이어받는다", async () => {
+    const t = await setup();
+    // 1) 첫 턴 성공 — 세션 s1.
+    pub(t.bus, dmHint("owner", "owner"), "작업 시작해줘", t.now());
+    await t.core.drain();
+    expect(t.calls.length).toBe(1);
+
+    // 2) 둘째 턴이 작업 도중 maxTurns 로 끊긴다. 세션은 열려 있으므로 id 는 돌아온다.
+    t.setResult({ text: "(에이전트 오류: error_max_turns)", sessionId: "s-work", ok: false });
+    pub(t.bus, dmHint("owner", "owner"), "13개 파일 고쳐줘", t.now());
+    await t.core.drain();
+    expect(t.published.some((e) => e.type === "system_notice" && e.text.includes("오류"))).toBe(true);
+    // 핵심: 실패했어도 그 세션이 저장돼야 한다. 예전에는 여기가 "s1"(이전 성공 턴)이었다.
+    const conv = await t.repos.conversations.getByChannelId("dm-owner");
+    expect(conv?.sessionId).toBe("s-work");
+
+    // 3) "이어서 진행" 이 실제로 그 작업 세션을 이어받는다.
+    t.setResult({ text: "이어서 마쳤어요", sessionId: "s-work", ok: true });
+    pub(t.bus, dmHint("owner", "owner"), "이어서 진행", t.now());
+    await t.core.drain();
+    expect(t.calls[2].resume).toBe("s-work");
+  });
+
+  it("세션이 아예 열리지 못한 실패는 기존 세션을 끊지 않는다", async () => {
+    const t = await setup();
+    pub(t.bus, dmHint("owner", "owner"), "1", t.now());
+    await t.core.drain();
+
+    // sessionId 없는 실패(세션 자체가 안 열린 경우) — 덮어쓸 새 값이 없다. 이때 null 을 쓰면
+    // 멀쩡한 이전 세션까지 끊기므로, 기존 값이 그대로 남아야 한다.
+    t.setResult({ text: "(에이전트 오류: error_during_execution)", ok: false });
+    pub(t.bus, dmHint("owner", "owner"), "2", t.now());
+    await t.core.drain();
+    const conv = await t.repos.conversations.getByChannelId("dm-owner");
+    expect(conv?.sessionId).toBe("s1");
+  });
+
   it("이어지는 세션의 프롬프트에도 화자가 실린다", async () => {
     const t = await setup();
     // 첫 턴에서 세션이 열리고, 두 번째 턴이 resume 경로로 간다 — 그 경로가 이번 수정 대상이다.

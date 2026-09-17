@@ -652,6 +652,25 @@ export class AgentCore {
       }
 
       if (!result.ok) {
+        // 실패해도 이 턴이 연 세션은 저장한다(2026-09-17). 예전엔 여기서 바로 return 해서 아래
+        // setSession 에 닿지 못했고, 그러면 이 턴의 세션 id 가 통째로 버려졌다 — 값이 없어서가
+        // 아니라(agent.ts 의 result 처리는 subtype 과 무관하게 session_id 를 먼저 담는다) 받아
+        // 놓고 쓰지 않았다. 그 결과 다음 턴의 resume 은 "마지막으로 성공한 턴"의 세션으로
+        // 돌아갔고, 실패한 턴이 한 작업은 사람이 "이어서 진행" 이라고 말해도 이어지지 않았다.
+        // 실측(2026-09-17): 파일 13개를 고치는 작업이 maxTurns 초과로 세 번 끊겼는데, 재개할
+        // 때마다 작업 내역이 없는 세션을 이어받아 git status 부터 다시 파악해야 했다.
+        //
+        // 실패를 한 덩어리로 보면 안 된다는 반론이 있을 수 있지만, 이 지점에 닿는 실패는 이미
+        // "세션은 유효한데 턴이 끝나지 못한" 것뿐이다. resume 세션이 없는 경우(SDK 쪽에 세션이
+        // 사라짐)는 위 catch 에서 isSessionNotFound 로 걸러져 새 세션 재시도로 가고(하네스 경로도
+        // agent.ts:449 에서 같은 판정으로 throw 한다), 여기까지 오지 않는다. 그러니 남는 것은
+        // maxTurns 초과·실행 중 오류처럼 이어받는 것이 옳은 실패다.
+        //
+        // sessionId 가 없을 때만 기존 값을 지키는 이유: 세션이 아예 열리지 못한 실패(인증 등)는
+        // 덮어쓸 새 값이 없고, 그때 null 을 쓰면 멀쩡한 이전 세션까지 끊는다.
+        if (result.sessionId) {
+          await this.repos.conversations.setSession(conv.id, result.sessionId, this.now());
+        }
         await this.notify(conv, `비서 처리 중 오류가 있었어요: ${result.text}`);
         return;
       }

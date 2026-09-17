@@ -37,7 +37,10 @@ export const GUEST_MCP_HUB = ["supabase"] as const;
 
 export const GUEST_MODEL = "claude-sonnet-5";
 // 봇 자기 세션의 maxTurns(agent.ts)와 같은 값 — 하네스라고 한 턴이 더 길어질 이유는 없다.
-export const DEFAULT_MAX_TURNS = 30;
+// 2026-09-17: 30 → 60. 그리고 이 상수는 이제 "설정이 없을 때의 폴백"이다 — 정상 경로에서는
+// config.sessionMaxTurns(env SESSION_MAX_TURNS)가 agent.ts 를 거쳐 여기 profileFor 의 maxTurns
+// 인자로 내려온다. 30 이었을 때 파일 여러 개를 고치는 작업이 반복해서 중간에 끊겼다(실측).
+export const DEFAULT_MAX_TURNS = 60;
 
 export function profileFor(
   ctx: { isOwner: boolean; isPrivate: boolean; role: string },
