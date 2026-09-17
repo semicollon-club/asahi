@@ -57,18 +57,9 @@ describe("WorkersRepo", () => {
     expect((await repo.getById("w1"))?.label).toBe("새 이름");
   });
 
-  it("personal 워커를 담당 사용자로 찾는다", async () => {
-    await repo.upsert({ id: "owner-laptop", kind: "personal", userId: "owner", tokenHash: "h", ts: 100 });
-    expect(await repo.personalWorkerOf("owner")).toBe("owner-laptop");
-    expect(await repo.personalWorkerOf("guest")).toBeNull();
-  });
-
-  it("personal 워커가 한 사용자에게 여럿이면(예: 노트북+데스크탑) 가장 먼저 등록된 것을 돌려준다(결정적)", async () => {
-    // created_ts 가 완전히 같은 동석(tie) 상황 — 정렬 없이 LIMIT 1 이면 DB 가 순서를 정한다.
-    await repo.upsert({ id: "z-laptop", kind: "personal", userId: "owner", tokenHash: "h", ts: 100 });
-    await repo.upsert({ id: "a-desktop", kind: "personal", userId: "owner", tokenHash: "h", ts: 100 });
-    expect(await repo.personalWorkerOf("owner")).toBe("a-desktop");
-  });
+  // 2026-09-17(ADR 0011): personalWorkerOf 가 삭제되면서 그 조회를 고정하던 두 케이스도 함께 없앴다.
+  // kind='personal' 행을 저장하는 것 자체는 여전히 되지만(위 upsert 케이스들), 그 행을 찾아 쓰는
+  // 경로가 코드에 없다 — 모든 턴이 아래 sharedWorkerId 로 간다.
 
   it("shared 워커를 찾는다 — 없으면 null", async () => {
     expect(await repo.sharedWorkerId()).toBeNull();

@@ -58,73 +58,40 @@ describe("buildToolCtx — makeRunAgentTurn 의 ToolCtx 구성", () => {
 // 하나만 떼어 보기 번거로웠다(다른 테스트들도 실제 query() 호출까지는 가지 않는다는 점에서 이
 // 파일의 관례와도 맞다).
 //
-// 예전 shouldConnectWorker 는 "연결은 됐지만 공개 채널"·"연결은 됐지만 손님" 두 경우 모두
-// false(워커 없음)를 돌려줬다 — 그땐 원격 워커 자체가 owner-DM 전용이었다. Task 7 이후로는
-// 그 두 경우도 워커가 "없는" 게 아니라 다른 워커(공유 워커)로 resolve 된다 — 위치가 어느
-// 기계냐를 정한다(workerSelect.ts 의 resolveWorkerSelector). 그래서 아래 테스트들은 "false"
-// 대신 "어느 워커로 resolve 됐는가(kind)"를 확인한다 — registry 에 personal/shared 를 서로
-// 다른 id 로 응답하게 해서, 실제로 옳은 쪽이 쓰였는지까지 검증한다(이게 예전 회귀가 지키려던
-// 성질의 갱신판이다 — "소유자의 개인 워커가 공개 채널·손님에게 새지 않는다").
-describe("resolveTurnWorker — 이 턴이 실제로 쓸 워커를 정한다(Task 7, 예전 shouldConnectWorker 를 대체)", () => {
-  function registryStub(o: { personal?: string | null; shared?: string | null } = {}) {
+// 2026-09-17(ADR 0011): 개인 워커가 사라졌다. 네 계층(소유자 DM·소유자 서버·손님 DM·손님 서버)이
+// 전부 같은 공유 워커로 resolve 되고, 이 함수가 하는 일은 "등록된 공유 워커가 있고 지금 붙어 있는가"
+// 하나다. 그래서 아래 케이스들은 "어느 워커인가(kind)" 대신 **네 계층이 같은 id 를 받는가**를 고정한다 —
+// 예전 회귀("소유자의 개인 워커가 공개 채널·손님에게 새지 않는다")는 셀 대상 자체가 없어져 사라졌고,
+// 그 자리를 "소유자 DM 도 부원들과 같은 기계로 간다"가 대신한다.
+describe("resolveTurnWorker — 이 턴이 실제로 쓸 워커를 정한다(ADR 0011: 언제나 공유 워커)", () => {
+  function registryStub(o: { shared?: string | null } = {}) {
     return {
-      personalWorkerOf: async (_userId: string) => (o.personal === undefined ? "personal-worker" : o.personal),
       sharedWorkerId: async () => (o.shared === undefined ? "shared-worker" : o.shared),
     };
   }
   const connectedHub = { isConnected: (_id: string) => true };
   const disconnectedHub = { isConnected: (_id: string) => false };
 
-  it("소유자·DM(비공개)·워커 연결 셋 다 맞으면 그 소유자의 개인 워커로 resolve 한다", async () => {
-    const worker = await resolveTurnWorker({ context: { isOwner: true, isPrivate: true, userId: "owner" } }, registryStub(), connectedHub);
-    expect(worker).toEqual({ workerId: "personal-worker", kind: "personal" });
+  it("네 계층 전부가 같은 공유 워커로 resolve 한다(소유자 DM 포함)", async () => {
+    const layers = [
+      { isOwner: true, isPrivate: true, userId: "owner" },
+      { isOwner: true, isPrivate: false, userId: "owner" },
+      { isOwner: false, isPrivate: true, userId: "guest" },
+      { isOwner: false, isPrivate: false, userId: "guest" },
+    ];
+    for (const context of layers) {
+      expect(await resolveTurnWorker({ context }, registryStub(), connectedHub)).toBe("shared-worker");
+    }
   });
 
-  it("워커는 연결돼 있지만 공개 채널(isPrivate=false)이면 소유자라도 개인 워커가 아니라 공유 워커로 resolve 한다(예전엔 여기서 아예 없음이었지만, 이제는 공유 기계로 간다 — Task 7 반전)", async () => {
-    const worker = await resolveTurnWorker({ context: { isOwner: true, isPrivate: false, userId: "owner" } }, registryStub(), connectedHub);
-    expect(worker).toEqual({ workerId: "shared-worker", kind: "shared" });
-  });
-
-  it("워커는 연결돼 있지만 손님(isOwner=false)이면 DM 이어도 개인 워커가 아니라 공유 워커로 resolve 한다(같은 반전)", async () => {
-    const worker = await resolveTurnWorker({ context: { isOwner: false, isPrivate: true, userId: "guest" } }, registryStub(), connectedHub);
-    expect(worker).toEqual({ workerId: "shared-worker", kind: "shared" });
-  });
-
-  it("소유자 DM 이어도 개인·공유 워커가 둘 다 허브에 연결돼 있지 않으면 null", async () => {
+  it("공유 워커가 허브에 붙어 있지 않으면 null — 소유자 DM 이라고 다른 기계로 떨어지지 않는다", async () => {
     const worker = await resolveTurnWorker({ context: { isOwner: true, isPrivate: true, userId: "owner" } }, registryStub(), disconnectedHub);
     expect(worker).toBeNull();
   });
 
-  // 풀 하네스 2단계(2026-09-05 밤, 계획 2.5): 미니PC 단일 호스트에서 허브가 루프백에만 묶여 개인 PC 워커는 붙을 수 없다 —
-  // 소유자 DM 이 워커 없는 대화로 떨어지지 않게, 개인 워커가 없거나 끊겨 있으면 공유 워커(관리자 스코프)로 간다.
-  // 개인 워커가 실제로 붙어 있으면 여전히 그것이 우선이다(위 첫 케이스).
-  it("소유자 DM 에서 개인 워커가 등록되지 않았으면 공유 워커로 간다(관리자 스코프)", async () => {
+  it("공유 워커가 아예 등록되지 않았으면 null", async () => {
     const worker = await resolveTurnWorker(
       { context: { isOwner: true, isPrivate: true, userId: "owner" } },
-      registryStub({ personal: null }),
-      connectedHub,
-    );
-    expect(worker).toEqual({ workerId: "shared-worker", kind: "shared" });
-  });
-
-  it("소유자 DM 에서 개인 워커가 등록됐지만 끊겨 있고 공유 워커만 연결돼 있으면 공유 워커로 간다", async () => {
-    const sharedOnly = { isConnected: (id: string) => id === "shared-worker" };
-    const worker = await resolveTurnWorker({ context: { isOwner: true, isPrivate: true, userId: "owner" } }, registryStub(), sharedOnly);
-    expect(worker).toEqual({ workerId: "shared-worker", kind: "shared" });
-  });
-
-  it("소유자 DM 에서 개인 워커도 없고 공유 워커도 등록되지 않았으면 null", async () => {
-    const worker = await resolveTurnWorker(
-      { context: { isOwner: true, isPrivate: true, userId: "owner" } },
-      registryStub({ personal: null, shared: null }),
-      connectedHub,
-    );
-    expect(worker).toBeNull();
-  });
-
-  it("손님은 공유 워커가 없으면 null — 개인 워커로 떨어지지 않는다", async () => {
-    const worker = await resolveTurnWorker(
-      { context: { isOwner: false, isPrivate: true, userId: "guest" } },
       registryStub({ shared: null }),
       connectedHub,
     );
@@ -145,13 +112,13 @@ describe("resolveTurnWorker — 이 턴이 실제로 쓸 워커를 정한다(Tas
 // 함수가 이 합성을 맡았지만, Task 7 로 shouldConnectWorker 와 함께 resolveTurnWorker 하나로
 // 합쳐졌다.
 describe("resolveTurnWorker — noRemoteTools 는 워커 연결 여부와 무관하게 강제로 닫는다(FIX4, 예전 resolveWorkerConnected 를 대체)", () => {
-  const registry = { personalWorkerOf: async () => "personal-worker", sharedWorkerId: async () => "shared-worker" };
+  const registry = { sharedWorkerId: async () => "shared-worker" };
   const connectedHub = { isConnected: () => true };
   const context = { isOwner: true, isPrivate: true, userId: "owner" };
 
   it("noRemoteTools 가 없으면 평소처럼 워커를 resolve 한다(회귀 없음)", async () => {
-    expect(await resolveTurnWorker({ context }, registry, connectedHub)).toEqual({ workerId: "personal-worker", kind: "personal" });
-    expect(await resolveTurnWorker({ context: { ...context, isPrivate: false } }, registry, connectedHub)).toEqual({ workerId: "shared-worker", kind: "shared" });
+    expect(await resolveTurnWorker({ context }, registry, connectedHub)).toBe("shared-worker");
+    expect(await resolveTurnWorker({ context: { ...context, isPrivate: false } }, registry, connectedHub)).toBe("shared-worker");
   });
 
   it("noRemoteTools=true 면 워커가 연결돼 있고 소유자 DM 이어도 null 이다(유휴 요약 턴) — registry·hub 조회 자체를 건너뛴다", async () => {
@@ -178,12 +145,12 @@ describe("resolveTurnWorker — noRemoteTools 는 워커 연결 여부와 무관
 // 되지 않는다는 것(고친 뒤의 상태)을 증명한다.
 describe("resolveTurnWorker — 정기 게시(digest) 컨텍스트도 noRemoteTools 없이는 공유 워커로 resolve 된다(최종 리뷰 FIX2)", () => {
   const digestContext = { isOwner: false, isPrivate: false, userId: "digest" };
-  const registry = { personalWorkerOf: async () => null, sharedWorkerId: async () => "semicolon-shared" };
+  const registry = { sharedWorkerId: async () => "semicolon-shared" };
   const connectedHub = { isConnected: () => true };
 
   it("(고치기 전 상태 재현) noRemoteTools 없이 digest 컨텍스트를 넘기면 연결된 공유 워커로 resolve 된다 — 리뷰가 지적한 바로 그 결과", async () => {
     const worker = await resolveTurnWorker({ context: digestContext }, registry, connectedHub);
-    expect(worker).toEqual({ workerId: "semicolon-shared", kind: "shared" });
+    expect(worker).toBe("semicolon-shared");
   });
 
   it("digest.ts 가 세우는 noRemoteTools:true 를 적용하면, 공유 워커가 연결돼 있어도 워커가 resolve 되지 않고 allowedToolsFor 에도 원격 도구가 하나도 없다", async () => {
@@ -215,52 +182,51 @@ describe("resolveTurnWorker — 정기 게시(digest) 컨텍스트도 noRemoteTo
 // 이 검증은 실제로 아무 의미가 없었다. 이제 allowDirHandler 는 ctx.remote.roots(워커가 hello
 // 프레임으로 알려온 실제 작업 폴더)로 검증하므로, makeRunAgentTurn 이 그 값을 실제로 채워야 한다 —
 // WorkerHub.rootsOf(workerId) 는 이 함수가 생기기 전까지 프로덕션 호출자가 없었다(테스트 전용).
-// Task 7: 시그니처가 workerConnected(boolean)+userId 대신 worker({workerId,kind}|null) 하나를
-// 받게 바뀌었다 — resolveTurnWorker 가 이미 어느 워커·어느 종류인지 정했으므로 이 함수는 그
-// 결과를 hub 에 연결하기만 한다.
-describe("buildRemoteCtx — ctx.remote 구성(Task 7: worker={workerId,kind} 기준으로 바뀜)", () => {
-  it("worker 가 있고 hub 가 있으면 roots 는 hub.rootsOf(workerId) 결과로, call 은 hub.call(workerId,...) 로 이어지고, workerId·workerKind 도 그대로 실린다", async () => {
+// Task 7: 시그니처가 workerConnected(boolean)+userId 대신 워커 하나를 받게 바뀌었다 —
+// resolveTurnWorker 가 이미 어느 워커인지 정했으므로 이 함수는 그 결과를 hub 에 연결하기만 한다.
+// 2026-09-17(ADR 0011): 그 인자가 {workerId,kind} 객체에서 workerId 문자열로 줄었다 — 워커 종류가
+// 하나뿐이라 kind 를 옮길 일이 없어졌고, ctx.remote.workerKind 필드도 함께 사라졌다.
+describe("buildRemoteCtx — ctx.remote 구성(ADR 0011: workerId 하나를 받는다)", () => {
+  it("workerId 와 hub 가 있으면 roots 는 hub.rootsOf(workerId) 결과로, call 은 hub.call(workerId,...) 로 이어진다", async () => {
     const seen: Array<{ id: string; tool: string; args: Record<string, unknown> }> = [];
     const hub = {
       call: async (id: string, tool: string, args: Record<string, unknown>) => {
         seen.push({ id, tool, args });
         return { ok: true, content: "본문" };
       },
-      rootsOf: (id: string) => (id === "owner-laptop" ? ["/w/proj"] : []),
+      rootsOf: (id: string) => (id === "semicolon-shared" ? ["/w/proj"] : []),
     };
-    const remote = buildRemoteCtx({ workerId: "owner-laptop", kind: "personal" }, hub);
+    const remote = buildRemoteCtx("semicolon-shared", hub);
     expect(remote?.roots).toEqual(["/w/proj"]);
-    expect(remote?.workerId).toBe("owner-laptop");
-    expect(remote?.workerKind).toBe("personal");
+    expect(remote?.workerId).toBe("semicolon-shared");
     const result = await remote!.call("fs_read", { path: "/w/proj/a.txt" });
     expect(result).toEqual({ ok: true, content: "본문" });
-    expect(seen).toEqual([{ id: "owner-laptop", tool: "fs_read", args: { path: "/w/proj/a.txt" } }]);
+    expect(seen).toEqual([{ id: "semicolon-shared", tool: "fs_read", args: { path: "/w/proj/a.txt" } }]);
   });
 
-  // FIX3(중요, 최종 리뷰) — workerKind 는 이 함수가 옮기는 필드 중 remoteToolHandler 의
-  // scopeDirs(remoteTools.ts) 가 손님을 자기 폴더로 가두는지 말지를 통째로 결정하는 값이다.
-  // 위 테스트는 kind:"personal" 하나만 확인해서, buildRemoteCtx 가 worker.kind 를 무시하고
-  // "personal" 을 하드코딩해도(리뷰의 M12 뮤테이션) 통과해 버렸다 — kind:"shared" 를 넣어도
-  // 그대로 "personal" 이 나오는 셈이라 아무도 못 잡았다. kind:"shared" 케이스를 별도로 확인해야
-  // 이 필드가 실제로 그대로 옮겨지는지(하드코딩되지 않는지) 검증된다.
-  it("worker.kind 가 'shared' 면 workerKind 도 'shared' 로 그대로 실린다(FIX3 — 하드코딩 회귀 가드)", async () => {
+  // 예전 FIX3 가드(worker.kind 하드코딩 회귀)는 옮길 필드 자체가 없어져 사라졌다. 대신 workerId 가
+  // 하드코딩되지 않고 실제로 전달되는지를 다른 id 로 한 번 더 확인한다 — roots 조회와 call 이 같은
+  // id 를 쓰는지가 이 함수가 지켜야 할 전부다.
+  it("다른 workerId 를 주면 roots·call 모두 그 id 로 간다(하드코딩 회귀 가드)", async () => {
+    const seen: string[] = [];
     const hub = {
-      call: async () => ({ ok: true, content: "" }),
-      rootsOf: (id: string) => (id === "semicolon-shared" ? ["C:\\ws"] : []),
+      call: async (id: string) => { seen.push(id); return { ok: true, content: "" }; },
+      rootsOf: (id: string) => (id === "other-shared" ? ["C:\\ws"] : []),
     };
-    const remote = buildRemoteCtx({ workerId: "semicolon-shared", kind: "shared" }, hub);
-    expect(remote?.workerKind).toBe("shared");
-    expect(remote?.workerId).toBe("semicolon-shared");
+    const remote = buildRemoteCtx("other-shared", hub);
+    expect(remote?.workerId).toBe("other-shared");
     expect(remote?.roots).toEqual(["C:\\ws"]);
+    await remote!.call("fs_read", {});
+    expect(seen).toEqual(["other-shared"]);
   });
 
-  it("worker 가 null 이면 hub 가 있어도 undefined 다(ctx.remote 를 채우지 않는다)", () => {
+  it("workerId 가 null 이면 hub 가 있어도 undefined 다(ctx.remote 를 채우지 않는다)", () => {
     const hub = { call: async () => ({ ok: true, content: "" }), rootsOf: () => ["/w"] };
     expect(buildRemoteCtx(null, hub)).toBeUndefined();
   });
 
-  it("hub 자체가 없으면 worker 가 있어도 undefined 다", () => {
-    expect(buildRemoteCtx({ workerId: "owner-laptop", kind: "personal" }, undefined)).toBeUndefined();
+  it("hub 자체가 없으면 workerId 가 있어도 undefined 다", () => {
+    expect(buildRemoteCtx("semicolon-shared", undefined)).toBeUndefined();
   });
 });
 
@@ -515,7 +481,7 @@ describe("makeRunAgentTurn — 하네스 디스패치(소유자, HARNESS_OWNER)"
     };
     return { hub, started };
   }
-  const registry = { personalWorkerOf: async () => null, sharedWorkerId: async () => "shared-worker" };
+  const registry = { sharedWorkerId: async () => "shared-worker" };
   const ownerCtx = { role: "owner" as const, isPrivate: true, isOwner: true, userId: "owner", conversationId: 3, channelRef: "chan-3" };
 
   it("소유자 턴을 turn.start 로 보낸다 — 작업 토큰·프로필·작업 폴더·하네스용 시스템 프롬프트를 싣고, 이벤트는 onProgress 로, 결과는 TurnResult 로", async () => {

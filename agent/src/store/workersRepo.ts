@@ -73,17 +73,10 @@ export class WorkersRepo {
     await this.db.query("UPDATE workers SET last_seen_ts = $1 WHERE id = $2", [ts, id]);
   }
 
-  // 한 사용자가 개인 워커를 두 대 이상 등록할 수 있다(예: 소유자의 노트북+데스크탑) —
-  // user_id 에는 UNIQUE 제약이 없다. sharedWorkerId 와 같은 이유로, created_ts 가 같을 때도
-  // 결과가 DB 순서에 휘둘리지 않도록 id 를 타이브레이커로 둔다.
-  async personalWorkerOf(userId: string): Promise<string | null> {
-    const r = await this.db.query(
-      "SELECT id FROM workers WHERE kind = 'personal' AND user_id = $1 ORDER BY created_ts, id LIMIT 1",
-      [userId],
-    );
-    return (r.rows as { id: string }[])[0]?.id ?? null;
-  }
-
+  // 2026-09-17(ADR 0011): personalWorkerOf 가 삭제됐다. 모든 턴이 공유 워커로 가므로 개인 워커를
+  // 찾는 호출부가 하나도 남지 않았다. kind 컬럼과 'personal' 값 자체는 그대로 둔다 — 이미 등록된
+  // 행(owner-laptop 등)의 기록이고, 정책을 되돌리면 이 조회를 다시 만들면 된다.
+  //
   // 공용 워커가 여러 대인 상황은 1단계에서 만들지 않지만, 그래도 결정적으로 하나를 고른다 —
   // 정렬 없이 LIMIT 1 을 쓰면 어느 행이 나올지 DB 가 정한다.
   async sharedWorkerId(): Promise<string | null> {

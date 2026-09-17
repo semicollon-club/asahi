@@ -1,23 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { resolveWorkerSelector, scopeDirs, harnessCwdFor } from "../src/core/workerSelect.js";
+import { scopeDirs, harnessCwdFor } from "../src/core/workerSelect.js";
 import { joinUnderRoot, isPathWithin } from "../src/core/paths.js";
 
-describe("resolveWorkerSelector — 어디서 말하느냐가 어느 기계냐를 정한다", () => {
-  it("소유자 DM 은 그 소유자의 개인 워커", () => {
-    expect(resolveWorkerSelector({ isOwner: true, isPrivate: true, userId: "owner" }))
-      .toEqual({ kind: "personal", userId: "owner" });
-  });
-
-  it("소유자가 서버에 있으면 공유 워커", () => {
-    expect(resolveWorkerSelector({ isOwner: true, isPrivate: false, userId: "owner" }))
-      .toEqual({ kind: "shared" });
-  });
-
-  it("손님은 DM 이든 서버든 공유 워커", () => {
-    expect(resolveWorkerSelector({ isOwner: false, isPrivate: true, userId: "g" })).toEqual({ kind: "shared" });
-    expect(resolveWorkerSelector({ isOwner: false, isPrivate: false, userId: "g" })).toEqual({ kind: "shared" });
-  });
-});
+// 2026-09-17(ADR 0011): resolveWorkerSelector 가 삭제되면서 그 선택자를 고정하던 세 케이스도 함께
+// 없앴다. "어느 기계인가"는 더 이상 이 파일의 판단이 아니다 — 모든 턴이 공유 워커로 가고, 그 사실은
+// agent.test.ts 의 resolveTurnWorker 케이스가 고정한다(소유자 DM 도 공유 워커 id 를 받는다).
 
 describe("joinUnderRoot — 워커 플랫폼의 구분자를 따른다", () => {
   it("윈도우 루트에는 역슬래시로 잇는다", () => {
@@ -74,28 +61,26 @@ describe("joinUnderRoot — 세그먼트 검증(회원 격리의 마지막 경�
 describe("scopeDirs — 공유 기계 안에서 사용자별로 가른다", () => {
   const dirs = ["C:\\workspace", "D:\\projects"];
 
-  it("개인 워커는 목록을 그대로 쓴다", () => {
-    expect(scopeDirs(dirs, { workerKind: "personal", isOwner: true, userId: "owner" })).toEqual(dirs);
+  // ADR 0011 이후 판정 축은 신원 하나다 — 예전의 "개인 워커면 좁히지 않는다" 케이스는 선택자와
+  // 함께 사라졌다(그 분기가 도달하지 않으면서 접근만 넓히던 자리라 지웠다).
+  it("소유자는 루트 전체", () => {
+    expect(scopeDirs(dirs, { isOwner: true, userId: "owner" })).toEqual(dirs);
   });
 
-  it("공유 워커 + 소유자는 루트 전체", () => {
-    expect(scopeDirs(dirs, { workerKind: "shared", isOwner: true, userId: "owner" })).toEqual(dirs);
-  });
-
-  it("공유 워커 + 손님은 본인 폴더로 좁혀진다", () => {
-    expect(scopeDirs(dirs, { workerKind: "shared", isOwner: false, userId: "123" }))
+  it("손님은 본인 폴더로 좁혀진다", () => {
+    expect(scopeDirs(dirs, { isOwner: false, userId: "123" }))
       .toEqual(["C:\\workspace\\123", "D:\\projects\\123"]);
   });
 
   it("허용 폴더가 없으면 결과도 없다 — 빈 목록을 전체 허용으로 바꾸지 않는다", () => {
-    expect(scopeDirs([], { workerKind: "shared", isOwner: false, userId: "123" })).toEqual([]);
+    expect(scopeDirs([], { isOwner: false, userId: "123" })).toEqual([]);
   });
 
   // Task 6 리뷰 이월: userId 는 joinUnderRoot 로 그대로 넘어간다 — 크래프트한 값이 와도 이
   // 함수가 조용히 잘못된 경로를 만들지 않고 예외로 실패해야 한다(remoteToolHandler 가 이미
   // try/catch 로 감싸고 있어 fail closed 로 이어진다 — remoteTools.test.ts 참고).
   it("크래프트한 userId(상위 참조 등)가 들어와도 예외를 던져 격리를 깨지 않는다", () => {
-    expect(() => scopeDirs(dirs, { workerKind: "shared", isOwner: false, userId: "../222" })).toThrow();
+    expect(() => scopeDirs(dirs, { isOwner: false, userId: "../222" })).toThrow();
   });
 });
 
@@ -106,20 +91,20 @@ describe("harnessCwdFor — 하네스 세션이 어디서 시작하는가", () =
   const roots = ["C:\\workspace", "D:\\projects"];
 
   it("소유자는 워커 루트에서 시작한다(관리자 스코프 — 좁히지 않는다)", () => {
-    expect(harnessCwdFor(roots, { workerKind: "shared", isOwner: true, userId: "owner" })).toBe("C:\\workspace");
+    expect(harnessCwdFor(roots, { isOwner: true, userId: "owner" })).toBe("C:\\workspace");
   });
 
   it("손님은 자기 폴더에서 시작한다 — 얇은 워커의 scopeDirs 와 같은 경로여야 한다", () => {
-    const cwd = harnessCwdFor(roots, { workerKind: "shared", isOwner: false, userId: "123" });
+    const cwd = harnessCwdFor(roots, { isOwner: false, userId: "123" });
     expect(cwd).toBe("C:\\workspace\\123");
-    expect(cwd).toBe(scopeDirs(roots, { workerKind: "shared", isOwner: false, userId: "123" })[0]);
+    expect(cwd).toBe(scopeDirs(roots, { isOwner: false, userId: "123" })[0]);
   });
 
   it("루트가 없으면 undefined — 호출측이 하네스로 보내지 않는다", () => {
-    expect(harnessCwdFor([], { workerKind: "shared", isOwner: false, userId: "123" })).toBeUndefined();
+    expect(harnessCwdFor([], { isOwner: false, userId: "123" })).toBeUndefined();
   });
 
   it("크래프트한 userId 는 undefined 로 닫는다 — 좁힐 수 없을 때 루트로 넓히지 않는다", () => {
-    expect(harnessCwdFor(roots, { workerKind: "shared", isOwner: false, userId: "../222" })).toBeUndefined();
+    expect(harnessCwdFor(roots, { isOwner: false, userId: "../222" })).toBeUndefined();
   });
 });
