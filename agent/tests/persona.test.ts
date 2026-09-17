@@ -186,11 +186,20 @@ describe("buildSystemPrompt — 능력 안내가 실제 도구 보유와 어긋�
     expect(cap).toMatch(/allow_dir/);
   });
 
-  it("서버 채널의 소유자 + 워커 연결 시에도 DM 전용 도구(manage_access/db_schema/db_query)는 언급하지 않는다", () => {
+  it("서버 채널의 소유자 + 워커 연결 시 DM 전용 도구(manage_access)는 언급하지 않되, DB 읽기는 안내한다", () => {
     const p = buildSystemPrompt({ role: "owner", isPrivate: false, isOwner: true, workerConnected: true });
     const cap = capabilitySection(p);
     expect(cap).not.toMatch(/manage_access/);
-    expect(cap).not.toMatch(/db_query/);
+    // ADR 0010(2026-09-17): db_schema/db_query 는 더 이상 DM 전용이 아니다 — 도구가 이 턴에 실제로
+    // 있으므로 안내도 함께 있어야 한다(둘이 갈리면 2026-08-06 사건이 반대 방향으로 재현된다).
+    expect(cap).toMatch(/db_query/);
+  });
+
+  it("손님 서버 채널 안내도 DB 읽기를 알리고, '소유자만' 목록에서는 DB 를 뺀다(ADR 0010)", () => {
+    const p = buildSystemPrompt({ role: "allowed", isPrivate: false, isOwner: false, workerConnected: true });
+    const cap = capabilitySection(p);
+    expect(cap).toMatch(/db_query/);
+    expect(cap).not.toMatch(/DB 직접 조회/);
   });
 
   it("서버 채널의 소유자 + 워커 미연결(기본값)이면 파일·셸 도구 이름을 언급하지 않고, recall 은 된다고 안내한다", () => {
