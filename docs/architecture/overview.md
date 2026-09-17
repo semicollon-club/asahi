@@ -239,8 +239,11 @@ core/agent.ts`). 그 배열이 실제로 여는 것은 웹 검색(`WebSearch`)�
   그 세션에 이미 프롬프트 인젝션이 심겨 있어도 PC·외부·기억에는 닿지 못하게 한다.
   **다만 이 턴이 텍스트 요약만 하는 상태가 되는 것은 아니다** — 네 축 중 어느 것도 닫지 않는
   도구는 그대로 남고, 소유자 DM 에서는 `manage_access`·`db_schema`·`db_query`·`runtime_info`가
-  실제로 남는다(`allowedToolsFor`의 소유자 DM 분기). 좁혀진 것은 "밖으로 나가는 통로와 기억"
-  이지 도구 목록 전체가 아니다.
+  실제로 남는다(`allowedToolsFor`의 소유자 DM 분기). 이 넷 중 그 분기에서**만** 나오는 것은
+  `manage_access` 뿐이고, 나머지 셋은 2026-09-17 부터 네 분기 전부에 있다
+  ([ADR 0010](../decisions/0010-db-read-for-all-members.md)·
+  [0012](../decisions/0012-runtime-info-for-all-members.md)). 좁혀진 것은 "밖으로 나가는 통로와
+  기억"이지 도구 목록 전체가 아니다.
 
 바닥선 이후 메시지는 `ts > floor`로, 요약은 `created_ts >= floor`로 거른다(`messagesRepo.ts`·
 `summariesRepo.ts`의 `recent`) — **부등호가 다른 것이 핵심이다.** `/기억정리`가 만드는 요약은

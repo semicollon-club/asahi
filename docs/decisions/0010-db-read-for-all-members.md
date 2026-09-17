@@ -32,7 +32,13 @@ Supabase 허브 MCP 도 소유자 프로필에만 열렸다(`core/profiles.ts` �
 - 하네스 경로 — 손님 프로필에도 `mcpHub: ["supabase"]` 를 준다(`GUEST_MCP_HUB`). 5단계
   (부원 하네스 개방) 전까지 실제로 도는 경로는 없지만, 두 경로의 축을 지금 맞춰 둔다.
 - **`manage_access` 는 그대로 소유자 DM 전용이다.** 신원 표(`users`)를 바꾸는 일은 DB 를
-  읽는 일과 다른 권한이다. `runtime_info` 도 그대로 소유자 전용이다.
+  읽는 일과 다른 권한이다. ~~`runtime_info` 도 그대로 소유자 전용이다.~~
+
+  > **정정(2026-09-17, [0012](./0012-runtime-info-for-all-members.md))** — `runtime_info` 를
+  > 유보한 위 한 줄에는 근거가 붙어 있지 않았다. 이 도구의 소유자 게이트는 애초에 이 ADR 이
+  > 푼 두 도구와 **한 묶음으로** 걸린 것이었으므로(2026-07-12 자기인지 계획), 묶음을 풀 때
+  > 같이 풀렸어야 했다. 0012 가 그 잔재를 제거했다 — 이 ADR 의 나머지 결정에는 영향이 없다.
+
 - **읽기 전용 보장은 손대지 않는다**(ADR 0004): `assertReadOnlySql`(1차) + `SET TRANSACTION
   READ ONLY`(2차, 핵심 방어선) + `maxRows`·`statement_timeout`.
 
