@@ -1,15 +1,15 @@
 import { joinUnderRoot } from "./paths.js";
 
-// 이 턴이 어느 기계를 쓰는가. 규칙은 한 줄이다 — "어디서 말하느냐가 어느 기계냐를 정한다".
-// 유일한 예외가 손님인데, 손님은 개인 워커가 없으므로 어디서든 공유 기계로 간다.
+// 2026-09-17(ADR 0011): 이 파일에 있던 resolveWorkerSelector("어디서 말하느냐가 어느 기계냐를
+// 정한다" — 소유자 DM 만 개인 워커, 그 외는 공유 워커)가 삭제됐다. **모든 턴은 동아리 미니PC 의
+// 공유 워커로 간다.** 고를 것이 하나뿐이라 고르는 함수가 필요 없다 — 워커 해석은 레지스트리 조회
+// 하나로 줄었고(agent.ts 의 resolveTurnWorker), 그 자리에 남아 있던 개인 워커 분기도 함께 없앴다.
 //
-// 순수 함수로 떼어 둔 이유는 agent.ts 의 resolveTurnWorker 와 같다: 이 판단 하나를 검증하려고 SDK
-// query() 나 DB 전체를 목업하고 싶지 않다. 실제 워커 id 로 바꾸는 것은 호출측(레지스트리 조회)의 몫이다.
-export type WorkerSelector = { kind: "personal"; userId: string } | { kind: "shared" };
-
-export function resolveWorkerSelector(ctx: { isOwner: boolean; isPrivate: boolean; userId: string }): WorkerSelector {
-  return ctx.isOwner && ctx.isPrivate ? { kind: "personal", userId: ctx.userId } : { kind: "shared" };
-}
+// 같은 이유로 아래 두 함수의 workerKind 인자도 사라졌다. 개인 워커가 선택되지 않는 이상
+// `workerKind === "personal"` 분기는 도달할 수 없는데, 그 분기가 하필 **폴더 좁히기를 건너뛰는**
+// 쪽이었다 — 도달하지 않는 채로 접근을 넓히는 분기를 남겨 두는 것이 이 저장소가 ownWorkstation
+// 에서 이미 한 번 겪은 함정이다(capability-model.md 의 canManagePc 항목). 판정 축은 이제 신원
+// 하나다: 소유자면 좁히지 않고, 손님이면 자기 하위 폴더로 좁힌다.
 
 // 봇 쪽 1차 필터가 쓸 폴더 목록. 공유 기계에서 손님은 자기 하위 폴더로만 좁혀진다.
 // 소유자는 관리자이므로 좁히지 않는다 — 다른 사람의 작업을 조회할 수 있어야 한다.
@@ -23,9 +23,9 @@ export function resolveWorkerSelector(ctx: { isOwner: boolean; isPrivate: boolea
 // 두 곳으로 갈린다.
 export function scopeDirs(
   dirs: string[],
-  o: { workerKind: "personal" | "shared"; isOwner: boolean; userId: string },
+  o: { isOwner: boolean; userId: string },
 ): string[] {
-  if (o.workerKind === "personal" || o.isOwner) return dirs;
+  if (o.isOwner) return dirs;
   return dirs.map((d) => joinUnderRoot(d, o.userId));
 }
 
@@ -42,7 +42,7 @@ export function scopeDirs(
 // 일이므로, 실패는 넓히는 쪽이 아니라 닫는 쪽으로 간다.
 export function harnessCwdFor(
   roots: string[],
-  o: { workerKind: "personal" | "shared"; isOwner: boolean; userId: string },
+  o: { isOwner: boolean; userId: string },
 ): string | undefined {
   try {
     return scopeDirs(roots, o)[0];

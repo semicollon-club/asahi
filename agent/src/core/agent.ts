@@ -8,7 +8,6 @@ import type { GithubAppConfig } from "../github/appToken.js";
 import type { ProjectsRepo } from "../store/projectsRepo.js";
 import type { PullRequestsRepo } from "../store/pullRequestsRepo.js";
 import type { IntrospectRepo } from "../store/introspectRepo.js";
-import type { WorkerKind } from "../store/workersRepo.js";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -16,7 +15,7 @@ import { buildTools, allowedToolsFor, TOOL_SERVER, type ToolCtx, type RuntimeInf
 import { makeShellTokenSource } from "../github/shellToken.js";
 import type { JobTokenMinter } from "./jobToken.js";
 import type { BotVersion } from "../remote/gitCommit.js";
-import { resolveWorkerSelector, harnessCwdFor } from "./workerSelect.js";
+import { harnessCwdFor } from "./workerSelect.js";
 import type { ImageInput } from "./images.js";
 import { skillPluginDirFrom, resolveSkillsEnabled, skillPluginsFor } from "./skills.js";
 import { progressFromMessage, isProgressUpdate, type PendingTool, type ProgressUpdate } from "./sdkEvents.js";
@@ -143,10 +142,11 @@ export function buildToolCtx(
 // hub.isConnected(userId) 를 직접 불렀는데, 실제 등록된 워커 id 와 userId 가 다른 한 이 호출은
 // 항상 어긋났다 — registry 도입 전에는 드러나지 않았던 잠재적 버그다).
 //
-// 규칙은 resolveWorkerSelector(workerSelect.ts) 한 줄이 전부다 — "어디서 말하느냐가 어느
-// 기계냐를 정한다": 소유자 DM 은 그 소유자의 개인 워커, 그 외(소유자의 서버 채널·손님의 DM·
-// 손님의 서버 채널 전부)는 공유 워커. 이 함수는 그 선택자를 실제 id 로 바꾸고 연결 여부까지
-// 확인하는 부분만 맡는다 — allowedToolsFor·remoteToolHandler 양쪽이 "워커가 있는가"를 판단할
+// 2026-09-17(ADR 0011): 규칙이 한 줄에서 아예 없어졌다 — **모든 턴이 공유 워커(동아리 미니PC)를
+// 쓴다.** 예전에는 resolveWorkerSelector 가 소유자 DM 만 개인 워커로 갈랐고, 개인 워커가 없거나
+// 끊겨 있으면 공유 워커로 떨어졌다(2026-09-05 폴백). 이제 그 갈래 자체가 없다: 소유자 DM 도
+// 부원들이 쓰는 그 미니PC 로 간다. 이 함수가 하는 일은 레지스트리에서 공유 워커 id 를 찾고 연결
+// 여부를 확인하는 것뿐이다 — allowedToolsFor·remoteToolHandler 양쪽이 "워커가 있는가"를 판단할
 // 때 쓰는 것과 동일한 하나의 결정이다(도구 목록과 실행 핸들러가 서로 다른 판정을 쓰면 "보이는데
 // 실행은 거부"가 생긴다 — remoteTools.ts 상단 주석 참고).
 //
@@ -155,22 +155,13 @@ export function buildToolCtx(
 // 타이머로 도는 턴에는 워커가 실제로 연결돼 있어도 강제로 닫아야 한다는 FIX4 의 취지 그대로).
 export async function resolveTurnWorker(
   req: { context: { isOwner: boolean; isPrivate: boolean; userId: string }; noRemoteTools?: boolean },
-  registry?: { personalWorkerOf(userId: string): Promise<string | null>; sharedWorkerId(): Promise<string | null> },
+  registry?: { sharedWorkerId(): Promise<string | null> },
   hub?: { isConnected(workerId: string): boolean },
-): Promise<{ workerId: string; kind: WorkerKind } | null> {
+): Promise<string | null> {
   if (req.noRemoteTools === true || !registry || !hub) return null;
-  const sel = resolveWorkerSelector(req.context);
-  if (sel.kind === "personal") {
-    const personal = await registry.personalWorkerOf(sel.userId);
-    if (personal !== null && hub.isConnected(personal)) return { workerId: personal, kind: "personal" };
-    // 풀 하네스 2단계(2026-09-05 밤, 계획 2.5): 개인 워커가 없거나 끊겨 있으면 소유자 DM 도 공유 워커로 간다 — 관리자
-    // 스코프다(scopeDirs 는 소유자를 좁히지 않는다). 미니PC 단일 호스트에서 허브가 루프백에만 묶여 개인 PC 워커는 붙을
-    // 수 없게 됐고(설계 §3·§6), 그 뒤 소유자 DM 은 워커 없는 대화로 떨어져 있었다. 선택자(workerSelect.ts)는 그대로
-    // "소유자 DM 은 개인 워커"를 말한다 — 개인 워커가 실제로 붙어 있으면 여전히 그것이 우선이다.
-  }
   const shared = await registry.sharedWorkerId();
   if (shared === null || !hub.isConnected(shared)) return null;
-  return { workerId: shared, kind: "shared" };
+  return shared;
 }
 
 // 풀 하네스 2단계(계획 2.6): 이 턴을 세션 러너(계정 B 의 Claude Code)로 보낼지. 조건을 순수 함수 하나에 모아 둔다 —
@@ -201,24 +192,24 @@ export function resolveMemoryWriteEnabled(req: { noMemoryWrite?: boolean }): boo
   return !req.noMemoryWrite;
 }
 
-// Task 7: ctx.remote(호출 통로 + workerId + workerKind + 워커의 실제 작업 폴더)를 구성하는
-// 순수 함수. resolveTurnWorker 가 이미 "어느 워커, 어느 종류(personal/shared)"까지 정했으므로
-// 이 함수는 그 결과를 hub.call/rootsOf 에 실제로 연결하기만 한다 — worker 가 null 이거나 hub 가
-// 없으면 undefined(= ctx.remote 를 아예 채우지 않음)를 돌려준다. roots 는 tools.ts 의
-// allowDirHandler 가 "이 경로가 워커의 실제 작업 폴더 안인가"를 검증하는 데 쓴다(봇 프로세스
-// 자신의 파일시스템은 더 이상 보지 않는다 — 봇과 워커는 서로 다른 머신일 수 있다). workerKind 는
-// remoteToolHandler(remoteTools.ts)가 scopeDirs 로 손님을 자기 폴더 안에 가두는 데 쓴다 —
-// personal 워커(소유자의 개인 기계)는 좁히지 않고, shared 워커에서만 좁힌다.
+// Task 7: ctx.remote(호출 통로 + workerId + 워커의 실제 작업 폴더)를 구성하는 순수 함수.
+// resolveTurnWorker 가 이미 "어느 워커인가"를 정했으므로 이 함수는 그 결과를 hub.call/rootsOf 에
+// 실제로 연결하기만 한다 — workerId 가 null 이거나 hub 가 없으면 undefined(= ctx.remote 를 아예
+// 채우지 않음)를 돌려준다. roots 는 tools.ts 의 allowDirHandler 가 "이 경로가 워커의 실제 작업
+// 폴더 안인가"를 검증하는 데 쓴다(봇 프로세스 자신의 파일시스템은 더 이상 보지 않는다 — 봇과
+// 워커는 서로 다른 머신일 수 있다).
+//
+// 2026-09-17(ADR 0011): workerKind 필드가 빠졌다. 모든 턴이 공유 워커로 가므로 값이 하나뿐이고,
+// 손님을 자기 폴더에 가두는 판정(scopeDirs)은 이제 신원(isOwner) 하나만 본다.
 export function buildRemoteCtx(
-  worker: { workerId: string; kind: WorkerKind } | null,
+  workerId: string | null,
   hub?: { rootsOf(id: string): string[]; call(id: string, tool: string, args: Record<string, unknown>): Promise<{ ok: boolean; content: string }> },
 ): ToolCtx["remote"] {
-  if (!worker || !hub) return undefined;
+  if (workerId === null || !hub) return undefined;
   return {
-    workerId: worker.workerId,
-    workerKind: worker.kind,
-    roots: hub.rootsOf(worker.workerId),
-    call: (tool, args) => hub.call(worker.workerId, tool, args),
+    workerId,
+    roots: hub.rootsOf(workerId),
+    call: (tool, args) => hub.call(workerId, tool, args),
   };
 }
 
@@ -243,7 +234,7 @@ export function makeRunAgentTurn(
   repos: ToolRepos,
   deployTarget: "local" | "cloud" = "local",
   model: string = DEFAULT_MODEL,
-  registry?: { personalWorkerOf(userId: string): Promise<string | null>; sharedWorkerId(): Promise<string | null> },
+  registry?: { sharedWorkerId(): Promise<string | null> },
   hub?: {
     isConnected(workerId: string): boolean;
     call(workerId: string, tool: string, args: Record<string, unknown>): Promise<{ ok: boolean; content: string }>;
@@ -282,8 +273,8 @@ export function makeRunAgentTurn(
     if (extras.jobTokens) ctx.jobTokens = extras.jobTokens;
 
     // Task 7: "어느 기계를, 그것이 있기는 한가"를 여기 한 곳에서만 정한다 — resolveTurnWorker 가
-    // resolveWorkerSelector(위치 기반 선택)로 개인/공유를 가르고, registry 로 실제 workerId 를
-    // 찾고, hub 로 연결 여부까지 확인한다. remoteToolHandler(remoteTools.ts)는 더 이상 이 판정을
+    // registry 로 공유 워커의 workerId 를 찾고 hub 로 연결 여부까지 확인한다(ADR 0011 이후로 고를
+    // 기계는 하나다). remoteToolHandler(remoteTools.ts)는 더 이상 이 판정을
     // 독립적으로 다시 하지 않는다 — ctx.remote 가 채워져 있다는 사실 자체가 이 판정의 결과다.
     // allowedTools 산정에도 같은 workerConnected 값을 넘겨야 "도구는 보이는데 실행하면 거부"라는
     // 불일치가 생기지 않는다(아래에서 확인).
@@ -303,7 +294,7 @@ export function makeRunAgentTurn(
     // 로 memories 행을 넣거나 지우는 도구(remember·forget)를 닫는다(recall 은
     // 그대로) — noRemoteTools/noWebTools 와 같은 방식으로 뽑아 allowedToolsFor 에 넘긴다.
     const memoryWriteEnabled = resolveMemoryWriteEnabled(req);
-    // ctx.remote 구성(호출 통로 + workerId/workerKind + 워커 roots) 자체도 buildRemoteCtx 로
+    // ctx.remote 구성(호출 통로 + workerId + 워커 roots) 자체도 buildRemoteCtx 로
     // 뽑아 테스트한다(agent.test.ts).
     ctx.remote = buildRemoteCtx(worker, hub);
 
@@ -314,12 +305,12 @@ export function makeRunAgentTurn(
     // 한 사람이 두 경로에서 같은 폴더를 받는다. 지금은 하네스가 소유자 전용이라 값이 워커 루트 그대로지만
     // (소유자는 좁히지 않는다), 5단계에서 손님을 여는 순간 이 한 줄이 "남의 폴더 옆에서 시작"을 막는다.
     const harnessCwd = worker !== null
-      ? harnessCwdFor(hub?.rootsOf(worker.workerId) ?? [], { workerKind: worker.kind, isOwner: req.context.isOwner, userId: req.context.userId })
+      ? harnessCwdFor(hub?.rootsOf(worker) ?? [], { isOwner: req.context.isOwner, userId: req.context.userId })
       : undefined;
     if (decideHarnessDispatch({
       enabled: extras.harness?.enabled === true,
       isOwner: req.context.isOwner,
-      workerIsHarness: worker !== null && hub?.isHarness?.(worker.workerId) === true,
+      workerIsHarness: worker !== null && hub?.isHarness?.(worker) === true,
       hasImages: (req.images?.length ?? 0) > 0,
       noRemoteTools: req.noRemoteTools === true,
       hasJobTokens: extras.jobTokens !== undefined,
@@ -425,7 +416,7 @@ export function makeRunAgentTurn(
   async function runHarnessTurn(
     req: TurnRequest,
     ctx: ToolCtx,
-    worker: { workerId: string; kind: WorkerKind },
+    workerId: string,
     cwd: string,
     jobTokens: JobTokenMinter,
     h: NonNullable<typeof hub>,
@@ -443,8 +434,8 @@ export function makeRunAgentTurn(
       role: req.context.role, isPrivate: req.context.isPrivate, isOwner: req.context.isOwner, deployTarget,
       workerConnected: true, githubReady: github !== null, harness: { cwd, browser: extras.harness?.browser === true },
     });
-    console.log(`[agent] 하네스 턴 — 워커 ${worker.workerId}, 모델 ${profile.model}, resume ${req.resume ? req.resume.slice(0, 8) : "없음"}`);
-    const turn = h.startTurn!(worker.workerId, {
+    console.log(`[agent] 하네스 턴 — 워커 ${workerId}, 모델 ${profile.model}, resume ${req.resume ? req.resume.slice(0, 8) : "없음"}`);
+    const turn = h.startTurn!(workerId, {
       userId: req.context.userId, cwd, systemPrompt, prompt: req.prompt, profile, token, git,
       ...(req.resume !== undefined ? { resume: req.resume } : {}),
     }, (e) => {

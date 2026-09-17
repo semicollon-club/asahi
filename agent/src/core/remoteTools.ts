@@ -186,9 +186,10 @@ export async function remoteToolHandler(
     if (!ctx.repos?.allowedDirs) return deny("허용 폴더 목록을 확인할 수 없어 요청을 거부했어요.");
 
     // Task 7: allowed_dirs 는 워커(remote.workerId) 기준으로 저장된다 — 같은 사람이라도 기계가
-    // 다르면(소유자의 노트북 vs 동아리 공용 PC) 목록이 섞이면 안 된다. scopeDirs 가 그 목록을
-    // 이 사용자 몫으로 좁힌다 — 공유 워커의 손님은 자기 하위 폴더로, 개인 워커거나 소유자면
-    // 그대로(관리자는 좁히지 않는다).
+    // 다르면(옛 개인 워커 vs 동아리 공용 PC) 목록이 섞이면 안 된다. scopeDirs 가 그 목록을
+    // 이 사용자 몫으로 좁힌다 — 손님은 자기 하위 폴더로, 소유자면 그대로(관리자는 좁히지 않는다).
+    // 2026-09-17(ADR 0011): 판정에서 workerKind 가 빠졌다 — 모든 턴이 공유 워커로 가므로 남은
+    // 축은 신원 하나다.
     //
     // 리뷰 Finding 2(사소함, 주석 정정): 예전엔 여기서 "scopeDirs(→joinUnderRoot)가 ctx.userId 를
     // 경로 조각으로 그대로 쓰므로 Discord 스노플레이크가 아닌 값이 오면 예외를 던지고, 아래 catch
@@ -206,7 +207,7 @@ export async function remoteToolHandler(
     // 오늘 닿지 않는 경로라는 사실을 이 함수가 스스로 보장하지 않고 호출 습관에만 기대지 않는다.
     try {
       const dirs = await ctx.repos.allowedDirs.list(remote.workerId);
-      allowed = scopeDirs(dirs, { workerKind: remote.workerKind, isOwner: ctx.isOwner, userId: ctx.userId });
+      allowed = scopeDirs(dirs, { isOwner: ctx.isOwner, userId: ctx.userId });
     } catch (e) {
       // allowedDirs.list 는 실제 DB 호출이라 reject 할 수 있다(아래 허브 콜과 달리 "절대
       // reject 하지 않는다"는 보장이 없다) — 여기서 잡아 문자열로 바꾼다. scopeDirs 가 잘못된
@@ -220,9 +221,10 @@ export async function remoteToolHandler(
 
     // Task 8: 손님의 개인 폴더는 첫 접근 때 만든다("1인당 1폴더"가 규칙이라 없다고 거부할 이유가
     // 없다). 모델에게 시키지 않고 봇이 직접 끼워 넣는다 — 모델이 fs_write 나 sh_exec 로 제각각
-    // 만들게 두면 실패 처리도 제각각이 된다. 개인 워커·소유자는 대상이 아니다: 개인 워커는 애초에
-    // 그 소유자 한 명 몫이라 "손님용 하위 폴더" 개념이 없고, 소유자는 scopeDirs 가 좁히지 않으므로
+    // 만들게 두면 실패 처리도 제각각이 된다. 소유자는 대상이 아니다: scopeDirs 가 좁히지 않으므로
     // allowed[0]이 "그 사람의 폴더" 하나로 특정되지 않는다(관리자 권한으로 아무 폴더나 다룬다).
+    // (2026-09-17, ADR 0011: 여기 있던 "개인 워커도 대상이 아니다"라는 조건은 워커가 공유 하나로
+    // 줄면서 함께 사라졌다.)
     //
     // 이 생성이 needsPathCheck 가 아니라 needsScope 아래에 있는 이유: proc_start 는 이 폴더를
     // cwd 로 받는데(아래 주입 참고), 폴더가 없으면 pm2 가 그 자리에서 실패한다 — 경로 인자가
@@ -254,7 +256,7 @@ export async function remoteToolHandler(
     // needsPathCheck 는 proc_* 이 아닌 기존 도구에 한해 needsScope 와 정확히 같으므로(위
     // needsScope 선언부 주석 참고), 이 조건을 추가해도 그 도구들의 동작은 그대로다 — 바뀌는
     // 것은 새로 편입된 proc_stop·proc_list·proc_logs 세 도구뿐이다.
-    if (remote.workerKind === "shared" && !ctx.isOwner && allowed.length > 0 && (tool === "proc_start" || needsPathCheck)) {
+    if (!ctx.isOwner && allowed.length > 0 && (tool === "proc_start" || needsPathCheck)) {
       await remote.call("fs_mkdir", { path: allowed[0] }).catch(() => {});
     }
   }

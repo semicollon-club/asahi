@@ -28,8 +28,7 @@ function arg(name: string): string | undefined {
 const USAGE = `
 사용법 (npm run 이 아니라 npx tsx 로 직접 부른다):
   cd agent
-  npx tsx src/scripts/registerWorker.ts --id owner-laptop     --kind personal --user <디스코드 id>
-  npx tsx src/scripts/registerWorker.ts --id semicolon-shared --kind shared   --label "동아리 미니PC"
+  npx tsx src/scripts/registerWorker.ts --id semicolon-shared --kind shared --label "동아리 미니PC"
 `;
 
 // 인자 오류에는 반드시 올바른 호출 형태를 함께 보여준다. npm run 으로 부르면 플래그가 통째로
@@ -42,14 +41,17 @@ function fail(msg: string): never {
 }
 
 const id = arg("id") ?? fail("--id 가 필요합니다 (예: semicolon-shared)");
-const kindRaw = arg("kind") ?? fail("--kind 가 필요합니다 (personal | shared)");
-if (kindRaw !== "personal" && kindRaw !== "shared") fail("--kind 는 personal 또는 shared 여야 합니다.");
+const kindRaw = arg("kind") ?? fail("--kind 가 필요합니다 (shared)");
+// 2026-09-17(ADR 0011): personal 등록을 막는다. 모든 턴이 공유 워커로 가므로 개인 워커를 등록해도
+// 어떤 턴도 그리로 가지 않는다 — 등록만 되고 아무 일도 일어나지 않는 상태가 운영자에게는 "붙였는데
+// 왜 안 되지"로 보인다. 받지 않는 편이 정직하다.
+if (kindRaw === "personal") fail("--kind personal 은 더 이상 지원하지 않습니다 — 모든 턴이 공유 워커로 갑니다(docs/decisions/0011-all-turns-shared-worker.md).");
+if (kindRaw !== "shared") fail("--kind 는 shared 여야 합니다.");
 const kind = kindRaw as WorkerKind;
 const userId = arg("user") ?? null;
 const label = arg("label");
 
-if (kind === "personal" && !userId) fail("--kind personal 에는 --user <디스코드 id> 가 필요합니다.");
-if (kind === "shared" && userId) fail("--kind shared 에는 --user 를 주지 않습니다(공용 기계는 담당자가 없습니다).");
+if (userId) fail("--kind shared 에는 --user 를 주지 않습니다(공용 기계는 담당자가 없습니다).");
 
 const databaseUrl = process.env.DATABASE_URL ?? fail("환경변수 누락: DATABASE_URL — .env 를 확인하세요.");
 

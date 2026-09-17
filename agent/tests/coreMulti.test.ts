@@ -42,7 +42,7 @@ async function setup(over: {
     call?(workerId: string, tool: string, args: Record<string, unknown>): Promise<{ ok: boolean; content: string }>;
     rootsOf?(workerId: string): string[];
   };
-  registry?: { personalWorkerOf(userId: string): Promise<string | null>; sharedWorkerId(): Promise<string | null> };
+  registry?: { sharedWorkerId(): Promise<string | null> };
   digest?: DigestRunner;
   // 코어가 now() 를 부를 때마다 시각이 이만큼 흐르게 한다(기본 0 = 지금까지처럼 고정 시계).
   // "한 번 구한 시각을 두 곳에 쓴다"는 종류의 불변식은 고정 시계로는 검증할 수 없다 — 두 번
@@ -98,12 +98,11 @@ async function setup(over: {
     return new Promise((res) => resolvers.push(() => res(nextResult)));
   };
   const bus = new EventBus();
-  // Task 7: AgentCore 는 이제 registry 도 받는다(resolveTurnWorker 가 hub.isConnected 를 부르기
-  // 전에 workerId 를 먼저 찾는 데 쓴다). 기본값은 personalWorkerOf 를 항등(userId 를 그대로
-  // workerId 로 씀)으로 흉내낸다 — 이 파일의 hub 가짜들이 원래 userId 로 isConnected 를 판정하던
-  // 습관과 그대로 맞물려, over.hub 를 바꾸는 기존 테스트를 건드리지 않고도 워커 해석이 통과한다.
+  // Task 7 / ADR 0011: AgentCore 는 이제 registry 도 받는다(resolveTurnWorker 가 hub.isConnected 를
+  // 부르기 전에 workerId 를 먼저 찾는 데 쓴다). ADR 0011 이후 찾을 것은 공유 워커 하나뿐이라
+  // 기본값도 한 줄이다 — 예전에는 personalWorkerOf 를 항등(userId 를 그대로 workerId 로 씀)으로
+  // 흉내내, 이 파일의 hub 가짜들이 userId 로 isConnected 를 판정하던 습관과 맞물리게 했다.
   const registry = over.registry ?? {
-    personalWorkerOf: async (userId: string) => userId,
     sharedWorkerId: async () => "shared-worker",
   };
   // over.hub 가 call·rootsOf 를 안 줬으면 기본 구현으로 채운다(위 setup 파라미터 주석 참고) —
@@ -570,7 +569,8 @@ describe("AgentCore — 멀티유저/멀티대화", () => {
 // (또는 그 반대) 불일치가 생긴다.
 describe("AgentCore — 원격 워커 연결 상태를 페르소나에 반영한다(FIX3)", () => {
   it("그 소유자의 워커가 연결돼 있으면 owner-DM 프롬프트가 실제 도구 이름(fs_read/sh_exec)으로 PC 작업이 가능하다고 안내한다", async () => {
-    const t = await setup({ hub: { isConnected: (userId) => userId === "owner" } });
+    // ADR 0011: 소유자 DM 도 공유 워커로 간다 — 예전엔 이 가짜가 userId("owner")로 판정했다.
+    const t = await setup({ hub: { isConnected: (id) => id === "shared-worker" } });
     pub(t.bus, dmHint("owner", "owner"), "안녕", 1);
     await t.core.drain();
     expect(t.calls[0].systemPrompt).toMatch(/fs_read/);
@@ -1291,7 +1291,6 @@ describe("AgentCore — /help", () => {
     const t = await setup({
       hub: { isConnected: () => true },
       registry: {
-        personalWorkerOf: async () => { throw new Error("db down(테스트용)"); },
         sharedWorkerId: async () => { throw new Error("db down(테스트용)"); },
       },
     });

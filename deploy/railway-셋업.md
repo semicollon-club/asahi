@@ -122,7 +122,7 @@ SDK 내장 파일/Bash 도구는 로컬이든 cloud 든 이제 항상 닫혀 있
 
 PC 작업이 필요하면 워커(`agent/src/worker.ts`)를 소유자 PC 또는 동아리 공용 미니PC 에서
 띄워 연동한다. **워커는 더 이상 소유자 전용 정책이 아니다** — `workers` 레지스트리 테이블에
-등록된 워커라면 개인(`kind=personal`, 소유자 DM 전용)이든 공유(`kind=shared`, 동아리
+등록된 워커라면 (ADR 0011 이전에 등록된) 개인(`kind=personal`)이든 공유(`kind=shared`, 동아리
 미니PC)든 붙을 수 있고, `role='allowed'`(소유자가 `manage_access` 로 명시적으로 등록한
 동아리원)로 등록된 손님도 그 공유 워커에 연결돼 원격 도구(`fs_*`/`sh_exec`)를 받는다
 (`docs/decisions/0007-multi-worker-routing.md`). 워커를 먼저 등록해야 붙을 수 있다 —
@@ -131,7 +131,7 @@ PC 작업이 필요하면 워커(`agent/src/worker.ts`)를 소유자 PC 또는 �
 
 ```powershell
 cd agent
-npx tsx src/scripts/registerWorker.ts --id owner-laptop --kind personal --user <소유자 디스코드 ID>
+npx tsx src/scripts/registerWorker.ts --id semicolon-shared --kind shared --label "동아리 미니PC"
 npx tsx src/scripts/registerWorker.ts --id semicolon-shared --kind shared --label "동아리 미니PC"
 ```
 

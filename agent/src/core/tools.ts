@@ -5,7 +5,6 @@ import type { UsersRepo } from "../store/usersRepo.js";
 import type { MemoriesRepo, Memory } from "../store/memoriesRepo.js";
 import type { AllowedDirsRepo } from "../store/allowedDirsRepo.js";
 import type { IntrospectRepo } from "../store/introspectRepo.js";
-import type { WorkerKind } from "../store/workersRepo.js";
 import { assertReadOnlySql, formatQueryResult } from "./sqlGuard.js";
 import { REMOTE_TOOL_NAMES, remoteToolHandler, displayNameOf, noreplyEmailOf } from "./remoteTools.js";
 import { isPathWithinAny, normalizeDir } from "./paths.js";
@@ -86,11 +85,8 @@ export type ToolCtx = {
     // 이 턴이 쓰는 워커의 id. allowed_dirs 가 워커 기준이 되면서 필요해졌다 —
     // "누가 물어보는가"(ctx.userId)와 "어느 기계인가"(이 값)는 이제 다른 축이다.
     workerId: string;
-    // Task 7: 그 워커가 개인(personal, 소유자의 개인 기계)인지 공유(shared, 동아리방 공용 PC 처럼
-    // 여러 사람이 함께 쓰는 기계)인지. remoteToolHandler(remoteTools.ts)가 scopeDirs 로 허용
-    // 폴더를 사용자별 하위 폴더로 좁힐지 정하는 데 쓴다 — 공유 워커에서만 손님을 좁히고, 개인
-    // 워커는 좁히지 않는다(resolveWorkerSelector 규칙상 개인 워커엔 애초에 그 소유자만 붙는다).
-    workerKind: WorkerKind;
+    // 2026-09-17(ADR 0011): 여기 있던 workerKind 필드가 빠졌다 — 모든 턴이 공유 워커로 가므로
+    // 값이 하나뿐이고, remoteToolHandler(remoteTools.ts)의 scopeDirs 는 이제 신원만 본다.
   };
 };
 
@@ -590,7 +586,7 @@ async function resolveTarget(ctx: ToolCtx, rawName: string): Promise<Target> {
   let dirs: string[];
   try {
     const listed = await ctx.repos.allowedDirs.list(remote.workerId);
-    dirs = scopeDirs(listed, { workerKind: remote.workerKind, isOwner: ctx.isOwner, userId: ctx.userId });
+    dirs = scopeDirs(listed, { isOwner: ctx.isOwner, userId: ctx.userId });
   } catch (e) {
     return { ok: false, content: `허용 폴더 확인 중 오류가 발생했어요: ${e instanceof Error ? e.message : String(e)}` };
   }

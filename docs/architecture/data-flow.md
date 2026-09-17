@@ -128,7 +128,7 @@ turn 체인에 들어간 `runConversationTurn(convId, userId, role, text, messag
 `runTurn`(`agent/src/core/agent.ts`의 `makeRunAgentTurn`)이 같은 `resolveTurnWorker` 판정을
 내부에서 독립적으로 다시 계산해 정한다. `resolveTurnWorker`는 `resolveWorkerSelector`
 (`agent/src/core/workerSelect.ts`)의 "어디서 말하느냐가 어느 기계냐를 정한다" 규칙으로 이
-턴이 개인 워커(소유자 DM)를 쓸지 공유 워커(그 외 전부)를 쓸지 고르고, `WorkersRepo` 레지스트리
+턴이 쓸 워커는 언제나 공유 워커다(ADR 0011 — 개인 워커 갈래는 삭제됐다). `WorkersRepo` 레지스트리
 (`agent/src/store/workersRepo.ts`)로 실제 `workerId`를 찾은 뒤 `hub.isConnected(workerId)`로
 연결 여부를 확인한다. 워커 자체의 인증(연결 시점의 `hello` → 레지스트리 조회 → `ready`/
 `denied`)과 도구 호출 하나하나가 워커로 전달되는 경로는 이 문서의 범위 밖이다 —

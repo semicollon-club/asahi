@@ -21,10 +21,10 @@ import {
 import { SHARED_MEMORY_MAX_LEN, SHARED_MEMORY_TITLE_MAX_LEN } from "../src/core/memoryScope.js";
 
 // remote 는 부분만 받아 나머지를 기본값으로 채운다. 이 파일의 테스트가 지정하는 건 roots·call·
-// workerId 정도인데 ToolCtx["remote"] 는 workerKind 까지 요구한다 — 매번 다 적으면 잡음이고,
-// 캐스팅으로 뭉개면 실제 타입과 어긋난 가짜가 조용히 통과한다(그게 CoreRepos 누락을 가렸던
-// 방식이다). workerKind 기본값 "personal" 은 scopeDirs 가 좁히지 않는 쪽이라 이 파일의 기본
-// 맥락(소유자)과 맞는다 — 공유 워커·손님 스코프를 보는 테스트는 remote 로 명시해 덮어쓴다.
+// workerId 정도인데 매번 다 적으면 잡음이고, 캐스팅으로 뭉개면 실제 타입과 어긋난 가짜가 조용히
+// 통과한다(그게 CoreRepos 누락을 가렸던 방식이다).
+// 2026-09-17(ADR 0011): 여기 있던 workerKind 기본값("personal")은 그 필드가 ToolCtx 에서 사라지며
+// 함께 없앴다 — 폴더를 좁힐지는 이제 ctx.isOwner 만 보고 정한다.
 type CtxOver = Partial<Omit<ToolCtx, "remote">> & { remote?: Partial<NonNullable<ToolCtx["remote"]>> };
 
 async function ctx(over: CtxOver = {}): Promise<ToolCtx> {
@@ -41,7 +41,7 @@ async function ctx(over: CtxOver = {}): Promise<ToolCtx> {
     ...(remote
       ? {
           remote: {
-            roots: [], workerId: "test-worker", workerKind: "personal" as const,
+            roots: [], workerId: "test-worker",
             call: async () => ({ ok: true, content: "" }),
             ...remote,
           },
@@ -453,7 +453,7 @@ describe("allow_dir/revoke_dir/list_dir 도구(§원격개발 A2, FIX2: 워커 r
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "asahi-ownerserver-"));
     const ownerServer = await ctx({
       isOwner: true, isPrivate: false,
-      remote: { roots: [os.tmpdir()], call: async () => ({ ok: true, content: "" }), workerId: "shared-worker", workerKind: "shared" },
+      remote: { roots: [os.tmpdir()], call: async () => ({ ok: true, content: "" }), workerId: "shared-worker" },
     });
     const out = await allowDirHandler(ownerServer, { path: dir });
     expect(out).toContain(path.resolve(dir));

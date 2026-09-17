@@ -37,12 +37,13 @@ Agent SDK 세션으로 직접 실행한다** — 위임이라는 개념은 이�
 무상태(stateless)다 — 재배포되어도 대화·기억은 Supabase Postgres에 남아 있으므로 데이터가
 사라지지 않는다.
 
-### 워커 (`agent/src/worker.ts`) — 개인 워커·공유 워커
+### 워커 (`agent/src/worker.ts`) — 동아리 공유 워커
 
 소유자 PC(또는 동아리 공용 미니PC 등 소유자가 지정한 다른 기계)에서 실행되는 별도
 프로세스다. 디스코드에도 DB에도 붙지 않는다. 각 워커는 `workers` 테이블(레지스트리,
-`agent/src/store/workersRepo.ts`)에 등록된 자기 고유의 `id`와 `kind`(`personal`|`shared`)를
-가지며, 갖고 있는 자격증명은 그 워커 자신의 토큰(`WORKER_TOKEN`) 하나뿐이다
+`agent/src/store/workersRepo.ts`)에 등록된 자기 고유의 `id` 와 `kind` 를 가지며(2026-09-17,
+[ADR 0011](../decisions/0011-all-turns-shared-worker.md) 이후 실제로 라우팅되는 종류는
+`shared` 하나뿐이다), 갖고 있는 자격증명은 그 워커 자신의 토큰(`WORKER_TOKEN`) 하나뿐이다
 (`agent/src/config.ts`의 `loadWorkerConfig`는 `databaseUrl`도 `model`도 요구하지 않는다).
 워커 등록·토큰 발급은 `npx tsx src/scripts/registerWorker.ts`(`agent/src/scripts/registerWorker.ts`)로
 하며, 발급된 토큰은 그 자리에서 한 번만 출력되고 DB에는 해시만 남는다(절차는
@@ -54,8 +55,8 @@ Agent SDK 세션으로 직접 실행한다** — 위임이라는 개념은 이�
 (`agent/src/remote/executors.ts`)로 실행하고 결과(`result` 프레임)를 돌려주는 것 말고는
 아무것도 하지 않는다 — 대화 이력도, 시스템 프롬프트도, SDK 세션도 워커 쪽에는 없다.
 
-허브는 동시에 여러 워커의 연결을 유지한다(`workerId`로 키잉) — 소유자의 개인 워커와 동아리
-공유 워커가 동시에 붙어 있는 것이 1단계의 정상 상태다. 같은 `workerId`로 재연결하면
+허브는 동시에 여러 워커의 연결을 유지한다(`workerId`로 키잉) — 다만 ADR 0011 이후 모든 대화가
+공유 워커 하나로 가므로, 지금의 정상 상태는 동아리 미니PC 워커 한 대가 붙어 있는 것이다. 같은 `workerId`로 재연결하면
 이전 연결만 정리된다(`dropExisting`) — 다른 워커의 연결에는 영향이 없다.
 
 연결이 끊기면 고정 간격(기본 3초, 지수 백오프 아님)으로 재연결을 시도한다

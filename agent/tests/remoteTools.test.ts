@@ -11,9 +11,9 @@ import { makeExecutors } from "../src/remote/executors.js";
 // over 로 repos 등 추가 필드를 덧붙일 수 있다(경로 인자가 있는 케이스에서 필요).
 //
 // remote 는 부분만 받아 나머지를 기본값으로 채운다. 테스트들이 관심 있는 건 call 하나뿐인데,
-// ToolCtx["remote"] 는 roots·workerId·workerKind 까지 요구한다 — 매 호출마다 그 셋을 적으면
+// ToolCtx["remote"] 는 roots·workerId 를 요구한다 — 매 호출마다 그 둘을 적으면
 // 잡음만 늘고, 반대로 캐스팅으로 뭉개면 실제 타입과 어긋난 가짜가 조용히 통과한다.
-// workerKind 기본값은 "personal" 이다: scopeDirs 가 좁히지 않아 위 주석의 "소유자 DM" 기본과
+// (ADR 0011 이전에는 workerKind 기본값 "personal" 이 여기 있었다 — scopeDirs 가 좁히지 않아 위 주석의 "소유자 DM" 기본과
 // 맞는다. 공유 워커·손님 스코프를 검증하는 테스트는 over 나 remote 로 명시해 덮어쓴다.
 const ctxWith = (
   remote: Partial<NonNullable<ToolCtx["remote"]>> | undefined,
@@ -23,8 +23,7 @@ const ctxWith = (
     remote: remote && {
       roots: ["/w"],
       workerId: "test-worker",
-      workerKind: "personal",
-      call: async () => ({ ok: true, content: "" }),
+        call: async () => ({ ok: true, content: "" }),
       ...remote,
     },
     isOwner: true,
@@ -103,7 +102,7 @@ describe("봇 쪽 1차 경로 필터", () => {
   // ctxWith 와 같은 이유로 remote 는 부분만 받아 나머지를 채운다(파일 상단 주석 참고).
   const withDirs = (dirs: string[], remote: Partial<NonNullable<ToolCtx["remote"]>>): ToolCtx =>
     ({
-      remote: { roots: ["/w"], workerId: "test-worker", workerKind: "personal", ...remote },
+      remote: { roots: ["/w"], workerId: "test-worker", ...remote },
       isOwner: true, isPrivate: true, userId: "owner",
       repos: { allowedDirs: { list: async () => dirs } },
     } as unknown as ToolCtx);
@@ -145,7 +144,7 @@ describe("FIX6 — fs_glob·fs_grep 는 path 가 없어도, pattern 이 벗어�
   // ctxWith 와 같은 이유로 remote 는 부분만 받아 나머지를 채운다(파일 상단 주석 참고).
   const withDirs = (dirs: string[], remote: Partial<NonNullable<ToolCtx["remote"]>>): ToolCtx =>
     ({
-      remote: { roots: ["/w"], workerId: "test-worker", workerKind: "personal", ...remote },
+      remote: { roots: ["/w"], workerId: "test-worker", ...remote },
       isOwner: true, isPrivate: true, userId: "owner",
       repos: { allowedDirs: { list: async () => dirs } },
     } as unknown as ToolCtx);
@@ -207,7 +206,7 @@ describe("신원 재확인은 이제 ctx.remote 존재 여부 하나다(옛 FIX1
   it("손님이라도 ctx.remote 가 있으면(agent.ts 가 이미 판정한 결과) 허브를 부른다", async () => {
     let called = false;
     const ctx = ({
-      remote: { call: async () => { called = true; return { ok: true, content: "본문" }; }, roots: [], workerId: "shared-worker", workerKind: "shared" },
+      remote: { call: async () => { called = true; return { ok: true, content: "본문" }; }, roots: [], workerId: "shared-worker" },
       isOwner: false, isPrivate: true, userId: "guest",
     } as unknown as ToolCtx);
     await remoteToolHandler(ctx, "sh_exec", { command: "ls" });
@@ -217,7 +216,7 @@ describe("신원 재확인은 이제 ctx.remote 존재 여부 하나다(옛 FIX1
   it("공개 서버 채널의 소유자도 ctx.remote 가 있으면 허브를 부른다(공유 기계의 관리자)", async () => {
     let called = false;
     const ctx = ({
-      remote: { call: async () => { called = true; return { ok: true, content: "본문" }; }, roots: [], workerId: "shared-worker", workerKind: "shared" },
+      remote: { call: async () => { called = true; return { ok: true, content: "본문" }; }, roots: [], workerId: "shared-worker" },
       isOwner: true, isPrivate: false, userId: "owner",
     } as unknown as ToolCtx);
     await remoteToolHandler(ctx, "sh_exec", { command: "ls" });
@@ -374,7 +373,7 @@ describe("FIX1(치명, 최종 리뷰) — path 생략 시 허브로 나가는 ar
   // ctxWith 와 같은 이유로 remote 는 부분만 받아 나머지를 채운다(파일 상단 주석 참고).
   const withDirs = (dirs: string[], remote: Partial<NonNullable<ToolCtx["remote"]>>): ToolCtx =>
     ({
-      remote: { roots: ["/w"], workerId: "test-worker", workerKind: "personal", ...remote },
+      remote: { roots: ["/w"], workerId: "test-worker", ...remote },
       isOwner: true, isPrivate: true, userId: "owner",
       repos: { allowedDirs: { list: async () => dirs } },
     } as unknown as ToolCtx);
@@ -421,7 +420,7 @@ describe("FIX1(치명, 최종 리뷰) — path 생략 시 허브로 나가는 ar
 // 이 설계의 핵심 불변식은 "손님이 남의 하위 폴더를 못 본다"는 것이다. 개인 워커(personal)나
 // 소유자는 좁히지 않는다(관리자는 전체를 본다).
 describe("remoteToolHandler — 공유 기계에서 사용자별 격리", () => {
-  function ctxFor(o: { isOwner: boolean; isPrivate: boolean; userId: string; dirs: string[]; workerKind: "personal" | "shared" }) {
+  function ctxFor(o: { isOwner: boolean; isPrivate: boolean; userId: string; dirs: string[]; workerKind?: "personal" | "shared" }) {
     const calls: Array<{ tool: string; args: Record<string, unknown> }> = [];
     const ctx = {
       repos: { allowedDirs: { list: async () => o.dirs } },
@@ -430,7 +429,6 @@ describe("remoteToolHandler — 공유 기계에서 사용자별 격리", () => 
       runtime: {} as any,
       remote: {
         workerId: o.workerKind === "shared" ? "semicolon-shared" : "owner-laptop",
-        workerKind: o.workerKind,
         roots: o.dirs,
         call: async (tool: string, args: Record<string, unknown>) => { calls.push({ tool, args }); return { ok: true, content: "ok" }; },
       },
@@ -587,7 +585,7 @@ describe("remoteToolHandler — 공유 기계에서 사용자별 격리", () => 
 describe("fs_tree 는 fs_glob 과 동일하게 1차 필터를 탄다", () => {
   const withDirs = (dirs: string[], remote: Partial<NonNullable<ToolCtx["remote"]>>): ToolCtx =>
     ({
-      remote: { roots: ["/w"], workerId: "test-worker", workerKind: "personal", ...remote },
+      remote: { roots: ["/w"], workerId: "test-worker", ...remote },
       isOwner: true, isPrivate: true, userId: "owner",
       repos: { allowedDirs: { list: async () => dirs } },
     } as unknown as ToolCtx);
@@ -624,7 +622,7 @@ describe("proc_* — 이름과 작업 폴더는 봇이 주입한다", () => {
   // 아래 "proc_list — labels 주입(Task 5)" describe 가 따로, 더 자세히 고정한다.
   const withDirs = (dirs: string[], remote: Partial<NonNullable<ToolCtx["remote"]>>, over: Record<string, unknown> = {}): ToolCtx =>
     ({
-      remote: { roots: ["/w"], workerId: "shared", workerKind: "shared", ...remote },
+      remote: { roots: ["/w"], workerId: "shared", ...remote },
       isOwner: false, isPrivate: false, userId: "111",
       repos: { allowedDirs: { list: async () => dirs }, users: { displayNames: async () => ({}) } },
       ...over,
@@ -925,7 +923,7 @@ describe("proc_list — labels 주입(Task 5)", () => {
 describe("proc_start — path 인자로 프로젝트 하위 폴더를 지정할 수 있다(Defect 1)", () => {
   const withDirs = (dirs: string[], remote: Partial<NonNullable<ToolCtx["remote"]>>, over: Record<string, unknown> = {}): ToolCtx =>
     ({
-      remote: { roots: ["/w"], workerId: "shared", workerKind: "shared", ...remote },
+      remote: { roots: ["/w"], workerId: "shared", ...remote },
       isOwner: false, isPrivate: false, userId: "111",
       repos: { allowedDirs: { list: async () => dirs } },
       ...over,
