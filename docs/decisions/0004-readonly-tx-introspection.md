@@ -1,6 +1,6 @@
 ---
 status: Accepted
-lastReviewed: 2026-07-13
+lastReviewed: 2026-09-17
 ---
 
 # 0004. READ ONLY 트랜잭션 기반 자기조회
@@ -32,13 +32,20 @@ lastReviewed: 2026-07-13
    `maxRows` 절단으로 무거운 조회로부터도 방어한다.
 
 `db_schema`/`db_query`/`runtime_info`는 소유자 DM 게이팅(`isOwnerDm`)을 통과해야만
-도달하므로(`agent/src/core/tools.ts`), 이 SQL 가드 자체는 소유자 DM 밖에서는 실행되지
-않는다.
+도달했으므로(`agent/src/core/tools.ts`), 이 SQL 가드 자체는 한동안 소유자 DM 밖에서는
+실행되지 않았다.
 
 > **개정(2026-08-01)** — `runtime_info` 는 이 게이팅에서 빠져 `ctx.isOwner` 하나로 판정한다.
 > 소유자가 공유 미니PC 에 닿는 곳이 서버 채널뿐이라 그 기계의 버전을 물어볼 장소가 없었기
 > 때문이다. 이 문단의 SQL 가드 서술에는 영향이 없다 — `runtime_info` 는 SQL 을 실행하지
-> 않는다. `db_schema`/`db_query` 는 그대로 소유자 DM 전용이다.
+> 않는다.
+
+> **개정(2026-09-17, [0010](./0010-db-read-for-all-members.md))** — `db_schema`/`db_query` 의
+> 신원·채널 게이트가 제거됐다. 이제 등록된 부원이면 DM·서버 어디서든 이 SQL 가드에 도달한다
+> (`canReadDb`). **이 ADR 이 정한 두 겹의 방어는 그대로다** — 오히려 지금은 이 가드가 유일한
+> 경계이므로 더 중요해졌다: 예전에는 "소유자 DM 밖에서는 도달조차 하지 않는다"가 한 겹 더
+> 있었지만, 이제 쓰기를 막는 것은 `assertReadOnlySql` 과 READ ONLY 트랜잭션뿐이다.
+> 이 두 겹을 약화시키는 변경은 이 ADR 을 먼저 뒤집어야 한다.
 > (`docs/security/capability-model.md` 의 능력 계층표가 현행 기준이다.)
 
 ## 근거

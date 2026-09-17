@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { profileFor, GUEST_MODEL, OWNER_MCP_HUB } from "../src/core/profiles.js";
+import { profileFor, GUEST_MODEL, OWNER_MCP_HUB, GUEST_MCP_HUB } from "../src/core/profiles.js";
 
 // 풀 하네스 2단계(2026-09-05 밤): 신원 → 세션 프로필(스펙 §6). 2단계에서 새 경로를 타는 것은 소유자 턴뿐이지만,
 // 프로필은 네 신원 모두 정의해 둔다 — 5단계(부원 개방)가 이 표를 그대로 쓴다. 소유자 = 전부(Opus 5·기본 effort·
@@ -16,13 +16,16 @@ describe("profileFor", () => {
     expect([...OWNER_MCP_HUB]).toEqual(["github", "supabase"]);
   });
 
-  it("손님(DM·서버)은 Sonnet 5·낮은 effort·서브에이전트 끔·허브 MCP 없음", () => {
+  it("손님(DM·서버)은 Sonnet 5·낮은 effort·서브에이전트 끔·허브 MCP 는 Supabase 만", () => {
     for (const isPrivate of [true, false]) {
       const p = profileFor({ isOwner: false, isPrivate, role: "allowed" }, owner);
-      expect(p).toEqual({ model: GUEST_MODEL, effort: "low", maxTurns: 30, subagents: false });
-      // 손님 프로필에는 mcpHub 키 자체가 없다(§6: 손님 허브는 "부원용으로 연 것만", 지금은 없음).
-      expect("mcpHub" in p).toBe(false);
+      expect(p).toEqual({ model: GUEST_MODEL, effort: "low", maxTurns: 30, subagents: false, mcpHub: ["supabase"] });
+      // ADR 0010(2026-09-17): DB 읽기는 신원으로 갈리지 않는다 — 봇 세션 경로에서 열어 두고 하네스
+      // 경로만 닫으면 "같은 사람이 같은 채널에서 물어도 경로에 따라 답이 갈리는" 어긋남이 남는다.
+      // GitHub 허브는 그대로 소유자만이다(설치 토큰이라 축이 다르다).
+      expect(p.mcpHub).not.toContain("github");
     }
+    expect([...GUEST_MCP_HUB]).toEqual(["supabase"]);
     expect(GUEST_MODEL).toBe("claude-sonnet-5");
   });
 

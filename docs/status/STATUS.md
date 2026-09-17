@@ -133,8 +133,11 @@ lastReviewed: 2026-09-05
   (`recall`로 가져올 수 있다). **DB 의 `character_images` 테이블과 `scope='character'` 로 저장된
   `memories` 행은 지우지 않고 그대로 남아 있다** — 코드 어디서도 더 이상 읽지 않는다(상세는
   `CHANGELOG.md` 참고).
-- **자기인지 DB 조회(조각C)** — 소유자 DM 전용 도구로 스키마 조회·읽기전용 SQL 질의·런타임 정보 제공.
-  Postgres READ ONLY 트랜잭션 + 정적 SQL 가드 + 타임아웃으로 다층 방어한다.
+- **자기인지 DB 조회(조각C)** — 스키마 조회·읽기전용 SQL 질의(`db_schema`/`db_query`)와 런타임
+  정보 제공(`runtime_info`). Postgres READ ONLY 트랜잭션 + 정적 SQL 가드 + 타임아웃으로 다층
+  방어한다. **DB 조회 두 도구는 2026-09-17 부터 등록된 부원 전원에게 열린다**(신원·채널을 보지
+  않는다 — [ADR 0010](../decisions/0010-db-read-for-all-members.md)); `runtime_info` 는 그대로
+  소유자 전용이다.
 - **디스코드 이미지 입력(멀티모달)** — 이미지 첨부를 모델에 직접 전달한다. 과거 이미지는
   재주입하지 않고 마커만 저장한다(비용 방지).
 - **디스코드 파일 올리기(2026-08-01)** — 이미지가 아닌 첨부(PDF 등)가 그 사람의 워커 작업
