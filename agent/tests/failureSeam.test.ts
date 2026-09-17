@@ -88,7 +88,7 @@ async function toolCtxWithRealWorker(o: { roots: string[]; allowed: string[] }):
     role: "owner", isPrivate: true, isOwner: true, userId: "owner", conversationId: 1,
     runtime: { model: "claude-opus-5", sdkVersion: "0.3.207", deployTarget: "local", maxTurns: 30, workers: [] },
     remote: {
-      workerId: "test-worker", workerKind: "personal", roots: o.roots,
+      workerId: "test-worker", roots: o.roots,
       call: (tool, args) => executors[tool]!(args),
     },
   };

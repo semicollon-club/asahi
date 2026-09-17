@@ -18,7 +18,6 @@ import type { AllowedDirsRepo } from "../store/allowedDirsRepo.js";
 import type { ProjectsRepo } from "../store/projectsRepo.js";
 import type { ActionsRepo } from "../store/actionsRepo.js";
 import type { LlmUsageRepo } from "../store/llmUsageRepo.js";
-import type { WorkerKind } from "../store/workersRepo.js";
 import { scopeDirs } from "./workerSelect.js";
 import { pathFlavorOf } from "./paths.js";
 import { buildContextBlock, isSessionNotFound } from "./turnPrep.js";
@@ -192,7 +191,7 @@ export class AgentCore {
   // id 로 풀 때 쓴다(index.ts 는 repos.workers 를 그대로 넘긴다). hub 와 마찬가지로 배선이 없는
   // 환경(테스트 등)에서는 늘 워커 미연결로 간주된다(resolveTurnWorker 는 registry·hub 둘 중
   // 하나라도 없으면 null 을 돌려준다).
-  private registry?: { personalWorkerOf(userId: string): Promise<string | null>; sharedWorkerId(): Promise<string | null> };
+  private registry?: { sharedWorkerId(): Promise<string | null> };
   // 정기 게시(조사) 실행기. 옵셔널인 이유는 hub 와 같다 — 배선이 없는 환경(테스트 등)에서는
   // 예약어를 받아도 실행할 대상이 없으므로 ingest 가 안내만 하고 넘어간다.
   // FIX1(치명, 최종 리뷰 3차): 예전엔 여기(AgentCore)에 예약어 전용 채널별 동시 실행 가드
@@ -214,7 +213,7 @@ export class AgentCore {
       call(workerId: string, tool: string, args: Record<string, unknown>): Promise<{ ok: boolean; content: string }>;
       rootsOf(workerId: string): string[];
     };
-    registry?: { personalWorkerOf(userId: string): Promise<string | null>; sharedWorkerId(): Promise<string | null> };
+    registry?: { sharedWorkerId(): Promise<string | null> };
     digest?: DigestRunner;
   }) {
     this.bus = deps.bus;
@@ -571,13 +570,13 @@ export class AgentCore {
           // 선언부 참고) — 신원 없이 workspaceDirs 의 모양만 보면 "손님인데 폴더가 없다"와
           // "소유자라 안 좁힌다"가 같은 모양이 될 수 있어, 손님이 워커 루트로 조용히 폴백하는
           // 폴더 격리 우회가 생겼었다.
-          const dir = uploadDirFor({ isOwner, workspaceDirs, workerRoots: hub.rootsOf(worker.workerId) });
+          const dir = uploadDirFor({ isOwner, workspaceDirs, workerRoots: hub.rootsOf(worker) });
           if (dir === null) {
             for (const f of files) failedFiles.push(`${f.name}(허용된 저장 폴더가 없어 저장 못 함)`);
           } else {
             for (const f of files) {
               try {
-                const r = await hub.call(worker.workerId, "file_fetch", { url: f.url, dir, name: f.name });
+                const r = await hub.call(worker, "file_fetch", { url: f.url, dir, name: f.name });
                 if (r.ok) savedFiles.push(r.content);
                 else failedFiles.push(`${f.name}(${r.content})`);
               } catch (err) {
@@ -727,17 +726,17 @@ export class AgentCore {
   // (scopeDirs)와 같은 입력(그 워커의 allowed_dirs)에서 뽑아, 안내와 집행이 갈리지 않게 한다.
   //
   // 소유자는 대상이 아니다: scopeDirs 가 소유자를 좁히지 않아 allowed_dirs 가 곧 "그 사람의
-  // 폴더" 하나로 특정되지 않고, 애초에 list_dirs 로 직접 조회할 수 있다. 개인 워커도 대상이
-  // 아니다 — 거기엔 손님이 붙지 않는다(resolveWorkerSelector).
+  // 폴더" 하나로 특정되지 않고, 애초에 list_dirs 로 직접 조회할 수 있다. (2026-09-17, ADR 0011:
+  // 예전엔 "개인 워커도 대상이 아니다"라는 조건이 하나 더 있었다 — 이제 워커는 공유 하나뿐이다.)
   private async resolveGuestWorkspaceDirs(
-    worker: { workerId: string; kind: WorkerKind } | null,
+    workerId: string | null,
     isOwner: boolean,
     userId: string,
   ): Promise<string[] | undefined> {
-    if (worker === null || worker.kind !== "shared" || isOwner) return undefined;
+    if (workerId === null || isOwner) return undefined;
     try {
-      const dirs = await this.repos.allowedDirs.list(worker.workerId);
-      return scopeDirs(dirs, { workerKind: worker.kind, isOwner, userId });
+      const dirs = await this.repos.allowedDirs.list(workerId);
+      return scopeDirs(dirs, { isOwner, userId });
     } catch (err) {
       // 안내용 부가 정보일 뿐이라 실패해도 턴을 죽이지 않는다(경로 없이 진행 — 예전 동작과 같다).
       // scopeDirs 는 joinUnderRoot 를 통해 이상한 userId 를 거부하며 던질 수 있는데, 그 경우

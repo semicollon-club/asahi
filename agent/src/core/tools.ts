@@ -5,7 +5,6 @@ import type { UsersRepo } from "../store/usersRepo.js";
 import type { MemoriesRepo, Memory } from "../store/memoriesRepo.js";
 import type { AllowedDirsRepo } from "../store/allowedDirsRepo.js";
 import type { IntrospectRepo } from "../store/introspectRepo.js";
-import type { WorkerKind } from "../store/workersRepo.js";
 import { assertReadOnlySql, formatQueryResult } from "./sqlGuard.js";
 import { REMOTE_TOOL_NAMES, remoteToolHandler, displayNameOf, noreplyEmailOf } from "./remoteTools.js";
 import { isPathWithinAny, normalizeDir } from "./paths.js";
@@ -86,11 +85,8 @@ export type ToolCtx = {
     // 이 턴이 쓰는 워커의 id. allowed_dirs 가 워커 기준이 되면서 필요해졌다 —
     // "누가 물어보는가"(ctx.userId)와 "어느 기계인가"(이 값)는 이제 다른 축이다.
     workerId: string;
-    // Task 7: 그 워커가 개인(personal, 소유자의 개인 기계)인지 공유(shared, 동아리방 공용 PC 처럼
-    // 여러 사람이 함께 쓰는 기계)인지. remoteToolHandler(remoteTools.ts)가 scopeDirs 로 허용
-    // 폴더를 사용자별 하위 폴더로 좁힐지 정하는 데 쓴다 — 공유 워커에서만 손님을 좁히고, 개인
-    // 워커는 좁히지 않는다(resolveWorkerSelector 규칙상 개인 워커엔 애초에 그 소유자만 붙는다).
-    workerKind: WorkerKind;
+    // 2026-09-17(ADR 0011): 여기 있던 workerKind 필드가 빠졌다 — 모든 턴이 공유 워커로 가므로
+    // 값이 하나뿐이고, remoteToolHandler(remoteTools.ts)의 scopeDirs 는 이제 신원만 본다.
   };
 };
 
@@ -207,10 +203,11 @@ export async function manageAccessHandler(ctx: ToolCtx, args: { userId: string; 
   return `${args.userId} 님의 접근 권한을 '${args.role}'(으)로 설정했어요.`;
 }
 
-// 원격 개발 워크플로우(Phase A): 소유자 DM 전용 게이트(isOwnerDm, db_schema/db_query/runtime_info/
-// manage_access 가 쓴다) — 실제 경로 제한(canUseTool)은 별도 태스크(A3)의 몫이다. 이 문구는 문자
-// 그대로 "DM 에서만"이 맞다 — 이 셋은 봇 자신에 대한 권한이라 Task 7 이후에도 DM 전용 그대로다.
-const OWNER_DM_ONLY = "이 작업은 소유자 DM에서만 할 수 있어요.";
+// db_schema/db_query 가 쓰는 거부 문구. 2026-09-17 이전에는 이 자리에 소유자 DM 전용 문구
+// (OWNER_DM_ONLY)가 있었다 — 그 게이트가 사라지면서(아래 canReadDb, ADR 0010) 남은 판정은
+// "등록된 신원인가" 하나다. manage_access 는 여전히 소유자 DM 전용이지만 그 문구는 자기
+// 핸들러 안에 직접 있다(:201).
+const NOT_ALLOWED = "이 작업을 할 수 있는 권한이 없어요.";
 
 // PC 관리 도구(allow_dir/revoke_dir/list_dirs, canManagePc 가 쓴다) 전용 거부 문구. Task 7 로
 // canManagePc 가 isOwner 만 보게 되면서(서버의 소유자도 공유 기계를 관리할 수 있다) "DM 에서만"
@@ -286,20 +283,28 @@ export async function listDirsHandler(ctx: ToolCtx): Promise<string> {
   return dirs.map((d) => `- ${d}`).join("\n");
 }
 
-// 자기인지 도구(§Task4) 중 db_schema/db_query 전용: 소유자 DM 에서만.
-// 손님·서버는 어느 경우에도 노출·실행 둘 다 거부한다(isOwner && isPrivate 로만 판정).
+// 자기인지 도구(§Task4) 중 db_schema/db_query: 2026-09-17 부터 신원·채널 게이트가 없다.
+// 예전에는 소유자 DM 에서만 열렸다(isOwner && isPrivate). 그 게이트를 거둔 근거는 ADR 0010 이다 —
+// 아사히는 부원별 비서가 아니라 동아리 하나의 에이전트이고(ADR 0009), 이 DB 에 쌓이는 것은 공개
+// 채널 대화·공용 기억·작업 기록처럼 이미 부원 전부에게 보이는 재료다. 신원 표(users)의 값도
+// 디스코드 ID·표시명이라 같은 채널에서 온 것이고, 비밀(디스코드 토큰·DATABASE_URL·깃허브 App
+// 개인키)은 DB 가 아니라 환경변수에 있다(config.ts). 표에 남는 유일한 자격증명은 평문이 아닌
+// workers.token_hash 다(schema.ts).
 //
-// 2026-08-01: runtime_info 가 이 게이트에서 빠졌다(아래 runtimeInfoHandler 참고). 남은 둘은
-// DB 를 직접 읽으므로 공개 채널에서 열 이유가 여전히 없다.
-function isOwnerDm(ctx: ToolCtx): boolean { return ctx.isOwner && ctx.isPrivate; }
+// **읽기 보장은 그대로다** — assertReadOnlySql(1차)와 READ ONLY 트랜잭션(2차, ADR 0004)이 쓰기·
+// 다중문을 막는다. 게이트가 "누구인가" 에서 "읽기 전용인가" 하나로 옮겨갔을 뿐이다.
+//
+// role 은 그래도 본다: decideRoute(adapters/discord.ts)가 blocked 를 이미 끊지만, allowedToolsFor
+// 의 마지막 분기가 같은 이유로 role 을 한 번 더 보는 것과 같은 심층 방어다.
+function canReadDb(ctx: ToolCtx): boolean { return ctx.role === "owner" || ctx.role === "allowed"; }
 
 export async function dbSchemaHandler(ctx: ToolCtx): Promise<string> {
-  if (!isOwnerDm(ctx)) return OWNER_DM_ONLY;
+  if (!canReadDb(ctx)) return NOT_ALLOWED;
   return await ctx.repos.introspect.schema();
 }
 
 export async function dbQueryHandler(ctx: ToolCtx, args: { sql: string }): Promise<string> {
-  if (!isOwnerDm(ctx)) return OWNER_DM_ONLY;
+  if (!canReadDb(ctx)) return NOT_ALLOWED;
   try { assertReadOnlySql(args.sql); } catch (e) { return e instanceof Error ? e.message : "잘못된 쿼리예요."; }
   try {
     const { rows, truncated } = await ctx.repos.introspect.readOnlyQuery(args.sql);
@@ -315,9 +320,10 @@ export async function dbQueryHandler(ctx: ToolCtx, args: { sql: string }): Promi
 // 작업을 하다 버전을 확인하려면 DM 으로 나가야 했고, 정작 DM 의 답은 다른 기계 얘기였다 —
 // 같은 기계를 두고 두 도구가 서로 다른 장소를 요구해 실제로 사람을 오진으로 몰았다.
 //
-// 함께 묶여 있던 db_schema/db_query 는 그대로 DM 전용이다: 그 둘은 DB 를 직접 읽지만 이
-// 도구는 모델명·SDK 버전·커밋·한도만 낸다. 노출(allowedToolsFor)과 실행(이 게이트)이 같은
-// 기준(isOwner)을 쓰므로 "도구는 보이는데 실행하면 거부"가 생기지 않는다.
+// 함께 묶여 있던 db_schema/db_query 는 2026-09-17 에 신원 게이트 자체가 사라졌다(위 canReadDb).
+// 이 도구는 그대로 소유자만 쓴다 — 모델명·SDK 버전·커밋·한도는 DB 에 쌓이는 동아리 작업 기록이
+// 아니라 봇 자신의 운영 정보다. 노출(allowedToolsFor)과 실행(이 게이트)이 같은 기준(isOwner)을
+// 쓰므로 "도구는 보이는데 실행하면 거부"가 생기지 않는다.
 // 2026-09-03: 봇 커밋과 워커 커밋을 SHA 로 대조하던 판정(`봇과 일치` / `봇과 다름 — 워커 갱신
 // 필요`)을 걷어냈다. 두 값은 애초에 같은 갈래의 커밋이 아니라, 다르다는 사실만으로는 워커가
 // 낡았는지 알 수 없다. 두 가지가 각각 독립적으로 그 등식을 깬다.
@@ -383,13 +389,15 @@ export async function runtimeInfoHandler(ctx: ToolCtx): Promise<string> {
 // ── 턴별 도구셋(능력 계층, §7.1) ────────────────────────────────────────────
 // Task 7(워커 라우팅) 이후의 계층 요약 — "어디서 말하느냐가 어느 기계냐를 정한다"(workerSelect.ts
 // 의 resolveWorkerSelector). 예전엔 원격 도구 자체가 owner-DM 전용이었지만, 이제는 그렇지 않다:
-// - 소유자 DM: 기억 전체 + 접근관리 + forget(공용 기억 삭제) + db_schema/db_query/runtime_info
-//   (전부 봇 자신에 대한 권한이라 DM 전용을 유지) + 워커(그 소유자의 개인 기계)가 연결돼 있으면
-//   원격 파일/셸 도구(fs_*/sh_exec)와 허용폴더 관리 도구(allow_dir/revoke_dir/list_dirs)까지.
+// - DB 읽기(db_schema/db_query)는 2026-09-17 부터 **네 분기 전부**에 있다(ADR 0010) — 신원도
+//   채널도 보지 않는다. 쓰기는 두 겹의 읽기 전용 보장이 막는다(ADR 0004).
+// - 소유자 DM: 기억 전체 + 접근관리(manage_access 만 DM 전용으로 남는다 — 신원 표를 바꾸는
+//   일이다) + forget(공용 기억 삭제) + runtime_info + 워커(그 소유자의 개인 기계)가 연결돼
+//   있으면 원격 파일/셸 도구(fs_*/sh_exec)와 허용폴더 관리 도구(allow_dir/revoke_dir/list_dirs)까지.
 // - 소유자(서버 채널): 공유 기계(동아리 공용 PC)의 관리자다. recall + forget(둘 다 소유자만 —
 //   forget 은 §Task3, 다른 사람의 기여를 지우는 일이라 공용 기억을 쓸 수 있는 손님과는 다른
-//   권한이다) + 워커가 연결돼 있으면 원격 도구와 dir 관리 도구까지 그대로 받는다. DB·접근관리는
-//   주지 않는다 — 그건 기계가 아니라 봇 자신에 대한 권한이라 공개 채널에서 열 이유가 없다.
+//   권한이다) + 워커가 연결돼 있으면 원격 도구와 dir 관리 도구까지 그대로 받는다. 접근관리만
+//   주지 않는다 — 그건 기계가 아니라 봇의 신원 표에 대한 권한이라 공개 채널에서 열 이유가 없다.
 // - 손님(DM·서버 공통): 항상 공유 기계로 연결된다. DM 이면 기억(본인)까지, 아니면 recall(공용)만.
 //   워커가 연결돼 있으면 원격 도구도 받는다(remoteToolHandler 의 scopeDirs 가 자기 하위 폴더로
 //   좁힌다) — 다만 dir 관리 도구는 절대 받지 않는다. 공유 목록 자체를 바꾸는 건 관리자만 한다.
@@ -490,6 +498,10 @@ export function allowedToolsFor(
   // 가 기본값(true)인 한 아래 각 분기의 결과는 예전과 완전히 동일하다(회귀 없음) — false 를
   // 넘기는 호출부(정기 게시·요약 턴)만 remember 를 잃고 recall 은 그대로 유지한다.
   const memoryTools = memoryWriteEnabled ? [t("remember")] : [];
+  // DB 읽기(ADR 0010). 네 분기 전부에 같은 배열이 들어간다 — 신원·채널로 갈리지 않으므로 조건이
+  // 없다. 조건 없는 배열을 굳이 상수로 두는 이유는 "이 둘은 어느 계층에서도 같다"를 코드 모양으로
+  // 고정하기 위해서다: 분기마다 이름을 따로 적으면 한 분기에만 더하거나 빠뜨리는 드리프트가 생긴다.
+  const dbTools = [t("db_schema"), t("db_query")];
   // Important 2(리뷰 후속) — forget 도 같은 축에 묶는다. 소유자 두 분기에만 들어가므로 배열을
   // 따로 두는 이유는 자리다: remember 와 forget 이 각 분기에서 서로 다른 위치에 놓인다.
   const forgetTools = memoryWriteEnabled ? [t("forget")] : [];
@@ -498,12 +510,13 @@ export function allowedToolsFor(
       ...remote, ...publishTools,
       ...memoryTools, t("recall"), t("manage_access"), ...forgetTools,
       ...dirTools,
-      t("db_schema"), t("db_query"), t("runtime_info"),
+      ...dbTools, t("runtime_info"),
       ...webTools,
     ];
   }
-  // 소유자가 서버에 있으면 공유 기계 + 관리자 권한(폴더 관리 포함). DB·접근관리는 DM 전용을
-  // 유지한다 — 그건 기계가 아니라 봇 자신에 대한 권한이라 공개 채널에서 열 이유가 없다.
+  // 소유자가 서버에 있으면 공유 기계 + 관리자 권한(폴더 관리 포함). 접근관리(manage_access)만
+  // DM 전용으로 남는다 — 그건 기계가 아니라 봇의 신원 표에 대한 권한이라 공개 채널에서 열 이유가
+  // 없다. DB 읽기는 2026-09-17 부터 여기에도 있다(ADR 0010).
   // runtime_info 는 예외로 여기서도 연다(2026-08-01): 소유자가 공유 기계에 닿는 곳이 서버
   // 채널뿐이라, 그 기계의 버전을 물어볼 수 있는 유일한 장소도 여기다.
   // remember 도 마찬가지로 연다(2026-08-02): 서버 채널의 저장은 개인 기억이 아니라 동아리
@@ -511,10 +524,10 @@ export function allowedToolsFor(
   // forget 도 같은 이유로 연다(2026-08-02, Task 3): 부원이 쌓는 공용 기억이 틀리거나 낡으면
   // 정리해야 하는데, 그 정리 대상도 그걸 할 수 있는 소유자도 전부 이 서버 분기에만 있다.
   // 단 remember 와 마찬가지로 memoryWriteEnabled 축이 닫히면 함께 닫힌다(위 forgetTools).
-  if (isOwner) return [...remote, ...publishTools, ...memoryTools, t("recall"), ...forgetTools, ...dirTools, t("runtime_info"), ...webTools];
+  if (isOwner) return [...remote, ...publishTools, ...memoryTools, t("recall"), ...forgetTools, ...dirTools, ...dbTools, t("runtime_info"), ...webTools];
   // 손님: DM 이든 서버든 공유 기계로 간다. 폴더 관리는 주지 않는다.
   if (isPrivate && (role === "owner" || role === "allowed")) {
-    return [...remote, ...publishTools, ...memoryTools, t("recall"), ...webTools];
+    return [...remote, ...publishTools, ...memoryTools, t("recall"), ...dbTools, ...webTools];
   }
   // Minor(최종 전체 브랜치 리뷰) — 이 마지막 catch-all 은 role 을 보지 않아
   // allowedToolsFor("blocked", ...) 도 remember·recall 을 돌려줬다(실측). 위 손님 DM 분기는
@@ -527,7 +540,7 @@ export function allowedToolsFor(
   // 되므로 여기서 remember 를 부르면 반드시 공용이 된다.
   // 발행도 여기서 연다 — 부원이 만든 것을 올리는 것이 이 기능의 목적이고, 손님은 어차피 자기
   // 폴더·자기 리포에만 닿는다(publish.ts 의 decideOwnership, workerSelect.ts 의 scopeDirs).
-  return [...remote, ...publishTools, ...memoryTools, t("recall"), ...webTools];
+  return [...remote, ...publishTools, ...memoryTools, t("recall"), ...dbTools, ...webTools];
 }
 
 // ── 인프로세스 MCP 서버(SDK) — handler 는 위 순수 함수를 감싼다 ──────────────
@@ -573,7 +586,7 @@ async function resolveTarget(ctx: ToolCtx, rawName: string): Promise<Target> {
   let dirs: string[];
   try {
     const listed = await ctx.repos.allowedDirs.list(remote.workerId);
-    dirs = scopeDirs(listed, { workerKind: remote.workerKind, isOwner: ctx.isOwner, userId: ctx.userId });
+    dirs = scopeDirs(listed, { isOwner: ctx.isOwner, userId: ctx.userId });
   } catch (e) {
     return { ok: false, content: `허용 폴더 확인 중 오류가 발생했어요: ${e instanceof Error ? e.message : String(e)}` };
   }
@@ -1042,13 +1055,13 @@ export function buildToolDefinitions(ctx: ToolCtx) {
     ),
     tool(
       "db_schema",
-      "(소유자 전용) 내 데이터베이스의 테이블·컬럼 구조를 보여줍니다.",
+      "내 데이터베이스의 테이블·컬럼 구조를 보여줍니다. 추측 대신 실측으로 답할 때 쓰세요.",
       {},
       async () => textResult(await dbSchemaHandler(ctx)),
     ),
     tool(
       "db_query",
-      "(소유자 전용) 읽기 전용 SELECT 로 내 데이터를 조회합니다. SELECT 만 가능합니다.",
+      "읽기 전용 SELECT 로 내 데이터를 조회합니다. SELECT·WITH 한 문장만 가능하고 쓰기는 거부됩니다.",
       { sql: z.string().describe("실행할 읽기 전용 SELECT 문") },
       async (args) => textResult(await dbQueryHandler(ctx, args)),
     ),
