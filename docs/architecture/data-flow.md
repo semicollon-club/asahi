@@ -166,8 +166,10 @@ bus.ts`)으로 실려 온다. 어댑터(`discord.ts`)가 그 턴의 참가자를
 `makeRunAgentTurn`(`agent/src/core/agent.ts`)은 `allowedToolsFor`로 이번 턴의 허용 도구
 목록을 정한 **뒤에** `buildTools(ctx, allowedTools)`(`agent/src/core/tools.ts`)를 불러 MCP
 서버를 만든다. `buildTools`는 내부의 `allowedToolDefinitions(ctx, allowed)`로 그 목록에
-없는 도구의 정의 자체를 걸러내므로, 이번 턴에 쓸 수 없는 도구(예: 손님 턴의 `runtime_info`)는
-모델에게 이름도 설명도 보이지 않는다. 예전에는 서버 생성이 이 계산보다 앞에 있어 도구 정의를
+없는 도구의 정의 자체를 걸러내므로, 이번 턴에 쓸 수 없는 도구(예: 손님 턴의 `manage_access`)는
+모델에게 이름도 설명도 보이지 않는다. 이 예시는 원래 `runtime_info` 였는데, 그 도구는
+2026-09-17 에 등록된 부원 전원에게 열려 더 이상 손님 턴에서 빠지지 않는다
+([ADR 0012](../decisions/0012-runtime-info-for-all-members.md)). 예전에는 서버 생성이 이 계산보다 앞에 있어 도구 정의를
 항상 전부 등록하고 차단은 SDK 사전승인 목록(`allowedTools`)에서만 걸었다 — 그러면 모델이 쓸
 수 없는 도구를 보고 부른 뒤 SDK가 만든 영문 거부를 받았고, 그 문자열에는 이유가 없어 모델이
 그럴듯한 한국어 사유를 지어냈다(2026-08-06, "이 채널에서는 안 된다"는 없는 규칙을 만들어낸

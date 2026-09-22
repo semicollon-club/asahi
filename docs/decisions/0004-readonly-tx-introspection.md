@@ -39,6 +39,10 @@ lastReviewed: 2026-09-17
 > 소유자가 공유 미니PC 에 닿는 곳이 서버 채널뿐이라 그 기계의 버전을 물어볼 장소가 없었기
 > 때문이다. 이 문단의 SQL 가드 서술에는 영향이 없다 — `runtime_info` 는 SQL 을 실행하지
 > 않는다.
+>
+> **개정(2026-09-17, [0012](./0012-runtime-info-for-all-members.md))** — 그 `isOwner` 게이트도
+> 제거됐다. `runtime_info` 는 이제 등록된 부원이면 누구나 쓴다(`canSeeRuntime`). 위와 같은
+> 이유로 이 문단의 SQL 가드 서술에는 여전히 영향이 없다.
 
 > **개정(2026-09-17, [0010](./0010-db-read-for-all-members.md))** — `db_schema`/`db_query` 의
 > 신원·채널 게이트가 제거됐다. 이제 등록된 부원이면 DM·서버 어디서든 이 SQL 가드에 도달한다

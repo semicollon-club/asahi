@@ -588,10 +588,11 @@ describe("allowedToolsFor — 능력 계층(§7.1)", () => {
 
   // Task 3(웹 검색 개방)로 WebSearch 가 모든 계층에 추가돼 이 계층의 정확 배열도 갱신했다 —
   // 다른 항목은 그대로고 WebSearch 만 늘었다.
-  it("손님 DM 은 remember/recall·DB 읽기·WebSearch 만(파일·manage_access·Bash·dir 도구 없음)", () => {
+  it("손님 DM 은 remember/recall·DB 읽기·runtime_info·WebSearch 만(파일·manage_access·Bash·dir 도구 없음)", () => {
     const tools = allowedToolsFor("allowed", true, false);
     // ADR 0010(2026-09-17): db_schema/db_query 가 네 계층 전부로 열렸다 — 정확 배열이라 함께 갱신한다.
-    expect(tools).toEqual(["mcp__asahi__remember", "mcp__asahi__recall", "mcp__asahi__db_schema", "mcp__asahi__db_query", "WebSearch"]);
+    // ADR 0012(같은 날): runtime_info 도 같은 이유로 더해졌다.
+    expect(tools).toEqual(["mcp__asahi__remember", "mcp__asahi__recall", "mcp__asahi__db_schema", "mcp__asahi__db_query", "mcp__asahi__runtime_info", "WebSearch"]);
     expect(tools).not.toContain("Read");
     expect(tools).not.toContain("Bash");
     expect(tools).not.toContain("mcp__asahi__manage_access");
@@ -601,9 +602,11 @@ describe("allowedToolsFor — 능력 계층(§7.1)", () => {
   // Task 1(동아리 공용 기억): 서버 채널의 remember 는 개인 기억이 아니라 동아리 공용 기억이다
   // (memoryScope.ts) — 그래서 이 계층에서도 "저장 자체가 불가능"이 아니라 recall 과 나란히
   // remember 가 열린다. PC 도구·dir 도구는 여전히 불가.
-  it("서버 턴은 remember(공용)·recall(공용)·DB 읽기와 WebSearch 만 — PC 도구·dir 도구 불가(개인 기억 저장은 여전히 DM 전용)", () => {
-    expect(allowedToolsFor("owner", false, false)).toEqual(["mcp__asahi__remember", "mcp__asahi__recall", "mcp__asahi__db_schema", "mcp__asahi__db_query", "WebSearch"]);
-    expect(allowedToolsFor("allowed", false, false)).toEqual(["mcp__asahi__remember", "mcp__asahi__recall", "mcp__asahi__db_schema", "mcp__asahi__db_query", "WebSearch"]);
+  // 2026-09-17(ADR 0012): 이 목록에 runtime_info 가 더해졌다 — dbTools 바로 뒤가 그 자리다.
+  it("서버 턴은 remember(공용)·recall(공용)·DB 읽기·runtime_info 와 WebSearch 만 — PC 도구·dir 도구 불가(개인 기억 저장은 여전히 DM 전용)", () => {
+    const expected = ["mcp__asahi__remember", "mcp__asahi__recall", "mcp__asahi__db_schema", "mcp__asahi__db_query", "mcp__asahi__runtime_info", "WebSearch"];
+    expect(allowedToolsFor("owner", false, false)).toEqual(expected);
+    expect(allowedToolsFor("allowed", false, false)).toEqual(expected);
   });
 
   // 2026-08-01: runtime_info 만 DM 전용에서 풀었다. 소유자가 공유 기계에 닿는 곳이 서버 채널
@@ -619,9 +622,25 @@ describe("allowedToolsFor — 능력 계층(§7.1)", () => {
     expect(server).not.toContain("mcp__asahi__manage_access");
   });
 
-  it("손님은 서버에서도 DM 에서도 runtime_info 를 받지 못한다", () => {
-    expect(allowedToolsFor("allowed", false, false)).not.toContain("mcp__asahi__runtime_info");
-    expect(allowedToolsFor("allowed", true, false)).not.toContain("mcp__asahi__runtime_info");
+  // 2026-09-17(ADR 0012): 남아 있던 isOwner 게이트도 걷어냈다. 예전 이 자리의 테스트는
+  // "손님은 서버에서도 DM 에서도 runtime_info 를 받지 못한다" 였다.
+  it("손님도 서버·DM 양쪽에서 runtime_info 를 받는다(ADR 0012)", () => {
+    expect(allowedToolsFor("allowed", false, false)).toContain("mcp__asahi__runtime_info");
+    expect(allowedToolsFor("allowed", true, false)).toContain("mcp__asahi__runtime_info");
+  });
+
+  // 네 분기 전부에 있다는 것을 한 번에 고정한다 — 예전 결함이 "소유자 두 분기에만 손으로
+  // 적혀 있어 나머지에서 빠졌다" 였으므로, 계층별 개별 단언보다 이 형태가 드리프트를 잡는다.
+  it("runtime_info 는 네 분기 전부에 있다(신원·채널로 갈리지 않는다)", () => {
+    const tiers = [
+      ["owner", true, true],   // 소유자 DM
+      ["owner", false, true],  // 소유자 서버
+      ["allowed", true, false], // 손님 DM
+      ["allowed", false, false], // 손님 서버
+    ] as const;
+    for (const [role, isPrivate, isOwner] of tiers) {
+      expect(allowedToolsFor(role, isPrivate, isOwner)).toContain("mcp__asahi__runtime_info");
+    }
   });
 
   it("deployTarget 을 생략하거나 'local' 로 주면 기존(로컬) 동작과 완전히 동일하다", () => {
@@ -679,9 +698,10 @@ describe("allowedToolsFor — 능력 계층(§7.1)", () => {
   });
 
   it("deployTarget='cloud' 라도 손님 DM·서버는 로컬과 동일(영향 없음)", () => {
-    expect(allowedToolsFor("allowed", true, false, "cloud")).toEqual(["mcp__asahi__remember", "mcp__asahi__recall", "mcp__asahi__db_schema", "mcp__asahi__db_query", "WebSearch"]);
-    expect(allowedToolsFor("owner", false, false, "cloud")).toEqual(["mcp__asahi__remember", "mcp__asahi__recall", "mcp__asahi__db_schema", "mcp__asahi__db_query", "WebSearch"]);
-    expect(allowedToolsFor("allowed", false, false, "cloud")).toEqual(["mcp__asahi__remember", "mcp__asahi__recall", "mcp__asahi__db_schema", "mcp__asahi__db_query", "WebSearch"]);
+    const guest = ["mcp__asahi__remember", "mcp__asahi__recall", "mcp__asahi__db_schema", "mcp__asahi__db_query", "mcp__asahi__runtime_info", "WebSearch"];
+    expect(allowedToolsFor("allowed", true, false, "cloud")).toEqual(guest);
+    expect(allowedToolsFor("owner", false, false, "cloud")).toEqual(guest);
+    expect(allowedToolsFor("allowed", false, false, "cloud")).toEqual(guest);
   });
 });
 
@@ -725,7 +745,8 @@ describe("allowedToolsFor — memoryWriteEnabled 로 remember 만 막고 recall 
   it("memoryWriteEnabled:false 여도 다른 도구(recall·WebSearch)는 정확히 그대로 남는다(공개 채널 계층 예시)", () => {
     const tools = allowedToolsFor("allowed", false, false, "local", { memoryWriteEnabled: false });
     // DB 읽기는 기억 쓰기 축과 무관하다 — memoryWriteEnabled 가 닫혀도 그대로 남는다(ADR 0010).
-    expect(tools.sort()).toEqual(["WebSearch", "mcp__asahi__db_query", "mcp__asahi__db_schema", "mcp__asahi__recall"]);
+    // runtime_info 도 같은 이유로 남는다(ADR 0012) — 읽기이고 기억 축과 무관하다.
+    expect(tools.sort()).toEqual(["WebSearch", "mcp__asahi__db_query", "mcp__asahi__db_schema", "mcp__asahi__recall", "mcp__asahi__runtime_info"]);
   });
 
   // DM 두 분기도 같은 축이다. 위 케이스가 네 계층을 다 돌지만, "이 턴은 기억을 쓰면 안 된다"는
@@ -815,8 +836,21 @@ describe("runtime_info", () => {
     expect(out).toMatch(/local/);
     expect(out).toMatch(/30/);
   });
-  it("소유자가 아니면 거부한다", async () => {
-    expect(await runtimeInfoHandler(await ownerCtx({ isOwner: false }))).toMatch(/소유자/);
+  // 2026-09-17(ADR 0012): 예전 이 자리의 테스트는 "소유자가 아니면 거부한다" 였다. 이제
+  // 등록된 부원이면 신원·채널과 무관하게 같은 답을 받는다.
+  it("손님에게도 같은 값을 보고한다(ADR 0012)", async () => {
+    for (const isPrivate of [true, false]) {
+      const out = await runtimeInfoHandler(await ownerCtx({ role: "allowed", isOwner: false, isPrivate }));
+      expect(out).toMatch(/claude-opus-5/);
+      expect(out).toMatch(/local/);
+      expect(out).not.toMatch(/소유자만/); // 거부 문구가 아니어야 한다
+    }
+  });
+
+  // 심층 방어는 남는다 — decideRoute 가 이미 끊지만 핸들러도 role 을 본다(canSeeRuntime).
+  it("등록되지 않은 역할(blocked)은 거부한다", async () => {
+    const out = await runtimeInfoHandler(await ownerCtx({ role: "blocked", isOwner: false, isPrivate: false }));
+    expect(out).not.toMatch(/claude-opus-5/);
   });
 
   // 2026-08-01: 예전엔 소유자 DM 전용이었다. 그런데 "어디서 말하느냐가 어느 기계냐를 정한다"
@@ -1008,7 +1042,7 @@ describe("allowedToolsFor — 웹 검색", () => {
   // 항상 공용이므로 게시 작업 컨텍스트라 해도 다른 손님 서버 턴과 다를 이유가 없다.
   it("게시 작업 컨텍스트(공개 채널 계층)는 remember(공용)·recall 과 WebSearch 를 받는다", () => {
     const tools = allowedToolsFor("allowed", false, false, "cloud", { workerConnected: false });
-    expect(tools.sort()).toEqual(["WebSearch", "mcp__asahi__db_query", "mcp__asahi__db_schema", "mcp__asahi__recall", "mcp__asahi__remember"]);
+    expect(tools.sort()).toEqual(["WebSearch", "mcp__asahi__db_query", "mcp__asahi__db_schema", "mcp__asahi__recall", "mcp__asahi__remember", "mcp__asahi__runtime_info"]);
   });
 
   it("WebFetch 는 어느 계층에도 없다", () => {
@@ -1072,15 +1106,14 @@ describe("allowedToolsFor — 공유 워커로 계층이 넓어진다", () => {
     expect(tools.some((t) => t.endsWith("allow_dir"))).toBe(true);
   });
 
-  it("손님에게 DB 읽기는 주고, 접근관리·runtime_info 는 여전히 주지 않는다(ADR 0010)", () => {
+  // 2026-09-17(ADR 0012): runtime_info 가 "주지 않는다" 쪽에서 "준다" 쪽으로 옮겨갔다.
+  // 남는 소유자 전용은 manage_access 하나뿐이다 — 그건 봇의 신원 표를 바꾸는 쓰기다.
+  it("손님에게 DB 읽기·runtime_info 는 주고, 접근관리는 주지 않는다(ADR 0010·0012)", () => {
     const tools = allowedToolsFor("allowed", true, false, "local", { workerConnected: true });
-    for (const n of ["db_query", "db_schema"]) {
+    for (const n of ["db_query", "db_schema", "runtime_info"]) {
       expect(tools.some((t) => t.endsWith(n))).toBe(true);
     }
-    // 이 둘은 DB 에 쌓이는 동아리 작업 기록이 아니라 봇 자신(신원 표·운영 설정)에 대한 권한이다.
-    for (const n of ["manage_access", "runtime_info"]) {
-      expect(tools.some((t) => t.endsWith(n))).toBe(false);
-    }
+    expect(tools.some((t) => t.endsWith("manage_access"))).toBe(false);
   });
 });
 
@@ -1112,10 +1145,11 @@ describe("allowedToolDefinitions — 그 턴에 못 쓰는 도구는 등록하�
     return allowedToolDefinitions(c, allowed).map((d) => d.name);
   };
 
-  it("손님 서버 턴에는 runtime_info 가 없다", async () => {
-    // 2026-08-06 에 부원이 이걸 불러 영문 거부를 받았고, 모델이 "이 채널에서는 안 된다"는
-    // 없는 규칙을 지어내 소유자에게까지 반복했다.
-    expect(await names("allowed", false, false, false)).not.toContain("runtime_info");
+  // 2026-09-17(ADR 0012): 예전 이 자리의 테스트는 "손님 서버 턴에는 runtime_info 가 없다" 였다.
+  // 2026-08-06 사건(부원이 이걸 불러 거부를 받자 모델이 "이 채널에서는 안 된다"는 없는 규칙을
+  // 지어냈다)의 최종 해소가 이것이다 — 이제 부원이 물으면 그 자리에서 답이 나온다.
+  it("손님 서버 턴에도 runtime_info 가 등록된다(ADR 0012)", async () => {
+    expect(await names("allowed", false, false, false)).toContain("runtime_info");
   });
 
   it("손님 서버 턴에도 db_query·db_schema 는 등록된다(ADR 0010)", async () => {

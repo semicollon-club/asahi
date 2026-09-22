@@ -272,11 +272,22 @@ describe("buildSystemPrompt — 손님 제한 안내는 채널이 아니라 신�
         expect(cap).not.toMatch(/이 채널에서(는)? ?[^\n]{0,15}(할 수 없|안 됩니다|불가)/);
       });
 
-      it(`${label}: 모델·버전 확인이 소유자만 가능하다고 안내한다`, () => {
-        // 거절할 근거를 프롬프트가 직접 준다 — 도구가 안 보이는 것만으로는 모델이 이유를
-        // 지어내는 것을 막지 못한다(2026-08-06 사건의 요지).
+      // 2026-09-17(ADR 0012): 예전 이 자리의 테스트는 "모델·버전 확인이 소유자만 가능하다고
+      // 안내한다" 였다. 2026-08-06 사건은 "거절할 참인 근거를 프롬프트가 직접 준다"로 막았는데,
+      // 이제는 거절 자체가 없어져 안내도 능력 쪽으로 뒤집힌다.
+      it(`${label}: 모델·버전 확인을 할 수 있다고 안내한다(소유자 제한 문구 없이)`, () => {
         const cap = capabilitySection(buildSystemPrompt({ ...guest, workerConnected }));
         const line = cap.split("\n").find((l) => l.includes("버전"));
+        expect(line).toBeDefined();
+        expect(line).toMatch(/runtime_info/);
+        expect(line).not.toMatch(/소유자만/);
+      });
+
+      // 남은 소유자 전용(manage_access) 안내는 그대로 있어야 한다 — 그 줄까지 같이 사라지면
+      // 2026-08-06 사건의 방어("왜 안 되는가"에 참인 근거를 준다)가 통째로 빠진다.
+      it(`${label}: 접근 권한 관리는 소유자만이라는 안내가 남아 있다`, () => {
+        const cap = capabilitySection(buildSystemPrompt({ ...guest, workerConnected }));
+        const line = cap.split("\n").find((l) => l.includes("접근 권한 관리"));
         expect(line).toBeDefined();
         expect(line).toMatch(/소유자만/);
       });
