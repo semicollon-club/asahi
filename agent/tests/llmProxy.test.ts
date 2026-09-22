@@ -1,5 +1,6 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import http from "node:http";
+import zlib from "node:zlib";
 import type { AddressInfo } from "node:net";
 import { LLM_PROXY_PREFIX, OAUTH_BETA, decideLlmRoute, fixBetaHeader, makeLlmProxyHandler, createUsageSniffer, type LlmUsageRow } from "../src/core/llmProxy.js";
 
@@ -205,6 +206,89 @@ describe("makeLlmProxyHandler", () => {
     await new Promise((r) => setTimeout(r, 10));
     expect(rows).toHaveLength(0);
   });
+
+  // ── 2026-09-22 로드맵 N0: llm_usage 가 역사상 0행이었다(pg_stat n_tup_ins=0, INSERT 오류 로그 없음 — 즉 시도된 적이 없다).
+  // 스니퍼가 평문 SSE 만 읽었는데, 프록시가 클라이언트의 accept-encoding 을 업스트림에 그대로 넘겨 압축 응답이 올 수 있었고
+  // (압축 바이트에서는 data: 줄을 못 찾는다 — 무소음), Claude Code 가 보내는 비스트리밍 JSON 응답의 usage 는 아예 읽지 않았다.
+  // 근거: docs/superpowers/specs/2026-09-22-usability-roadmap-design.md §2.6, 로드맵 N0.
+  it("업스트림 hop 에는 accept-encoding 을 보내지 않는다 — 전송 인코딩은 프록시가 소유한다", async () => {
+    const up = await fakeUpstream((_c, res) => { res.writeHead(200, { "content-type": "application/json" }); res.end("{}"); });
+    const base = await proxyServer(makeLlmProxyHandler({ verify, credential: () => "real", upstream: up.url }));
+    // Node fetch 는 기본으로 accept-encoding: gzip, deflate 를 보낸다(2026-09-22 실측). 명시해도 같은 결과여야 한다.
+    await (await fetch(`${base}/llm/v1/messages`, { method: "POST", body: "{}", headers: { authorization: "Bearer good", "accept-encoding": "gzip, deflate, br" } })).text();
+    expect(up.captured).toHaveLength(1);
+    expect(up.captured[0].headers["accept-encoding"]).toBeUndefined();
+  });
+
+  it("옛 결함 재현: 업스트림이 accept-encoding 을 보고 SSE 를 gzip 으로 답하면 클라이언트는 멀쩡히 받지만 사용량은 0건이었다 — 이제는 기록된다", async () => {
+    const sse = 'event: message_start\ndata: {"type":"message_start","message":{"model":"claude-sonnet-5","usage":{"input_tokens":100,"output_tokens":1}}}\n\nevent: message_delta\ndata: {"type":"message_delta","usage":{"output_tokens":55}}\n\n';
+    const up = await fakeUpstream((c, res) => {
+      if (String(c.headers["accept-encoding"] ?? "").includes("gzip")) {
+        res.writeHead(200, { "content-type": "text/event-stream", "content-encoding": "gzip" });
+        res.end(zlib.gzipSync(sse));
+      } else {
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        res.end(sse);
+      }
+    });
+    const rows: LlmUsageRow[] = [];
+    const base = await proxyServer(makeLlmProxyHandler({ verify: verifyModel, credential: () => "real", upstream: up.url, recordUsage: (row) => rows.push(row) }));
+    const r = await fetch(`${base}/llm/v1/messages`, { method: "POST", body: JSON.stringify({ model: "claude-sonnet-5" }), headers: { authorization: "Bearer good" } });
+    expect(await r.text()).toBe(sse); // 클라이언트 쪽은 어느 쪽이든 정상이다 — 결함이 무소음이었던 이유
+    await new Promise((r) => setTimeout(r, 20));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ inputTokens: 100, outputTokens: 55 });
+  });
+
+  it("사용량 기록: 비스트리밍 JSON 응답의 최상위 usage 도 읽어 recordUsage 를 한 번 부른다", async () => {
+    const up = await fakeUpstream((_c, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ id: "msg", model: "claude-sonnet-5", usage: { input_tokens: 200, output_tokens: 30, cache_creation_input_tokens: 5, cache_read_input_tokens: 50 } }));
+    });
+    const rows: LlmUsageRow[] = [];
+    const base = await proxyServer(makeLlmProxyHandler({ verify: verifyModel, credential: () => "real", upstream: up.url, recordUsage: (row) => rows.push(row), now: () => 777 }));
+    await (await fetch(`${base}/llm/v1/messages`, { method: "POST", body: JSON.stringify({ model: "claude-sonnet-5" }), headers: { authorization: "Bearer good" } })).text();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ jobId: "j", userId: "u1", requestModel: "claude-sonnet-5", model: "claude-sonnet-5", inputTokens: 200, outputTokens: 30, cacheCreationInputTokens: 5, cacheReadInputTokens: 50, ts: 777 });
+  });
+
+  it("진단: 2xx 인데 사용량을 못 읽으면 상태·content-type·content-encoding·바이트 수를 한 줄 경고로 남긴다", async () => {
+    const up = await fakeUpstream((_c, res) => { res.writeHead(200, { "content-type": "application/json" }); res.end('{"id":"no-usage"}'); });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const base = await proxyServer(makeLlmProxyHandler({ verify: verifyModel, credential: () => "real", upstream: up.url, recordUsage: () => {} }));
+      await (await fetch(`${base}/llm/v1/messages`, { method: "POST", body: JSON.stringify({ model: "claude-sonnet-5" }), headers: { authorization: "Bearer good" } })).text();
+      await new Promise((r) => setTimeout(r, 20));
+      const lines = warn.mock.calls.map((c) => c.map(String).join(" "));
+      expect(lines.some((l) => l.includes("사용량") && l.includes("application/json") && l.includes("200"))).toBe(true);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("진단: 세션이 응답 도중 연결을 끊으면(스트리밍 재시도 폭풍의 신호) 한 줄 경고를 남긴다", async () => {
+    const holder: { finish?: () => void } = {};
+    const up = await fakeUpstream((_c, res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write('event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":1}}}\n\n');
+      holder.finish = () => res.end();
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const base = await proxyServer(makeLlmProxyHandler({ verify: verifyModel, credential: () => "real", upstream: up.url, recordUsage: () => {} }));
+      const ac = new AbortController();
+      const r = await fetch(`${base}/llm/v1/messages`, { method: "POST", body: JSON.stringify({ model: "claude-sonnet-5" }), headers: { authorization: "Bearer good" }, signal: ac.signal });
+      await r.body!.getReader().read(); // 첫 조각을 받은 뒤 끊는다
+      ac.abort();
+      await new Promise((r) => setTimeout(r, 100));
+      const lines = warn.mock.calls.map((c) => c.map(String).join(" "));
+      expect(lines.some((l) => l.includes("연결을 끊"))).toBe(true);
+    } finally {
+      warn.mockRestore();
+      holder.finish?.();
+    }
+  });
 });
 
 describe("createUsageSniffer — SSE usage 파싱", () => {
@@ -216,9 +300,31 @@ describe("createUsageSniffer — SSE usage 파싱", () => {
     expect(s.result()).toEqual({ inputTokens: 30, outputTokens: 42, cacheCreationInputTokens: 8, cacheReadInputTokens: 0, model: "m" });
   });
 
-  it("SSE 이벤트를 하나도 못 보면(비스트리밍 JSON 등) null", () => {
+  it("sse 모드에서 SSE 이벤트가 하나도 없으면 null — JSON 본문은 json 모드가 읽는다", () => {
     const s = createUsageSniffer();
     s.push('{"id":"msg","usage":{"input_tokens":5}}');
+    expect(s.result()).toBeNull();
+  });
+
+  it("json 모드: 비스트리밍 응답 본문의 최상위 usage·model 을 읽고, 조각으로 나뉘어 와도 합친다", () => {
+    const s = createUsageSniffer("json");
+    s.push('{"id":"msg","model":"m","usage":{"input_tokens":5,"output');
+    s.push('_tokens":7,"cache_read_input_tokens":2}}');
+    expect(s.result()).toEqual({ inputTokens: 5, outputTokens: 7, cacheCreationInputTokens: 0, cacheReadInputTokens: 2, model: "m" });
+  });
+
+  it("json 모드: JSON 이 아니거나 usage 가 없으면 null", () => {
+    const a = createUsageSniffer("json");
+    a.push("not json");
+    expect(a.result()).toBeNull();
+    const b = createUsageSniffer("json");
+    b.push('{"id":"x"}');
+    expect(b.result()).toBeNull();
+  });
+
+  it("json 모드: 상한을 넘는 본문은 모으지 않는다 — 끝에 usage 가 있어도 null (메모리 보호)", () => {
+    const s = createUsageSniffer("json", { maxBytes: 16 });
+    s.push(" ".repeat(17) + '{"usage":{"input_tokens":1}}');
     expect(s.result()).toBeNull();
   });
 });

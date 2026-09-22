@@ -65,15 +65,26 @@ export type LlmUsageParsed = {
   model?: string;
 };
 
-// SSE 사용량 스니퍼. Anthropic 스트림은 message_start 에 입력 토큰(+캐시)을, 이어지는 message_delta 에
-// 누적 출력 토큰을 싣는다. 조각(chunk)이 줄 중간에서 끊길 수 있어 buffer 에 남겨 완전한 줄만 파싱한다.
-// pipe 를 방해하지 않는 순수 관찰자다 — push 로 먹이고 result 로 최종값을 받는다(스트림이 아니었으면 null).
-export function createUsageSniffer(): { push(chunk: Buffer | string): void; result(): LlmUsageParsed | null } {
+export type UsageSniffer = { push(chunk: Buffer | string): void; result(): LlmUsageParsed | null };
+// 응답 모양. Claude Code 는 둘 다 보낸다 — 평소에는 스트리밍(text/event-stream)이고, 스트리밍이 실패하면 비스트리밍으로
+// 폴백한다(바이너리의 "Error streaming, falling back to non-streaming"). 첫 판(2026-09-06)은 SSE 만 읽어 비스트리밍
+// 응답의 usage 를 통째로 놓쳤다(로드맵 N0).
+export type UsageSnifferMode = "sse" | "json";
+// 비스트리밍 JSON 본문을 모을 때의 상한. 모델 응답 하나는 수십 KB 안이다 — 이보다 크면 모으지 않고 기록을 포기한다(메모리 보호).
+const DEFAULT_JSON_SNIFF_MAX_BYTES = 4 * 1024 * 1024;
+
+const num = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
+
+// 사용량 스니퍼. pipe 를 방해하지 않는 순수 관찰자다 — push 로 먹이고 result 로 최종값을 받는다(읽을 게 없었으면 null).
+// - sse: Anthropic 스트림은 message_start 에 입력 토큰(+캐시)을, 이어지는 message_delta 에 누적 출력 토큰을 싣는다.
+//   조각(chunk)이 줄 중간에서 끊길 수 있어 buffer 에 남겨 완전한 줄만 파싱한다.
+// - json: 비스트리밍 응답은 본문 최상위 usage(같은 필드 이름)와 model 에 있다. 본문을 상한까지 모아 끝에서 한 번 파싱한다.
+export function createUsageSniffer(mode: UsageSnifferMode = "sse", opts: { maxBytes?: number } = {}): UsageSniffer {
+  if (mode === "json") return createJsonUsageSniffer(opts.maxBytes ?? DEFAULT_JSON_SNIFF_MAX_BYTES);
   let buffer = "";
   let input = 0, output = 0, cacheCreate = 0, cacheRead = 0;
   let model: string | undefined;
   let seen = false;
-  const num = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
   return {
     push(chunk) {
       buffer += typeof chunk === "string" ? chunk : chunk.toString("utf8");
@@ -103,6 +114,37 @@ export function createUsageSniffer(): { push(chunk: Buffer | string): void; resu
     },
     result() {
       return seen ? { inputTokens: input, outputTokens: output, cacheCreationInputTokens: cacheCreate, cacheReadInputTokens: cacheRead, ...(model ? { model } : {}) } : null;
+    },
+  };
+}
+
+function createJsonUsageSniffer(maxBytes: number): UsageSniffer {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  let overflow = false;
+  return {
+    push(chunk) {
+      if (overflow) return;
+      const b = typeof chunk === "string" ? Buffer.from(chunk, "utf8") : chunk;
+      total += b.length;
+      if (total > maxBytes) { overflow = true; chunks.length = 0; return; }
+      chunks.push(b);
+    },
+    result() {
+      if (overflow || chunks.length === 0) return null;
+      let v: unknown;
+      try { v = JSON.parse(Buffer.concat(chunks).toString("utf8")); } catch { return null; }
+      if (!v || typeof v !== "object") return null;
+      const o = v as { usage?: unknown; model?: unknown };
+      if (!o.usage || typeof o.usage !== "object") return null;
+      const u = o.usage as Record<string, unknown>;
+      return {
+        inputTokens: num(u.input_tokens) ?? 0,
+        outputTokens: num(u.output_tokens) ?? 0,
+        cacheCreationInputTokens: num(u.cache_creation_input_tokens) ?? 0,
+        cacheReadInputTokens: num(u.cache_read_input_tokens) ?? 0,
+        ...(typeof o.model === "string" ? { model: o.model } : {}),
+      };
     },
   };
 }
@@ -137,7 +179,12 @@ function replyJson(res: http.ServerResponse, status: number, body: string): void
 
 // 업스트림으로 옮기지 않는 헤더. 인증은 우리 것으로 바꾸고, 연결 단위(hop-by-hop) 헤더는 새 연결에 맞지 않으며,
 // content-length 는 본문을 다 받은 뒤 다시 계산한다.
-const DROP_HEADERS = new Set(["host", "authorization", "x-api-key", "content-length", "transfer-encoding", "connection", "keep-alive", "proxy-authorization", "te", "trailer", "upgrade"]);
+//
+// accept-encoding 은 2026-09-22 에 더했다(로드맵 N0). 클라이언트(Claude Code 의 fetch — Node 22 실측 `gzip, deflate`)가
+// 광고한 압축을 업스트림이 받아들이면 프록시는 압축 바이트를 그대로 흘리게 되고, 아래 사용량 스니퍼는 압축된 본문에서
+// data: 줄을 찾지 못해 **조용히** 아무것도 기록하지 못한다 — llm_usage 가 역사상 0행이었던 결함의 한 축이다. 전송 인코딩은
+// 프록시가 소유한다: 업스트림에는 이 헤더를 보내지 않아 identity 로 받고, 클라이언트에는 그대로 흘린다(루프백이라 전송량은 무의미).
+const DROP_HEADERS = new Set(["host", "authorization", "x-api-key", "content-length", "transfer-encoding", "connection", "keep-alive", "proxy-authorization", "te", "trailer", "upgrade", "accept-encoding"]);
 
 export function makeLlmProxyHandler(deps: LlmProxyDeps): (req: http.IncomingMessage, res: http.ServerResponse) => void {
   const upstream = deps.upstream ?? DEFAULT_UPSTREAM;
@@ -220,6 +267,9 @@ export function makeLlmProxyHandler(deps: LlmProxyDeps): (req: http.IncomingMess
       headers["content-length"] = String(body.length);
 
       let up: http.ClientRequest;
+      // 진단(N0)용 상태 둘 — 응답 콜백이 채우고, 아래 res 'close' 가 읽는다.
+      let upstreamEnded = false;
+      let forwarded = 0;
       try {
         up = lib.request(
           { protocol: upstream.protocol, hostname: upstream.hostname, port: upstream.port === "" ? undefined : Number(upstream.port), method: "POST", path: route.path, headers },
@@ -230,21 +280,35 @@ export function makeLlmProxyHandler(deps: LlmProxyDeps): (req: http.IncomingMess
             // 업스트림 429 = 구독 한도(§4.3). 스트림은 그대로 지나가고(SDK 가 받는다), 로그만 남긴다 — 소유자
             // 우선은 프록시가 아니라 봇의 사전 게이트(3.3, 부원만 예약)가 집행하므로 여기서 신원으로 가르지 않는다.
             if (status === 429) console.warn("[llm] 업스트림 429 — 구독 한도에 닿았어요.");
-            // 사용량 기록(3단계 3.2): 성공 응답의 SSE 를 곁으로 읽는다. 관찰자(data)를 pipe 보다 먼저 걸어,
-            // dest 백프레셔로 소스가 멈추면 관찰자도 함께 멈춘다(둘 다 같은 data 이벤트를 본다).
-            const sniff = deps.recordUsage && status >= 200 && status < 300 ? createUsageSniffer() : null;
-            if (sniff) {
-              upRes.on("data", (chunk: Buffer) => { try { sniff.push(chunk); } catch { /* 기록 실패가 스트림을 막지 않는다 */ } });
-              upRes.on("end", () => {
-                const u = sniff.result();
-                if (u === null) return;
-                try {
-                  deps.recordUsage!({ ...u, jobId: jobClaims.jobId, userId: jobClaims.userId, conversationId: jobClaims.conversationId, requestModel: pinnedModel ?? requestModel ?? u.model ?? "", ts: nowFn() });
-                } catch (err) {
-                  console.error("[llm] 사용량 기록 실패:", err instanceof Error ? err.message : String(err));
-                }
-              });
-            }
+            // 사용량 기록(3단계 3.2, 2026-09-22 N0 재작업): 성공 응답의 본문을 곁으로 읽는다. 관찰자(data)를 pipe 보다
+            // 먼저 걸어, dest 백프레셔로 소스가 멈추면 관찰자도 함께 멈춘다(둘 다 같은 data 이벤트를 본다).
+            // 모양은 content-type 이 정한다 — 스트리밍이면 SSE 이벤트에서, 아니면 JSON 본문 최상위 usage 에서.
+            // content-encoding 이 남아 있으면(accept-encoding 을 뗐으니 정상이라면 없다) 읽을 수 없으므로 시도하지 않는다.
+            const contentType = String(upRes.headers["content-type"] ?? "");
+            const contentEncoding = String(upRes.headers["content-encoding"] ?? "");
+            const wantUsage = deps.recordUsage !== undefined && status >= 200 && status < 300;
+            const encoded = contentEncoding !== "" && contentEncoding !== "identity";
+            const sniff = wantUsage && !encoded ? createUsageSniffer(contentType.includes("text/event-stream") ? "sse" : "json") : null;
+            upRes.on("data", (chunk: Buffer) => {
+              forwarded += chunk.length;
+              if (sniff) { try { sniff.push(chunk); } catch { /* 기록 실패가 스트림을 막지 않는다 */ } }
+            });
+            upRes.on("end", () => {
+              upstreamEnded = true;
+              if (!wantUsage) return;
+              const u = sniff ? sniff.result() : null;
+              if (u === null) {
+                // 진단(N0): 여기가 찍히면 프록시가 이해하지 못하는 응답 모양이 있다는 뜻이다 — 다음 조사의 첫 증거.
+                // 정상 경로(SSE·JSON 어느 쪽이든 usage 를 읽은 경우)에는 아무것도 찍지 않는다.
+                console.warn(`[llm] 사용량을 읽지 못했어요 — status ${status}, content-type "${contentType}", content-encoding "${contentEncoding || "없음"}", ${forwarded} 바이트`);
+                return;
+              }
+              try {
+                deps.recordUsage!({ ...u, jobId: jobClaims.jobId, userId: jobClaims.userId, conversationId: jobClaims.conversationId, requestModel: pinnedModel ?? requestModel ?? u.model ?? "", ts: nowFn() });
+              } catch (err) {
+                console.error("[llm] 사용량 기록 실패:", err instanceof Error ? err.message : String(err));
+              }
+            });
             upRes.pipe(res);
             upRes.on("error", () => res.end());
           },
@@ -261,7 +325,13 @@ export function makeLlmProxyHandler(deps: LlmProxyDeps): (req: http.IncomingMess
         else res.end();
       });
       // 세션이 요청을 끊으면(취소) 업스트림 요청도 끊는다 — 남은 스트림이 자격증명으로 계속 돌지 않게.
-      res.on("close", () => { if (!up.destroyed) up.destroy(); });
+      res.on("close", () => {
+        // 진단(N0): 응답이 시작된 뒤 업스트림이 끝나기 전에 클라이언트가 끊었다. Claude Code 가 스트리밍을 재시도하다
+        // 비스트리밍으로 폴백하는 증상(claude-code #84442 류)이면 이 줄이 턴마다 여러 번 찍힌다. 정상 완료에서는 'close' 가
+        // 'end' 뒤에 오므로 찍히지 않는다.
+        if (res.headersSent && !upstreamEnded) console.warn(`[llm] 세션이 응답 도중 연결을 끊었어요 — ${forwarded} 바이트 전달 뒤`);
+        if (!up.destroyed) up.destroy();
+      });
       up.end(body);
     });
   };
