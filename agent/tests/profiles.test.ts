@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { profileFor, GUEST_MODEL, OWNER_MCP_HUB, GUEST_MCP_HUB } from "../src/core/profiles.js";
+import { profileFor, GUEST_MODEL, OWNER_MCP_HUB, GUEST_MCP_HUB, DEFAULT_MAX_TURNS } from "../src/core/profiles.js";
 
 // 풀 하네스 2단계(2026-09-05 밤): 신원 → 세션 프로필(스펙 §6). 2단계에서 새 경로를 타는 것은 소유자 턴뿐이지만,
 // 프로필은 네 신원 모두 정의해 둔다 — 5단계(부원 개방)가 이 표를 그대로 쓴다. 소유자 = 전부(Opus 5·기본 effort·
@@ -10,7 +10,9 @@ describe("profileFor", () => {
   it("소유자(DM·서버)는 운영자 모델·기본 effort·서브에이전트 열림·허브 MCP(GitHub·Supabase)", () => {
     for (const isPrivate of [true, false]) {
       const p = profileFor({ isOwner: true, isPrivate, role: "owner" }, owner);
-      expect(p).toEqual({ model: "claude-opus-5", maxTurns: 30, subagents: true, mcpHub: ["github", "supabase"] });
+      // maxTurns 는 숫자를 다시 적지 않는다(2026-09-17) — 상수를 테스트가 손으로 베끼면 값이 바뀔 때
+      // 여기만 빨개지고, 정작 "설정에서 내려온 값을 쓰는가"는 검증하지 못한다. 그건 아래 별도 케이스가 본다.
+      expect(p).toEqual({ model: "claude-opus-5", maxTurns: DEFAULT_MAX_TURNS, subagents: true, mcpHub: ["github", "supabase"] });
     }
     // 4단계 4.1·4.2: 소유자만 허브 GitHub·Supabase 를 연다. 상수와 어긋나지 않게 대조한다.
     expect([...OWNER_MCP_HUB]).toEqual(["github", "supabase"]);
@@ -19,7 +21,7 @@ describe("profileFor", () => {
   it("손님(DM·서버)은 Sonnet 5·낮은 effort·서브에이전트 끔·허브 MCP 는 Supabase 만", () => {
     for (const isPrivate of [true, false]) {
       const p = profileFor({ isOwner: false, isPrivate, role: "allowed" }, owner);
-      expect(p).toEqual({ model: GUEST_MODEL, effort: "low", maxTurns: 30, subagents: false, mcpHub: ["supabase"] });
+      expect(p).toEqual({ model: GUEST_MODEL, effort: "low", maxTurns: DEFAULT_MAX_TURNS, subagents: false, mcpHub: ["supabase"] });
       // ADR 0010(2026-09-17): DB 읽기는 신원으로 갈리지 않는다 — 봇 세션 경로에서 열어 두고 하네스
       // 경로만 닫으면 "같은 사람이 같은 채널에서 물어도 경로에 따라 답이 갈리는" 어긋남이 남는다.
       // GitHub 허브는 그대로 소유자만이다(설치 토큰이라 축이 다르다).

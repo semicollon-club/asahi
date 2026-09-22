@@ -20,7 +20,7 @@ import type { ImageInput } from "./images.js";
 import { skillPluginDirFrom, resolveSkillsEnabled, skillPluginsFor } from "./skills.js";
 import { progressFromMessage, isProgressUpdate, type PendingTool, type ProgressUpdate } from "./sdkEvents.js";
 import { buildSystemPrompt } from "./persona.js";
-import { profileFor } from "./profiles.js";
+import { profileFor, DEFAULT_MAX_TURNS } from "./profiles.js";
 import { shellGitArgs } from "./remoteTools.js";
 import { isSessionNotFound } from "./turnPrep.js";
 import type { TurnOutcome, TurnStartInput } from "../remote/hub.js";
@@ -252,8 +252,15 @@ export function makeRunAgentTurn(
   // botVersion(1단계, 미니PC 단일 호스트): index.ts 가 기동 시 resolveBotVersion(remote/gitCommit.ts)으로 읽은
   // 봇 자기 커밋·브랜치. 없으면 예전처럼 Railway 주입 변수를 그대로 본다(아래 runtime).
   // harness(2단계): HARNESS_OWNER 플래그. 켜져 있고 조건이 맞는 소유자 턴은 아래 runHarnessTurn 으로 간다.
-  extras: { jobTokens?: JobTokenMinter; botVersion?: BotVersion; harness?: { enabled: boolean; browser?: boolean } } = {},
+  // maxTurns(2026-09-17): 한 턴의 최대 스텝. config.sessionMaxTurns 가 그대로 내려온다. 예전엔 이 값이
+  // 아래 두 곳(runtime 보고·query 옵션)에 리터럴 30 으로 박혀 있었고 profiles.ts 에도 같은 수가 따로
+  // 있었다 — 세 곳이 손으로 맞춰져 있었으므로 설정으로 바꿀 수도, 한 곳만 고쳐도 조용히 갈라지는 것을
+  // 막을 수도 없었다. 이제 이 인자 하나가 세 자리 전부의 출처다(하네스는 profileFor 로 넘긴다).
+  extras: { jobTokens?: JobTokenMinter; botVersion?: BotVersion; harness?: { enabled: boolean; browser?: boolean }; maxTurns?: number } = {},
 ): TurnRunner {
+  // 기본값을 여기서 한 번만 푼다 — 호출측(테스트 등)이 안 넘겼을 때 아래 세 자리가 각자 다른 값으로
+  // 떨어지지 않게 하기 위해서다. profiles.DEFAULT_MAX_TURNS 를 그대로 쓴다(그쪽이 이 상수의 정본).
+  const maxTurns = extras.maxTurns ?? DEFAULT_MAX_TURNS;
   // sh_exec 의 git 이 쓸 단기 토큰 공급원(2026-09-05). 턴이 아니라 이 러너의 수명으로 하나만 만든다 —
   // 캐시가 턴을 넘어 살아야 sh_exec 호출마다 깃허브 API 를 두드리지 않는다(shellToken.ts). 깃허브
   // 설정이 없으면 만들지 않고, 그러면 remoteTools.ts 가 토큰 대신 사유를 워커에 실어 보낸다.
@@ -263,7 +270,7 @@ export function makeRunAgentTurn(
     // runtime_info 가 한 화면에서 설명하게 해 준다. 1단계(2026-09-05)부터 값은 extras.botVersion(git 에서 읽은
     // 것)이 우선이고, 없을 때만 Railway 주입 변수로 떨어진다 — 미니PC 에는 그 변수가 없다.
     const runtime: RuntimeInfo = {
-      model, sdkVersion: SDK_VERSION, deployTarget, maxTurns: 30,
+      model, sdkVersion: SDK_VERSION, deployTarget, maxTurns,
       botCommit: extras.botVersion?.commit ?? process.env.RAILWAY_GIT_COMMIT_SHA,
       botBranch: extras.botVersion?.branch ?? process.env.RAILWAY_GIT_BRANCH,
       workers: hub?.workersInfo() ?? [],
@@ -372,7 +379,7 @@ export function makeRunAgentTurn(
         mcpServers: { [TOOL_SERVER]: server },
         permissionMode: "default",
         model,
-        maxTurns: 30,
+        maxTurns,
         // 스킬은 agent/skill-plugin/ 에 플러그인 하나로 모여 있다(agent/skill-plugin/.claude-plugin).
         // 외부 스킬은 그 폴더에 그대로 복사해 커밋하는 것이 설치 방식이다.
         plugins: SKILL_PLUGINS,
@@ -421,7 +428,7 @@ export function makeRunAgentTurn(
     jobTokens: JobTokenMinter,
     h: NonNullable<typeof hub>,
   ): Promise<TurnResult> {
-    const profile = profileFor(req.context, { ownerModel: model });
+    const profile = profileFor(req.context, { ownerModel: model, maxTurns });
     // 작업 토큰에 이 턴의 고정 모델(3단계 3.1)과 허용 허브 MCP 서버 목록(4단계 4.2)을 싣는다 — 프록시가 본문
     // model 을 여기에 고정하고, 허브가 요청한 서버가 이 목록에 있는지 검사한다(세션이 Bash 로 우회해도 경계가 선다).
     const token = jobTokens.mint({

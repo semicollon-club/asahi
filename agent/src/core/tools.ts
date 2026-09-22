@@ -296,7 +296,16 @@ export async function listDirsHandler(ctx: ToolCtx): Promise<string> {
 //
 // role 은 그래도 본다: decideRoute(adapters/discord.ts)가 blocked 를 이미 끊지만, allowedToolsFor
 // 의 마지막 분기가 같은 이유로 role 을 한 번 더 보는 것과 같은 심층 방어다.
-function canReadDb(ctx: ToolCtx): boolean { return ctx.role === "owner" || ctx.role === "allowed"; }
+// 등록된 부원인가 — 신원 특권이 아니라 decideRoute 가 이미 거른 것을 핸들러에서 한 번 더 보는
+// 심층 방어다. 아래 두 술어가 이 하나를 공유한다: 축이 같은데 본문을 따로 두면 한쪽만 고쳐져
+// 조용히 갈라진다.
+function isRegisteredMember(ctx: ToolCtx): boolean { return ctx.role === "owner" || ctx.role === "allowed"; }
+
+function canReadDb(ctx: ToolCtx): boolean { return isRegisteredMember(ctx); }
+
+// runtime_info 전용(ADR 0012). canReadDb 와 같은 축이지만 이름을 따로 둔다 — SQL 읽기와 운영
+// 정보 조회는 서로 다른 결정이고, 한쪽 정책이 바뀔 때 다른 쪽이 딸려가지 않게 한다.
+function canSeeRuntime(ctx: ToolCtx): boolean { return isRegisteredMember(ctx); }
 
 export async function dbSchemaHandler(ctx: ToolCtx): Promise<string> {
   if (!canReadDb(ctx)) return NOT_ALLOWED;
@@ -320,10 +329,14 @@ export async function dbQueryHandler(ctx: ToolCtx, args: { sql: string }): Promi
 // 작업을 하다 버전을 확인하려면 DM 으로 나가야 했고, 정작 DM 의 답은 다른 기계 얘기였다 —
 // 같은 기계를 두고 두 도구가 서로 다른 장소를 요구해 실제로 사람을 오진으로 몰았다.
 //
-// 함께 묶여 있던 db_schema/db_query 는 2026-09-17 에 신원 게이트 자체가 사라졌다(위 canReadDb).
-// 이 도구는 그대로 소유자만 쓴다 — 모델명·SDK 버전·커밋·한도는 DB 에 쌓이는 동아리 작업 기록이
-// 아니라 봇 자신의 운영 정보다. 노출(allowedToolsFor)과 실행(이 게이트)이 같은 기준(isOwner)을
-// 쓰므로 "도구는 보이는데 실행하면 거부"가 생기지 않는다.
+// 2026-09-17(ADR 0012): 남아 있던 isOwner 게이트도 걷어냈다. 이 도구가 소유자 전용이었던 것은
+// 이 도구를 두고 따로 내린 판단이 아니다 — 2026-07-12 자기인지 계획이 db_schema/db_query/
+// runtime_info 셋을 한 줄로 묶어 같은 게이트를 걸었고, 그 근거로 적힌 것은 DB 노출 쪽이었다.
+// 묶음의 나머지 둘이 ADR 0010 으로 열린 뒤에는 남을 이유가 없는 잔재였다. 보고하는 값(모델명·
+// SDK 버전·배포 대상·커밋 SHA·maxTurns·한도 안내 한 줄)에 비밀도 개인정보도 없고, 오히려
+// "지금 봇이 어느 코드로 도는가"는 부원이 스스로 확인할 수 있어야 하는 값이다 — 배포 추적을
+// 소유자 한 사람에게 병목시킬 이유가 없다. 이제 노출(allowedToolsFor)과 실행(이 핸들러)이
+// canReadDb 와 같은 축(등록된 부원)을 쓰므로 "도구는 보이는데 실행하면 거부"가 생기지 않는다.
 // 2026-09-03: 봇 커밋과 워커 커밋을 SHA 로 대조하던 판정(`봇과 일치` / `봇과 다름 — 워커 갱신
 // 필요`)을 걷어냈다. 두 값은 애초에 같은 갈래의 커밋이 아니라, 다르다는 사실만으로는 워커가
 // 낡았는지 알 수 없다. 두 가지가 각각 독립적으로 그 등식을 깬다.
@@ -343,7 +356,7 @@ export async function dbQueryHandler(ctx: ToolCtx, args: { sql: string }): Promi
 // 판정하려면 커밋 신원이 아니라 돌고 있는 코드를 견주는 다른 장치가 필요하고, 그건 별도 작업이다.
 // 워커가 아예 사라지는 쪽은 staleWorker.ts 의 decideMissingAlerts 가 그대로 지킨다.
 export async function runtimeInfoHandler(ctx: ToolCtx): Promise<string> {
-  if (!ctx.isOwner) return OWNER_ONLY;
+  if (!canSeeRuntime(ctx)) return NOT_ALLOWED;
   const r = ctx.runtime;
   const short = (sha: string) => sha.slice(0, 7);
   const botLine =
@@ -391,6 +404,8 @@ export async function runtimeInfoHandler(ctx: ToolCtx): Promise<string> {
 // 의 resolveWorkerSelector). 예전엔 원격 도구 자체가 owner-DM 전용이었지만, 이제는 그렇지 않다:
 // - DB 읽기(db_schema/db_query)는 2026-09-17 부터 **네 분기 전부**에 있다(ADR 0010) — 신원도
 //   채널도 보지 않는다. 쓰기는 두 겹의 읽기 전용 보장이 막는다(ADR 0004).
+// - runtime_info 도 같은 날 **네 분기 전부**로 갔다(ADR 0012). 아래 소유자 항목에 이 이름이
+//   남아 있는 것은 그 계층에도 있다는 뜻일 뿐, 그 계층에만 있다는 뜻이 아니다.
 // - 소유자 DM: 기억 전체 + 접근관리(manage_access 만 DM 전용으로 남는다 — 신원 표를 바꾸는
 //   일이다) + forget(공용 기억 삭제) + runtime_info + 워커(그 소유자의 개인 기계)가 연결돼
 //   있으면 원격 파일/셸 도구(fs_*/sh_exec)와 허용폴더 관리 도구(allow_dir/revoke_dir/list_dirs)까지.
@@ -502,6 +517,11 @@ export function allowedToolsFor(
   // 없다. 조건 없는 배열을 굳이 상수로 두는 이유는 "이 둘은 어느 계층에서도 같다"를 코드 모양으로
   // 고정하기 위해서다: 분기마다 이름을 따로 적으면 한 분기에만 더하거나 빠뜨리는 드리프트가 생긴다.
   const dbTools = [t("db_schema"), t("db_query")];
+  // runtime_info(ADR 0012). dbTools 와 같은 이유로 조건 없는 배열이다 — 2026-09-17 부터 네 분기
+  // 전부에 들어가고 신원·채널로 갈리지 않는다. 배열로 두는 것도 같은 이유다: 분기마다 이름을
+  // 따로 적으면 한 곳만 빠뜨리는 드리프트가 생긴다(예전 이 도구가 정확히 그 상태였다 — 소유자
+  // 두 분기에만 손으로 적혀 있었다).
+  const runtimeTools = [t("runtime_info")];
   // Important 2(리뷰 후속) — forget 도 같은 축에 묶는다. 소유자 두 분기에만 들어가므로 배열을
   // 따로 두는 이유는 자리다: remember 와 forget 이 각 분기에서 서로 다른 위치에 놓인다.
   const forgetTools = memoryWriteEnabled ? [t("forget")] : [];
@@ -510,24 +530,24 @@ export function allowedToolsFor(
       ...remote, ...publishTools,
       ...memoryTools, t("recall"), t("manage_access"), ...forgetTools,
       ...dirTools,
-      ...dbTools, t("runtime_info"),
+      ...dbTools, ...runtimeTools,
       ...webTools,
     ];
   }
   // 소유자가 서버에 있으면 공유 기계 + 관리자 권한(폴더 관리 포함). 접근관리(manage_access)만
   // DM 전용으로 남는다 — 그건 기계가 아니라 봇의 신원 표에 대한 권한이라 공개 채널에서 열 이유가
   // 없다. DB 읽기는 2026-09-17 부터 여기에도 있다(ADR 0010).
-  // runtime_info 는 예외로 여기서도 연다(2026-08-01): 소유자가 공유 기계에 닿는 곳이 서버
-  // 채널뿐이라, 그 기계의 버전을 물어볼 수 있는 유일한 장소도 여기다.
+  // runtime_info 는 2026-08-01 에 이 분기로 넓어졌고(소유자가 공유 기계에 닿는 곳이 서버
+  // 채널뿐이었다), 2026-09-17(ADR 0012)부터는 네 분기 전부에 있다 — 위 runtimeTools.
   // remember 도 마찬가지로 연다(2026-08-02): 서버 채널의 저장은 개인 기억이 아니라 동아리
   // 공용 기억이고(memoryScope.ts), 그것을 만들 수 있는 곳이 여기뿐이다.
   // forget 도 같은 이유로 연다(2026-08-02, Task 3): 부원이 쌓는 공용 기억이 틀리거나 낡으면
   // 정리해야 하는데, 그 정리 대상도 그걸 할 수 있는 소유자도 전부 이 서버 분기에만 있다.
   // 단 remember 와 마찬가지로 memoryWriteEnabled 축이 닫히면 함께 닫힌다(위 forgetTools).
-  if (isOwner) return [...remote, ...publishTools, ...memoryTools, t("recall"), ...forgetTools, ...dirTools, ...dbTools, t("runtime_info"), ...webTools];
+  if (isOwner) return [...remote, ...publishTools, ...memoryTools, t("recall"), ...forgetTools, ...dirTools, ...dbTools, ...runtimeTools, ...webTools];
   // 손님: DM 이든 서버든 공유 기계로 간다. 폴더 관리는 주지 않는다.
   if (isPrivate && (role === "owner" || role === "allowed")) {
-    return [...remote, ...publishTools, ...memoryTools, t("recall"), ...dbTools, ...webTools];
+    return [...remote, ...publishTools, ...memoryTools, t("recall"), ...dbTools, ...runtimeTools, ...webTools];
   }
   // Minor(최종 전체 브랜치 리뷰) — 이 마지막 catch-all 은 role 을 보지 않아
   // allowedToolsFor("blocked", ...) 도 remember·recall 을 돌려줬다(실측). 위 손님 DM 분기는
@@ -540,7 +560,7 @@ export function allowedToolsFor(
   // 되므로 여기서 remember 를 부르면 반드시 공용이 된다.
   // 발행도 여기서 연다 — 부원이 만든 것을 올리는 것이 이 기능의 목적이고, 손님은 어차피 자기
   // 폴더·자기 리포에만 닿는다(publish.ts 의 decideOwnership, workerSelect.ts 의 scopeDirs).
-  return [...remote, ...publishTools, ...memoryTools, t("recall"), ...dbTools, ...webTools];
+  return [...remote, ...publishTools, ...memoryTools, t("recall"), ...dbTools, ...runtimeTools, ...webTools];
 }
 
 // ── 인프로세스 MCP 서버(SDK) — handler 는 위 순수 함수를 감싼다 ──────────────
@@ -1067,7 +1087,7 @@ export function buildToolDefinitions(ctx: ToolCtx) {
     ),
     tool(
       "runtime_info",
-      "(소유자 전용) 내가 어떤 모델·SDK·배포 설정으로 동작 중인지, 그리고 지금 연결된 워커가 어느 커밋으로 도는지 보여줍니다.",
+      "내가 어떤 모델·SDK·배포 설정으로 동작 중인지, 그리고 지금 연결된 워커가 어느 커밋으로 도는지 보여줍니다.",
       {},
       async () => textResult(await runtimeInfoHandler(ctx)),
     ),

@@ -39,6 +39,14 @@ export type Config = {
   // 멀티유저 한도(2B): 코어는 이 3개를 사용한다. maxTurnsPerHour 는 하위호환용으로 남긴다.
   maxTurnsPerHourPerUser: number; // 유저별 시간당 상한 (기본 20)
   maxTurnsPerHourGlobal: number;  // 전역 시간당 상한 (기본 40)
+  // 한 턴 안에서 모델이 돌 수 있는 최대 스텝(2026-09-17). 위 세 값과 축이 다르다 — 저건 "시간당 몇 번
+  // 부를 수 있나"(남용 방지)이고, 이건 "한 번 부르면 얼마나 오래 일할 수 있나"다. 예전엔 30 이
+  // agent.ts 와 profiles.ts 두 곳에 리터럴로 박혀 설정으로 바꿀 수 없었다. 기본을 60 으로 올린 것은
+  // 실측 때문이다 — 파일 여러 개를 고치는 작업은 파일마다 읽고·고치고·확인하는 왕복이 붙어 30 에서
+  // 반복해 끊겼다(2026-09-17, 한 작업이 세 번 끊김). 30 은 대화형 답변에나 맞는 값이다.
+  // 선택인 이유는 값이 없어도 되기 때문이 아니라(loadConfig 는 항상 채운다) 이 타입을 손으로
+  // 조립하는 테스트 픽스처가 여럿이라서다. 없으면 agent.ts 가 profiles.DEFAULT_MAX_TURNS 로 떨어진다.
+  sessionMaxTurns?: number;
   ownerReserve: number;           // (현재 미사용) 소유자는 무제한 정책이라 예약 불필요 — 하위호환 위해 로드만 유지
   // 배포 대상(Railway 조각2): cloud 는 소유자 PC 가 없는 컨테이너 실행을 뜻하며, PC 도구(파일/Bash)를 비활성한다.
   // 기본은 local(기존 동작 그대로). DEPLOY_TARGET 값이 정확히 "cloud" 일 때만 cloud, 그 외(미설정·오타)는 local.
@@ -129,6 +137,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     maxTurnsPerHour: positiveNumberEnv(env, "MAX_TURNS_PER_HOUR", 30),
     maxTurnsPerHourPerUser: positiveNumberEnv(env, "MAX_TURNS_PER_HOUR_PER_USER", 20),
     maxTurnsPerHourGlobal: positiveNumberEnv(env, "MAX_TURNS_PER_HOUR_GLOBAL", 40),
+    sessionMaxTurns: positiveNumberEnv(env, "SESSION_MAX_TURNS", 60),
     ownerReserve: positiveNumberEnv(env, "OWNER_RESERVE", 10),
     deployTarget: env.DEPLOY_TARGET === "cloud" ? "cloud" : "local",
     model: env.ANTHROPIC_MODEL || "claude-opus-5",

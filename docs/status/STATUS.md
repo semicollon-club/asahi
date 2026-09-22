@@ -136,9 +136,10 @@ lastReviewed: 2026-09-05
   `CHANGELOG.md` 참고).
 - **자기인지 DB 조회(조각C)** — 스키마 조회·읽기전용 SQL 질의(`db_schema`/`db_query`)와 런타임
   정보 제공(`runtime_info`). Postgres READ ONLY 트랜잭션 + 정적 SQL 가드 + 타임아웃으로 다층
-  방어한다. **DB 조회 두 도구는 2026-09-17 부터 등록된 부원 전원에게 열린다**(신원·채널을 보지
-  않는다 — [ADR 0010](../decisions/0010-db-read-for-all-members.md)); `runtime_info` 는 그대로
-  소유자 전용이다.
+  방어한다. **세 도구 모두 2026-09-17 부터 등록된 부원 전원에게 열린다** — DB 조회 두 도구는
+  신원·채널을 보지 않고([ADR 0010](../decisions/0010-db-read-for-all-members.md)),
+  `runtime_info` 도 같은 날 신원 게이트가 사라졌다
+  ([ADR 0012](../decisions/0012-runtime-info-for-all-members.md)).
 - **디스코드 이미지 입력(멀티모달)** — 이미지 첨부를 모델에 직접 전달한다. 과거 이미지는
   재주입하지 않고 마커만 저장한다(비용 방지).
 - **디스코드 파일 올리기(2026-08-01)** — 이미지가 아닌 첨부(PDF 등)가 그 사람의 워커 작업
