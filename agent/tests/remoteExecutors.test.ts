@@ -4,6 +4,7 @@ import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import iconv from "iconv-lite";
 import {
   makeExecutors,
   OUTPUT_MAX,
@@ -195,6 +196,58 @@ describe("워커 실행기", () => {
     expect(r.content).toContain("[0]");
   });
 
+  // N4(2026-11-25): 윈도우 내장 명령은 콘솔 코드페이지(미니PC 949)로 낸다. 실제로 cp949 바이트를 내는 자식을 띄워 sh_exec 가
+  // 줄마다 판정하는지 본다. 어느 OS 에서든 같도록 node 가 바이트를 직접 쓰고, 셸마다 다른 인용을 피하려고 스크립트 파일로 둔다.
+  // 앞줄 cp949·뒷줄 UTF-8 은 실측한 섞임 그대로이고, stdout 에 반만 쓴 글자 사이에 stderr 의 cp949 줄이 끼어드는 경우를 더했다.
+  const writeMixedEncodingScript = (dir: string): string => {
+    const hex = (s: string) => iconv.encode(s, "cp949").toString("hex");
+    const script = path.join(dir, "mixed.cjs");
+    fs.writeFileSync(script, [
+      `const half = Buffer.from("반쪽 글자\\n");`,
+      `process.stdout.write(Buffer.from("${hex("지정된 파일을 찾을 수 없습니다.\r\n")}", "hex"));`,
+      `process.stdout.write("뒷줄 utf8 한글\\n");`,
+      `process.stdout.write(half.subarray(0, 1));`,
+      `setTimeout(() => {`,
+      `  process.stderr.write(Buffer.from("${hex("액세스가 거부되었습니다.\r\n")}", "hex"));`,
+      `  setTimeout(() => process.stdout.write(half.subarray(1)), 30);`,
+      `}, 30);`,
+    ].join("\n"));
+    return `"${process.execPath}" mixed.cjs`;
+  };
+
+  it("sh_exec 는 UTF-8 이 아닌 줄을 콘솔 코드페이지로 읽는다(N4)", async () => {
+    const ex949 = makeExecutors([root], { consoleCodePage: 949 });
+    const r = await ex949.sh_exec({ command: writeMixedEncodingScript(root) });
+    expect(r.ok).toBe(true);
+    expect(r.content).toContain("지정된 파일을 찾을 수 없습니다.");
+    expect(r.content).toContain("뒷줄 utf8 한글");
+    expect(r.content).toContain("액세스가 거부되었습니다.");
+    expect(r.content).toContain("반쪽 글자");
+    expect(r.content).not.toContain("�");
+  });
+
+  // 2026-11-25 리뷰: cp949 `카타.txt`·`책` 은 UTF-8 로도 온전해서(īŸ.txt·å) 줄 하나만 보면 조용히 틀린다. 같은 출력에 cp949 가
+  // 확실한 줄(`과제`)이 있으면 그것을 근거로 바로잡는다 — dir /b 의 짧은 이름이 정확히 이 모양이다.
+  it("sh_exec 는 UTF-8 로도 읽히는 짧은 cp949 줄을 같은 출력의 다른 줄을 근거로 바로잡는다(N4)", async () => {
+    const ex949 = makeExecutors([root], { consoleCodePage: 949 });
+    const bytes = iconv.encode("카타.txt\r\n책\r\n과제\r\n", "cp949").toString("hex");
+    fs.writeFileSync(path.join(root, "dirb.cjs"), `process.stdout.write(Buffer.from("${bytes}", "hex"));\n`);
+    const r = await ex949.sh_exec({ command: `"${process.execPath}" dirb.cjs` });
+    expect(r.ok).toBe(true);
+    expect(r.content).toContain("카타.txt");
+    expect(r.content).toContain("책");
+    expect(r.content).toContain("과제");
+  });
+
+  it("sh_exec 는 코드페이지가 없으면 예전처럼 UTF-8 로만 읽되, 청크에 걸린 글자는 다시 붙인다", async () => {
+    const r = await ex.sh_exec({ command: writeMixedEncodingScript(root) });
+    expect(r.ok).toBe(true);
+    expect(r.content).toContain("�");
+    expect(r.content).not.toContain("지정된");
+    expect(r.content).toContain("뒷줄 utf8 한글");
+    expect(r.content).toContain("반쪽 글자");
+  });
+
   it("describeExit 는 신호 종료(code=null)를 코드 대신 사실로 적는다", () => {
     // "(종료 코드 null)" 은 사람에게도 모델에게도 의미가 없다.
     expect(describeExit("", null)).toContain("신호로 종료됨");
@@ -245,6 +298,14 @@ describe("워커 실행기", () => {
     // 상수와 몰래 따로 노는 하드코딩 사본이 다시 생겼다는 뜻이다(고치려던 중복의 재발).
     const literalOccurrences = src.split(`"${SH_EXEC_TIMEOUT_HINT}"`).length - 1;
     expect(literalOccurrences).toBe(1);
+  });
+
+  // N4 리뷰(2026-11-25): 출력은 다 모인 뒤에 디코드하므로, 본문을 만드는 두 자리(close·hardTimer) 모두 collectShellOutput() 으로
+  // 끝나지 않은 마지막 줄까지 모아야 한다. hardTimer 갈래는 위와 같은 이유로 실행해 볼 수 없어 소스에서 센다 — 한쪽이 빠지면 그
+  // 갈래의 본문에서 마지막 줄(줄바꿈 없는 출력이면 전부)이 사라진다.
+  it("close·hardTimer 두 갈래 모두 collectShellOutput() 으로 본문을 만든다", () => {
+    const src = fs.readFileSync(EXECUTORS_SRC, "utf8");
+    expect(src.match(/= collectShellOutput\(\);/g) ?? []).toHaveLength(2);
   });
 
   it("루트가 비면 sh_exec 도 거부한다", async () => {
