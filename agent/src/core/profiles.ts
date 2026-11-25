@@ -22,9 +22,14 @@ export type HarnessProfile = {
   mcpHub?: string[];
 };
 
-// 소유자 하네스 턴에 여는 허브 MCP 서버(4단계). GitHub(읽기, 4.1)·Supabase(읽기, 4.2). Railway 는 보류 —
-// 봇에 Railway API 자격증명이 없고(호스트로만 썼다) 5단계에서 종료 예정이라, 필요해지면 토큰을 받아 더한다.
-export const OWNER_MCP_HUB = ["github", "supabase"] as const;
+// 소유자 하네스 턴에 여는 허브 MCP 서버(4단계). GitHub(읽기, 4.1)·Supabase(읽기, 4.2)·기억(2026-11-25, 기억 정비 3-1 —
+// remember·recall·forget, 봇 세션과 같은 핸들러). Railway 는 보류 — 봇에 Railway API 자격증명이 없고(호스트로만 썼다)
+// 5단계에서 종료 예정이라, 필요해지면 토큰을 받아 더한다.
+//
+// 기억은 소유자 프로필에만 먼저 연다. 손님은 아직 하네스로 가지 않고(봇 세션에서 기억 도구를 그대로 쓴다), 손님
+// 하네스 안내도 아직 없다 — X6(부원 하네스 개방)에서 아래 GUEST_MCP_HUB 에 "memory" 를 더한다. 그러지 않으면 부원이
+// 하네스로 옮겨 가는 순간 기억 도구를 잃는다.
+export const OWNER_MCP_HUB = ["github", "supabase", "memory"] as const;
 
 // 손님 하네스 턴에 여는 허브 MCP 서버(ADR 0010, 2026-09-17). DB 읽기만 연다 — 봇 세션 경로에서
 // db_schema/db_query 가 신원을 보지 않게 됐으므로, 하네스 경로만 닫아 두면 "같은 사람이 같은 채널에서

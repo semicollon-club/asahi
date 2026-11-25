@@ -27,6 +27,11 @@ export type JobTokenClaims = {
   // 이름이 이 목록에 있는지 검사해 없으면 거부한다(403). 프로필의 mcpHub 를 그대로 담는다. 없으면 빈 목록
   // 취급(어떤 허브 서버도 못 씀) — /llm·/files 토큰은 이 값이 없다(그쪽은 /mcp 를 안 탄다).
   mcpHub?: string[];
+  // 이 턴이 도는 대화의 위치(2026-11-25, 기억 정비 3-1). 참이면 DM, 거짓이면 서버 채널. 허브의 기억 서버
+  // (mcp/memoryServer.ts)가 이 값으로 개인·공용 기억을 가른다(memoryScopeFor 와 같은 축) — 하네스 턴의 시스템
+  // 프롬프트를 만든 것과 같은 context.isPrivate 로 발급하므로, 모델이 읽은 안내와 도구가 보는 위치가 같다.
+  // 없으면(파일 반환 토큰, 옛 토큰) 기억 서버는 거부한다 — 위치를 모르면 개인·공용을 가를 수 없다.
+  isPrivate?: boolean;
   // 만료 시각(ms since epoch). `now >= exp` 면 만료다 — 경계에서 유효하지 않다(jobToken.test.ts).
   exp: number;
 };
@@ -68,6 +73,7 @@ function isClaims(v: unknown): v is JobTokenClaims {
     typeof o.channelRef === "string" &&
     (o.model === undefined || typeof o.model === "string") &&
     (o.mcpHub === undefined || (Array.isArray(o.mcpHub) && o.mcpHub.every((s) => typeof s === "string"))) &&
+    (o.isPrivate === undefined || typeof o.isPrivate === "boolean") &&
     typeof o.exp === "number" && Number.isFinite(o.exp)
   );
 }
@@ -92,11 +98,12 @@ export function verifyJobToken(secret: Buffer, token: string, now: number): JobT
   }
   if (!isClaims(parsed)) return null;
   if (now >= parsed.exp) return null;
-  // 알려진 필드만 돌려준다 — payload 에 덧붙은 키가 호출측으로 새지 않게. model·mcpHub 는 있을 때만 싣는다.
+  // 알려진 필드만 돌려준다 — payload 에 덧붙은 키가 호출측으로 새지 않게. model·mcpHub·isPrivate 는 있을 때만 싣는다.
   return {
     jobId: parsed.jobId, userId: parsed.userId, conversationId: parsed.conversationId, channelRef: parsed.channelRef,
     ...(typeof parsed.model === "string" ? { model: parsed.model } : {}),
     ...(Array.isArray(parsed.mcpHub) ? { mcpHub: parsed.mcpHub } : {}),
+    ...(typeof parsed.isPrivate === "boolean" ? { isPrivate: parsed.isPrivate } : {}),
     exp: parsed.exp,
   };
 }

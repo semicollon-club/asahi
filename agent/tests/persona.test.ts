@@ -863,12 +863,13 @@ describe("buildSystemPrompt — 소유자가 직접 지시하는 기계 유지�
 // 풀 하네스 2단계(2026-09-05 밤): 소유자 턴이 세션 러너(계정 B 의 Claude Code)에서 돌 때의 능력 안내. 그 턴에는
 // 봇의 인프로세스 MCP 도구(fs_*/sh_exec/remember/recall/db_*/…)가 없고 Claude Code 내장 도구(Read/Write/Edit/Bash/
 // Glob/Grep/WebSearch…)가 있다 — 안내가 그 사실을 따라야 한다("안내와 실제 도구가 어긋남" 을 결함으로 다루는 이 파일의
-// 원칙). 기억 블록도 빼야 한다: remember/recall 을 쓰라고 해 놓고 도구를 안 주면 모델이 시도하다 실패를 사용자에게 전한다.
+// 원칙). 기억은 2026-11-25 부터 허브의 memory 서버(mcp__memory__*)로 있다 — 맨 이름(remember/recall/forget)을 쓰라고
+// 하면 모델이 이 턴에 없는 도구를 시도하다 실패를 사용자에게 전하므로, 안내는 네임스페이스 이름만 쓴다.
 describe("buildSystemPrompt — 하네스 턴(소유자, 세션 러너)", () => {
   const harness = { cwd: "C:\asahi-workspace" };
   const owners = ALL_IDENTITIES.filter((i) => i.ctx.isOwner);
 
-  it("소유자 두 분기에서 내장 도구와 작업 폴더를 안내하고, 원격 도구·기억 도구 이름은 쓰지 않는다", () => {
+  it("소유자 두 분기에서 내장 도구와 작업 폴더를 안내하고, 원격 도구 이름과 맨 기억 도구 이름은 쓰지 않는다", () => {
     for (const { ctx } of owners) {
       const p = buildSystemPrompt({ ...ctx, workerConnected: true, harness });
       const cap = capabilitySection(p);
@@ -880,13 +881,13 @@ describe("buildSystemPrompt — 하네스 턴(소유자, 세션 러너)", () => 
       expect(cap).not.toMatch(/fs_read|sh_exec|proc_start/);
       // 봇의 접근관리·runtime_info 는 이 턴에 없다. (DB 읽기는 4.2 에서 mcp__supabase__db_query 로 열렸다.)
       expect(cap).not.toMatch(/runtime_info|manage_access/);
-      // 기억 블록 자체가 빠진다 — remember/recall 이 이 턴에 없다.
-      expect(p).not.toMatch(/## 기억/);
-      expect(cap).not.toMatch(/remember|recall/);
+      // 맨 이름(remember/recall/forget)은 이 턴에 없는 도구다 — 프롬프트 어디에도(기억 블록 포함) 나오지 않는다.
+      // "mcp__memory__remember" 안의 remember 는 앞이 밑줄(단어 문자)이라 \b 에 걸리지 않는다 — 맨 이름만 잡힌다.
+      expect(p).not.toMatch(/\b(remember|recall|forget)\b/);
     }
   });
 
-  it("DB 읽기(4단계 4.2)는 mcp__supabase__db_schema·db_query 로 안내한다(쓰기·기억은 여전히 없음)", () => {
+  it("DB 읽기(4단계 4.2)는 mcp__supabase__db_schema·db_query 로 안내한다(쓰기는 여전히 없음)", () => {
     const cap = capabilitySection(buildSystemPrompt({ role: "owner", isPrivate: true, isOwner: true, workerConnected: true, harness }));
     expect(cap).toMatch(/mcp__supabase__db_schema/);
     expect(cap).toMatch(/mcp__supabase__db_query/);
@@ -908,9 +909,30 @@ describe("buildSystemPrompt — 하네스 턴(소유자, 세션 러너)", () => 
     expect(withoutBrowser).not.toMatch(/mcp__browser__/);
   });
 
-  it("기억 도구가 이 턴에 없다는 사실을 말한다 — 기억 요청을 받으면 그렇게 안내하게", () => {
-    const cap = capabilitySection(buildSystemPrompt({ role: "owner", isPrivate: true, isOwner: true, workerConnected: true, harness }));
-    expect(cap).toMatch(/기억/);
+  it("기억(2026-11-25, 허브 memory)은 mcp__memory__remember·recall·forget 으로 안내하고, '기억 도구가 없다'고 하지 않는다", () => {
+    for (const { ctx } of owners) {
+      const p = buildSystemPrompt({ ...ctx, workerConnected: true, harness });
+      const cap = capabilitySection(p);
+      expect(cap).toMatch(/mcp__memory__remember/);
+      expect(cap).toMatch(/mcp__memory__recall/);
+      expect(cap).toMatch(/mcp__memory__forget/);
+      expect(cap).not.toMatch(/기억 도구를 쓸 수 없어요/);
+      // 접근 권한 관리는 여전히 이 턴에 없다 — 없다는 사실을 말한다(도구 이름은 쓰지 않는다).
+      expect(cap).toMatch(/접근 권한 관리/);
+      // 하네스용 기억 블록이 들어간다. Claude Code 자체 메모 파일에 저장하지 말라는 줄이 있다 — 그 파일은 봇의
+      // 기억 목록에 실리지 않아 다른 대화에서 찾을 수 없다.
+      expect(p).toMatch(/## 기억/);
+      expect(p).toMatch(/CLAUDE\.md/);
+    }
+  });
+
+  it("기억의 범위 안내는 위치를 따른다 — DM 은 개인 기억, 서버 채널은 동아리 공용 기억(memoryScopeFor 와 같은 축)", () => {
+    const dm = capabilitySection(buildSystemPrompt({ role: "owner", isPrivate: true, isOwner: true, workerConnected: true, harness }));
+    expect(dm).toMatch(/개인 기억이 됩니다/);
+    expect(dm).not.toMatch(/모든 부원에게 보입니다/);
+    const server = capabilitySection(buildSystemPrompt({ role: "owner", isPrivate: false, isOwner: true, workerConnected: true, harness }));
+    expect(server).toMatch(/동아리 공용 기억이 되어 모든 부원에게 보입니다/);
+    expect(server).not.toMatch(/개인 기억이 됩니다/);
   });
 
   it("git 자격증명이 자동으로 붙는다는 것과 표준 절차를 알린다(githubReady 일 때)", () => {

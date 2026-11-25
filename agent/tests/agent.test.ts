@@ -495,8 +495,11 @@ describe("makeRunAgentTurn — 하네스 디스패치(소유자, HARNESS_OWNER)"
     expect(started).toHaveLength(1);
     const input = started[0].input;
     expect(input).toMatchObject({ userId: "owner", cwd: "C:\\asahi-workspace", prompt: "사용자(운영자) 메시지: 파일 하나 만들어", profile: { model: "claude-opus-5", subagents: true } });
-    // 토큰은 이 부원·이 대화·이 채널로 발급된 진짜 작업 토큰이다.
-    expect(minter.verify(input.token as string)).toMatchObject({ userId: "owner", conversationId: 3, channelRef: "chan-3" });
+    // 토큰은 이 부원·이 대화·이 채널로 발급된 진짜 작업 토큰이다. 위치(isPrivate)도 싣는다 — 허브의 기억 서버가
+    // 이 값으로 개인·공용을 가른다(2026-11-25). 허용 허브 목록은 프로필 그대로다(memory 포함).
+    expect(minter.verify(input.token as string)).toMatchObject({
+      userId: "owner", conversationId: 3, channelRef: "chan-3", isPrivate: true, mcpHub: ["github", "supabase", "memory"],
+    });
     // 시스템 프롬프트는 봇용이 아니라 하네스용이다 — 내장 도구를 안내하고 원격 도구 이름은 없다.
     expect(String(input.systemPrompt)).toMatch(/Bash/);
     expect(String(input.systemPrompt)).not.toMatch(/fs_read|sh_exec/);
