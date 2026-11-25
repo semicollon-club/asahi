@@ -222,7 +222,10 @@ export class PrTracker {
       return;
     }
     for (const n of notices) {
-      this.deps.bus.publish({ type: n.kind, channel: "discord", channelRef, text: n.text, ts: now });
+      // 턴을 끝내지 않는 알림으로 보낸다(2026-11-25) — PR 을 낸 그 스레드에서 다른 작업이 도는 중일 수 있다. system_notice·
+      // assistant_message 로 보내면 어댑터가 그 턴의 진행 표시를 닫고 반응 순번을 하나 넘긴다(bus.ts 의 SideNoticeEvent).
+      // 경고였던 것(CI 실패 등)은 warn 으로 같은 표시를 유지한다.
+      this.deps.bus.publish({ type: "side_notice", channel: "discord", channelRef, text: n.text, ts: now, ...(n.kind === "system_notice" ? { warn: true as const } : {}) });
     }
   }
 
@@ -242,8 +245,9 @@ export class PrTracker {
         } catch (err) {
           console.error("[prTracker] 표시 이름 조회 실패 — id 로 진행:", err);
         }
+        // 소유자 DM 에서 소유자가 작업 중일 수 있다 — 위 apply 와 같은 이유로 턴을 끝내지 않는 알림이다.
         this.deps.bus.publish({
-          type: "assistant_message", channel: "discord", channelRef,
+          type: "side_notice", channel: "discord", channelRef,
           text: ownerNoticeText(row, names[row.requesterUserId] ?? row.requesterUserId), ts: now,
         });
       }

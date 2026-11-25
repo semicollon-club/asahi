@@ -127,6 +127,8 @@ async function setup(over: {
   bus.subscribe("assistant_message", (e) => { published.push(e); });
   bus.subscribe("system_notice", (e) => { published.push(e); });
   bus.subscribe("progress", (e) => { published.push(e); });
+  // 턴을 끝내지 않는 알림(2026-11-25) — 턴 도중의 이미지 실패 안내 등이 이리로 간다.
+  bus.subscribe("side_notice", (e) => { published.push(e); });
   return {
     db, bus, core, calls, published, repos, resolvers,
     setClock: (t: number) => { clock = t; },
@@ -1364,7 +1366,9 @@ describe("AgentCore — 이미지 입력", () => {
     expect(recent.some((m) => m.role === "user" && m.content.includes("[이미지 1장: a.png]"))).toBe(true);
   });
 
-  it("이미지 다운로드가 전부 실패하면 system_notice 로 안내하되, 턴은 텍스트만으로 계속 진행된다", async () => {
+  // 2026-11-25: 안내는 턴을 끝내지 않는 side_notice(경고)다 — system_notice 는 어댑터에서 "이 턴이 끝났다"로 읽혀 진행
+  // 표시를 닫고 반응 순번을 넘겼다(답이 아직 안 나왔는데).
+  it("이미지 다운로드가 전부 실패하면 턴을 끝내지 않는 경고(side_notice)로 안내하되, 턴은 텍스트만으로 계속 진행된다", async () => {
     const failFetch = (async () => ({ ok: false }) as Response) as unknown as typeof fetch;
     const t = await setup({ imageFetch: failFetch });
     const hint = dmHint("owner", "owner");
@@ -1375,9 +1379,11 @@ describe("AgentCore — 이미지 입력", () => {
     expect(t.calls).toHaveLength(1);
     expect(t.calls[0].images).toHaveLength(0); // 다운로드 실패로 이미지 없이 전달
     // 사용자에게 실패를 안내
-    const notice = t.published.find((e) => e.type === "system_notice" && e.text.includes("불러오지"));
+    const notice = t.published.find((e) => e.type === "side_notice" && e.text.includes("불러오지"));
     expect(notice).toBeDefined();
     expect(notice?.channelRef).toBe("dm-owner");
+    expect(notice?.type === "side_notice" ? notice.warn : undefined).toBe(true);
+    expect(t.published.some((e) => e.type === "system_notice" && e.text.includes("불러오지"))).toBe(false);
   });
 });
 

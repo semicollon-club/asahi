@@ -329,7 +329,9 @@ async function main() {
         .then((conv) => {
           for (const text of alerts) {
             if (conv === null) { console.error("[stale]", text); continue; }
-            bus.publish({ type: "system_notice", channel: "discord", channelRef: conv.discordChannelId, text, ts: Date.now() });
+            // 턴을 끝내지 않는 경고로 보낸다(2026-11-25) — 소유자가 DM 에서 작업 중이면 system_notice 가 그 턴의 진행 표시를
+            // 닫고 반응 순번을 하나 넘긴다(bus.ts 의 SideNoticeEvent).
+            bus.publish({ type: "side_notice", channel: "discord", channelRef: conv.discordChannelId, text, ts: Date.now(), warn: true });
           }
         })
         .catch((err) => console.error("[stale] 알림 발송 오류:", err));

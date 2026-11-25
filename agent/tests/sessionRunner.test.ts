@@ -162,7 +162,8 @@ describe("makeSessionRunner — turn.start 하나를 query() 한 번으로", () 
     expect(out.map((f) => f.type)).toEqual(["turn.event", "turn.event", "turn.event", "turn.result"]);
     expect(out[0]).toEqual({ type: "turn.event", id: "t1", event: { kind: "tool", name: "Read", input: "a.ts" } });
     expect(out[1]).toMatchObject({ type: "turn.event", id: "t1", event: { kind: "tool_result", name: "Read", ok: true, summary: "본문" } });
-    expect(out[2]).toEqual({ type: "turn.event", id: "t1", event: { kind: "answering" } });
+    // 텍스트 블록은 판단 줄(note)이다(2026-11-25 N1) — 봇 자기 세션과 같은 함수라 두 경로가 함께 바뀐다.
+    expect(out[2]).toEqual({ type: "turn.event", id: "t1", event: { kind: "note", text: "답" } });
     expect(out[3]).toEqual({ type: "turn.result", id: "t1", ok: true, text: "다 했어요", sessionId: "sess-new" });
     // query 에 넘긴 것: 프롬프트 그대로, 환경에는 프록시 주소·토큰·부원별 설정 폴더, 폴더는 실제로 만들어져 있다.
     expect(seen[0].prompt).toBe("hi");
@@ -242,6 +243,44 @@ describe("makeSessionRunner — turn.start 하나를 query() 한 번으로", () 
     await vi.waitFor(() => expect(out.some((f) => f.type === "turn.result")).toBe(true));
     expect(aborted).toBe(true);
     expect(out.at(-1)).toMatchObject({ type: "turn.result", ok: false });
+  });
+
+  // N2(2026-11-25): 사용자가 멈춘 턴도 이어받을 수 있어야 한다 — 예전엔 예외 갈래가 세션 id 를 버려, 봇이 다음 턴에
+  // 직전 성공 턴의 세션으로 돌아갔다(멈춘 턴이 한 일이 없는 세션).
+  it("중단돼도 그때까지의 세션 id 를 결과에 싣는다", async () => {
+    const q: SessionQuery = (p) => {
+      const ac = p.options.abortController as AbortController;
+      return (async function* () {
+        yield initMsg;
+        await new Promise<void>((resolve) => { ac.signal.addEventListener("abort", () => resolve()); });
+        throw new Error("Claude Code process aborted by user");
+      })();
+    };
+    const runner = makeSessionRunner({ query: q, llmBaseUrl: "http://h/llm", sessionRootDir: tmpRoot() });
+    const out: Frame[] = [];
+    runner.start(frame, (f) => out.push(f));
+    for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r)); // init 메시지가 처리될 틈
+    runner.cancel("t1");
+    await vi.waitFor(() => expect(out.some((f) => f.type === "turn.result")).toBe(true));
+    expect(out.at(-1)).toMatchObject({ type: "turn.result", ok: false, sessionId: "sess-new" });
+  });
+
+  it("성공 결과 뒤에 예외가 나도 완성된 답을 보낸다(2026-11-25 리뷰 — 멈춤이 결과와 엇갈린 경우 등)", async () => {
+    const q: SessionQuery = () => (async function* () { yield initMsg; yield resultMsg; throw new Error("process exited with code 1"); })();
+    const runner = makeSessionRunner({ query: q, llmBaseUrl: "http://h/llm", sessionRootDir: tmpRoot() });
+    const out: Frame[] = [];
+    runner.start(frame, (f) => out.push(f));
+    await vi.waitFor(() => expect(out.some((f) => f.type === "turn.result")).toBe(true));
+    expect(out.at(-1)).toEqual({ type: "turn.result", id: "t1", ok: true, text: "다 했어요", sessionId: "sess-new" });
+  });
+
+  it("사람이 멈춘 게 아닌 예외에는 세션 id 를 싣지 않는다 — 이어받을 수 없는 세션을 봇이 저장하지 않게", async () => {
+    const q: SessionQuery = () => (async function* () { yield initMsg; throw new Error("spawn failed"); })();
+    const runner = makeSessionRunner({ query: q, llmBaseUrl: "http://h/llm", sessionRootDir: tmpRoot() });
+    const out: Frame[] = [];
+    runner.start(frame, (f) => out.push(f));
+    await vi.waitFor(() => expect(out.some((f) => f.type === "turn.result")).toBe(true));
+    expect(out.at(-1)).toEqual({ type: "turn.result", id: "t1", ok: false, text: "", error: "spawn failed" });
   });
 
   it("idle() 은 진행 중인 턴이 모두 끝나면 풀린다(갱신 종료 순서가 기다린다)", async () => {

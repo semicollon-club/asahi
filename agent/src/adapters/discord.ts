@@ -1,15 +1,18 @@
 import {
-  ChannelType, Client, GatewayIntentBits, Partials, ThreadAutoArchiveDuration, type Message,
+  ActionRowBuilder, ButtonBuilder, ButtonStyle, ChannelType, Client, GatewayIntentBits, MessageReferenceType, Partials,
+  ThreadAutoArchiveDuration, type Interaction, type Message,
 } from "discord.js";
-import type { EventBus, ConversationHint } from "../events/bus.js";
+import type { EventBus, ConversationHint, ProgressKind } from "../events/bus.js";
 import type { Config } from "../config.js";
 import type { UsersRepo, Role } from "../store/usersRepo.js";
 import type { ConversationsRepo } from "../store/conversationsRepo.js";
 import { filterImageAttachments, type ImageRef } from "../core/images.js";
 import { filterFileAttachments, type FileRef } from "../core/attachments.js";
-import { isChannelCommand } from "../core/commands.js";
+import { isChannelCommand, isReservedCommand, parseCancelCommand } from "../core/commands.js";
 
-export function chunkMessage(text: string, max = 2000): string[] {
+// 줄바꿈 단위 분할(펜스를 모른다). 펜스가 없는 본문은 이 결과가 그대로 나간다 — chunkMessage 가 펜스를 다룰 때도
+// 자르는 일 자체는 이 함수가 하고, 그 위에서 펜스만 닫고 다시 연다.
+export function chunkLines(text: string, max = 2000): string[] {
   const chunks: string[] = [];
   let rest = text;
   while (rest.length > 0) {
@@ -29,6 +32,95 @@ export function chunkMessage(text: string, max = 2000): string[] {
     rest = rest.slice(cut).replace(/^\n/, "");
   }
   return chunks;
+}
+
+// 빠른 개선 1.2(2026-11-25 설계): 긴 답이 코드블록 중간에서 잘리면 앞 메시지는 블록이 닫히지 않고 뒤 메시지는
+// 코드가 본문으로 보인다. 펜스가 있는 본문만 여유분을 남기고 자른 뒤, 열린 채 끝나는 조각은 닫고 다음 조각 앞에
+// 같은 여는 줄을 붙인다. 여유분 = 다시 여는 줄(``` + 표기 최대 FENCE_INFO_MAX) + 줄바꿈 + 닫는 줄바꿈·```.
+export const FENCE_RESERVE = 24;
+const FENCE_INFO_MAX = 16;
+
+export function chunkMessage(text: string, max = 2000): string[] {
+  if (!text.includes("```")) return chunkLines(text, max);
+  const out: string[] = [];
+  let reopen: string | null = null;
+  for (const piece of chunkLines(text, max - FENCE_RESERVE)) {
+    const body: string = reopen === null ? piece : `${reopen}\n${piece}`;
+    const open = openFenceAtEnd(body);
+    out.push(open === null ? body : `${body}\n\`\`\``);
+    reopen = open;
+  }
+  return out;
+}
+
+// 본문 끝에서 코드블록이 열려 있으면 그 블록을 다시 열 줄(언어 표기 포함)을, 닫혀 있으면 null 을 돌려준다.
+// 한 줄 안에서 열고 닫는 ```코드``` 는 블록 상태를 바꾸지 않는다. 표기가 길거나 백틱이 섞이면 표기 없이 다시 연다 —
+// 여유분(FENCE_RESERVE)을 넘기지 않는 것이 하이라이트보다 중요하다.
+function openFenceAtEnd(s: string): string | null {
+  let open: string | null = null;
+  for (const line of s.split("\n")) {
+    const t = line.trimStart();
+    if (!t.startsWith("```")) continue;
+    if (t.length > 3 && t.slice(3).includes("```")) continue;
+    if (open === null) {
+      const info = t.slice(3).trim();
+      open = info.length > 0 && info.length <= FENCE_INFO_MAX && !info.includes("`") ? `\`\`\`${info}` : "```";
+    } else {
+      open = null;
+    }
+  }
+  return open;
+}
+
+// 빠른 개선 1.3: 봇 자신의 멘션(<@id>·<@!id>)은 프롬프트와 스레드 이름에서 뺀다 — 모델에게는 잡음이고, 스레드
+// 이름에는 숫자 ID 가 그대로 보였다. 다른 사람의 멘션은 남긴다: 소유자가 "@이름 부원으로 추가해줘" 라고 하면
+// 모델은 그 안의 숫자 ID 로 manage_access 를 부른다. 공백 정리는 앞뒤만 한다 — 본문 안(코드 들여쓰기 등)은 건드리지 않는다.
+export function stripBotMention(text: string, botId: string): string {
+  const id = botId.replace(/[^0-9A-Za-z]/g, "");
+  return text.replace(new RegExp(`<@!?${id}>`, "g"), "").trim();
+}
+
+// 봇 메시지에 대한 **핑이 켜진** 답장인가(빠른 개선 1.3). discord.js 는 repliedUser 를 핑 여부와 무관하게 답장 대상의
+// 작성자로 채운다(Message.js — referenced_message.author) — 그것만 보면 핑을 끄고 남들과 이야기하려던 답장까지 봇을
+// 부른다(2026-11-25 리뷰). 핑이 켜진 답장일 때만 그 사람이 mentions.users 에 들어 있다.
+type ReplyMentionLike = { repliedUser?: { id: string } | null; users?: { has(id: string): boolean } };
+export function detectReplyToBot(mentions: ReplyMentionLike, botId: string): boolean {
+  return mentions.repliedUser?.id === botId && mentions.users?.has(botId) === true;
+}
+
+// 답장 대상 한 덩어리. 답장은 같은 채널 안에서만 가능하므로 다른 채널의 내용이 이 경로로 새지 않는다(전달된 메시지는
+// 다른 채널 것이라 인용하지 않는다 — onMessage 의 reference.type 확인). 상한은 대상이 봇의 긴 답(최대 수천 자)일 때
+// 프롬프트를 그 원문으로 채우지 않기 위한 것이다 — 앞부분이면 무엇에 대한 답장인지 알기에 충분하다.
+//
+// 인용은 신뢰할 수 없는 자료다(2026-11-25 리뷰): 평소 모델에 닿지 못하는 미등록자의 글도, 소유자가 거기에 답장하면 소유자
+// 턴(manage_access·db_query·셸이 열린 턴)에 들어간다. 그래서 (1) 한 줄로 펴고 대괄호를 바꿔 인용 안의 글이 프롬프트의
+// 구조(구분선·화자 표기)를 흉내 내지 못하게 하고, (2) 작성자의 신분을 어댑터가 판정한 태그로 붙인다 — 표시 이름은
+// 아무나 "아사히(운영자)" 로 바꿀 수 있지만 태그는 그 사람이 고칠 수 없다.
+export const REPLY_QUOTE_MAX = 500;
+const QUOTE_NAME_MAX = 32;
+export type QuoteAuthorTag = "봇" | "운영자" | "부원" | "미등록";
+
+function flattenForQuote(s: string, max: number): string {
+  const flat = s.replace(/\s+/g, " ").replace(/\[/g, "(").replace(/\]/g, ")").trim();
+  const chars = [...flat];
+  return chars.length > max ? `${chars.slice(0, max).join("")}…` : flat;
+}
+
+export function buildReplyQuote(o: { authorName: string; authorTag: QuoteAuthorTag; content: string }): string {
+  const name = flattenForQuote(o.authorName, QUOTE_NAME_MAX);
+  const body = flattenForQuote(o.content, REPLY_QUOTE_MAX) || "(본문 없음)";
+  return `[답장 대상(인용) · ${o.authorTag} ${name}: ${body}]`;
+}
+
+type RawAttachment = { url: string; contentType: string | null; name: string; size: number };
+
+// 빠른 개선 1.4: 첨부를 모델에 실을 이미지·워커에 내려놓을 파일·거절 사유로 나눈다. 예전엔 이미지 쪽 거절
+// (형식 미지원·5MB 초과·장수 초과)이 이 자리에서 버려져, 그 이미지는 안내도 마커도 없이 사라졌다 — 파일 쪽
+// 거절은 이미 사유가 [파일 처리 실패: …] 마커로 모델에게 간다(core.ts 의 failedFiles). 같은 목록에 합친다.
+export function sortAttachments(atts: RawAttachment[]): { images: ImageRef[]; files: FileRef[]; rejected: string[] } {
+  const { images, skipped: skippedImages } = filterImageAttachments(atts);
+  const { files, skipped: skippedFiles } = filterFileAttachments(atts);
+  return { images, files, rejected: [...skippedImages, ...skippedFiles] };
 }
 
 // 본문이 비어 아무것도 못 보내는 경우의 최소 응답. 조용히 아무 것도 안 나가면 finishStatus 가
@@ -52,13 +144,16 @@ export function planSend(text: string): { chunks: string[] } {
 // 인입 메시지 + 발화자 role + 이 채널에 대화 행 존재여부 → 무엇을 할지.
 export type Incoming = {
   userId: string; channelId: string; isDM: boolean; isThread: boolean; mentionsBot: boolean;
+  // 빠른 개선 1.3: 봇의 메시지에 대한 답장(핑이 켜진 답장 — mentions.repliedUser 가 봇). 직접 멘션과 같이 "부르는
+  // 것"으로 본다. 선택 필드인 이유는 이 값을 모르는 호출측(기존 테스트 픽스처 등)이 지금처럼 동작하게 하기 위해서다.
+  repliesToBot?: boolean;
   guildId?: string; parentChannelId?: string; content: string; messageId: string;
   images: ImageRef[];
   files: FileRef[];
-  // filterFileAttachments 가 거절한 첨부의 사유 문자열(예: "big.pdf(너무 큼)"). 최종 리뷰
+  // 거절된 첨부의 사유 문자열(예: "big.pdf(너무 큼)", "scan.tiff(지원 안 하는 형식)"). 최종 리뷰
   // Important — 예전엔 이 값을 어디서도 읽지 않아 크기 초과·이름 위험·개수 초과로 거절된
-  // 첨부가 마커도 안내도 로그도 없이 사라졌다. images 쪽 skipped(형식 미지원 등)는 이 브랜치
-  // 이전부터 같은 자리에서 버려지던 것이라 손대지 않는다 — 범위를 넓히지 않는다.
+  // 첨부가 마커도 안내도 로그도 없이 사라졌다. 2026-11-25(빠른 개선 1.4)부터 이미지 쪽 거절도 여기에
+  // 함께 실린다(sortAttachments).
   rejectedFiles: string[];
 };
 export type RouteDecision =
@@ -80,14 +175,17 @@ export function decideRoute(i: Incoming, role: Role, hasConversation: boolean): 
   // 그 신호를 정정하는 대신 **통로 자체를 닫는다** — 얕은 벽을 세우고 설명하는 것보다 문을 없애는 쪽이다.
   // 소유자 DM 은 그대로다: 관리(manage_access·db_query)와 개인 워커 경로가 거기서 돈다.
   if (i.isDM) return role === "owner" ? { kind: "dm" } : { kind: "dm-declined" };
+  // 부르는 방법은 둘 — 직접 멘션, 또는 봇 메시지에 대한 답장(빠른 개선 1.3). 정기 게시·알림에 답장으로 묻는 것이
+  // 자연스러운데 그 길이 막혀 있었다. @everyone·역할 멘션은 여전히 부르는 것이 아니다(detectBotMention).
+  const called = i.mentionsBot || i.repliesToBot === true;
   if (i.isThread) {
     if (hasConversation) return { kind: "thread-existing" }; // 봇 대화 지속(멘션 불필요)
-    if (i.mentionsBot) return { kind: "adopt-thread" };
+    if (called) return { kind: "adopt-thread" };
     return { kind: "ignore" };
   }
   // 일반(비스레드) 채널
   if (hasConversation) return { kind: "thread-existing" };   // 스레드 생성 폴백으로 채택된 채널 등
-  if (i.mentionsBot) return { kind: "thread-create" };
+  if (called) return { kind: "thread-create" };
   // 멘션 없는 예약어(/대회·/개발뉴스·/help): 지금까지는 여기서 무시돼 코어까지 닿지도 못했고,
   // 쓰려면 봇을 멘션해 스레드를 연 뒤 그 안에서 쳐야 했다 — 뉴스가 스레드에 갇혀 밖에서 안 보였다.
   // 대화를 만들지 않는 경로로 통과시킨다(commandOnly 힌트). 문자열 비교라 LLM 턴 비용은 없다.
@@ -128,6 +226,21 @@ export function decideProgressEditThrottle(
   return { action: "later", delayMs: minIntervalMs - elapsed };
 }
 
+// N2 중지 버튼(2026-11-25 설계 §3). 이 봇의 첫 디스코드 상호작용이다 — 앱 명령과 달리 등록 없이 메시지에 붙여 쓴다.
+// 누르면 onInteraction 이 cancel_request 를 내고, 권한 판정(시킨 사람·소유자)은 코어가 한다. 끝난 턴의 기록에서는
+// finishStatus 가 버튼을 걷는다.
+export const CANCEL_BUTTON_ID = "asahi:cancel";
+
+function cancelRow(): ActionRowBuilder<ButtonBuilder> {
+  return new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder().setCustomId(CANCEL_BUTTON_ID).setLabel("중지").setStyle(ButtonStyle.Secondary),
+  );
+}
+
+// 일반 채널에서 멘션과 함께 친 /취소. 멈출 턴은 스레드·DM 안에서만 돌므로 그 자리에는 대상이 없다 — 스레드를 새로
+// 만들면 "/취소" 라는 이름의 빈 대화만 생긴다.
+export const CANCEL_WHERE_NOTICE = "진행 중인 작업이 있는 스레드 안에서 /취소 를 쳐 주세요. 진행 표시의 중지 버튼을 눌러도 됩니다.";
+
 // 디스코드 2000자 한도 보호용: 상태 메시지엔 최근 이 개수만큼만 표시한다.
 export const PROGRESS_DISPLAY_MAX_LINES = 12;
 
@@ -141,22 +254,87 @@ function collapseConsecutiveDuplicates(lines: readonly string[]): string[] {
 }
 
 // 누적된 진행 라인 → 상태 메시지 문자열. 무한 누적으로 2000자 한도를 넘기지 않도록
-// 연속 중복을 접고 최근 N개만 표시한다(순수 함수).
-export function formatProgressMessage(lines: readonly string[]): string {
-  if (lines.length === 0) return "처리 중";
+// 연속 중복을 접고 최근 N개만 표시한다(순수 함수). header 는 N1(c)의 머리줄 — 넘기지 않으면 예전 그대로다.
+export function formatProgressMessage(lines: readonly string[], header = "처리 중"): string {
+  if (lines.length === 0) return header;
   const collapsed = collapseConsecutiveDuplicates(lines);
   const display = collapsed.length > PROGRESS_DISPLAY_MAX_LINES
     ? collapsed.slice(-PROGRESS_DISPLAY_MAX_LINES)
     : collapsed;
-  return ["처리 중", ...display.map((line) => `· ${line}`)].join("\n");
+  return [header, ...display.map((line) => `· ${line}`)].join("\n");
+}
+
+// N1(c) 머리줄(2026-11-25 설계 §2). 2분 넘는 턴에서 사람이 가장 먼저 묻는 것이 "얼마나 했고 얼마나 걸렸나"다.
+// 단계는 도구 호출 수다 — 판단 줄·결과 줄까지 세면 같은 일을 두세 번 센다.
+export const STATUS_HEARTBEAT_MS = 15_000;
+// 하트비트의 상한(2026-11-25 리뷰). 마지막 진행 이벤트 뒤 이만큼 아무것도 오지 않으면 다시 그리기를 멈춘다 — 어떤 이유로든
+// 종료 이벤트를 놓친 상태 메시지가 봇이 사는 내내 15초마다 편집되는 것을 막는다. 하네스 턴의 상한(30분, remote/hub.ts)보다
+// 조금 길게 잡아, 진행 이벤트 없이 오래 도는 정상 명령(설치·빌드)의 경과는 끝까지 흐른다.
+export const STATUS_HEARTBEAT_IDLE_MAX_MS = 35 * 60_000;
+
+export function formatElapsed(ms: number): string {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  if (m === 0) return `${s}초`;
+  return s === 0 ? `${m}분` : `${m}분 ${s}초`;
+}
+
+export function formatStatusHeader(o: { steps: number; elapsedMs: number }): string {
+  const parts = ["처리 중"];
+  if (o.steps > 0) parts.push(`${o.steps}단계`);
+  parts.push(`경과 ${formatElapsed(o.elapsedMs)}`);
+  return parts.join(" · ");
+}
+
+// N1(b) 끝나도 남는 기록. 예전엔 턴이 끝나면 상태 메시지를 지워(finishStatus) 127스텝짜리 턴도 끝난 뒤에는 무엇을
+// 했는지 남지 않았다. 머리줄 한 줄 + 스포일러(||…||)로 접어 남긴다 — 평소엔 한 줄이고, 궁금하면 눌러 펼친다.
+//
+// - 마지막 도구 줄 뒤의 판단·답변 줄은 뺀다: 그건 최종 답의 첫 문장이고 답은 바로 아래 있다.
+// - 줄 안의 "||" 는 스포일러를 끊으므로(셸 명령 `a || b` 등) 사이에 폭 없는 공백을 끼운다.
+// - 2000자 한도 안에서 최근 줄부터 담는다 — 끝 무렵이 "어디까지 했는가"이고, 오래된 줄은 대개 탐색이다.
+const RECORD_MAX = 2000;
+const OMIT_RESERVE = 24; // "(앞 N줄 생략)" 한 줄과 줄바꿈의 자리
+
+export function formatProgressRecord(
+  lines: readonly string[],
+  kinds: ReadonlyArray<ProgressKind | undefined>,
+  o: { steps: number; elapsedMs: number },
+): string {
+  let lastTool = -1;
+  for (let i = 0; i < kinds.length; i++) if (kinds[i] === "tool" || kinds[i] === "tool_result") lastTool = i;
+  let end = lines.length;
+  if (lastTool >= 0) {
+    while (end > lastTool + 1 && (kinds[end - 1] === "note" || kinds[end - 1] === "answering")) end--;
+  }
+  const kept = collapseConsecutiveDuplicates(lines.slice(0, end)).map((l) => `· ${l.replaceAll("||", "|​|")}`);
+  const header = `작업 기록 · ${o.steps}단계 · ${formatElapsed(o.elapsedMs)}`;
+  const wrap = (body: readonly string[]) => `${header}\n||${body.join("\n")}||`;
+  const all = wrap(kept);
+  if (all.length <= RECORD_MAX) return all;
+  let budget = RECORD_MAX - wrap([]).length - OMIT_RESERVE;
+  const body: string[] = [];
+  for (let i = kept.length - 1; i >= 0; i--) {
+    const cost = kept[i].length + 1;
+    if (cost > budget) break;
+    body.unshift(kept[i]);
+    budget -= cost;
+  }
+  return wrap([`(앞 ${kept.length - body.length}줄 생략)`, ...body]);
 }
 
 // 채널(channelRef)별 진행 상태 UI 수명주기.
 type ProgressState = {
   lines: string[];                               // 누적된 진행 라인
+  recordLines: string[];                          // 끝난 뒤 기록에 남길 줄(lines 와 같은 순서 — 도구 결과 요약을 뺀 판, bus.ts 의 record)
+  lastEventTs: number | null;                     // 마지막 진행 이벤트 시각(하트비트 상한)
+  kinds: Array<ProgressKind | undefined>;         // lines 와 같은 순서의 줄 종류(N1 — 단계 수·끝 판단 줄 판정용)
+  steps: number;                                  // 이 턴의 도구 호출 수(머리줄·기록)
+  startedAt: number | null;                       // 이 턴의 첫 진행 이벤트 시각(경과)
   statusMessage: Message | null;                  // 현재 턴의 상태 메시지(없으면 아직 미전송)
   lastEditTs: number | null;                       // 마지막 편집 시각(throttle 기준)
   editTimer: ReturnType<typeof setTimeout> | null; // 지연된(트레일링) 편집 타이머
+  heartbeat: ReturnType<typeof setInterval> | null; // 경과를 다시 그리는 주기 타이머(상태 메시지가 있는 동안만)
   pendingTriggers: Message[];                      // 반응을 달아둔 원본 메시지들(턴 순서대로 FIFO)
 };
 
@@ -199,6 +377,10 @@ export class DiscordAdapter {
     this.client.on("messageCreate", (message: Message) => {
       this.enqueueInbound(message.channelId, () => this.onMessage(message));
     });
+    // 중지 버튼(N2). 인입 체인에 싣지 않는다 — 멈춤은 그 채널의 다른 처리를 기다리지 않고 바로 닿아야 한다.
+    this.client.on("interactionCreate", (interaction: Interaction) => {
+      void this.onInteraction(interaction).catch((err) => console.error("[discord] 상호작용 처리 오류:", err));
+    });
 
     this.subscribeBus();
 
@@ -213,7 +395,7 @@ export class DiscordAdapter {
   // 경로를 실제 버스로 검증한다(discordFileSend.test.ts). 배선 자체는 start() 가 부르는 것 하나뿐이다.
   private subscribeBus(): void {
     this.bus.subscribe("progress", (e) => {
-      this.enqueueStatus(e.channelRef, () => this.handleProgress(e.channelRef, e.text));
+      this.enqueueStatus(e.channelRef, () => this.handleProgress(e.channelRef, e.text, e.kind, e.record));
     });
     this.bus.subscribe("assistant_message", (e) => {
       const statusDone = this.enqueueStatus(e.channelRef, () => this.finishStatus(e.channelRef));
@@ -230,6 +412,10 @@ export class DiscordAdapter {
     this.bus.subscribe("assistant_file", (e) => {
       this.enqueueFileSend(e.channelRef, e.name, e.data);
     });
+    // 턴을 끝내지 않는 알림(bus.ts 의 SideNoticeEvent). 상태 체인은 건드리지 않고 전송 체인 순서만 지킨다.
+    this.bus.subscribe("side_notice", (e) => {
+      this.enqueueSendAfter(e.channelRef, Promise.resolve(), e.warn ? `⚠️ ${e.text}` : e.text);
+    });
   }
 
   private async onMessage(message: Message): Promise<void> {
@@ -238,13 +424,8 @@ export class DiscordAdapter {
     if (!bot) return;
 
     const isThread = message.channel.isThread();
-    const { images } = filterImageAttachments(
-      [...message.attachments.values()].map((a) => ({ url: a.url, contentType: a.contentType, name: a.name, size: a.size })),
-    );
-    // skipped(최종 리뷰 Important): 거절 사유를 rejectedFiles 로 나른다 — images 쪽 skipped 는
-    // 이 브랜치 이전부터 버려지던 별개의 자리라 여기서 함께 고치지 않는다(위 Incoming.rejectedFiles
-    // 선언부 참고).
-    const { files, skipped: rejectedFiles } = filterFileAttachments(
+    // 이미지·파일·거절 사유(빠른 개선 1.4 — sortAttachments 주석 참고). 거절 사유는 rejectedFiles 로 코어까지 간다.
+    const { images, files, rejected: rejectedFiles } = sortAttachments(
       [...message.attachments.values()].map((a) => ({ url: a.url, contentType: a.contentType, name: a.name, size: a.size })),
     );
     const incoming: Incoming = {
@@ -253,9 +434,13 @@ export class DiscordAdapter {
       isDM: message.channel.type === ChannelType.DM,
       isThread,
       mentionsBot: detectBotMention(message.mentions, bot),
+      // 핑을 끈 답장은 부르는 것으로 보지 않는다(detectReplyToBot 주석) — 그런 답장은 지금처럼 멘션해야 부른다.
+      repliesToBot: detectReplyToBot(message.mentions, bot.id),
       guildId: message.guildId ?? undefined,
       parentChannelId: isThread ? message.channel.parentId ?? undefined : undefined,
-      content: message.content,
+      // 봇 자신의 멘션을 뺀 본문(빠른 개선 1.3). 라우팅·스레드 이름·프롬프트가 모두 이 값을 본다 — 그래서
+      // "@아사히 /새세션" 처럼 멘션과 함께 친 예약어도 이제 예약어로 인식된다.
+      content: stripBotMention(message.content, bot.id),
       messageId: message.id,
       images,
       files,
@@ -300,27 +485,84 @@ export class DiscordAdapter {
       /* 위 주석 참고 — 이름 갱신 실패는 메시지 처리를 막지 않는다 */
     }
 
+    // N2: /취소 는 턴을 시작하지 않는다. 반응 순번(pendingTriggers)에 넣으면 그 메시지에 대한 종료 이벤트가 오지 않아,
+    // 이후 턴들의 ✅ 가 하나씩 밀린다 — 그래서 아래 beginTurn·타이핑 표시를 건너뛰고 코어로만 보낸다(코어의 ingest 가
+    // 대화도 만들지 않고 requestCancel 로 처리한다). 일반 채널에서 멘션과 함께 친 것은 스레드를 만들지 않고 안내만 한다.
+    const isCancel = parseCancelCommand(incoming.content);
+    if (isCancel && decision.kind === "thread-create") {
+      await message.reply(CANCEL_WHERE_NOTICE).catch(() => {});
+      return;
+    }
+
     // 타이핑 표시(있으면). 스레드 생성 전 원 채널에.
-    if ("sendTyping" in message.channel) {
+    if (!isCancel && "sendTyping" in message.channel) {
       void message.channel.sendTyping().catch(() => {});
     }
 
     const hint = await this.resolveHint(decision, incoming, role, message, displayName, existing?.primaryUserId);
     if (!hint) return; // 폴백조차 불가하면 조용히 종료(로그는 resolveHint 내부에서)
 
-    this.beginTurn(hint.discordChannelId, message);
+    // 답장이면 대상 메시지를 문맥으로 앞에 붙인다(빠른 개선 1.3). 예약어에는 붙이지 않는다 — 코어는 예약어를
+    // 정확히 일치할 때만 알아보므로, 앞에 무엇이 붙으면 그 메시지가 평범한 대화 턴이 된다.
+    // 전달(forward)된 메시지도 reference 를 갖지만 다른 채널의 글이다 — 같은 채널의 답장(Default)만 인용한다.
+    const isReply = message.reference?.messageId !== undefined
+      && (message.reference.type ?? MessageReferenceType.Default) === MessageReferenceType.Default;
+    const text = isReply && !isReservedCommand(incoming.content)
+      ? await this.withReplyQuote(message, incoming.content, bot.id)
+      : incoming.content;
+
+    if (!isCancel) this.beginTurn(hint.discordChannelId, message);
 
     this.bus.publish({
       type: "user_message",
       channel: "discord",
       channelRef: hint.discordChannelId,
-      text: incoming.content,
+      text,
       ts: Date.now(),
       hint,
       images: incoming.images.length > 0 ? incoming.images : undefined,
       files: incoming.files.length > 0 ? incoming.files : undefined,
       rejectedFiles: incoming.rejectedFiles.length > 0 ? incoming.rejectedFiles : undefined,
     });
+  }
+
+  // 중지 버튼 클릭(N2). 디스코드는 3초 안에 응답이 없으면 누른 사람에게 "상호작용 실패"를 띄우므로, 우리 버튼이면
+  // 누가 눌렀든 먼저 조용히 받는다(deferUpdate — 메시지는 바꾸지 않는다). 그다음 등록된 사람의 것만 코어로 보낸다 —
+  // 미등록자가 버튼을 눌러도 아무 일도 일어나지 않는 것이 메시지 경로(decideRoute 의 ignore)와 같은 규칙이다.
+  private async onInteraction(interaction: Interaction): Promise<void> {
+    if (!interaction.isButton() || interaction.customId !== CANCEL_BUTTON_ID) return;
+    await interaction.deferUpdate().catch((err) => console.error("[discord] 버튼 응답 실패:", err));
+    const role = await this.users.getRole(interaction.user.id);
+    if (role !== "owner" && role !== "allowed") return;
+    if (!interaction.channelId) return;
+    this.bus.publish({ type: "cancel_request", channel: "discord", channelRef: interaction.channelId, userId: interaction.user.id, ts: Date.now() });
+  }
+
+  // 답장 대상을 한 번 읽어 본문 앞에 붙인다. 대상이 지워졌거나 읽을 권한이 없으면 문맥 없이 그대로 간다 — 부가
+  // 정보가 본 처리를 막지 않는다(표시 이름 갱신과 같은 원칙).
+  private async withReplyQuote(message: Message, text: string, botId: string): Promise<string> {
+    try {
+      const ref = await message.fetchReference();
+      const authorName = ref.member?.displayName ?? ref.author.displayName ?? ref.author.username;
+      const authorTag = ref.author.id === botId ? "봇" : await this.quoteTagOf(ref.author.id);
+      const quote = buildReplyQuote({ authorName, authorTag, content: ref.content });
+      return text.length > 0 ? `${quote}\n${text}` : quote;
+    } catch (err) {
+      console.error("[discord] 답장 대상 조회 실패 — 문맥 없이 진행:", err);
+      return text;
+    }
+  }
+
+  // 인용 작성자의 신분 태그(buildReplyQuote 주석). 운영자는 역할이 아니라 신원(ownerId)으로 본다 — 코어의 특권 판정과 같은
+  // 규칙이다. 조회가 실패하면 가장 낮은 신뢰(미등록)로 본다.
+  private async quoteTagOf(userId: string): Promise<QuoteAuthorTag> {
+    if (userId === this.config.ownerId) return "운영자";
+    try {
+      const role = await this.users.getRole(userId);
+      return role === "owner" || role === "allowed" ? "부원" : "미등록";
+    } catch {
+      return "미등록";
+    }
   }
 
   // 라우팅 결정을 실제 대화 매핑 힌트로 바꾼다. thread-create 만 부수효과(스레드 생성)가 있다.
@@ -409,10 +651,43 @@ export class DiscordAdapter {
   private getProgressState(channelRef: string): ProgressState {
     let state = this.progressState.get(channelRef);
     if (!state) {
-      state = { lines: [], statusMessage: null, lastEditTs: null, editTimer: null, pendingTriggers: [] };
+      state = {
+        lines: [], recordLines: [], lastEventTs: null, kinds: [], steps: 0, startedAt: null,
+        statusMessage: null, lastEditTs: null, editTimer: null, heartbeat: null, pendingTriggers: [],
+      };
       this.progressState.set(channelRef, state);
     }
     return state;
+  }
+
+  // 지금 상태를 그린다(머리줄 + 최근 줄). 첫 전송·스로틀 편집·하트비트가 모두 이 한 곳을 쓴다 — 세 자리가 각자
+  // 그리면 머리줄이 갈린다.
+  private renderStatus(state: ProgressState): string {
+    const startedAt = state.startedAt ?? Date.now();
+    return formatProgressMessage(state.lines, formatStatusHeader({ steps: state.steps, elapsedMs: Date.now() - startedAt }));
+  }
+
+  // 오래 도는 도구(설치·빌드) 동안에는 진행 이벤트가 없어 경과가 멈춰 보인다. 상태 메시지가 있는 동안만 주기적으로
+  // 다시 그린다. 상태 체인에 실어 finishStatus 와 직렬로 돈다 — 정리가 먼저 끝났으면 statusMessage 가 비어 건너뛴다.
+  private startHeartbeat(channelRef: string, state: ProgressState): void {
+    if (state.heartbeat) return;
+    state.heartbeat = setInterval(() => {
+      void this.enqueueStatus(channelRef, async () => {
+        if (!state.statusMessage) return;
+        if (state.lastEventTs !== null && Date.now() - state.lastEventTs > STATUS_HEARTBEAT_IDLE_MAX_MS) {
+          this.stopHeartbeat(state);
+          return;
+        }
+        this.scheduleStatusEdit(state);
+      });
+    }, STATUS_HEARTBEAT_MS);
+  }
+
+  private stopHeartbeat(state: ProgressState): void {
+    if (state.heartbeat) {
+      clearInterval(state.heartbeat);
+      state.heartbeat = null;
+    }
   }
 
   // 게이트를 통과해 턴이 시작될 때: 원본 메시지에 처리중 반응을 달고, 그 채널의 반응 정리 순번
@@ -424,15 +699,24 @@ export class DiscordAdapter {
   }
 
   // 그 채널의 첫 진행 이벤트면 상태 메시지를 새로 보내고, 이후엔 throttle 을 거쳐 편집한다.
-  private async handleProgress(channelRef: string, text: string): Promise<void> {
+  private async handleProgress(channelRef: string, text: string, kind?: ProgressKind, record?: string): Promise<void> {
     const state = this.getProgressState(channelRef);
     state.lines.push(text);
+    state.recordLines.push(record ?? text);
+    state.kinds.push(kind);
+    if (kind === "tool") state.steps += 1;
+    const now = Date.now();
+    if (state.startedAt === null) state.startedAt = now;
+    state.lastEventTs = now;
     if (!state.statusMessage) {
       try {
         const channel = await this.client.channels.fetch(channelRef);
         if (channel && channel.isSendable()) {
-          state.statusMessage = await channel.send(formatProgressMessage(state.lines));
+          // allowedMentions(2026-11-25 리뷰): 판단 줄은 모델이 쓴 글이고 도구 줄에는 파일 내용이 실린다 — 거기 든 @everyone·
+          // <@id> 가 진행 표시에서 사람을 부르지 않게 한다. 편집은 원래 알림을 보내지 않으므로 첫 전송에만 걸면 된다.
+          state.statusMessage = await channel.send({ content: this.renderStatus(state), components: [cancelRow()], allowedMentions: { parse: [] } });
           state.lastEditTs = Date.now();
+          this.startHeartbeat(channelRef, state);
         }
       } catch (err) {
         console.error("[discord] 상태 메시지 전송 실패:", err);
@@ -459,11 +743,15 @@ export class DiscordAdapter {
     const msg = state.statusMessage;
     if (!msg) return;
     state.lastEditTs = Date.now();
-    void msg.edit(formatProgressMessage(state.lines)).catch((err) => console.error("[discord] 상태 메시지 편집 실패:", err));
+    void msg.edit(this.renderStatus(state)).catch((err) => console.error("[discord] 상태 메시지 편집 실패:", err));
   }
 
-  // 턴 종료(assistant_message/system_notice 공통): 대기 중인 편집을 취소하고 상태 메시지를 지운 뒤,
+  // 턴 종료(assistant_message/system_notice 공통): 대기 중인 편집·하트비트를 멈추고 상태 메시지를 정리한 뒤,
   // 이 턴을 시작시킨 원본 메시지의 반응을 처리중→완료로 바꾼다. 실패는 로그만 남기고 흐름은 계속한다.
+  //
+  // 정리(N1-b): 도구를 한 번이라도 쓴 턴은 지우지 않고 접힌 기록으로 바꾼다(formatProgressRecord). 버튼 같은
+  // 구성요소는 함께 걷는다 — 끝난 턴의 버튼이 남으면 누를 수 있는 것처럼 보인다. 도구 없이 끝난 턴(짧은 대화가
+  // 대부분이다)은 남길 것이 없으므로 예전처럼 지운다.
   private async finishStatus(channelRef: string): Promise<void> {
     const state = this.progressState.get(channelRef);
     if (state) {
@@ -471,16 +759,27 @@ export class DiscordAdapter {
         clearTimeout(state.editTimer);
         state.editTimer = null;
       }
+      this.stopHeartbeat(state);
       if (state.statusMessage) {
         const msg = state.statusMessage;
         state.statusMessage = null;
         try {
-          await msg.delete();
+          if (state.steps > 0) {
+            const elapsedMs = Date.now() - (state.startedAt ?? Date.now());
+            await msg.edit({ content: formatProgressRecord(state.recordLines, state.kinds, { steps: state.steps, elapsedMs }), components: [] });
+          } else {
+            await msg.delete();
+          }
         } catch (err) {
-          console.error("[discord] 상태 메시지 삭제 실패:", err);
+          console.error("[discord] 상태 메시지 정리 실패:", err);
         }
       }
       state.lines = [];
+      state.recordLines = [];
+      state.kinds = [];
+      state.steps = 0;
+      state.startedAt = null;
+      state.lastEventTs = null;
     }
     const trigger = state?.pendingTriggers.shift() ?? null;
     if (!trigger) return;
@@ -574,6 +873,7 @@ export class DiscordAdapter {
         clearTimeout(state.editTimer);
         state.editTimer = null;
       }
+      this.stopHeartbeat(state);
     }
     // 종료 전, 모든 채널 체인(인입 처리 + 상태 정리 + 전송)에 남은 작업을 최대한 흘려보낸다(마지막 응답 유실 최소화).
     await Promise.allSettled([...this.inboundChains.values(), ...this.statusChains.values(), ...this.sendChains.values()]);

@@ -35,13 +35,28 @@ export type UserMessageEvent = { type: "user_message"; channel: ChannelKind; cha
 export type AssistantMessageEvent = { type: "assistant_message"; channel: ChannelKind; channelRef: string; text: string; ts: number };
 export type SystemNoticeEvent = { type: "system_notice"; channel: ChannelKind; channelRef: string; text: string; ts: number };
 // 턴 처리 중 진행 상황(도구 호출/결과/답변 시작 등)을 알리는 이벤트(2B). 실제 표시(전송·편집)는 어댑터 쪽 책임.
-export type ProgressEvent = { type: "progress"; channel: ChannelKind; channelRef: string; text: string; ts: number };
+// kind(2026-11-25, N1): 그 줄이 무엇에서 나왔는가. 어댑터가 머리줄의 단계 수(tool 의 개수)를 세고, 끝난 뒤 기록에서
+// 최종 답의 첫 문장인 마지막 note 를 빼려면 줄의 종류를 알아야 한다. notice 는 진행 중 턴에 덧붙이는 안내(도중에 온
+// 메시지·중지 요청)다. 선택인 이유: 종류를 모르는 발행자도 지금처럼 줄만 보낼 수 있다(단계로 세지 않을 뿐이다).
+export type ProgressKind = "tool" | "tool_result" | "note" | "answering" | "notice";
+// record(2026-11-25 리뷰): 끝난 뒤 남는 기록에 실을 줄이 text 와 다를 때만 싣는다 — 도구 결과의 요약(출력 첫 줄)은 진행 중
+// 표시에만 보이고 공개 스레드에 영구히 남지 않게 한다(core.ts 의 formatProgressRecordLine). 없으면 text 를 그대로 쓴다.
+export type ProgressEvent = { type: "progress"; channel: ChannelKind; channelRef: string; text: string; ts: number; kind?: ProgressKind; record?: string };
 // 파일 반환(2026-09-05, 풀 하네스 0단계): 워커가 봇의 POST /files 로 올린 파일을 그 대화 채널에 첨부로
 // 보내라는 이벤트. 다섯 이벤트 중 유일하게 텍스트가 아니라 바이트(data)를 나른다. 발행자는 코어의 턴이
 // 아니라 HTTP 핸들러(core/fileReturn.ts)다 — 턴 도중 도구 호출로 나가는 부수 전송이라 어댑터는 이 이벤트로
 // 진행 표시(상태 메시지·⏳ 반응)를 끝내지 않는다(adapters/discord.ts).
 export type AssistantFileEvent = { type: "assistant_file"; channel: ChannelKind; channelRef: string; name: string; data: Buffer; ts: number };
-export type AgentEvent = UserMessageEvent | AssistantMessageEvent | SystemNoticeEvent | ProgressEvent | AssistantFileEvent;
+// 턴을 끝내지 않는 한 줄(2026-11-25). assistant_message·system_notice 는 어댑터에서 "그 채널의 턴이 끝났다"로 읽혀
+// 진행 상태 메시지를 정리하고 반응 순번(pendingTriggers)을 하나 넘긴다 — 진행 중인 턴과 무관한 알림(소유자 DM 경보,
+// 취소 요청에 대한 "멈출 작업이 없어요" 등)을 그 둘로 보내면 다른 턴의 상태를 엉뚱하게 닫는다. 이 이벤트는 전송
+// 체인에만 합류한다(assistant_file 과 같은 자리). warn 이면 어댑터가 경고 표시를 붙인다(system_notice 와 같은 표시).
+export type SideNoticeEvent = { type: "side_notice"; channel: ChannelKind; channelRef: string; text: string; ts: number; warn?: true };
+// 진행 중인 턴을 멈춰 달라는 요청(N2, 2026-11-25). 어댑터가 상태 메시지의 중지 버튼 클릭에서 발행하고 코어의
+// requestCancel 이 받는다 — 예약어 /취소 는 user_message 로 와서 코어의 ingest 가 같은 함수로 보낸다. 권한 판정(시킨
+// 사람·소유자)은 코어가 한다. 어댑터는 그 클릭이 등록된 사람의 것인지만 거른다.
+export type CancelRequestEvent = { type: "cancel_request"; channel: ChannelKind; channelRef: string; userId: string; ts: number };
+export type AgentEvent = UserMessageEvent | AssistantMessageEvent | SystemNoticeEvent | ProgressEvent | AssistantFileEvent | SideNoticeEvent | CancelRequestEvent;
 
 type Handler = (e: AgentEvent) => void | Promise<void>;
 
