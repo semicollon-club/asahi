@@ -58,6 +58,9 @@ export type Config = {
   httpPort: number;      // 워커 허브 WS 를 붙일 HTTP 포트. Railway 는 PORT 를 주입한다.
   // 정기 게시 목적지. 주제별로 설정하며, 없는 주제는 스케줄에서 건너뛴다(예약어로는 실행 가능).
   digestChannels: DigestChannels;
+  // 봇 전용 채널(빠른 개선 2차 §3.4, 2026-11-25). 여기 든 채널에서는 등록된 사람이 멘션 없이 말해도 부른 것으로 본다.
+  // 선택값인 이유: 비어 있으면 꺼짐이고, 테스트 픽스처가 지금처럼 이 키 없이 Config 를 만들 수 있게.
+  botChannelIds?: string[];
   // 깃허브 발행 설정. 없으면 null 이고, 그때는 발행 도구가 아예 노출되지 않는다.
   github: GithubAppConfig | null;
   // PR 추적(2026-09-05): 봇이 만든 새 PR 을 운영자에게 알릴 채널. 없으면 소유자 DM 으로 간다 —
@@ -146,6 +149,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       ...(env.DIGEST_CONTEST_CHANNEL_ID ? { contest: env.DIGEST_CONTEST_CHANNEL_ID } : {}),
       ...(env.DIGEST_DEVNEWS_CHANNEL_ID ? { devnews: env.DIGEST_DEVNEWS_CHANNEL_ID } : {}),
     },
+    botChannelIds: (env.BOT_CHANNEL_IDS ?? "").split(",").map((s) => s.trim()).filter((s) => s.length > 0),
     github: loadGithubConfig(env),
     prNotifyChannelId: env.PR_NOTIFY_CHANNEL_ID || undefined,
     hubBind: env.HUB_BIND?.trim() || undefined,

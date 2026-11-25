@@ -6,6 +6,7 @@ import dotenv from "dotenv";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { loadWorkerConfig } from "./config.js";
 import { makeExecutors, type Executors } from "./remote/executors.js";
+import { detectConsoleCodePage, legacyEncodingOf } from "./remote/shellOutput.js";
 import { startWorkerClient, type ClientSocket } from "./remote/workerClient.js";
 import { readCommit, defaultRunGit } from "./remote/gitCommit.js";
 import { planShutdown } from "./remote/workerShutdown.js";
@@ -62,7 +63,10 @@ async function main() {
     // send_file 만 그 사실을 말하며 실패한다.
     const fileReturnUrl = fileReturnUrlOf(config.hubUrl) ?? undefined;
     if (fileReturnUrl === undefined) console.warn(`[worker] HUB_URL 에서 업로드 주소를 유도하지 못했습니다 — send_file 을 쓸 수 없습니다: ${config.hubUrl}`);
-    const { wrapped: executors, idle: executorsIdle } = trackInFlight(makeExecutors(config.roots, { fileReturnUrl }));
+    // N4(2026-11-25): sh_exec 가 UTF-8 이 아닌 출력 줄을 읽을 콘솔 코드페이지(remote/shellOutput.ts). 기동 때 한 번만 묻는다 —
+    // 워커는 갱신될 때 재시작되므로 도는 동안 바뀌지 않는다. 못 읽으면 null(예전처럼 UTF-8 로만 읽는다).
+    const consoleCodePage = await detectConsoleCodePage();
+    const { wrapped: executors, idle: executorsIdle } = trackInFlight(makeExecutors(config.roots, { fileReturnUrl, consoleCodePage }));
 
     // 풀 하네스 2단계: WORKER_MODE=harness 면 세션 러너를 켠다. 이 프로세스에는 자격증명이 없다 — 세션은 봇의 루프백
     // 프록시(HUB_URL 에서 유도한 /llm)와 봇이 turn.start 마다 주는 작업 토큰으로 모델을 부른다(remote/sessionRunner.ts).
@@ -146,7 +150,8 @@ async function main() {
       }, 15_000);
     }
 
-    console.log(`로컬 워커가 시작되었습니다 (허브=${config.hubUrl}, 모드=${config.mode}, 커밋=${commit ?? "알 수 없음"}, 폴더=${config.roots.join(", ")}).`);
+    // 셸 코드페이지 뒤 괄호는 sh_exec 가 UTF-8 이 아닌 줄을 실제로 읽을 인코딩이다 — "대체 없음"이면 예전처럼 깨진다(65001·검출 실패).
+    console.log(`로컬 워커가 시작되었습니다 (허브=${config.hubUrl}, 모드=${config.mode}, 커밋=${commit ?? "알 수 없음"}, 폴더=${config.roots.join(", ")}, 셸 코드페이지=${consoleCodePage ?? "알 수 없음"}(${legacyEncodingOf(consoleCodePage) ?? "대체 없음"})).`);
   } catch (err) {
     // FIX8: 이전(DB 폴링) 버전의 main().catch 와 같은 문구로 복원한다 — WORKER_ROOTS 오타 같은
     // 설정 오류가 맨 스택트레이스 대신 사람이 읽을 수 있는 한 줄로 보이게 한다.

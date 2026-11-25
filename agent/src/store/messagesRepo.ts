@@ -47,6 +47,12 @@ export class MessagesRepo {
     return (r.rows as Row[]).map(toMessage);
   }
 
+  // 아직 처리하지 않은 메시지를 사용자가 고쳤을 때(빠른 개선 2차 §3.5). 기록도 고친 내용이어야 다음 세션의 컨텍스트 블록과 크래시
+  // 복구(recoverPending)가 고친 내용을 본다.
+  async updateContent(id: number, content: string): Promise<void> {
+    await this.db.query("UPDATE messages SET content = $1 WHERE id = $2", [content, id]);
+  }
+
   async markProcessed(id: number): Promise<void> {
     await this.db.query("UPDATE messages SET processed = TRUE WHERE id = $1", [id]);
   }

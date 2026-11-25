@@ -112,6 +112,7 @@ Variables 를 아래 표대로 옮긴다 — **값을 복사할 때는 Railway �
 | `BOT_SENTINEL` | (없음) → **`C:\Users\asahi-bot\asahi-bot\update.flag`** | 4절 업데이터의 `-Sentinel` 기본값(`<RepoPath>\update.flag`)과 같아야 한다 |
 | `DIGEST_CONTEST_CHANNEL_ID`, `DIGEST_DEVNEWS_CHANNEL_ID` | 그대로 | 있을 때만 |
 | `PR_NOTIFY_CHANNEL_ID` | 그대로 | 있을 때만 |
+| `BOT_CHANNEL_IDS` | 새로(2026-11-25) | 있을 때만 — 멘션 없이 부르는 봇 전용 채널(쉼표로 여럿) |
 | `GITHUB_ORG`, `GITHUB_APP_ID`, `GITHUB_APP_INSTALLATION_ID`, `GITHUB_APP_PRIVATE_KEY_B64` | 그대로 | 넷 다 있어야 발행·git·PR 도구가 열린다. **B(`C:\asahi-worker\.env`)에는 절대 두지 않는다** |
 | `ANTHROPIC_MODEL`, `SESSION_IDLE_MINUTES`, `MAX_TURNS_PER_HOUR*` | 그대로 | 설정돼 있던 것만 |
 | `DATA_DIR`, `MEMORY_DIR` | (Dockerfile 고정값) → **비운다** | 기본값이 클론 아래 `data\store`·`data\memory` 다 |

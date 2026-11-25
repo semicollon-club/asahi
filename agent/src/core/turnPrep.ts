@@ -35,7 +35,10 @@ function stripLegacyMarkers(text: string): string {
 
 // 새 세션 시작 시 주입할 기억+요약+최근대화 컨텍스트 블록.
 // 프라이버시(§6): DM 은 상대(primaryUser)의 개인+공용, 서버/스레드는 공용만.
-export async function buildContextBlock(repos: ContextRepos, conv: Conversation, excludeMessageId: number): Promise<string> {
+// exclude: 이번 턴이 본문으로 따로 싣는 메시지(들). 대기 메시지를 묶은 턴(빠른 개선 2차 §3.6)은 여럿이다 — 그 메시지들이 이미 DB 에
+// 있어도 최근 대화에 다시 실리면 같은 말이 두 번 보인다.
+export async function buildContextBlock(repos: ContextRepos, conv: Conversation, exclude: number | readonly number[]): Promise<string> {
+  const excluded = new Set(typeof exclude === "number" ? [exclude] : exclude);
   // Critical(최종 전체 브랜치 리뷰) — 렌더링을 memoryScope.ts 에 맡긴다. 예전엔 여기서 직접
   // `- [${title}] ${content}` 를 만들어 개행 방어가 없었다 — 서버에서 등록한 공용 기억이
   // forUser()(scope='shared' 도 포함)를 통해 소유자 DM 컨텍스트에도 실리므로, 내용에 개행과
@@ -63,7 +66,7 @@ export async function buildContextBlock(repos: ContextRepos, conv: Conversation,
   const floor = conv.contextFloorTs ?? undefined;
   const summaries = await repos.summaries.recent(conv.id, 3, floor);
   const recentAll = await repos.messages.recent(conv.id, 21, floor);
-  const recent = recentAll.filter((m) => m.id !== excludeMessageId).slice(-20);
+  const recent = recentAll.filter((m) => !excluded.has(m.id)).slice(-20);
   // 공유 스레드에서는 모든 사용자 턴이 "사용자:"로 뭉개져 모델이 화자를 구분하지 못했다. names 는
   // 위(52행)에서 기억 작성자 표시용으로 이미 불러온 것을 재사용한다 — 조회를 두 번 하지 않는다.
   // 라벨 조합은 speakerLabel(speaker.ts)에게 맡긴다: 표시 이름은 누구나 바꿀 수 있는 값이라

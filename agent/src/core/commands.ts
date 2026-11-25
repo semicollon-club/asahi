@@ -57,6 +57,43 @@ export function parseCancelCommand(text: string): boolean {
   return CANCEL_COMMANDS.has(text.trim().toLowerCase());
 }
 
+// 운영자 예약어(빠른 개선 2차 §1, 2026-11-25). 소유자 턴은 하네스로 가서 봇 도구 manage_access·runtime_info 가 없다 — 그래서
+// 등록·차단·상태 확인을 모델을 거치지 않는 예약어로 한다. 문자열로 처리하므로 LLM 비용이 없고, 턴이 어느 경로로 가든 동작하며,
+// 접근 통제가 모델의 판단(과 그것을 노리는 프롬프트 주입)에 기대지 않는다.
+//
+// /상태: runtime_info 와 같은 내용. 등록된 사람 누구나(ADR 0012 와 같은 축). 같은 규칙 — 정확히 일치할 때만.
+const STATUS_COMMANDS = new Set(["/상태", "/status"]);
+
+export function parseStatusCommand(text: string): boolean {
+  return STATUS_COMMANDS.has(text.trim().toLowerCase());
+}
+
+// /차단·/허용: 운영자 신원만(코어가 판정한다). 대상은 멘션(<@id>·<@!id>)이나 숫자 ID 하나 — manage_access 와 같이 표시 이름은
+// 받지 않는다(동명·사칭 오작동). 대상이 없거나 모양이 틀리면 userId:null 로 돌려줘 코어가 다시 묻게 한다 — null(예약어 아님)로
+// 돌려주면 그 메시지가 평범한 대화 턴이 되어 모델이 "차단해 드릴게요" 라고 답하는, 실제와 다른 일이 생긴다.
+const BLOCK_COMMANDS = new Set(["/차단", "/block"]);
+const ALLOW_COMMANDS = new Set(["/허용", "/해제", "/allow", "/unblock"]);
+
+export type AccessCommand = { action: "block" | "allow"; userId: string | null };
+
+export function parseAccessCommand(text: string): AccessCommand | null {
+  const m = text.trim().match(/^(\S+)(?:\s+([\s\S]*))?$/);
+  if (!m) return null;
+  const head = m[1].toLowerCase();
+  const action = BLOCK_COMMANDS.has(head) ? "block" : ALLOW_COMMANDS.has(head) ? "allow" : null;
+  if (action === null) return null;
+  const rest = (m[2] ?? "").trim();
+  const id = rest.match(/^<@!?(\d{5,})>$/)?.[1] ?? rest.match(/^(\d{5,})$/)?.[1] ?? null;
+  return { action, userId: id };
+}
+
+// 턴을 시작하지 않고 그 자리에서 끝나는 예약어인가. 어댑터는 이 예약어에 반응(👀→✅)을 달지 않고 순번에 넣지 않으며, 코어는
+// 턴을 끝내지 않는 side_notice 로 답한다 — 진행 중인 턴이 있는 스레드에서 쳐도 그 턴의 상태 메시지·순번을 건드리지 않는다
+// (/취소 가 같은 이유로 처음 이 방식을 썼다).
+export function isInstantCommand(text: string): boolean {
+  return parseCancelCommand(text) || parseStatusCommand(text) || parseAccessCommand(text) !== null;
+}
+
 // 대화(스레드·DM) 없이 일반 채널에서 그 자리에서 처리할 수 있는 예약어인가.
 //
 // 배경: 어댑터는 일반 채널의 멘션 없는 메시지를 전부 무시한다(decideRoute). 무시하지 않으려면
@@ -66,15 +103,16 @@ export function parseCancelCommand(text: string): boolean {
 // /새세션·/기억정리 는 제외한다 — 정리하거나 초기화할 세션이 있어야 의미가 있고, 대화가 없는
 // 채널에는 그 대상 자체가 없다(스레드·DM 안에서는 지금까지처럼 그대로 동작한다). 둘 다
 // parseSessionCommand 로만 인식되므로 이 함수를 건드리지 않아도 자동으로 빠진다.
+// 운영자 예약어(/상태·/차단·/허용)도 여기 든다 — 대화가 필요 없는 명령이고, 운영자가 아무 채널에서나 바로 쓸 수 있어야 한다.
 export function isChannelCommand(text: string): boolean {
-  return parseHelpCommand(text) || parseDigestCommand(text) !== null;
+  return parseHelpCommand(text) || parseDigestCommand(text) !== null || parseStatusCommand(text) || parseAccessCommand(text) !== null;
 }
 
 // 코어가 예약어로 처리하는 문자열인가(어디서 치든). 어댑터가 답장 문맥을 붙일지 정할 때 쓴다(빠른 개선 1.3) —
 // 예약어는 정확히 일치할 때만 인식되므로 앞에 인용을 붙이면 평범한 대화 턴이 돼 버린다. 예약어 파서가 늘면 여기에도
 // 더한다(commands.test.ts 가 이 목록과 COMMAND_HELP 의 일치를 본다).
 export function isReservedCommand(text: string): boolean {
-  return parseSessionCommand(text) !== null || parseDigestCommand(text) !== null || parseHelpCommand(text) || parseCancelCommand(text);
+  return parseSessionCommand(text) !== null || parseDigestCommand(text) !== null || parseHelpCommand(text) || isInstantCommand(text);
 }
 
 // 안내문은 위 예약어 테이블에서 파생시킨다. 손으로 적으면 예약어를 추가하는 순간
@@ -92,6 +130,9 @@ export const COMMAND_HELP: ReadonlyArray<{ commands: readonly string[]; descript
   // "지정 채널이 없으면 여기로" 는 두 신원 모두에게 참이라 그대로 둔다.
   { commands: ["/대회"], description: "코딩·CTF 대회 소식을 지금 조사합니다. 지정 채널이 있으면 그리로, 없으면 여기로 옵니다" },
   { commands: ["/개발뉴스"], description: "개발 관련 소식을 지금 조사합니다. 지정 채널이 있으면 그리로, 없으면 여기로 옵니다" },
+  { commands: [...STATUS_COMMANDS], description: "저와 동아리 PC 가 어느 버전으로 도는지, PC 가 연결돼 있는지 보여드립니다" },
+  // 운영자 전용이지만 목록에 둔다 — /취소 의 "(시킨 분이나 운영자만)" 처럼 누가 쓸 수 있는지를 함께 적는다. 영문 별칭은 적지 않는다.
+  { commands: ["/차단 @사람", "/허용 @사람"], description: "(운영자만) 그 사람이 저를 부르지 못하게 막거나, 다시 부를 수 있게 합니다" },
   { commands: [...HELP_COMMANDS], description: "이 목록을 보여드립니다" },
 ];
 

@@ -389,7 +389,12 @@ export async function dbQueryHandler(ctx: ToolCtx, args: { sql: string }): Promi
 // 워커가 아예 사라지는 쪽은 staleWorker.ts 의 decideMissingAlerts 가 그대로 지킨다.
 export async function runtimeInfoHandler(ctx: ToolCtx): Promise<string> {
   if (!canSeeRuntime(ctx)) return NOT_ALLOWED;
-  const r = ctx.runtime;
+  return formatRuntimeInfo(ctx.runtime);
+}
+
+// runtime_info 의 본문. 예약어 /상태(빠른 개선 2차 §1 — 소유자 턴은 하네스로 가서 이 도구가 없다)가 같은 함수를 쓴다 — 두 자리가
+// 따로 서식을 만들면 한쪽만 고치는 드리프트가 생긴다.
+export function formatRuntimeInfo(r: RuntimeInfo): string {
   const short = (sha: string) => sha.slice(0, 7);
   const botLine =
     r.botCommit === undefined

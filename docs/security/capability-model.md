@@ -547,6 +547,18 @@ pm2 jlist 가 돌려주는 명령은 이제 회원이 실제로 실행한 값이
 
 - `manage_access` 는 `isOwner && isPrivate` 에서만 실행된다(핸들러 안에 직접 있다) — 신원
   표(`users`)를 바꾸는 일이라 소유자의 사설 DM 으로 좁혀 둔다.
+- **운영자 예약어 `/차단 @사람`·`/허용 @사람`(2026-11-25, 빠른 개선 2차)** — 같은 신원 표를 바꾸지만 모델을 거치지 않는다
+  (`core/commands.ts` 의 `parseAccessCommand`, `core/core.ts` 의 `applyAccessCommand`). 소유자 턴이 하네스로 가면서 `manage_access`
+  에 닿지 못하게 된 것을 메운다. 판정은 **신원**(`userId === config.ownerId`) 하나이고 위치는 보지 않는다 — DM 으로 좁힌
+  `manage_access` 의 이유가 "공개 채널의 글이 모델을 움직여 권한을 바꾸는 것"이었는데, 예약어는 운영자가 직접 친 문자열에만
+  반응하므로 그 경로가 없다. 대상은 멘션이나 숫자 ID 하나, 운영자 자신은 바꿀 수 없다(`owner` 역할은 이 경로로 줄 수 없다 —
+  차단·허용 둘뿐이다). 결과 안내는 대상을 멘션하지 않는다. `/상태` 는 `runtime_info` 와 같은 내용을 등록된 누구에게나 보인다
+  (ADR 0012 와 같은 축).
+- **멘션(2026-11-25)**: 디스코드 클라이언트의 기본 `allowedMentions` 가 `parse: []` 다(`adapters/discord.ts` 의
+  `DEFAULT_ALLOWED_MENTIONS`). 답 본문·안내·정기 게시 어디서든 본문에 쓰인 `@everyone`·`@here`·역할·사람 멘션은 울리지 않는다 —
+  인용·웹 페이지·파일 내용에 심긴 지시로 모델이 그 문자열을 써도 마찬가지다(사람 멘션 도배 포함). 봇이 의도해서 부르는 곳은 긴 작업
+  완료 알림 하나이고, 그 메시지만 `allowedMentions.users` 로 시킨 사람을 지정한다. `repliedUser` 는 봇의 답장(reply)이 그 사람을
+  부르는 것이라 남긴다.
 - **자기인지 DB 도구(`db_schema`/`db_query`)는 2026-09-17 부터 이 축에서 빠졌다**
   ([ADR 0010](../decisions/0010-db-read-for-all-members.md)). 핸들러 게이트는
   `canReadDb(ctx) = ctx.role in {owner, allowed}` 하나이고, 이것은 신원 특권이 아니라
