@@ -106,8 +106,40 @@ function canManagePc(ctx: ToolCtx): boolean {
   return ctx.isOwner;
 }
 
+// 기억 핸들러 셋(remember·recall·forget)이 실제로 읽는 값만 모은 컨텍스트(2026-11-25, 기억 정비 3-1). 봇 세션은
+// ToolCtx 를 그대로 넘기고(그 부분집합이다), 하네스 턴의 허브 기억 서버(mcp/memoryServer.ts)는 작업 토큰 클레임으로
+// 이 다섯 값을 채워 **같은 함수**를 부른다 — 범위·상한·recall 풀·forget 권한이 두 경로에서 갈라질 수 없게.
+// 리포는 핸들러가 실제로 부르는 메서드만 요구한다 — 허브 서버가 쓰기·삭제 지점을 감싸, 시도가 아니라 실제로 일어난
+// 쓰기·삭제를 감사 줄로 남길 수 있게 하려는 것이다.
+export type MemoryToolCtx = Pick<ToolCtx, "isPrivate" | "isOwner" | "userId" | "conversationId"> & {
+  repos: {
+    memories: Pick<MemoriesRepo, "insert" | "all" | "forUser" | "sharedOnly" | "delete">;
+    users: Pick<UsersRepo, "displayNames">;
+  };
+};
+
+// 기억 도구 셋의 설명·인자 모양. 봇 세션(buildToolDefinitions)과 허브 기억 서버가 함께 쓴다 — 같은 문장을 두 곳에
+// 두면 한쪽만 고치는 드리프트가 생긴다(persona.ts 가 같은 이유로 문장을 한 곳에서 만든다).
+export const MEMORY_TOOL_SPECS = {
+  remember: {
+    description: "사용자에 대해 오래 기억할 사실·선호·결정·진행 중인 일을 저장합니다. 사소한 것은 저장하지 마세요.",
+    args: { title: z.string().describe("짧은 제목"), content: z.string().describe("기억할 내용") },
+  },
+  recall: {
+    description: "저장된 기억에서 관련 내용을 찾습니다.",
+    args: { query: z.string().describe("찾을 키워드") },
+  },
+  forget: {
+    description: "(소유자 전용) 동아리 공용 기억을 제목으로 찾아 지웁니다. 여러 개가 걸리면 지우지 않고 번호(id) 목록을 보여줍니다 — 그 번호를 id 인자로 다시 불러 하나만 정확히 지정해 지울 수 있습니다.",
+    args: {
+      title: z.string().optional().describe("지울 공용 기억의 제목(일부만 적어도 됩니다)"),
+      id: z.number().optional().describe("여러 개가 걸렸을 때 그 목록에서 본 번호로 하나를 정확히 지정합니다"),
+    },
+  },
+};
+
 // ── 순수 핸들러(테스트 대상) ────────────────────────────────────────────────
-export async function rememberHandler(ctx: ToolCtx, args: { title: string; content: string }): Promise<string> {
+export async function rememberHandler(ctx: MemoryToolCtx, args: { title: string; content: string }): Promise<string> {
   // 스코프는 위치가 정한다(memoryScope.ts) — DM 은 개인, 서버 채널은 동아리 공용이다.
   const scope = memoryScopeFor(ctx);
   if (scope === "shared") {
@@ -132,7 +164,7 @@ export async function rememberHandler(ctx: ToolCtx, args: { title: string; conte
   return scope === "shared" ? `동아리 공용으로 기억했어요: "${args.title}"` : `기억했어요: "${args.title}"`;
 }
 
-export async function recallHandler(ctx: ToolCtx, args: { query: string }): Promise<string> {
+export async function recallHandler(ctx: MemoryToolCtx, args: { query: string }): Promise<string> {
   // 프라이버시 스코프: 소유자 DM=전원, 손님 DM=본인+공용, 서버=공용만.
   let pool: Memory[];
   if (ctx.isOwner && ctx.isPrivate) pool = await ctx.repos.memories.all();
@@ -170,7 +202,7 @@ const singleLine = (s: string): string => s.replace(/[\r\n]+/g, " ");
 // 등록하는 순간이 정확히 이 상태다 — forget 이 존재하는 이유(낡은 공용 기억 정리) 그 자체가
 // 막히는 사고다. id(Memory 가 이미 갖는 고유 번호)를 목록에 함께 보여주고, 그 번호로 하나를
 // 정확히 지정할 수 있게 한다 — title 검색으로 좁힌 뒤 id 로 확정하는 2단계 흐름이다.
-export async function forgetHandler(ctx: ToolCtx, args: { title?: string; id?: number }): Promise<string> {
+export async function forgetHandler(ctx: MemoryToolCtx, args: { title?: string; id?: number }): Promise<string> {
   if (!ctx.isOwner) return OWNER_ONLY;
   if (args.id !== undefined) {
     const shared = await ctx.repos.memories.sharedOnly();
@@ -976,23 +1008,20 @@ export function buildToolDefinitions(ctx: ToolCtx) {
   return [
     tool(
       "remember",
-      "사용자에 대해 오래 기억할 사실·선호·결정·진행 중인 일을 저장합니다. 사소한 것은 저장하지 마세요.",
-      { title: z.string().describe("짧은 제목"), content: z.string().describe("기억할 내용") },
+      MEMORY_TOOL_SPECS.remember.description,
+      MEMORY_TOOL_SPECS.remember.args,
       async (args) => textResult(await rememberHandler(ctx, args)),
     ),
     tool(
       "recall",
-      "저장된 기억에서 관련 내용을 찾습니다.",
-      { query: z.string().describe("찾을 키워드") },
+      MEMORY_TOOL_SPECS.recall.description,
+      MEMORY_TOOL_SPECS.recall.args,
       async (args) => textResult(await recallHandler(ctx, args)),
     ),
     tool(
       "forget",
-      "(소유자 전용) 동아리 공용 기억을 제목으로 찾아 지웁니다. 여러 개가 걸리면 지우지 않고 번호(id) 목록을 보여줍니다 — 그 번호를 id 인자로 다시 불러 하나만 정확히 지정해 지울 수 있습니다.",
-      {
-        title: z.string().optional().describe("지울 공용 기억의 제목(일부만 적어도 됩니다)"),
-        id: z.number().optional().describe("여러 개가 걸렸을 때 그 목록에서 본 번호로 하나를 정확히 지정합니다"),
-      },
+      MEMORY_TOOL_SPECS.forget.description,
+      MEMORY_TOOL_SPECS.forget.args,
       async (args) => textResult(await forgetHandler(ctx, args)),
     ),
     tool(

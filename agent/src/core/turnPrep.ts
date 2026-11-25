@@ -93,3 +93,12 @@ export function isSessionNotFound(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
   return msg.includes("No conversation found with session ID");
 }
+
+// 세션은 있는데 이어받을 수 없는 경우(2026-11-25, 작업 취소와 함께). 도구 호출 도중 중단된 세션은 전사 끝에 결과 없는
+// tool_use 가 남을 수 있고, 그 세션을 resume 하면 API 가 400 으로 거절할 수 있다. 그 세션을 계속 붙잡으면 이후 모든 턴이
+// 같은 이유로 실패하므로(사람이 /새세션 을 칠 때까지), 세션 없음과 같이 버리고 새 세션 + 기억 컨텍스트로 다시 한다.
+// 문구는 Claude Code 가 내는 것과 API 원문 둘 다 본다 — 어느 쪽으로 올라올지는 실측으로 정해지지 않았다.
+export function isBrokenSession(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /tool use concurrency issues/i.test(msg) || /tool_use`? ids were found without `?tool_result/i.test(msg);
+}

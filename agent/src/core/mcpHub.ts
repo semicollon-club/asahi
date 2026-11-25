@@ -29,8 +29,10 @@ export function decideMcpRoute(url: string | undefined): McpRoute {
 export type McpHubDeps = {
   // 작업 토큰 검증(index.ts 가 makeJobTokenMinter 의 verify 를 넘긴다). null/던짐은 401.
   verify(token: string): JobTokenClaims | null;
-  // 이름 → 요청마다 새 McpServer 를 만드는 팩토리(stateless). 표에 없는 이름은 404.
-  servers: Record<string, () => McpServer>;
+  // 이름 → 요청마다 새 McpServer 를 만드는 팩토리(stateless). 표에 없는 이름은 404. 팩토리는 그 요청의 **검증된**
+  // 클레임을 받는다(2026-11-25) — 기억 서버처럼 "누가·어느 대화에서" 부르는지가 결과를 바꾸는 서버는 그 값을 세션이
+  // 보낸 인자가 아니라 서명된 토큰에서만 얻어야 한다. 신원이 필요 없는 서버(GitHub·Supabase 읽기)는 인자를 무시한다.
+  servers: Record<string, (claims: JobTokenClaims) => McpServer>;
 };
 
 function replyJson(res: http.ServerResponse, status: number, message: string): void {
@@ -69,8 +71,9 @@ export function makeMcpHubHandler(deps: McpHubDeps): (req: http.IncomingMessage,
       return;
     }
 
+    const verified = claims;
     void (async () => {
-      const server = deps.servers[route.name]();
+      const server = deps.servers[route.name](verified);
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
       // 응답이 끝나면(또는 클라이언트가 끊으면) 이 요청용 서버·전송을 닫는다 — stateless 라 요청마다 하나다.
       res.on("close", () => {

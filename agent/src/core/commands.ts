@@ -48,6 +48,15 @@ export function parseHelpCommand(text: string): boolean {
   return HELP_COMMANDS.has(text.trim().toLowerCase());
 }
 
+// 진행 중인 작업 멈추기(N2, 2026-11-25 설계 §3). 상태 메시지의 중지 버튼과 같은 길(core.ts 의 requestCancel)로 간다.
+// 같은 규칙 — 앞 슬래시를 요구하고 정확히 일치할 때만. "작업 취소해줘" 같은 문장은 대화 턴이다: 멈추려는 그 턴 뒤에
+// 줄을 서서, 정작 멈춰야 할 때는 이미 늦는다.
+const CANCEL_COMMANDS = new Set(["/취소", "/중지", "/stop"]);
+
+export function parseCancelCommand(text: string): boolean {
+  return CANCEL_COMMANDS.has(text.trim().toLowerCase());
+}
+
 // 대화(스레드·DM) 없이 일반 채널에서 그 자리에서 처리할 수 있는 예약어인가.
 //
 // 배경: 어댑터는 일반 채널의 멘션 없는 메시지를 전부 무시한다(decideRoute). 무시하지 않으려면
@@ -61,11 +70,19 @@ export function isChannelCommand(text: string): boolean {
   return parseHelpCommand(text) || parseDigestCommand(text) !== null;
 }
 
+// 코어가 예약어로 처리하는 문자열인가(어디서 치든). 어댑터가 답장 문맥을 붙일지 정할 때 쓴다(빠른 개선 1.3) —
+// 예약어는 정확히 일치할 때만 인식되므로 앞에 인용을 붙이면 평범한 대화 턴이 돼 버린다. 예약어 파서가 늘면 여기에도
+// 더한다(commands.test.ts 가 이 목록과 COMMAND_HELP 의 일치를 본다).
+export function isReservedCommand(text: string): boolean {
+  return parseSessionCommand(text) !== null || parseDigestCommand(text) !== null || parseHelpCommand(text) || parseCancelCommand(text);
+}
+
 // 안내문은 위 예약어 테이블에서 파생시킨다. 손으로 적으면 예약어를 추가하는 순간
 // 조용히 어긋나고, 그 어긋남은 아무도 눈치채지 못한다(테스트가 이 일치를 검증한다).
 export const COMMAND_HELP: ReadonlyArray<{ commands: readonly string[]; description: string }> = [
   { commands: [...RESET_COMMANDS], description: "지금까지의 대화를 끊고 새로 시작합니다(기억은 남습니다)" },
   { commands: [...COMPACT_COMMANDS], description: "지금까지의 대화를 요약해서 다음 세션으로 넘깁니다" },
+  { commands: [...CANCEL_COMMANDS], description: "진행 중인 작업을 멈춥니다(시킨 분이나 운영자만). 진행 표시의 중지 버튼과 같습니다" },
   // FIX6(사소, 머지 전 리뷰): 결과가 항상 "대회 소식 채널"에 올라가는 건 아니다 — DM 에서 부르거나
   // 지정 채널(DIGEST_CONTEST_CHANNEL_ID 등)이 설정돼 있지 않으면 명령을 친 곳에 그대로 온다
   // (core.ts 의 startDigestCommand). 조건부 목적지를 그대로 반영해 안내문이 실제 동작과 어긋나지

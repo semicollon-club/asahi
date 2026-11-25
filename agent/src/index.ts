@@ -30,12 +30,13 @@ import { decideMissingAlerts, type SeenState } from "./core/staleWorker.js";
 import { PrTracker } from "./core/prTracker.js";
 import { makeBackupRunner } from "./core/backup.js";
 import { DiscordAdapter } from "./adapters/discord.js";
-import { makeJobTokenMinter, newJobTokenSecret } from "./core/jobToken.js";
+import { makeJobTokenMinter, newJobTokenSecret, type JobTokenClaims } from "./core/jobToken.js";
 import { makeFileReturnHandler, FILE_RETURN_PATH } from "./core/fileReturn.js";
 import { makeLlmProxyHandler, LLM_PROXY_PREFIX } from "./core/llmProxy.js";
 import { makeMcpHubHandler, MCP_HUB_PREFIX } from "./core/mcpHub.js";
 import { makeGithubReadServer } from "./mcp/githubReadServer.js";
 import { makeSupabaseReadServer } from "./mcp/supabaseReadServer.js";
+import { makeMemoryServer } from "./mcp/memoryServer.js";
 import { makeShellTokenSource } from "./github/shellToken.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { defaultRunGit, resolveBotVersion } from "./remote/gitCommit.js";
@@ -121,7 +122,7 @@ async function main() {
   // 허브 MCP(4단계 4.1): 비밀이 필요한 MCP 서버를 봇(계정 A)에서 띄우고 /mcp/<이름> 으로 노출한다. 세션은 작업 토큰으로
   // 인증해 붙는다(core/mcpHub.ts). 첫 서버는 GitHub 읽기 — 봇의 읽기 헬퍼(src/github)를 최소권한(읽기 스코프) 설치 토큰으로
   // 노출한다. github 설정이 없으면 표가 비어 어떤 이름이든 404 다(소유자 프로필이 열어도 세션이 못 붙을 뿐, 무해).
-  const mcpServers: Record<string, () => McpServer> = {};
+  const mcpServers: Record<string, (claims: JobTokenClaims) => McpServer> = {};
   if (config.github !== null) {
     const ghConfig = config.github;
     const ghReadToken = makeShellTokenSource({ config: ghConfig, permissions: { metadata: "read", contents: "read", pull_requests: "read", issues: "read" } });
@@ -138,6 +139,9 @@ async function main() {
   // 읽기 가드(READ ONLY 트랜잭션)를 그대로 탄다 — db_schema·db_query. 소유자 프로필(OWNER_MCP_HUB)만 이름을 받고,
   // 토큰 허용 목록(mcpHub 클레임)이 서버 접근을 한 번 더 강제한다(core/mcpHub.ts).
   mcpServers.supabase = () => makeSupabaseReadServer({ introspect: repos.introspect });
+  // 기억(2026-11-25, 기억 정비 3-1): 봇 세션의 remember·recall·forget 과 같은 핸들러. 신원·위치는 요청마다 검증된 작업
+  // 토큰 클레임에서 온다(팩토리 인자) — 세션이 보낸 인자로는 바뀌지 않는다. 소유자 프로필(OWNER_MCP_HUB)만 이름을 받는다.
+  mcpServers.memory = (claims) => makeMemoryServer({ memories: repos.memories, users: repos.users, ownerId: config.ownerId }, claims);
   const mcpHub = makeMcpHubHandler({ verify: (t) => jobTokens.verify(t), servers: mcpServers });
 
   // FIX9(사소): 예전엔 모든 경로·메서드에 무조건 200 "ok" 를 돌려줘, 이 서버가 뭘 하는 프로세스인지
@@ -329,7 +333,9 @@ async function main() {
         .then((conv) => {
           for (const text of alerts) {
             if (conv === null) { console.error("[stale]", text); continue; }
-            bus.publish({ type: "system_notice", channel: "discord", channelRef: conv.discordChannelId, text, ts: Date.now() });
+            // 턴을 끝내지 않는 경고로 보낸다(2026-11-25) — 소유자가 DM 에서 작업 중이면 system_notice 가 그 턴의 진행 표시를
+            // 닫고 반응 순번을 하나 넘긴다(bus.ts 의 SideNoticeEvent).
+            bus.publish({ type: "side_notice", channel: "discord", channelRef: conv.discordChannelId, text, ts: Date.now(), warn: true });
           }
         })
         .catch((err) => console.error("[stale] 알림 발송 오류:", err));

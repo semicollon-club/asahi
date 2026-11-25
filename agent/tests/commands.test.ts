@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseSessionCommand, parseDigestCommand, parseHelpCommand, renderCommandHelp, COMMAND_HELP, isChannelCommand } from "../src/core/commands.js";
+import { parseSessionCommand, parseDigestCommand, parseHelpCommand, renderCommandHelp, COMMAND_HELP, isChannelCommand, isReservedCommand, parseCancelCommand } from "../src/core/commands.js";
 
 describe("parseSessionCommand", () => {
   it("예약어(/새세션·/새대화·/새로시작·/reset)를 reset 으로 인식한다(대소문자·앞뒤 공백 무시)", () => {
@@ -85,8 +85,9 @@ describe("renderCommandHelp — 안내문이 실제 예약어와 어긋나지 �
     expect(listed.length).toBeGreaterThan(0);
     for (const cmd of listed) {
       expect(help).toContain(cmd);
-      const parsed = parseSessionCommand(cmd) !== null || parseDigestCommand(cmd) !== null || parseHelpCommand(cmd);
-      expect(parsed, `${cmd} 는 안내문에 있지만 파싱되지 않는다`).toBe(true);
+      // 파서 합집합을 여기서 손으로 적지 않는다 — 예약어가 늘 때 이 줄만 낡는다(2026-11-25 /취소 추가 때 그랬다).
+      // 정본은 isReservedCommand 다.
+      expect(isReservedCommand(cmd), `${cmd} 는 안내문에 있지만 파싱되지 않는다`).toBe(true);
     }
   });
 
@@ -131,6 +132,29 @@ describe("renderCommandHelp — 안내문이 실제 예약어와 어긋나지 �
       const g = COMMAND_HELP.find((x) => x.commands.includes(name));
       expect(g?.description).not.toMatch(/DM/);
     }
+  });
+});
+
+describe("parseCancelCommand — 진행 중인 작업 멈추기(N2, 2026-11-25)", () => {
+  it("/취소·/중지·/stop 을 인식한다(대소문자·앞뒤 공백 무시)", () => {
+    for (const t of ["/취소", "/중지", "/stop", "  /STOP  "]) expect(parseCancelCommand(t)).toBe(true);
+  });
+  it("정확히 일치할 때만 — 문장 속의 단어나 다른 예약어는 아니다", () => {
+    for (const t of ["취소", "/취소 해줘", "작업 취소해줘", "/새세션", ""]) expect(parseCancelCommand(t)).toBe(false);
+  });
+  it("예약어 목록·안내문에 들어 있다", () => {
+    expect(isReservedCommand("/취소")).toBe(true);
+    expect(renderCommandHelp(true)).toContain("/취소");
+  });
+  it("일반 채널 명령은 아니다 — 멈출 턴은 스레드·DM 안에만 있다", () => {
+    expect(isChannelCommand("/취소")).toBe(false);
+  });
+});
+
+describe("isReservedCommand — 코어가 예약어로 처리하는 모든 문자열", () => {
+  it("세션·조사·도움말·취소 예약어는 참, 평범한 대화는 거짓", () => {
+    for (const t of ["/새세션", "/기억정리", "/대회", "/개발뉴스", "/help", "/취소"]) expect(isReservedCommand(t)).toBe(true);
+    for (const t of ["안녕", "/없는명령", "새세션", ""]) expect(isReservedCommand(t)).toBe(false);
   });
 });
 

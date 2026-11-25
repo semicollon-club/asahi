@@ -45,6 +45,19 @@ describe("작업 토큰 — mint/verify", () => {
     expect(verifyJobToken(secret, forged, 9_999)).toBeNull();
   });
 
+  it("isPrivate 클레임(하네스 턴의 위치 — 기억 허브가 개인·공용을 가른다)은 참·거짓 모두 왕복하고, 불리언이 아니면 거절한다", () => {
+    const secret = newJobTokenSecret();
+    for (const isPrivate of [true, false]) {
+      const withLocation: JobTokenClaims = { ...claims, isPrivate };
+      expect(verifyJobToken(secret, mintJobToken(secret, withLocation), 9_999)).toEqual(withLocation);
+    }
+    // 없이 발급하면(파일 반환 토큰) 검증 결과에도 키가 없다 — 기억 허브는 그 토큰을 거부한다(fail closed).
+    const back = verifyJobToken(secret, mintJobToken(secret, claims), 9_999);
+    expect(back && "isPrivate" in back).toBe(false);
+    const forged = mintJobToken(secret, { ...claims, isPrivate: "true" } as unknown as JobTokenClaims);
+    expect(verifyJobToken(secret, forged, 9_999)).toBeNull();
+  });
+
   it("서명 한 글자를 바꾸면 거절한다", () => {
     const secret = newJobTokenSecret();
     const token = mintJobToken(secret, claims);

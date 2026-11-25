@@ -22,7 +22,7 @@ import { progressFromMessage, isProgressUpdate, type PendingTool, type ProgressU
 import { buildSystemPrompt } from "./persona.js";
 import { profileFor, DEFAULT_MAX_TURNS } from "./profiles.js";
 import { shellGitArgs } from "./remoteTools.js";
-import { isSessionNotFound } from "./turnPrep.js";
+import { isSessionNotFound, isBrokenSession } from "./turnPrep.js";
 import type { TurnOutcome, TurnStartInput } from "../remote/hub.js";
 
 // 자기인지(§Task5): SDK_VERSION 은 package.json 의 @anthropic-ai/claude-agent-sdk 버전과 동기화한다.
@@ -80,13 +80,26 @@ export type { ProgressUpdate, PendingTool } from "./sdkEvents.js";
 // 되는 턴"이라는 축이 삭제 도구를 열어 두는 것은 다음 호출부를 향한 함정이라, 둘을 한 축으로
 // 묶었다(tools.ts 의 memoryWriteEnabled). memories 행을 만들거나 지우는 도구가 새로 생기면
 // 그것도 같은 이유로 이 축에 묶는다.
+// signal(N2, 2026-11-25): 사용자 취소(core.ts 의 requestCancel). 봇 자기 세션은 SDK 의 abortController 로, 하네스 턴은
+// 러너의 turn.cancel 로 잇는다. 중단으로 끝난 턴은 던지지 않고 cancelled 결과를 돌려준다 — 그때까지의 세션 id 를 실어서
+// (코어가 저장해 다음 턴이 그 자리에서 이어받는다).
 export type TurnRequest = {
   prompt: string; systemPrompt: string; resume?: string; cwd: string; context: TurnContext;
   onProgress?: (u: ProgressUpdate) => void; images?: ImageInput[]; noRemoteTools?: boolean; noWebTools?: boolean;
-  noSkills?: boolean; noMemoryWrite?: boolean;
+  noSkills?: boolean; noMemoryWrite?: boolean; signal?: AbortSignal;
 };
-export type TurnResult = { text: string; sessionId?: string; ok: boolean };
+export type TurnResult = { text: string; sessionId?: string; ok: boolean; cancelled?: true };
 export type TurnRunner = (req: TurnRequest) => Promise<TurnResult>;
+
+// 바깥 신호(턴 요청의 signal)를 SDK 가 받는 AbortController 로 잇는다. SDK 는 신호가 아니라 컨트롤러를 받는데, 코어의
+// 컨트롤러를 그대로 넘기면 실행기가 코어 대신 중단을 걸 수 있게 된다 — 중단은 코어만 건다.
+export function linkedAbortController(signal?: AbortSignal): AbortController {
+  const controller = new AbortController();
+  if (signal === undefined) return controller;
+  if (signal.aborted) controller.abort();
+  else signal.addEventListener("abort", () => controller.abort(), { once: true });
+  return controller;
+}
 
 export type ToolRepos = {
   memories: MemoriesRepo; users: UsersRepo; allowedDirs: AllowedDirsRepo; introspect: IntrospectRepo;
@@ -368,51 +381,64 @@ export function makeRunAgentTurn(
       ? (async function* () { yield buildMultimodalMessage(req.prompt, req.images!); })()
       : req.prompt;
 
-    for await (const message of query({
-      prompt: promptInput,
-      options: {
-        cwd: req.cwd,
-        systemPrompt: req.systemPrompt,
-        resume: req.resume,
-        allowedTools: preApprovedTools,
-        tools: builtinTools,
-        mcpServers: { [TOOL_SERVER]: server },
-        permissionMode: "default",
-        model,
-        maxTurns,
-        // 스킬은 agent/skill-plugin/ 에 플러그인 하나로 모여 있다(agent/skill-plugin/.claude-plugin).
-        // 외부 스킬은 그 폴더에 그대로 복사해 커밋하는 것이 설치 방식이다.
-        plugins: SKILL_PLUGINS,
-        // 항상 'all' 이다. 끄는 일은 위 builtinTools 가 한다 — skills: [] 가 실제로 끄는지는
-        // 실측으로 증명되지 않았고(Task 1 의 C 갈래는 tools: [] 와 겹쳐 분리되지 않았다),
-        // 증명되지 않은 경로에 차단을 걸지 않는다.
-        skills: "all" as const,
-      },
-    })) {
-      if (req.onProgress) {
-        for (const update of progressFromMessage(message, pendingToolNames)) {
-          req.onProgress(update);
+    // N2: 사용자 취소가 이 세션까지 닿게 한다(linkedAbortController 주석). SDK 는 중단되면 Claude Code 프로세스를 끝내고
+    // 스트림을 예외로 닫는다 — 그 예외는 취소의 결과이지 오류가 아니므로 cancelled 로 바꾼다. 결과(success)가 이미
+    // 왔다면 그쪽이 이긴다: 취소가 완료와 엇갈렸을 뿐 일은 끝났다.
+    const abortController = linkedAbortController(req.signal);
+    try {
+      for await (const message of query({
+        prompt: promptInput,
+        options: {
+          cwd: req.cwd,
+          systemPrompt: req.systemPrompt,
+          resume: req.resume,
+          allowedTools: preApprovedTools,
+          tools: builtinTools,
+          mcpServers: { [TOOL_SERVER]: server },
+          permissionMode: "default",
+          model,
+          maxTurns,
+          abortController,
+          // 스킬은 agent/skill-plugin/ 에 플러그인 하나로 모여 있다(agent/skill-plugin/.claude-plugin).
+          // 외부 스킬은 그 폴더에 그대로 복사해 커밋하는 것이 설치 방식이다.
+          plugins: SKILL_PLUGINS,
+          // 항상 'all' 이다. 끄는 일은 위 builtinTools 가 한다 — skills: [] 가 실제로 끄는지는
+          // 실측으로 증명되지 않았고(Task 1 의 C 갈래는 tools: [] 와 겹쳐 분리되지 않았다),
+          // 증명되지 않은 경로에 차단을 걸지 않는다.
+          skills: "all" as const,
+        },
+      })) {
+        if (req.onProgress) {
+          for (const update of progressFromMessage(message, pendingToolNames)) {
+            req.onProgress(update);
+          }
+        }
+        if (message.type === "system" && message.subtype === "init") {
+          sessionId = message.session_id;
+          // 자기인지(§Task5): 설정한 model 과 SDK 가 실제로 실행한 model 이 다르면(예: 모델 별칭이 다른
+          // 버전으로 라우팅됨) 즉시 알아챌 수 있도록 warn 으로 남긴다. 같으면 확인용 info 로그만.
+          const actual = (message as { model?: string }).model;
+          if (actual && actual !== model) console.warn(`[agent] 설정 모델(${model}) ≠ 실제 실행 모델(${actual})`);
+          else if (actual) console.log(`[agent] 실행 모델: ${actual}`);
+        }
+        if (message.type === "result") {
+          sessionId = message.session_id ?? sessionId;
+          if (message.subtype === "success") {
+            text = message.result;
+            ok = true;
+          } else {
+            text = `(에이전트 오류: ${message.subtype})`;
+            ok = false;
+          }
         }
       }
-      if (message.type === "system" && message.subtype === "init") {
-        sessionId = message.session_id;
-        // 자기인지(§Task5): 설정한 model 과 SDK 가 실제로 실행한 model 이 다르면(예: 모델 별칭이 다른
-        // 버전으로 라우팅됨) 즉시 알아챌 수 있도록 warn 으로 남긴다. 같으면 확인용 info 로그만.
-        const actual = (message as { model?: string }).model;
-        if (actual && actual !== model) console.warn(`[agent] 설정 모델(${model}) ≠ 실제 실행 모델(${actual})`);
-        else if (actual) console.log(`[agent] 실행 모델: ${actual}`);
-      }
-      if (message.type === "result") {
-        sessionId = message.session_id ?? sessionId;
-        if (message.subtype === "success") {
-          text = message.result;
-          ok = true;
-        } else {
-          text = `(에이전트 오류: ${message.subtype})`;
-          ok = false;
-        }
-      }
+    } catch (err) {
+      // 중단 뒤의 예외는 오류가 아니다. 결과(success)가 이미 왔다면 그 답이 이긴다 — 결과와 CLI 종료 사이(MCP 정리 등)에
+      // 멈춤이 끼어든 경우에도 완성된 답과 그 세션을 버리지 않는다(2026-11-25 리뷰).
+      if (abortController.signal.aborted) return ok ? { text, sessionId, ok } : { text: "", sessionId, ok: false, cancelled: true };
+      throw err;
     }
+    if (abortController.signal.aborted && !ok) return { text: "", sessionId, ok: false, cancelled: true };
 
     return { text, sessionId, ok };
   };
@@ -431,9 +457,12 @@ export function makeRunAgentTurn(
     const profile = profileFor(req.context, { ownerModel: model, maxTurns });
     // 작업 토큰에 이 턴의 고정 모델(3단계 3.1)과 허용 허브 MCP 서버 목록(4단계 4.2)을 싣는다 — 프록시가 본문
     // model 을 여기에 고정하고, 허브가 요청한 서버가 이 목록에 있는지 검사한다(세션이 Bash 로 우회해도 경계가 선다).
+    // 위치(isPrivate, 2026-11-25)도 싣는다 — 허브의 기억 서버가 이 값으로 개인·공용 기억을 가른다. 아래 시스템
+    // 프롬프트를 만드는 것과 같은 값이라, 모델이 읽은 기억 안내와 도구가 보는 위치가 어긋나지 않는다.
     const token = jobTokens.mint({
       userId: req.context.userId, conversationId: req.context.conversationId, channelRef: req.context.channelRef!,
       model: profile.model, ...(profile.mcpHub !== undefined ? { mcpHub: profile.mcpHub } : {}),
+      isPrivate: req.context.isPrivate,
     });
     // git 자격증명·신원은 sh_exec 와 같은 자리(shellGitArgs)에서 같은 수명으로 만든다 — 세션 환경으로 옮겨지는 것만 다르다.
     const git = (await shellGitArgs(ctx)) as unknown as Record<string, unknown>;
@@ -448,12 +477,29 @@ export function makeRunAgentTurn(
     }, (e) => {
       if (req.onProgress && isProgressUpdate(e)) req.onProgress(e);
     });
-    const out = await turn.result;
+    // N2: 사용자 취소를 러너의 turn.cancel 로 잇는다. 러너는 중단 뒤에도 그때까지의 세션 id 를 실어 turn.result 를
+    // 보낸다(remote/sessionRunner.ts) — 그 결과가 올 때까지 기다리는 것은 평소와 같다(허브의 턴 타임아웃이 상한이다).
+    const onAbort = () => turn.cancel();
+    if (req.signal?.aborted) turn.cancel();
+    else req.signal?.addEventListener("abort", onAbort, { once: true });
+    let out: TurnOutcome;
+    try {
+      out = await turn.result;
+    } finally {
+      req.signal?.removeEventListener("abort", onAbort);
+    }
+    // 취소가 완료와 엇갈렸으면(결과가 이미 성공) 성공이 이긴다 — 봇 자기 세션 경로와 같은 규칙이다.
+    if (req.signal?.aborted && !out.ok) {
+      console.log(`[agent] 하네스 턴 취소됨 — 세션 ${out.sessionId ? out.sessionId.slice(0, 8) : "없음"}`);
+      return { text: "", sessionId: out.sessionId, ok: false, cancelled: true };
+    }
     // 진단(2026-09-06): resume 이 매 턴 새 세션으로 떨어지는 원인을 좁히려면 "무엇을 resume 했고
     // 무엇이 돌아왔는가"를 봐야 한다. id 는 앞 8자만 — 비밀이 아니고 대조에는 충분하다. 다음 턴의
     // resume(위 줄)이 이 새 세션 id 와 같으면 저장은 정상, 다르면 core 의 저장이 stale 한 것이다.
     console.log(`[agent] 하네스 결과 — ok=${out.ok}, 새 세션 ${out.sessionId ? out.sessionId.slice(0, 8) : "없음"}${out.error !== undefined ? `, 오류 ${out.error}` : ""}`);
-    if (!out.ok && out.error !== undefined && isSessionNotFound(new Error(out.error))) throw new Error(out.error);
+    // 이어받을 수 없는 세션(isBrokenSession — 중단된 턴이 남긴 결과 없는 도구 호출 등)도 세션 없음과 같은 길로 던진다 —
+    // core 의 재시도가 그 세션을 버리고 새 세션으로 다시 한다.
+    if (!out.ok && out.error !== undefined && (isSessionNotFound(new Error(out.error)) || isBrokenSession(new Error(out.error)))) throw new Error(out.error);
     return {
       text: out.ok ? out.text : `(에이전트 오류: ${out.error ?? "알 수 없음"})`,
       sessionId: out.sessionId,

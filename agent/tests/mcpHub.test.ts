@@ -7,6 +7,8 @@ import { decideMcpRoute, makeMcpHubHandler, MCP_HUB_PREFIX } from "../src/core/m
 import { makeGithubReadServer } from "../src/mcp/githubReadServer.js";
 import { makeSupabaseReadServer } from "../src/mcp/supabaseReadServer.js";
 import type { IntrospectRepo } from "../src/store/introspectRepo.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { JobTokenClaims } from "../src/core/jobToken.js";
 
 // 허브 MCP(풀 하네스 4단계 4.1) — 봇(계정 A)의 /mcp/<이름>. 세션(계정 B)의 Claude Code 가 작업 토큰으로 붙어
 // mcp__<이름>__* 로 쓴다. 여기서는 실제 MCP 클라이언트로 허브에 붙어 핸드셰이크·인증·도구 왕복을 끝까지 본다
@@ -15,9 +17,11 @@ import type { IntrospectRepo } from "../src/store/introspectRepo.js";
 const closers: Array<() => Promise<void>> = [];
 afterEach(async () => { while (closers.length) await closers.pop()!(); });
 
-// verify: "good" 은 github·supabase 둘 다 허용, "gh-only" 는 github 만 허용(토큰 허용 목록 강제 확인용), 그 외는 null.
+// verify: "good" 은 github·supabase 둘 다 허용, "gh-only" 는 github 만 허용(토큰 허용 목록 강제 확인용),
+// "echo" 는 클레임 전달 확인용 서버 하나만 허용, 그 외는 null.
 const claimsFor = (mcpHub: string[]) => ({ jobId: "j", userId: "u1", conversationId: 1, channelRef: "c", mcpHub, exp: 9e12 });
-const verify = (t: string) => (t === "good" ? claimsFor(["github", "supabase"]) : t === "gh-only" ? claimsFor(["github"]) : null);
+const verify = (t: string) =>
+  t === "good" ? claimsFor(["github", "supabase"]) : t === "gh-only" ? claimsFor(["github"]) : t === "echo" ? claimsFor(["echo"]) : null;
 
 // 가짜 IntrospectRepo — Supabase 서버가 부르는 두 메서드만 구현한다.
 const fakeIntrospect = {
@@ -42,7 +46,7 @@ const fakeFetch = (async (url: string | URL) => {
   return new Response("not found", { status: 404 });
 }) as unknown as typeof fetch;
 
-async function hubServer(servers: Record<string, () => import("@modelcontextprotocol/sdk/server/mcp.js").McpServer>) {
+async function hubServer(servers: Record<string, (claims: JobTokenClaims) => McpServer>) {
   const handler = makeMcpHubHandler({ verify, servers });
   const server = http.createServer((req, res) => {
     if (req.url?.startsWith(MCP_HUB_PREFIX)) { handler(req, res); return; }
@@ -132,5 +136,20 @@ describe("makeMcpHubHandler — 허브 MCP 왕복", () => {
     // 같은 토큰으로 github 는 여전히 붙는다(허용 목록에 있으므로).
     const client = await connect(base, "github", "gh-only");
     expect((await client.listTools()).tools.length).toBeGreaterThan(0);
+  });
+
+  it("서버 팩토리는 그 요청의 검증된 클레임을 받는다 — 신원이 필요한 서버(memory)가 토큰에서 사람·대화를 안다", async () => {
+    const base = await hubServer({
+      echo: (claims) => {
+        const s = new McpServer({ name: "echo", version: "0" });
+        s.registerTool("whoami", { description: "클레임 확인", inputSchema: {} }, async () => ({
+          content: [{ type: "text", text: `${claims.userId}/${claims.conversationId}` }],
+        }));
+        return s;
+      },
+    });
+    const client = await connect(base, "echo", "echo");
+    const out = await client.callTool({ name: "whoami", arguments: {} });
+    expect((out.content as Array<{ text: string }>)[0].text).toBe("u1/1");
   });
 });

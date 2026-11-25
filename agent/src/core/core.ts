@@ -3,7 +3,7 @@ import type { EventBus, UserMessageEvent, ConversationHint } from "../events/bus
 import type { Config } from "../config.js";
 import { resolveTurnWorker, type TurnRunner, type TurnContext, type TurnResult, type ProgressUpdate } from "./agent.js";
 import { buildSystemPrompt } from "./persona.js";
-import { parseSessionCommand, parseDigestCommand, parseHelpCommand, renderCommandHelp } from "./commands.js";
+import { parseSessionCommand, parseDigestCommand, parseHelpCommand, parseCancelCommand, renderCommandHelp } from "./commands.js";
 import { DIGEST_TOPICS } from "./digest.js";
 import type { DigestRunner, DigestTopic } from "./digest.js";
 import type { Role } from "../store/usersRepo.js";
@@ -20,12 +20,28 @@ import type { ActionsRepo } from "../store/actionsRepo.js";
 import type { LlmUsageRepo } from "../store/llmUsageRepo.js";
 import { scopeDirs } from "./workerSelect.js";
 import { pathFlavorOf } from "./paths.js";
-import { buildContextBlock, isSessionNotFound } from "./turnPrep.js";
+import { buildContextBlock, isSessionNotFound, isBrokenSession } from "./turnPrep.js";
 import { speakerLabel } from "./speaker.js";
 import { buildImageMarker, downloadImages, type ImageRef, type ImageInput } from "./images.js";
 import { buildFileMarker, uploadDirFor, type FileRef } from "./attachments.js";
+import { isAuthFailure, shouldAlertOwner, authFailureUserNotice, authFailureOwnerAlert } from "./authFailure.js";
 
 const HOUR_MS = 60 * 60 * 1000;
+
+// N2 작업 취소(2026-11-25 설계 §3)의 문구. 멈춤 안내는 오류가 아니라 사람이 시킨 일의 결과라 경고 표시 없이
+// (assistant_message) 낸다. 나머지 셋은 진행 중인 턴과 무관한 응답이라 턴을 끝내지 않는 side_notice 로 낸다.
+// "이미 실행 중이던 명령" 단서(2026-11-25 리뷰): 멈춤은 모델을 멈출 뿐, 워커에서 이미 돌고 있던 원격 호출(sh_exec 등 —
+// 최대 120초)은 끝까지 간다. 사람이 위험한 명령을 멈췄다고 믿지 않게 사실대로 말한다.
+const CANCELLED_NOTICE = "작업을 멈췄어요. 이미 실행 중이던 명령은 끝까지 돌 수 있어요 — 이어서 하라고 하시면 멈춘 지점부터 계속합니다.";
+const CANCELLED_RECORD = "(사용자 요청으로 작업을 멈춤)";
+const CANCEL_NOTHING = "지금 멈출 작업이 없어요.";
+const CANCEL_NOT_ALLOWED = "진행 중인 작업은 시킨 분이나 운영자만 멈출 수 있어요.";
+const CANCEL_ALREADY = "이미 멈추는 중이에요.";
+const CANCEL_REQUESTED_LINE = "중지 요청 — 멈추는 중이에요";
+const QUEUED_LINE = "새 메시지가 왔어요 — 지금 작업이 끝나면 이어서 처리합니다";
+
+// 대화 채널별로 지금 도는 턴. 취소 요청이 "누구의 어떤 턴을" 멈출지 여기서 찾는다.
+type InFlightTurn = { userId: string; controller: AbortController };
 
 const SUMMARY_PROMPT = `이 대화 세션이 곧 종료됩니다. 나중에 다시 깨어날 너 자신을 위해 이번 대화를 요약하세요.
 - 결정된 것, 사용자에 대해 새로 알게 된 것, 진행 중인 일 중심으로 10줄 이내
@@ -120,9 +136,20 @@ export function formatProgress(u: ProgressUpdate, baseDirs?: string[]): string {
       const rest = tail.filter((x) => x !== undefined).join(" ");
       return rest.length > 0 ? `${mark} ${name} — ${rest}` : `${mark} ${name}`;
     }
+    case "note":
+      return `판단: ${shortenPath(u.text, baseDirs)}`;
     case "answering":
       return "답변 작성 중";
   }
+}
+
+// 끝난 뒤 남는 기록(N1-b)에 실을 줄. 진행 중 표시와 같되 도구 결과의 요약(출력 첫 줄)은 뺀다 — 진행 중에는 흘러가 사라지던
+// 줄이 이제 공개 스레드에 영구히 남으므로, 도구가 읽은 내용(.env 의 값 등)이 기록에 박히지 않게 한다(2026-11-25 리뷰).
+// 성패·도구 이름·소요는 남는다 — "무엇을 했고 됐는가"에는 그것으로 충분하다.
+export function formatProgressRecordLine(u: ProgressUpdate, baseDirs?: string[]): string {
+  if (u.kind !== "tool_result") return formatProgress(u, baseDirs);
+  const tail = u.ok && u.durationMs !== undefined ? ` (${seconds(u.durationMs)})` : "";
+  return `${u.ok ? "✓" : "✗"} ${u.name ?? "도구"}${tail}`;
 }
 
 export type CoreRepos = {
@@ -202,6 +229,12 @@ export class AgentCore {
   // 같은 가드를 공유하게 했으므로, 이 필드는 삭제한다 — run() 의 반환값({ started: boolean })만
   // 보고 아래 ingest 에서 안내 여부를 정한다.
   private digest?: DigestRunner;
+  // 마지막으로 소유자에게 구독 인증 실패를 알린 시각(빠른 개선 1.1). 프로세스 메모리에만 둔다 — 재시작하면 한 번 더
+  // 오는 정도는 받아들인다(authFailure.ts 의 AUTH_ALERT_COOLDOWN_MS 주석).
+  private lastAuthAlertAt: number | null = null;
+  // 대화 채널(discord_channel_id) → 지금 도는 턴(N2). runConversationTurn 이 모델 호출 준비를 마치기 전에 넣고 끝나면
+  // 뺀다. 턴 체인이 대화별 직렬이므로 한 채널에 동시에 둘이 있을 수 없다.
+  private inFlight = new Map<string, InFlightTurn>();
 
   constructor(deps: {
     bus: EventBus; config: Config; runTurn: TurnRunner; repos: CoreRepos; agentCwd: string; now?: () => number;
@@ -234,6 +267,31 @@ export class AgentCore {
     // ingest 안에서 일어나고 그 오류는 enqueue 의 .catch 가 처리하므로, 여기서
     // 프라미스를 잃어버릴 일이 없다.
     this.bus.subscribe("user_message", (e) => this.onUserMessage(e));
+    // 중지 버튼(N2). 예약어 /취소 는 user_message 로 와서 ingest 가 같은 함수로 보낸다.
+    this.bus.subscribe("cancel_request", (e) => this.requestCancel(e.channelRef, e.userId));
+  }
+
+  // 진행 중인 턴 멈추기(N2, 2026-11-25 설계 §3). 그 턴을 시킨 사람이나 소유자만 멈출 수 있다 — 공유 스레드에서 남의
+  // 작업을 멈추지 못하게 한다. 멈춤 자체는 신호만 건다: 턴 실행기가 SDK·러너를 중단시키고 cancelled 결과로 돌아오면
+  // runConversationTurn 이 마무리(세션 저장·안내)를 한다. 응답은 전부 턴을 끝내지 않는 이벤트(side_notice·progress)다 —
+  // 어댑터의 반응 순번을 건드리지 않는다.
+  private requestCancel(channelRef: string, userId: string): void {
+    const side = (text: string) => this.bus.publish({ type: "side_notice", channel: "discord", channelRef, text, ts: this.now() });
+    const turn = this.inFlight.get(channelRef);
+    if (!turn) {
+      side(CANCEL_NOTHING);
+      return;
+    }
+    if (userId !== turn.userId && userId !== this.ownerId) {
+      side(CANCEL_NOT_ALLOWED);
+      return;
+    }
+    if (turn.controller.signal.aborted) {
+      side(CANCEL_ALREADY);
+      return;
+    }
+    turn.controller.abort();
+    this.bus.publish({ type: "progress", channel: "discord", channelRef, text: CANCEL_REQUESTED_LINE, ts: this.now(), kind: "notice" });
   }
 
   private onUserMessage(e: UserMessageEvent): void {
@@ -276,6 +334,13 @@ export class AgentCore {
       }
       const topic = parseDigestCommand(text);
       if (topic) await this.startDigestCommand(topic, { userId: hint.userId, conv: null, replyRef: hint.discordChannelId, isPrivate: false });
+      return;
+    }
+
+    // N2: /취소 는 대화를 조회하지도 만들지도 않고 그 자리에서 끝낸다. 이 함수는 수신(ingest) 체인에서 돌므로 진행 중인
+    // 턴(턴 체인)을 기다리지 않고 바로 닿는다 — 턴 체인에 실었다면 멈추려는 그 턴 뒤에 줄을 서서 의미가 없다.
+    if (parseCancelCommand(text)) {
+      this.requestCancel(hint.discordChannelId, hint.userId);
       return;
     }
 
@@ -341,6 +406,11 @@ export class AgentCore {
       conversationId: conv.id, ts, role: "user", userId: hint.userId,
       discordMessageId: hint.discordMessageId, content: buildImageMarker(text, images), processed: false,
     });
+    // 턴 도중 온 메시지(N2): 조용히 다음 턴이 되던 것을 진행 중인 턴의 진행 표시에 한 줄로 알린다. 진행 중인 세션에
+    // 끼워 넣지는 않는다(조향 — 설계 §4 범위 밖).
+    if (this.inFlight.has(hint.discordChannelId)) {
+      this.bus.publish({ type: "progress", channel: "discord", channelRef: hint.discordChannelId, text: QUEUED_LINE, ts: this.now(), kind: "notice" });
+    }
     this.enqueue(this.turnChains, hint.discordChannelId, () => this.runConversationTurn(conv.id, hint.userId, hint.role as "owner" | "allowed", text, messageId, images, files, rejectedFiles, hint.displayName));
   }
 
@@ -474,6 +544,9 @@ export class AgentCore {
   }
 
   private async runConversationTurn(convId: number, userId: string, role: "owner" | "allowed", text: string, messageId: number, images: ImageRef[] = [], files: FileRef[] = [], rejectedFiles: string[] = [], displayName?: string): Promise<void> {
+    // N2: 이 턴의 취소 손잡이. try 밖에 두는 이유는 finally 가 등록을 지우고, 예외 갈래가 "멈춘 것인가"를 봐야 해서다.
+    let flight: InFlightTurn | undefined;
+    let flightKey: string | undefined;
     try {
       const conv = await this.repos.conversations.getById(convId);
       if (!conv) return;
@@ -506,6 +579,13 @@ export class AgentCore {
           return;
         }
       }
+
+      // N2: 이 턴을 멈출 수 있게 등록한다. 모델 호출 전(첨부 내려받기 등 준비 단계)부터 두어 그 사이에 온 취소도 잡는다 —
+      // 준비 중에 멈췄으면 모델을 부르지 않는다(아래 runTurn 앞의 확인). 한도 안내로 끝나는 턴은 등록하지 않는다.
+      flight = { userId, controller: new AbortController() };
+      flightKey = conv.discordChannelId;
+      this.inFlight.set(flightKey, flight);
+      const signal = flight.controller.signal;
 
       // 2026-08-06: 화자를 프롬프트에 싣는다. 공유 스레드에서 사람이 바뀌어도 모델이 알 수
       // 없어, 앞사람에게 한 거절을 다음 사람에게 그대로 반복한 사건이 있었다. 아래 세 조립
@@ -596,7 +676,10 @@ export class AgentCore {
       prompt = buildFileMarker(prompt, savedFiles, failedFiles);
       const systemPrompt = buildSystemPrompt({ role, isPrivate: conv.isPrivate, isOwner, deployTarget: this.config.deployTarget, workerConnected, workspaceDirs, githubReady: this.config.github !== null });
       const onProgress = (u: ProgressUpdate) => {
-        this.bus.publish({ type: "progress", channel: "discord", channelRef: conv.discordChannelId, text: formatProgress(u, workspaceDirs), ts: this.now() });
+        this.bus.publish({
+          type: "progress", channel: "discord", channelRef: conv.discordChannelId, text: formatProgress(u, workspaceDirs), ts: this.now(), kind: u.kind,
+          ...(u.kind === "tool_result" ? { record: formatProgressRecordLine(u, workspaceDirs) } : {}),
+        });
         // 기록은 도구 호출이 끝난 시점에만 남긴다(tool 이벤트는 짝이 맞춰져 이 한 행에 흡수된다).
         // 부가 기능이므로 실패해도 턴을 죽이지 않는다 — hub.ts 의 touchLastSeen 과 같은 패턴.
         if (u.kind !== "tool_result") return;
@@ -618,15 +701,22 @@ export class AgentCore {
         const dl = await downloadImages(images, { fetchImpl: this.fetchImpl });
         imageInputs = dl.inputs;
         if (dl.failed.length > 0) {
-          this.bus.publish({ type: "system_notice", channel: "discord", channelRef: conv.discordChannelId, text: `이미지 ${dl.failed.length}장을 불러오지 못했어요.`, ts: this.now() });
+          // 턴 도중의 안내라 턴을 끝내지 않는 side_notice 로 보낸다(2026-11-25) — system_notice 로 보내면 어댑터가 이 턴의 진행
+          // 표시를 닫고 반응 순번을 하나 넘겨, 정작 답이 나올 때 엉뚱한 메시지에 ✅ 가 달린다.
+          this.bus.publish({ type: "side_notice", channel: "discord", channelRef: conv.discordChannelId, text: `이미지 ${dl.failed.length}장을 불러오지 못했어요.`, ts: this.now(), warn: true });
         }
       }
 
       let result: TurnResult;
       try {
-        result = await this.runTurn({ prompt, systemPrompt, resume, cwd: this.agentCwd, context, onProgress, images: imageInputs });
+        result = signal.aborted
+          ? { text: "", ok: false, cancelled: true }
+          : await this.runTurn({ prompt, systemPrompt, resume, cwd: this.agentCwd, context, onProgress, images: imageInputs, signal });
       } catch (err) {
-        if (resume && isSessionNotFound(err)) {
+        if (signal.aborted) {
+          // 실행기가 중단을 결과(cancelled)가 아니라 예외로 돌려준 경우(SDK 의 AbortError 등) — 취소의 결과다.
+          result = { text: "", ok: false, cancelled: true };
+        } else if (resume && (isSessionNotFound(err) || isBrokenSession(err))) {
           // resume 세션이 SDK 쪽에 없음(클라우드 컨테이너 재배포/재시작으로 세션 저장소가 초기화됨 등)
           // → 그 세션을 버리고 새 세션 + 기억 컨텍스트로 재시도한다(대화 연속성 유지).
           console.warn("[core] resume 세션 없음 — 새 세션으로 재시도:", conv.id);
@@ -645,10 +735,22 @@ export class AgentCore {
           if (conv.isPrivate && conv.primaryUserId === this.ownerId) {
             await this.repos.conversations.setPrivateMemoryLoaded(conv.id, true);
           }
-          result = await this.runTurn({ prompt: retryPrompt, systemPrompt, resume: undefined, cwd: this.agentCwd, context, onProgress, images: imageInputs });
+          result = await this.runTurn({ prompt: retryPrompt, systemPrompt, resume: undefined, cwd: this.agentCwd, context, onProgress, images: imageInputs, signal });
         } else {
           throw err;
         }
+      }
+
+      // 모델 호출이 끝났다 — 이 턴은 더 멈출 것이 없다. 종료 이벤트(답·안내)를 내기 **전에** 등록을 푼다(2026-11-25 리뷰):
+      // 그 사이(안내 뒤 소유자 경보를 보내는 동안 등)에 온 /취소 가 끝난 턴에 "중지 요청" 줄을 남기면, 그 줄이 아무 턴도
+      // 닫지 않을 새 상태 메시지를 만든다.
+      this.releaseFlight(flightKey, flight);
+
+      // N2: 사람이 멈춘 턴. 오류 안내가 아니라 멈췄다는 안내로 끝내고, 그때까지의 세션을 저장해 다음 턴이 이어받게 한다.
+      // 멈춤이 완료와 엇갈려 결과가 이미 성공이면(실행기가 그렇게 돌려준다) 아래 성공 경로로 간다.
+      if (result.cancelled) {
+        await this.finishCancelled(conv, result.sessionId);
+        return;
       }
 
       if (!result.ok) {
@@ -671,6 +773,12 @@ export class AgentCore {
         if (result.sessionId) {
           await this.repos.conversations.setSession(conv.id, result.sessionId, this.now());
         }
+        // 구독 인증 실패는 다른 실패와 갈라서 다룬다(빠른 개선 1.1) — 시킨 사람이 할 수 있는 일이 없고, 고칠 사람은
+        // 소유자다. 원문을 그대로 보여주는 대신 상황을 말하고 소유자에게 알린다.
+        if (isAuthFailure(result.text)) {
+          await this.handleAuthFailure(conv, isOwner, result.text);
+          return;
+        }
         await this.notify(conv, `비서 처리 중 오류가 있었어요: ${result.text}`);
         return;
       }
@@ -687,14 +795,43 @@ export class AgentCore {
       // 예외(SDK 프로세스 오류·인증 throw 등)도 종료 이벤트를 반드시 발행해야 한다. 그러지 않으면
       // 어댑터의 finishStatus 가 불려지지 않아 그 채널의 상태 메시지·반응이 유령으로 남고,
       // pendingTriggers(FIFO)가 영구적으로 어긋난다.
-      console.error("[core] runConversationTurn 예외:", err);
+      const aborted = flight?.controller.signal.aborted === true;
+      this.releaseFlight(flightKey, flight); // 위 성공 경로의 releaseFlight 와 같은 이유 — 종료 안내보다 먼저 푼다.
+      if (!aborted) console.error("[core] runConversationTurn 예외:", err);
       const conv = await this.repos.conversations.getById(convId);
       if (conv) {
-        await this.notify(conv, "비서 처리 중 예기치 못한 오류가 발생했어요. 잠시 후 다시 시도해 주세요.");
+        // 인증 실패는 SDK 가 결과 대신 던지는 경우도 있다(봇 자기 세션 경로) — 결과 갈래와 같은 안내·경보로 바꾼다.
+        // 멈춘 뒤의 예외(세션 없음 재시도 도중 중단 등)는 오류가 아니라 취소의 결과다.
+        const raw = err instanceof Error ? err.message : String(err);
+        if (aborted) await this.finishCancelled(conv, undefined);
+        else if (isAuthFailure(raw)) await this.handleAuthFailure(conv, userId === this.ownerId, raw);
+        else await this.notify(conv, "비서 처리 중 예기치 못한 오류가 발생했어요. 잠시 후 다시 시도해 주세요.");
       }
     } finally {
+      this.releaseFlight(flightKey, flight);
       await this.repos.messages.markProcessed(messageId);
     }
+  }
+
+  // 진행 중 턴 등록을 푼다. 같은 채널에 다음 턴이 이미 들어와 있으면(턴 체인 직렬이라 정상 흐름에선 없지만) 그 턴의 것을
+  // 지우지 않도록 자기 자신일 때만 지운다. 여러 번 불러도 된다.
+  private releaseFlight(key: string | undefined, flight: InFlightTurn | undefined): void {
+    if (key !== undefined && flight !== undefined && this.inFlight.get(key) === flight) this.inFlight.delete(key);
+  }
+
+  // 멈춘 턴의 마무리(N2). 세션이 열린 뒤에 멈췄으면 그 세션을 저장한다 — 다음 턴이 그 자리에서 이어받는다(실패 턴의
+  // 세션 보존, 2026-09-17 과 같은 원리). 열리기 전에 멈췄으면 이전 세션을 그대로 둔다. 기록에 system 행을 남겨, 새 세션의
+  // 컨텍스트 블록에도 "여기서 멈췄다"가 보이게 한다. 진행 표시는 어댑터가 접힌 기록으로 남긴다(N1) — 그것이 "어디까지 했나"다.
+  private async finishCancelled(conv: Conversation, sessionId: string | undefined): Promise<void> {
+    // 기록이 실패해도 종료 이벤트는 반드시 낸다(2026-11-25 리뷰) — 안 내면 어댑터의 상태 메시지가 중지 버튼을 단 채 남고
+    // 반응 순번이 어긋난다. 세션을 못 저장한 대가는 다음 턴이 직전 세션으로 돌아가는 것뿐이다.
+    try {
+      if (sessionId) await this.repos.conversations.setSession(conv.id, sessionId, this.now());
+      await this.repos.messages.insert({ conversationId: conv.id, ts: this.now(), role: "system", content: CANCELLED_RECORD });
+    } catch (err) {
+      console.error("[core] 취소 기록 실패 — 안내는 그대로 냅니다:", err);
+    }
+    this.bus.publish({ type: "assistant_message", channel: "discord", channelRef: conv.discordChannelId, text: CANCELLED_NOTICE, ts: this.now() });
   }
 
   // 부팅 시 미처리 사용자 메시지를 그 대화 문맥으로 재개한다(크래시 복구).
@@ -1041,8 +1178,40 @@ export class AgentCore {
   }
 
   private async notify(conv: Conversation, text: string): Promise<void> {
-    await this.repos.messages.insert({ conversationId: conv.id, ts: this.now(), role: "system", content: text });
+    // 안내는 기록이 실패해도 나간다(2026-11-25 리뷰) — 이 함수가 내는 system_notice 는 대개 그 턴의 종료 이벤트라, 기록
+    // 실패(DB 장애 등)로 던지면 어댑터의 진행 표시가 닫히지 않고 반응 순번이 어긋난다. 장애 중일수록 사람에게 알리는 쪽이 먼저다.
+    try {
+      await this.repos.messages.insert({ conversationId: conv.id, ts: this.now(), role: "system", content: text });
+    } catch (err) {
+      console.error("[core] 안내 기록 실패 — 안내는 그대로 냅니다:", err);
+    }
     this.bus.publish({ type: "system_notice", channel: "discord", channelRef: conv.discordChannelId, text, ts: this.now() });
+  }
+
+  // 구독 인증 실패(빠른 개선 1.1, 2026-11-25 설계): 그 턴의 대화에는 상황 안내(턴의 끝 — notify)를, 소유자 DM 에는 조치가
+  // 담긴 경보를 보낸다. 경보는 턴을 끝내지 않는 side_notice 다 — 소유자가 DM 에서 다른 작업을 돌리는 중이어도 그 진행
+  // 상태를 닫지 않는다(bus.ts 의 SideNoticeEvent). 소유자 자신의 DM 에서 난 실패는 그 자리 안내가 곧 경보다.
+  // 경보 실패는 삼킨다 — 이미 실패한 턴의 안내까지 막으면 안 된다.
+  private async handleAuthFailure(conv: Conversation, isOwner: boolean, raw: string): Promise<void> {
+    await this.notify(conv, authFailureUserNotice(isOwner, raw));
+    const now = this.now();
+    if (conv.isPrivate && conv.primaryUserId === this.ownerId) {
+      this.lastAuthAlertAt = now;
+      return;
+    }
+    if (!shouldAlertOwner(this.lastAuthAlertAt, now)) return;
+    this.lastAuthAlertAt = now;
+    const alert = authFailureOwnerAlert(raw);
+    try {
+      const dm = await this.repos.conversations.findDmFor(this.ownerId);
+      if (dm === null) {
+        console.error("[auth] 소유자 DM 대화가 없어 경보를 로그로만 남깁니다:", alert);
+        return;
+      }
+      this.bus.publish({ type: "side_notice", channel: "discord", channelRef: dm.discordChannelId, text: alert, ts: now, warn: true });
+    } catch (err) {
+      console.error("[auth] 소유자 경보 발송 실패:", err);
+    }
   }
 
   private idleMs(): number {
