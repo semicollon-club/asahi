@@ -28,6 +28,21 @@ import type { TurnOutcome, TurnStartInput } from "../remote/hub.js";
 // 자기인지(§Task5): SDK_VERSION 은 package.json 의 @anthropic-ai/claude-agent-sdk 버전과 동기화한다.
 // DEFAULT_MODEL 은 makeRunAgentTurn 의 model 인자가 없을 때 쓰는 기본 모델이다.
 const SDK_VERSION = "0.3.207"; // package.json 과 동기화
+
+// runtime_info·/상태 가 보고하는 값. 턴 실행기(makeRunAgentTurn)와 코어의 예약어 /상태(빠른 개선 2차 §1, index.ts 가 배선)가 이
+// 함수 하나로 만든다 — 두 자리가 각자 조립하면 한쪽에만 필드가 늘어난다. botBranch: 봇 커밋이 어느 갈래의 것인지. 1단계
+// (2026-09-05)부터 값은 botVersion(git 에서 읽은 것)이 우선이고, 없을 때만 Railway 주입 변수로 떨어진다 — 미니PC 에는 그 변수가 없다.
+export function buildRuntimeInfo(o: {
+  model: string; deployTarget: "local" | "cloud"; maxTurns: number; botVersion?: BotVersion;
+  workers: RuntimeInfo["workers"];
+}): RuntimeInfo {
+  return {
+    model: o.model, sdkVersion: SDK_VERSION, deployTarget: o.deployTarget, maxTurns: o.maxTurns,
+    botCommit: o.botVersion?.commit ?? process.env.RAILWAY_GIT_COMMIT_SHA,
+    botBranch: o.botVersion?.branch ?? process.env.RAILWAY_GIT_BRANCH,
+    workers: o.workers,
+  };
+}
 const DEFAULT_MODEL = "claude-opus-5";
 
 // 프로세스 수명 동안 바뀌지 않으므로 턴마다 다시 계산하지 않는다. 존재 확인도 여기서 한 번만
@@ -279,15 +294,8 @@ export function makeRunAgentTurn(
   // 설정이 없으면 만들지 않고, 그러면 remoteTools.ts 가 토큰 대신 사유를 워커에 실어 보낸다.
   const shellTokens = github === null ? undefined : makeShellTokenSource({ config: github });
   return async (req) => {
-    // botBranch: 봇 커밋이 어느 갈래의 것인지. 워커 커밋과 나란히 놓인 두 SHA 가 왜 다른지를
-    // runtime_info 가 한 화면에서 설명하게 해 준다. 1단계(2026-09-05)부터 값은 extras.botVersion(git 에서 읽은
-    // 것)이 우선이고, 없을 때만 Railway 주입 변수로 떨어진다 — 미니PC 에는 그 변수가 없다.
-    const runtime: RuntimeInfo = {
-      model, sdkVersion: SDK_VERSION, deployTarget, maxTurns,
-      botCommit: extras.botVersion?.commit ?? process.env.RAILWAY_GIT_COMMIT_SHA,
-      botBranch: extras.botVersion?.branch ?? process.env.RAILWAY_GIT_BRANCH,
-      workers: hub?.workersInfo() ?? [],
-    };
+    // runtime_info 가 보고할 값(buildRuntimeInfo 주석 — 코어의 /상태 와 같은 함수로 만든다).
+    const runtime = buildRuntimeInfo({ model, deployTarget, maxTurns, botVersion: extras.botVersion, workers: hub?.workersInfo() ?? [] });
     const ctx: ToolCtx = buildToolCtx(repos, req.context, runtime, github, now);
     if (shellTokens) ctx.shellTokens = shellTokens;
     if (extras.jobTokens) ctx.jobTokens = extras.jobTokens;

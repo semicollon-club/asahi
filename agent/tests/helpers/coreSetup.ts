@@ -14,6 +14,7 @@ import { LlmUsageRepo } from "../../src/store/llmUsageRepo.js";
 import { AgentCore } from "../../src/core/core.js";
 import type { Config } from "../../src/config.js";
 import type { TurnRequest, TurnResult } from "../../src/core/agent.js";
+import type { RuntimeInfo } from "../../src/core/tools.js";
 
 // 2026-11-25 브랜치(진행 표시·취소·인증 알림)의 코어 테스트가 함께 쓰는 최소 픽스처. coreMulti.test.ts 의 setup 과
 // 같은 배선(pg-mem 실DB 리포 + 가짜 runTurn)이되, runTurn 을 테스트가 통째로 주입한다 — 취소 테스트는 req.signal 을
@@ -26,7 +27,7 @@ export const flush = async (): Promise<void> => {
 
 export type CoreFixture = Awaited<ReturnType<typeof setupCore>>;
 
-export async function setupCore(over: { runTurn?: (req: TurnRequest) => Promise<TurnResult>; config?: Partial<Config> } = {}) {
+export async function setupCore(over: { runTurn?: (req: TurnRequest) => Promise<TurnResult>; config?: Partial<Config>; runtimeInfo?: () => RuntimeInfo } = {}) {
   const db = await openTestDb();
   const repos = {
     users: new UsersRepo(db), conversations: new ConversationsRepo(db), participants: new ParticipantsRepo(db),
@@ -49,7 +50,7 @@ export async function setupCore(over: { runTurn?: (req: TurnRequest) => Promise<
     return over.runTurn ? over.runTurn(req) : { text: "답변", sessionId: "s1", ok: true };
   };
   const bus = new EventBus();
-  const core = new AgentCore({ bus, config, runTurn, now: () => clock, repos, agentCwd: "/data/agent" });
+  const core = new AgentCore({ bus, config, runTurn, now: () => clock, repos, agentCwd: "/data/agent", ...(over.runtimeInfo ? { runtimeInfo: over.runtimeInfo } : {}) });
   core.start();
   const published: AgentEvent[] = [];
   for (const type of ["assistant_message", "system_notice", "progress", "side_notice"] as const) {

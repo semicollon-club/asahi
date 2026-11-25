@@ -111,7 +111,9 @@ describe("send — 긴 본문은 계획된 모든 청크가 순서대로 나간�
 
   it("줄바꿈이 있는 긴 본문도 계획된 청크가 하나도 빠지지 않고 순서대로 나간다", async () => {
     const { view, sent } = makeAdapter();
-    const text = Array.from({ length: 400 }, (_, i) => `${i}번째 줄입니다. ${"가".repeat(20)}`).join("\n");
+    // 2026-11-25 빠른 개선 2차 §3.2: 메시지 네 개(INLINE_MAX_CHUNKS)를 넘는 답은 미리보기+파일로 바뀐다 — 그 경로는
+    // discordSendUx.test.ts 가 본다. 여기서는 여러 조각으로 나가는 범위(2~4개) 안의 길이로 순서 보존을 본다.
+    const text = Array.from({ length: 150 }, (_, i) => `${i}번째 줄입니다. ${"가".repeat(20)}`).join("\n");
 
     await view.send("chan-lines", text);
 
