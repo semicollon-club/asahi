@@ -20,6 +20,7 @@ import { FILE_NAME_HEADER, FILE_RETURN_MAX_BYTES } from "../core/fileReturn.js";
 import { defaultRunGit, type RunGit } from "./gitCommit.js";
 import { runPublish, runRestore } from "./gitPublish.js";
 import { shellGitEnv, shellGitOf } from "./gitEnv.js";
+import { decodeShellOutput, legacyEncodingOf, makeLineSplitter } from "./shellOutput.js";
 
 export type ExecResult = { ok: boolean; content: string };
 export type Executors = Record<string, (args: Record<string, unknown>) => Promise<ExecResult>>;
@@ -27,6 +28,9 @@ export type Executors = Record<string, (args: Record<string, unknown>) => Promis
 // 모델에게 돌려줄 출력 상한. 넘으면 잘라내고 잘렸다고 명시한다 — 조용히 자르면 모델이
 // 전체를 봤다고 착각한다.
 export const OUTPUT_MAX = 30000;
+// sh_exec 가 자식 출력을 모으는 바이트 상한(N4). 출력이 다 모인 뒤에 디코드하므로(shellOutput.ts 의 decodeShellOutput) 상한을
+// 문자가 아니라 바이트로 둔다. 한 글자가 최대 3바이트(UTF-8 한글)라도 OUTPUT_MAX 자를 넘겨 "잘랐어요" 안내가 붙을 만큼 넉넉하다.
+export const SH_EXEC_RAW_MAX = OUTPUT_MAX * 4;
 const READ_DEFAULT_LIMIT = 2000;
 const SH_DEFAULT_TIMEOUT_MS = 120_000;
 // M-3(최종 리뷰, Minor): file_fetch 의 fetch 에 타임아웃이 없으면 CDN 이 멈췄을 때 허브의
@@ -445,6 +449,9 @@ export function makeExecutors(
     // 워커가 먼저 거르면 8MB 를 다 올리고서야 413 을 받는 낭비가 없다.
     sendFileTimeoutMs?: number;
     sendFileMaxBytes?: number;
+    // sh_exec 가 UTF-8 이 아닌 출력 줄을 읽을 콘솔 코드페이지(N4, shellOutput.ts). worker.ts 가 기동 때 한 번 검출해 넘긴다 —
+    // 없으면(테스트 기본·검출 실패·윈도우가 아님) 대체 없이 UTF-8 로만 읽는다.
+    consoleCodePage?: number | null;
   } = {},
 ): Executors {
   // proc_start 가 회원 명령을 적을 스크립트 파일 위치(DEFAULT_SCRIPT_DIR·writeStartScript 선언부
@@ -458,6 +465,8 @@ export function makeExecutors(
   const fileReturnUrl = opts.fileReturnUrl;
   const sendFileTimeoutMs = opts.sendFileTimeoutMs ?? DEFAULT_SEND_FILE_TIMEOUT_MS;
   const sendFileMaxBytes = opts.sendFileMaxBytes ?? FILE_RETURN_MAX_BYTES;
+  // sh_exec 가 UTF-8 이 아닌 출력 줄을 읽을 인코딩 — 코드페이지는 이 함수 호출 동안 바뀌지 않으므로 한 번만 정한다.
+  const shellLegacy = legacyEncodingOf(opts.consoleCodePage);
 
   // Finding 3(Minor, 후속 리뷰): DEFAULT_SCRIPT_DIR 선언부의 "회원 폴더(roots) 밖에 둔다"는
   // 지금까지 강제되지 않는 주석일 뿐이었다 — roots(WORKER_ROOTS)에 언젠가 사용자 프로필 폴더가
@@ -723,14 +732,30 @@ export function makeExecutors(
       const env = { ...process.env, ...shellGitEnv(shellGitOf(args.git)) };
       return new Promise<ExecResult>((resolve) => {
         const child = spawn(command, { cwd: roots[0], shell: true, env });
-        let out = "";
         let timedOut = false;
         let settled = false;
-        const append = (chunk: Buffer) => {
-          if (out.length < OUTPUT_MAX * 2) out += chunk.toString();
+        // N4(2026-11-25): 청크를 바로 UTF-8 로 읽지 않고 스트림마다 줄로 끊어 모은 뒤, 출력이 다 모이면 줄마다 판정해 디코드한다
+        // (shellOutput.ts) — 윈도우 내장 명령의 cp949 출력과 청크 경계·두 스트림 사이에 걸린 글자가 깨지지 않게. 애매한 줄을 같은
+        // 출력의 다른 줄로 정하므로 디코드는 끝에 한 번 한다. 상한(SH_EXEC_RAW_MAX 바이트)에 닿으면 더 받지 않는다.
+        const lines: Buffer[] = [];
+        let rawBytes = 0;
+        const full = () => rawBytes >= SH_EXEC_RAW_MAX;
+        const emit = (line: Buffer) => {
+          if (full()) return;
+          lines.push(line);
+          rawBytes += line.length;
         };
-        child.stdout.on("data", append);
-        child.stderr.on("data", append);
+        const stdoutLines = makeLineSplitter(emit);
+        const stderrLines = makeLineSplitter(emit);
+        child.stdout.on("data", (c: Buffer) => { if (!full()) stdoutLines.push(c); });
+        child.stderr.on("data", (c: Buffer) => { if (!full()) stderrLines.push(c); });
+        // 끝나지 않은 마지막 줄까지 넣고 모은 출력을 문자열로 만든다 — 본문을 만드는 두 자리(close·hardTimer)에서 부른다.
+        // end() 는 두 번 불러도 안전하다.
+        const collectShellOutput = (): string => {
+          stdoutLines.end();
+          stderrLines.end();
+          return decodeShellOutput(lines, shellLegacy);
+        };
 
         // 타임아웃이 되면 죽이기만 하고, resolve 는 실제로 프로세스가 끝난 뒤(close 이벤트)
         // 넘긴다 — kill() 은 종료를 "요청"할 뿐이라 그 순간 바로 resolve 해버리면 OS 가 아직
@@ -791,6 +816,7 @@ export function makeExecutors(
             hardTimer = setTimeout(() => {
               // 강제종료 이후에도 close 가 안 왔다 — 프로세스 생사와 무관하게 호출자에게는
               // 반드시 끝을 알려야 한다. sh_exec 의 "유한한 시간 안에 resolve" 보장은 바로 이 지점이다.
+              const out = collectShellOutput();
               finish({
                 ok: false,
                 content: truncate(
@@ -805,6 +831,7 @@ export function makeExecutors(
           finish({ ok: false, content: `실행하지 못했어요: ${String(err)}` });
         });
         child.on("close", (code) => {
+          const out = collectShellOutput();
           if (timedOut) {
             finish({
               ok: false,
