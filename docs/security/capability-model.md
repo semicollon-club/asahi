@@ -733,9 +733,9 @@ pm2 jlist 가 돌려주는 명령은 이제 회원이 실제로 실행한 값이
 세션이 아니라 **워커(계정 B)의 Claude Code** 에 맡긴다(`core/agent.ts` 의 `decideHarnessDispatch` → `hub.startTurn` →
 `remote/sessionRunner.ts`). 그 턴의 능력은 위 표와 다른 세계다.
 
-- **도구**: Claude Code 내장 도구 전부(Read/Write/Edit/Glob/Grep/Bash/WebSearch/WebFetch/Task). 봇의 `mcp__asahi__*` 중 기억·
-  접근관리·PR 생성은 아직 없다 — 나머지 4단계 몫이고, 능력 안내(`persona.ts` 의 `buildHarnessCapabilityBlock`)가 그 사실을
-  말한다(기억 블록도 그 턴에는 빠진다). DB 읽기(4.2)와 파일 반환(4.5)은 아래처럼 다시 열렸다.
+- **도구**: Claude Code 내장 도구 전부(Read/Write/Edit/Glob/Grep/Bash/WebSearch/WebFetch/Task). 봇의 `mcp__asahi__*` 중 접근관리·
+  PR 생성은 아직 없고, 능력 안내(`persona.ts` 의 `buildHarnessCapabilityBlock`)가 그 사실을 말한다. DB 읽기(4.2)·파일 반환(4.5)·
+  기억(2026-11-25)은 아래처럼 다시 열렸다.
 - **로컬 브라우저 MCP(4단계 4.3, 2026-09-06)**: 하네스 세션에 **`mcp__browser__*`(로컬 stdio MCP)** 가 붙을 수 있다 — 로컬
   개발서버·웹페이지를 열어 화면을 확인·조작·캡처한다. **허브 MCP 와 다르다**: 봇(A)이 아니라 세션 계정(B)에서 도는 로컬 서버로,
   비밀이 없다(브라우저는 자격증명을 쥐지 않는다). 그래서 작업 토큰 인증도 없다 — 세션의 서브프로세스로 뜬다. 봇은 워커의 설치
@@ -771,8 +771,20 @@ pm2 jlist 가 돌려주는 명령은 이제 회원이 실제로 실행한 값이
     노출한다 — `list_repos`·`get_pull_request`. 쓰기(발행·push)는 여전히 기존 경로(`create_pull_request`·`sh_exec`)다.
   - **Supabase(4.2)**: 봇의 자기인지 도구(`db_schema`/`db_query`)와 같은 재료를 노출한다 — 1차 가드(`assertReadOnlySql`) + 핵심 방어선
     (`IntrospectRepo.readOnlyQuery` 의 Postgres **READ ONLY** 트랜잭션). 쓰기는 구조적으로 불가능하다(DB 가 거부).
-  - **경계(설계 §9) — 두 겹**: (1) 어느 서버를 어느 신원에 여는지는 프로필 한 곳(`core/profiles.ts` 의 `OWNER_MCP_HUB=["github","supabase"]`)이
-    정하고 손님에게는 열지 않는다. (2) 하네스 세션은 Bash 로 임의 루프백 요청을 할 수 있어 프로필(세션의 `mcpServers`)만으로는 경계가
+  - **기억(2026-11-25, 기억 정비 3-1)**: `mcp__memory__remember`·`recall`·`forget`(`mcp/memoryServer.ts`). 봇 세션의 기억 도구와
+    **같은 핸들러**(`tools.ts` 의 `rememberHandler`·`recallHandler`·`forgetHandler`)를 부르므로 범위(DM=개인, 서버=공용)·공용 기억
+    상한·recall 풀·forget 소유자 전용이 두 경로에서 같다. 다른 허브 서버와 달리 **결과가 신원·위치로 갈린다** — 그 값은 세션이 보낸
+    인자가 아니라 허브가 검증한 작업 토큰 클레임에서만 온다(팩토리가 클레임을 받는다): `userId`·`conversationId`, 그리고 하네스
+    턴이 시스템 프롬프트와 같은 값으로 싣는 위치(`isPrivate`). 위치가 없는 토큰이면 도구가 거부한다(fail closed). 소유자 여부는
+    클레임의 `userId` 를 `DISCORD_OWNER_ID` 와 견준다. 실제로 일어난 쓰기·삭제만 봇 로그에 한 줄씩 남는다(기억 번호·범위,
+    누가·어느 대화·작업 토큰 앞 6자 — 제목·내용은 남기지 않는다). DB 오류의 원문은 세션에 돌려주지 않고 로그에만 남긴다.
+    유휴 요약·정기 게시 같은 무인 턴은 하네스로 가지 않으므로(`noRemoteTools`) 봇 세션의 `memoryWriteEnabled` 축이 여기 따로
+    필요 없다 — 무인 턴을 하네스로 보내게 되면 그 턴의 허브 목록에서 `memory` 를 빼야 한다.
+    **한계**: 진행 중인 소유자 작업 토큰은 같은 계정 B 의 프로세스에 보이므로, 그 토큰을 읽은 부원은 그 만료까지 소유자 이름으로
+    기억을 심거나(소유자 권위를 빌린, 오래 남는 프롬프트 주입) 공용 기억을 지울 수 있다(위험 등록부 §14). 지운 기억은 매일
+    백업에서 되살린다.
+  - **경계(설계 §9) — 두 겹**: (1) 어느 서버를 어느 신원에 여는지는 프로필 한 곳(`core/profiles.ts` 의 `OWNER_MCP_HUB=["github","supabase","memory"]`)이
+    정하고 손님에게는 Supabase 만 열어 둔다(손님은 아직 하네스로 가지 않는다 — 기억은 X6 에서). (2) 하네스 세션은 Bash 로 임의 루프백 요청을 할 수 있어 프로필(세션의 `mcpServers`)만으로는 경계가
     못 되므로, **작업 토큰에 허용 서버 목록(`mcpHub` 클레임)을 담아 허브가 요청 서버가 그 목록에 있는지 검사한다(없으면 403)**. 손님이
     토큰을 들고 `/mcp/supabase` 를 직접 두드려도 그 토큰에 supabase 가 없으면 거부된다.
   - 허브가 `127.0.0.1` 에만 묶여(`HUB_BIND`) 미니PC 밖에서는 이 엔드포인트가 보이지 않는다.

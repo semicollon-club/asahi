@@ -252,10 +252,29 @@ const HARNESS_GIT_LINES =
 const HARNESS_GITHUB_READ_LINE =
   "\n- 깃허브 조직을 **읽을** 수 있습니다: `mcp__github__list_repos`(저장소 목록), `mcp__github__get_pull_request`(PR 상태·리뷰·코멘트). 저장소 코드 자체는 위 git 으로 clone 해 보는 편이 빠르고, 이 도구는 저장소 목록과 PR 리뷰·코멘트 확인에 씁니다.";
 
-// 하네스 턴(소유자)의 능력 블록. 도구 이름은 Claude Code 내장 도구다 — 원격 도구 이름(fs_*/sh_exec/proc_*/send_file)과
-// 봇 MCP 이름(remember/recall/db_*/runtime_info/manage_access)은 한 번도 쓰지 않는다(persona.test 가 고정한다).
+// 하네스 턴(소유자)의 능력 블록. 도구 이름은 Claude Code 내장 도구와 허브·로컬 MCP 의 네임스페이스 이름(mcp__…)이다 —
+// 원격 도구 이름(fs_*/sh_exec/proc_*/send_file)과 봇 MCP 의 맨 이름(remember/recall/forget/db_*/runtime_info/manage_access)은
+// 한 번도 쓰지 않는다(persona.test 가 고정한다). 맨 이름은 이 턴에 없는 도구라, 쓰라고 하면 모델이 시도하다 실패한다.
 const HARNESS_BROWSER_LINE =
   "\n- 로컬 개발서버나 웹페이지를 브라우저로 열어 화면을 확인·조작·캡처할 수 있습니다(`mcp__browser__*`). UI 를 고쳐 가며 실제 화면으로 확인할 때 쓰고, 캡처한 이미지를 작업 폴더에 저장한 뒤 위 `mcp__file__send_file` 로 사용자에게 보낼 수 있습니다.";
+
+// 하네스 턴(소유자)의 기억 블록(2026-11-25, 기억 정비 3-1). 봇 세션의 MEMORY 와 같은 규칙을 이 턴의 도구 이름(허브의
+// mcp__memory__*, mcp/memoryServer.ts)으로 쓴다. Claude Code 는 자체 메모 파일(CLAUDE.md·자동 메모)에 적어 두는 버릇이
+// 있는데, 그 파일은 봇의 기억 목록(turnPrep 의 컨텍스트 블록)에 실리지 않아 다른 대화·다른 경로에서 찾을 수 없다 — 그
+// 사실을 함께 적는다.
+const HARNESS_MEMORY = `## 기억 (도구)
+- 기억은 \`mcp__memory__remember\`(저장)·\`mcp__memory__recall\`(조회) 도구(데이터베이스)로 관리합니다. CLAUDE.md 나 메모 파일로 저장하지 마세요 — 그 파일은 봇의 기억 목록에 실리지 않아 다른 대화에서 찾을 수 없습니다.
+- 먼저 사용자에게 간결히 답하세요. 매 턴 저장·조회하지 말고, 정말 오래 기억할 가치가 있을 때만 저장하고 필요할 때만 조회하세요.`;
+
+// 하네스 턴(소유자)의 기억 안내 줄. 범위는 위치가 정한다(memoryScope.ts 의 memoryScopeFor — DM=개인, 서버=공용) — 허브
+// 기억 서버가 작업 토큰의 위치로 같은 규칙을 집행하므로, 이 문장도 같은 축으로 갈린다. 서버 쪽 문장은 봇 세션의
+// OWNER_SERVER_MEMORY_LINES 와 같은 내용을 이 턴의 도구 이름으로 쓴 것이다.
+function harnessMemoryLines(isPrivate: boolean): string {
+  const forget = `공용 기억이 틀리거나 낡으면 \`mcp__memory__forget\` 으로 지우세요 — ${FORGET_DISAMBIGUATION_HINT}`;
+  return isPrivate
+    ? `\n- 이 1:1 대화에서 \`mcp__memory__remember\` 로 저장하면 소유자 개인 기억이 됩니다. \`mcp__memory__recall\` 로 저장된 기억을 찾습니다. 서버 채널에서 부원들이 쌓은 ${forget}`
+    : `\n- 이 채널에서 \`mcp__memory__remember\` 로 저장하면 개인 기억이 아니라 동아리 공용 기억이 되어 모든 부원에게 보입니다. 동아리 문서를 전달받으면 "회비"·"활동 시간"·"가입 절차"처럼 주제별로 나눠 저장하세요 — 한 건에 문서 전체를 넣으면 조회할 때마다 전문이 그대로 돌아옵니다. \`mcp__memory__recall\` 은 이 채널에서 공용 기억만 찾습니다. ${forget}`;
+}
 
 function buildHarnessCapabilityBlock(ctx: PersonaContext, h: { cwd: string; browser?: boolean }): string {
   const where = ctx.isPrivate ? "소유자와의 1:1 비공개 대화" : "공개 채널(서버) 대화";
@@ -264,8 +283,8 @@ function buildHarnessCapabilityBlock(ctx: PersonaContext, h: { cwd: string; brow
   const publish = ctx.githubReady === true ? HARNESS_GIT_LINES : "";
   return `## 능력
 - ${where}이고, 이 턴은 동아리 미니PC 의 작업 계정에서 Claude Code 로 직접 돕니다. 파일·셸·검색은 내장 도구(Read/Write/Edit/Glob/Grep/Bash/WebSearch/WebFetch, 필요하면 Task 서브에이전트)로 합니다 — 원격 도구 이름은 없습니다.
-- 작업 폴더는 \`${h.cwd}\` 입니다. 이 기계의 관리자 권한으로 폴더 제한 없이 다루되, 부원들의 작업 폴더(그 아래 숫자 이름 폴더)는 그 사람의 것임을 존중하세요. 프로젝트는 작업 폴더 바로 밑에 폴더 하나로 만들고 그 안에서 작업하세요.
-- 이 턴에는 봇의 기억·접근관리 도구가 없습니다. 기억을 저장하거나 조회해 달라는 요청은 "이 방식의 턴에서는 아직 기억 도구를 쓸 수 없어요" 라고 답하세요 — 시도하지 마세요.
+- 작업 폴더는 \`${h.cwd}\` 입니다. 이 기계의 관리자 권한으로 폴더 제한 없이 다루되, 부원들의 작업 폴더(그 아래 숫자 이름 폴더)는 그 사람의 것임을 존중하세요. 프로젝트는 작업 폴더 바로 밑에 폴더 하나로 만들고 그 안에서 작업하세요.${harnessMemoryLines(ctx.isPrivate)}
+- 접근 권한 관리 도구는 이 턴에 없습니다. 요청받으면 시도하지 말고 지금은 할 수 없다고 답하세요.
 - DB 는 **읽기**만 됩니다: \`mcp__supabase__db_schema\`(테이블·컬럼 구조), \`mcp__supabase__db_query\`(읽기 전용 SELECT/WITH 한 문장). 쓰기·다중문은 거부됩니다 — 추측 대신 실측으로 답할 때 씁니다.
 - 만든 파일(이미지·PDF·캡처 등)은 \`mcp__file__send_file\` 로 디스코드 대화에 첨부해 보낼 수 있습니다 — path 는 작업 폴더 안의 파일입니다. 디스코드 첨부 상한을 넘으면 그 사실을 알립니다.${browser}${githubRead}${publish}
 - 특정 작업(예: UI 디자인)에는 전용 스킬이 있을 수 있습니다. 먼저 쓸 수 있는 스킬이 있는지 살펴보고, 있으면 그 지침을 따르세요.`;
@@ -386,12 +405,13 @@ function buildCapabilityBlock(ctx: PersonaContext): string {
 
 // 턴별 컨텍스트(역할·DM여부·워커 연결)로 시스템 프롬프트를 만든다. 능력 계층(§7.1)을 반영한다.
 export function buildSystemPrompt(ctx: PersonaContext): string {
-  // 하네스 턴(소유자)에는 remember/recall 이 없다 — 기억 블록을 넣으면 모델이 없는 도구를 쓰라는 지시를 받는다.
+  // 하네스 턴(소유자)의 기억 도구는 맨 이름(remember/recall)이 아니라 허브의 mcp__memory__* 다 — 봇 세션의 기억 블록을
+  // 넣으면 모델이 이 턴에 없는 도구를 쓰라는 지시를 받으므로, 같은 규칙을 이 턴의 도구 이름으로 쓴 블록을 넣는다.
   const harness = ctx.isOwner && ctx.harness !== undefined;
   return [
     IDENTITY,
     QUALITY,
-    ...(harness ? [] : [MEMORY]),
+    harness ? HARNESS_MEMORY : MEMORY,
     buildCapabilityBlock(ctx),
   ].filter((block) => block.length > 0).join("\n\n");
 }

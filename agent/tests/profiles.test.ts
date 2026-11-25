@@ -7,15 +7,16 @@ import { profileFor, GUEST_MODEL, OWNER_MCP_HUB, GUEST_MCP_HUB, DEFAULT_MAX_TURN
 describe("profileFor", () => {
   const owner = { ownerModel: "claude-opus-5" };
 
-  it("소유자(DM·서버)는 운영자 모델·기본 effort·서브에이전트 열림·허브 MCP(GitHub·Supabase)", () => {
+  it("소유자(DM·서버)는 운영자 모델·기본 effort·서브에이전트 열림·허브 MCP(GitHub·Supabase·기억)", () => {
     for (const isPrivate of [true, false]) {
       const p = profileFor({ isOwner: true, isPrivate, role: "owner" }, owner);
       // maxTurns 는 숫자를 다시 적지 않는다(2026-09-17) — 상수를 테스트가 손으로 베끼면 값이 바뀔 때
       // 여기만 빨개지고, 정작 "설정에서 내려온 값을 쓰는가"는 검증하지 못한다. 그건 아래 별도 케이스가 본다.
-      expect(p).toEqual({ model: "claude-opus-5", maxTurns: DEFAULT_MAX_TURNS, subagents: true, mcpHub: ["github", "supabase"] });
+      expect(p).toEqual({ model: "claude-opus-5", maxTurns: DEFAULT_MAX_TURNS, subagents: true, mcpHub: ["github", "supabase", "memory"] });
     }
-    // 4단계 4.1·4.2: 소유자만 허브 GitHub·Supabase 를 연다. 상수와 어긋나지 않게 대조한다.
-    expect([...OWNER_MCP_HUB]).toEqual(["github", "supabase"]);
+    // 4단계 4.1·4.2: 소유자만 허브 GitHub·Supabase 를 연다. 2026-11-25(기억 정비 3-1): 기억(memory)도 소유자에게 먼저
+    // 연다 — 소유자 턴이 하네스로 가면서 기억 도구가 통째로 빠져 있었다. 상수와 어긋나지 않게 대조한다.
+    expect([...OWNER_MCP_HUB]).toEqual(["github", "supabase", "memory"]);
   });
 
   it("손님(DM·서버)은 Sonnet 5·낮은 effort·서브에이전트 끔·허브 MCP 는 Supabase 만", () => {
@@ -26,6 +27,8 @@ describe("profileFor", () => {
       // 경로만 닫으면 "같은 사람이 같은 채널에서 물어도 경로에 따라 답이 갈리는" 어긋남이 남는다.
       // GitHub 허브는 그대로 소유자만이다(설치 토큰이라 축이 다르다).
       expect(p.mcpHub).not.toContain("github");
+      // 기억 허브는 X6(부원 하네스 개방)에서 손님 하네스 안내와 함께 연다 — 그 전에는 손님이 하네스로 가지 않는다.
+      expect(p.mcpHub).not.toContain("memory");
     }
     expect([...GUEST_MCP_HUB]).toEqual(["supabase"]);
     expect(GUEST_MODEL).toBe("claude-sonnet-5");
