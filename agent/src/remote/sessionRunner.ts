@@ -190,6 +190,13 @@ export function makeSessionRunner(o: {
       running.set(frame.id, { userId: frame.userId, abort });
       busyUsers.add(frame.userId);
 
+      // 세션 id·결과를 try 밖에 둔다(N2, 2026-11-25). (1) 사용자가 멈춘 턴(abort → 아래 catch)도 그때까지의 세션 id 를
+      // 결과에 실어야 봇이 저장하고 다음 턴이 그 자리에서 이어받는다 — 예전엔 try 안에 있어 예외 갈래가 이 값을 버렸고,
+      // 봇은 직전 성공 턴의 세션(멈춘 턴이 한 일이 없는 세션)으로 돌아갔다. (2) 성공 결과가 이미 왔는데 그 뒤 종료 과정에서
+      // 예외가 나면(멈춤이 결과와 엇갈린 경우 등) 완성된 답을 버리지 않는다.
+      let sessionId: string | undefined;
+      let text = "";
+      let ok = false;
       void (async () => {
         try {
           fs.mkdirSync(configDir, { recursive: true });
@@ -197,9 +204,6 @@ export function makeSessionRunner(o: {
           // 경로에서만 만든다(위 관문) — 루트를 안 넘긴 구성에서는 프레임의 값을 그대로 믿고 만들지 않는다.
           if (o.workerRoots !== undefined) fs.mkdirSync(cwd, { recursive: true });
           const pending = new Map<string, PendingTool>();
-          let sessionId: string | undefined;
-          let text = "";
-          let ok = false;
           let error: string | undefined;
           for await (const m of o.query({ prompt: frame.prompt, options })) {
             // 봇의 makeRunAgentTurn 과 같은 함수로 같은 모양의 이벤트를 만든다 — 진행 표시·actions 기록이 옛 경로와 같다.
@@ -234,7 +238,15 @@ export function makeSessionRunner(o: {
           // id 와 대조된다 — 로그로 그 id 를 남긴다(비밀 아님).
           const msg = err instanceof Error ? err.message : String(err);
           console.log(`[runner] 턴 예외 — id ${frame.id}, ${msg}`);
-          send({ type: "turn.result", id: frame.id, ok: false, text: "", error: msg });
+          if (ok) {
+            // 결과(success)는 이미 받았다 — 그 뒤의 예외는 답을 바꾸지 않는다.
+            send({ type: "turn.result", id: frame.id, ok: true, text, ...(sessionId !== undefined ? { sessionId } : {}) });
+            return;
+          }
+          // 세션 id 는 사람이 멈춘 경우에만 싣는다. 다른 예외(프로세스 오류 등)로 끝난 세션을 봇이 저장하면, 이어받을 수 없는
+          // 세션을 다음 턴마다 resume 하려다 같은 이유로 실패할 수 있다 — 그런 경우는 예전처럼 직전 세션으로 돌아간다.
+          const keepSession = abort.signal.aborted && sessionId !== undefined;
+          send({ type: "turn.result", id: frame.id, ok: false, text: "", error: msg, ...(keepSession ? { sessionId } : {}) });
         } finally {
           finish(frame.id);
         }

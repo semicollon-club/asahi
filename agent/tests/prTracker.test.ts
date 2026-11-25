@@ -77,6 +77,8 @@ async function make(s: Scenario, o: { notifyChannelId?: string; hasOwnerDm?: boo
   const sent: AgentEvent[] = [];
   bus.subscribe("assistant_message", (e) => { sent.push(e); });
   bus.subscribe("system_notice", (e) => { sent.push(e); });
+  // 2026-11-25 부터 PR 알림은 턴을 끝내지 않는 side_notice 다(경고였던 것은 warn).
+  bus.subscribe("side_notice", (e) => { sent.push(e); });
   let clock = o.now ?? 1_000_000;
   const tracker = new PrTracker({
     pullRequests,
@@ -96,7 +98,9 @@ async function make(s: Scenario, o: { notifyChannelId?: string; hasOwnerDm?: boo
   return { tracker, pullRequests, gh, sent, record, tick: () => tracker.tick(), advance: (ms: number) => { clock += ms; } };
 }
 
-const texts = (sent: AgentEvent[]) => sent.map((e) => ("text" in e ? `${e.type}@${e.channelRef}: ${e.text}` : ""));
+// 경고 표시가 붙는 side_notice 는 "side_notice!" 로 적는다 — 예전 system_notice(경고)와 assistant_message(담담한 알림)의
+// 구분이 그대로 남았는지 본다.
+const texts = (sent: AgentEvent[]) => sent.map((e) => ("text" in e ? `${e.type}${"warn" in e && e.warn ? "!" : ""}@${e.channelRef}: ${e.text}` : ""));
 
 describe("PrTracker.tick", () => {
   it("추적 중인 열린 PR 이 없으면 깃허브를 부르지 않는다", async () => {
@@ -115,7 +119,7 @@ describe("PrTracker.tick", () => {
     expect(owner).toHaveLength(1);
     expect(owner[0]).toContain("homepage#7");
     expect(owner[0]).toContain("민수");
-    expect(owner[0]).toContain("assistant_message");
+    expect(owner[0]).toMatch(/^side_notice@/);
     // CI 가 아직 도는 중이면 요청자에게는 아무 말도 하지 않는다.
     expect(texts(t.sent).filter((s) => s.includes("@C-req"))).toHaveLength(0);
     const row = (await t.pullRequests.byRepoNumber("homepage", 7))!;
@@ -163,7 +167,7 @@ describe("PrTracker.tick", () => {
     await t.tick();
     const req = texts(t.sent).filter((s) => s.includes("@C-req"));
     expect(req).toHaveLength(1);
-    expect(req[0]).toContain("assistant_message");
+    expect(req[0]).toMatch(/^side_notice@/);
     expect(req[0]).toContain("CI 통과");
     expect(req[0]).toContain("homepage#7");
     expect((await t.pullRequests.byRepoNumber("homepage", 7))!.ciState).toBe("success");
@@ -178,7 +182,7 @@ describe("PrTracker.tick", () => {
     await t.tick();
     const req = texts(t.sent).filter((s) => s.includes("@C-req"));
     expect(req).toHaveLength(1);
-    expect(req[0]).toContain("system_notice");
+    expect(req[0]).toMatch(/^side_notice!@/);
     expect(req[0]).toContain("CI 실패");
     expect(req[0]).toContain("agent");
     expect(req[0]).not.toContain("docs");
@@ -217,7 +221,7 @@ describe("PrTracker.tick", () => {
     await t.tick();
     const req = texts(t.sent).filter((s) => s.includes("@C-req"));
     expect(req).toHaveLength(1);
-    expect(req[0]).toContain("assistant_message");
+    expect(req[0]).toMatch(/^side_notice@/);
     expect(req[0]).toContain("병합");
     expect(req[0]).toContain("git switch main");
     expect((await t.pullRequests.byRepoNumber("homepage", 7))!.state).toBe("merged");
@@ -235,7 +239,7 @@ describe("PrTracker.tick", () => {
     await t.tick();
     const req = texts(t.sent).filter((s) => s.includes("@C-req"));
     expect(req).toHaveLength(1);
-    expect(req[0]).toContain("system_notice");
+    expect(req[0]).toMatch(/^side_notice!@/);
     expect(req[0]).toContain("병합 없이 닫");
     expect((await t.pullRequests.byRepoNumber("homepage", 7))!.state).toBe("closed");
   });

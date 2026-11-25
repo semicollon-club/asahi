@@ -55,10 +55,12 @@ describe("progressFromMessage — SDK 메시지에서 진행 업데이트 추출
     expect(pending.get("t1")?.name).toBe("recall");
   });
 
-  it("assistant 의 text 블록 → kind:'answering'", () => {
+  // 2026-11-25(N1 판단 줄)부터 텍스트가 있는 블록은 note 다 — 예전엔 answering 한 종류로 접혀 내용이 한 줄도
+  // 안 나갔다. 빈 텍스트 블록만 answering 으로 남는다(progressNote.test.ts).
+  it("assistant 의 text 블록 → kind:'note'(첫 줄)", () => {
     const pending = new Map<string, PendingTool>();
     const msg = { type: "assistant", message: { content: [{ type: "text", text: "안녕하세요" }] } };
-    expect(progressFromMessage(msg, pending)).toEqual<ProgressUpdate[]>([{ kind: "answering" }]);
+    expect(progressFromMessage(msg, pending)).toEqual<ProgressUpdate[]>([{ kind: "note", text: "안녕하세요" }]);
   });
 
   it("user 의 tool_result 블록 → kind:'tool_result', pending 에서 이름을 되찾는다", () => {

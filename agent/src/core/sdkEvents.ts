@@ -13,6 +13,10 @@ export type ProgressUpdate =
   // 표시와 기록이 같은 값에서 나오도록 확장했다(2026-07-28 관측 기반 스펙 §3).
   // ok/summary 는 SDK 의 tool_result 블록에서, input/durationMs 는 짝지은 tool 이벤트에서 온다.
   | { kind: "tool_result"; name?: string; input?: string; ok: boolean; summary?: string; durationMs?: number }
+  // 모델의 텍스트 블록 첫 줄(N1 판단 줄, 2026-11-25 설계 §2). 도구 사이에서 모델이 "무엇을 보았고 그래서 무엇을
+  // 하기로 했는지"가 여기에 담긴다. 마지막 텍스트 블록은 최종 답의 첫 문장이기도 해서, 끝난 뒤의 기록에서는
+  // 어댑터가 마지막 도구 뒤의 note 를 뺀다(discord.ts 의 formatProgressRecord).
+  | { kind: "note"; text: string }
   | { kind: "answering" };
 
 // tool_use_id → 그 호출의 이름·입력·시작 시각. 예전엔 이름(string)만 담았는데, 기록 한 행을
@@ -35,6 +39,18 @@ export function shortToolName(name: string): string {
 function truncate(s: string, max = 40): string {
   const t = s.trim();
   return t.length > max ? `${t.slice(0, max)}…` : t;
+}
+
+// 판단 줄 하나의 상한. 진행 표시는 최근 12줄을 보여주므로(discord.ts 의 PROGRESS_DISPLAY_MAX_LINES) 줄 하나가
+// 100자 안팎이면 2000자 한도까지 여유가 남는다. 코드포인트로 센다 — 한글·이모지가 경계에서 쪼개지지 않게.
+export const NOTE_MAX = 100;
+
+// 텍스트 블록 → 판단 줄. 비어 있지 않은 첫 줄만 쓴다 — 모델의 중간 설명은 대개 첫 줄이 요지이고, 여러 문단을
+// 진행 표시에 쏟으면 도구 줄이 밀려난다. 없으면 빈 문자열(호출측이 answering 으로 되돌린다).
+function noteFromText(text: string): string {
+  const first = text.split("\n").map((l) => l.trim()).find((l) => l.length > 0) ?? "";
+  const chars = [...first];
+  return chars.length > NOTE_MAX ? `${chars.slice(0, NOTE_MAX).join("")}…` : first;
 }
 
 // 도구 입력 객체에서 사람이 읽을 만한 짧은 요약 하나를 뽑는다(대표 키 우선순위). 없으면 undefined.
@@ -87,7 +103,7 @@ export function progressFromMessage(
     if (!raw || typeof raw !== "object") continue;
     const block = raw as {
       type?: unknown; name?: unknown; id?: unknown; input?: unknown;
-      tool_use_id?: unknown; is_error?: unknown; content?: unknown;
+      tool_use_id?: unknown; is_error?: unknown; content?: unknown; text?: unknown;
     };
     if (block.type === "tool_use" && typeof block.name === "string") {
       const name = shortToolName(block.name);
@@ -109,7 +125,11 @@ export function progressFromMessage(
         durationMs: p === undefined ? undefined : now() - p.startedAt,
       });
     } else if (block.type === "text") {
-      updates.push({ kind: "answering" });
+      // 판단 줄은 모델이 쓴 텍스트(assistant)에서만 뽑는다(2026-11-25 리뷰). user 메시지의 텍스트 블록 — 서브에이전트에게
+      // 넘기는 프롬프트, 스킬 본문, SDK 가 끼우는 합성 메시지 — 은 모델의 판단이 아니므로, 진행 표시에도 기록에도 싣지 않는다.
+      if (message.type !== "assistant") continue;
+      const note = typeof block.text === "string" ? noteFromText(block.text) : "";
+      updates.push(note.length > 0 ? { kind: "note", text: note } : { kind: "answering" });
     }
   }
   return updates;
@@ -122,6 +142,8 @@ export function isProgressUpdate(v: unknown): v is ProgressUpdate {
   if (typeof v !== "object" || v === null) return false;
   const o = v as Record<string, unknown>;
   if (o.kind === "answering") return true;
+  // 새 워커가 보내는 판단 줄. 옛 봇은 이 갈래가 없어 note 를 버린다 — 표시만 빠지고 턴은 그대로다(설계 §5 호환).
+  if (o.kind === "note") return typeof o.text === "string";
   if (o.kind === "tool") return typeof o.name === "string" && (o.input === undefined || typeof o.input === "string");
   if (o.kind === "tool_result") {
     return typeof o.ok === "boolean"
