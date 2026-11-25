@@ -1,9 +1,13 @@
 import path from "node:path";
-import type { EventBus, UserMessageEvent, ConversationHint } from "../events/bus.js";
+import type { EventBus, UserMessageEvent, UserMessageEditEvent, ConversationHint } from "../events/bus.js";
 import type { Config } from "../config.js";
 import { resolveTurnWorker, type TurnRunner, type TurnContext, type TurnResult, type ProgressUpdate } from "./agent.js";
 import { buildSystemPrompt } from "./persona.js";
-import { parseSessionCommand, parseDigestCommand, parseHelpCommand, parseCancelCommand, renderCommandHelp } from "./commands.js";
+import {
+  parseSessionCommand, parseDigestCommand, parseHelpCommand, parseCancelCommand, renderCommandHelp, parseStatusCommand, parseAccessCommand,
+  type AccessCommand,
+} from "./commands.js";
+import { formatRuntimeInfo, type RuntimeInfo } from "./tools.js";
 import { DIGEST_TOPICS } from "./digest.js";
 import type { DigestRunner, DigestTopic } from "./digest.js";
 import type { Role } from "../store/usersRepo.js";
@@ -22,9 +26,10 @@ import { scopeDirs } from "./workerSelect.js";
 import { pathFlavorOf } from "./paths.js";
 import { buildContextBlock, isSessionNotFound, isBrokenSession } from "./turnPrep.js";
 import { speakerLabel } from "./speaker.js";
-import { buildImageMarker, downloadImages, type ImageRef, type ImageInput } from "./images.js";
+import { buildImageMarker, downloadImages, IMAGE_LIMITS, type ImageRef, type ImageInput } from "./images.js";
 import { buildFileMarker, uploadDirFor, type FileRef } from "./attachments.js";
 import { isAuthFailure, shouldAlertOwner, authFailureUserNotice, authFailureOwnerAlert } from "./authFailure.js";
+import { describeTurnFailure } from "./failureText.js";
 
 const HOUR_MS = 60 * 60 * 1000;
 
@@ -39,9 +44,50 @@ const CANCEL_NOT_ALLOWED = "진행 중인 작업은 시킨 분이나 운영자�
 const CANCEL_ALREADY = "이미 멈추는 중이에요.";
 const CANCEL_REQUESTED_LINE = "중지 요청 — 멈추는 중이에요";
 const QUEUED_LINE = "새 메시지가 왔어요 — 지금 작업이 끝나면 이어서 처리합니다";
+// 운영자 예약어(빠른 개선 2차 §1)의 안내. 전부 턴을 끝내지 않는 side_notice 로 나간다(commands.ts 의 isInstantCommand).
+const STATUS_UNAVAILABLE = "지금은 상태 정보를 볼 수 없어요.";
+const ACCESS_OWNER_ONLY = "접근 권한 관리는 운영자만 할 수 있어요.";
+const ACCESS_NEED_TARGET = "누구를 바꿀지 @멘션이나 숫자 ID 하나로 알려 주세요. 예: /차단 @이름";
+const ACCESS_NOT_SELF = "운영자 자신의 권한은 바꿀 수 없어요.";
+const ACCESS_FAILED = "권한을 바꾸지 못했어요. 잠시 뒤 다시 시도해 주세요.";
 
 // 대화 채널별로 지금 도는 턴. 취소 요청이 "누구의 어떤 턴을" 멈출지 여기서 찾는다.
 type InFlightTurn = { userId: string; controller: AbortController };
+
+// 대기열에서 꺼내 시작한 메시지(빠른 개선 2차 §3.5). 꺼낸 순간부터 그 턴이 끝날 때까지 들고 있다 — "이미 시작한 메시지"를 알아보는
+// 기준이다. 진행 중 등록(inFlight)은 한도 확인·예약 뒤에야 생겨서, 그것만 보면 그 사이에 온 수정이 적용도 안내도 안 되는 빈틈이
+// 있었다(2026-11-25 리뷰). noticed: "반영되지 않았다" 안내를 이미 보냈는가(같은 메시지를 여러 번 고쳐도 한 번만).
+type StartedMessage = { channelRef: string; userId: string; noticed: boolean };
+
+// 이미 시작한 턴의 메시지를 고쳤을 때의 안내(빠른 개선 2차 §3.5). 도는 중인 턴을 고친 내용으로 다시 시작하지는 않는다 — 이미 한 도구
+// 호출을 되돌릴 수 없다.
+export const EDIT_TOO_LATE = "이미 시작한 작업이라 메시지를 고친 내용은 반영되지 않았어요. 바뀐 내용이 중요하면 새 메시지로 보내 주세요.";
+
+// 대화 채널별 대기열(빠른 개선 2차 §3.5·§3.6). 턴 체인에 실린 메시지 턴마다 한 항목이 있고, 그 턴이 시작될 때 빠진다. 아직 빠지지
+// 않은 항목이 "아직 시작하지 않은 메시지"다 — 수정은 여기서 찾아 고치고, 묶기는 바로 뒤의 같은 사람 항목을 함께 꺼낸다. barrier 는
+// 메시지가 아닌 턴 체인 작업(/새세션·/기억정리·유휴 정리)의 자리다: 그 앞뒤 메시지를 하나로 묶으면 순서의 뜻이 바뀐다.
+type QueuedMessage = {
+  kind: "message"; convId: number; messageId: number; discordMessageId: string; userId: string; role: "owner" | "allowed";
+  text: string; images: ImageRef[]; files: FileRef[]; rejectedFiles: string[]; displayName?: string;
+};
+type QueueEntry = QueuedMessage | { kind: "barrier"; id: number };
+
+export type MergeInput = { text: string; images: ImageRef[]; files: FileRef[]; rejectedFiles: string[] };
+
+// 묶인 메시지들 → 한 턴의 입력(빠른 개선 2차 §3.6). 하나면 그대로다. 여럿이면 본문을 "(이어서 보낸 메시지)" 로 잇는다 — 모델이 따로
+// 보낸 말이었음을 알게. 이미지는 한 번에 실을 수 있는 수(IMAGE_LIMITS.maxCount)까지, 넘친 것은 거절 사유로 알린다(조용히 사라지는
+// 첨부를 만들지 않는다 — sortAttachments 와 같은 원칙).
+export function mergeQueuedMessages(group: readonly MergeInput[]): MergeInput {
+  if (group.length === 1) return { text: group[0].text, images: group[0].images, files: group[0].files, rejectedFiles: group[0].rejectedFiles };
+  const max = IMAGE_LIMITS.maxCount;
+  const allImages = group.flatMap((m) => m.images);
+  return {
+    text: group.map((m, i) => (i === 0 ? m.text : `(이어서 보낸 메시지)\n${m.text}`)).join("\n\n"),
+    images: allImages.slice(0, max),
+    files: group.flatMap((m) => m.files),
+    rejectedFiles: [...group.flatMap((m) => m.rejectedFiles), ...allImages.slice(max).map((img) => `${img.name}(한 번에 ${max}장까지라 빠짐)`)],
+  };
+}
 
 const SUMMARY_PROMPT = `이 대화 세션이 곧 종료됩니다. 나중에 다시 깨어날 너 자신을 위해 이번 대화를 요약하세요.
 - 결정된 것, 사용자에 대해 새로 알게 된 것, 진행 중인 일 중심으로 10줄 이내
@@ -229,12 +275,21 @@ export class AgentCore {
   // 같은 가드를 공유하게 했으므로, 이 필드는 삭제한다 — run() 의 반환값({ started: boolean })만
   // 보고 아래 ingest 에서 안내 여부를 정한다.
   private digest?: DigestRunner;
+  // 예약어 /상태(빠른 개선 2차 §1)가 보고할 값의 공급원. index.ts 가 턴 실행기와 같은 재료(buildRuntimeInfo)로 만든다 — 소유자 턴은
+  // 하네스로 가서 runtime_info 도구가 없으므로, 같은 내용을 모델 없이 낸다. 없으면(테스트 등) 볼 수 없다고 답한다.
+  private runtimeInfo?: () => RuntimeInfo;
   // 마지막으로 소유자에게 구독 인증 실패를 알린 시각(빠른 개선 1.1). 프로세스 메모리에만 둔다 — 재시작하면 한 번 더
   // 오는 정도는 받아들인다(authFailure.ts 의 AUTH_ALERT_COOLDOWN_MS 주석).
   private lastAuthAlertAt: number | null = null;
   // 대화 채널(discord_channel_id) → 지금 도는 턴(N2). runConversationTurn 이 모델 호출 준비를 마치기 전에 넣고 끝나면
   // 뺀다. 턴 체인이 대화별 직렬이므로 한 채널에 동시에 둘이 있을 수 없다.
   private inFlight = new Map<string, InFlightTurn>();
+  // 대기열(위 QueueEntry 주석)과, 앞 턴에 묶여 이미 처리된 메시지 id. 묶인 메시지의 턴 체인 차례가 오면 할 일 없이 turn_merged 만 낸다.
+  private queues = new Map<string, QueueEntry[]>();
+  private absorbed = new Set<number>();
+  private barrierSeq = 0;
+  // 디스코드 메시지 id → 시작한 메시지(위 StartedMessage 주석).
+  private started = new Map<string, StartedMessage>();
 
   constructor(deps: {
     bus: EventBus; config: Config; runTurn: TurnRunner; repos: CoreRepos; agentCwd: string; now?: () => number;
@@ -248,6 +303,7 @@ export class AgentCore {
     };
     registry?: { sharedWorkerId(): Promise<string | null> };
     digest?: DigestRunner;
+    runtimeInfo?: () => RuntimeInfo;
   }) {
     this.bus = deps.bus;
     this.config = deps.config;
@@ -260,6 +316,7 @@ export class AgentCore {
     this.hub = deps.hub;
     this.registry = deps.registry;
     this.digest = deps.digest;
+    this.runtimeInfo = deps.runtimeInfo;
   }
 
   start(): void {
@@ -269,6 +326,9 @@ export class AgentCore {
     this.bus.subscribe("user_message", (e) => this.onUserMessage(e));
     // 중지 버튼(N2). 예약어 /취소 는 user_message 로 와서 ingest 가 같은 함수로 보낸다.
     this.bus.subscribe("cancel_request", (e) => this.requestCancel(e.channelRef, e.userId));
+    // 메시지 수정(빠른 개선 2차 §3.5). 수신 체인에 싣는다 — 원 메시지의 저장(ingest)이 끝나 대기열에 들어간 뒤에 처리되는 것이
+    // 보장된다(같은 채널 키).
+    this.bus.subscribe("user_message_edit", (e) => this.enqueue(this.ingestChains, e.channelRef, () => this.applyEdit(e)));
   }
 
   // 진행 중인 턴 멈추기(N2, 2026-11-25 설계 §3). 그 턴을 시킨 사람이나 소유자만 멈출 수 있다 — 공유 스레드에서 남의
@@ -325,6 +385,7 @@ export class AgentCore {
     // 굳어(decideRoute 의 hasConversation) 이후 그 채널의 모든 메시지에 답하기 시작한다.
     // 어댑터의 isChannelCommand 를 통과한 것만 오므로 /help 와 조사 예약어 둘뿐이다.
     if (hint.commandOnly) {
+      if (await this.handleInstantCommand(hint, text)) return;
       if (parseHelpCommand(text)) {
         // 능력 안내는 워커 연결 여부로 갈린다(최종 리뷰 Important 3) — 아래 helpText 참고.
         // commandOnly 는 일반 채널 경로라 항상 공개(isPrivate:false)다.
@@ -344,6 +405,9 @@ export class AgentCore {
       return;
     }
 
+    // 운영자 예약어(/상태·/차단·/허용)도 /취소 처럼 대화를 조회하지도 만들지도 않고 그 자리에서 끝낸다 — 대화가 필요 없는 명령이다.
+    if (await this.handleInstantCommand(hint, text)) return;
+
     const conv = await this.resolveConversation(hint, ts);
 
     // 세션 예약어 두 갈래. 둘 다 메시지를 저장하지 않고, 본체는 이 ingest 체인이 아니라 그
@@ -359,7 +423,12 @@ export class AgentCore {
     // 큐 키로 conv.discordChannelId 가 아니라 hint.discordChannelId 를 쓰는 이유도 그쪽과 같다.
     const sessionCmd = parseSessionCommand(text);
     if (sessionCmd === "reset") {
-      this.enqueue(this.turnChains, hint.discordChannelId, () => this.resetSession(conv.id, conv.discordChannelId));
+      // 대기열에 경계를 둔다(빠른 개선 2차 §3.6) — 이 앞뒤의 메시지가 한 턴으로 묶이면 "끊고 새로" 의 뜻이 사라진다.
+      const barrier = this.pushBarrier(hint.discordChannelId);
+      this.enqueue(this.turnChains, hint.discordChannelId, async () => {
+        this.dropBarrier(hint.discordChannelId, barrier);
+        await this.resetSession(conv.id, conv.discordChannelId);
+      });
       return;
     }
 
@@ -382,7 +451,11 @@ export class AgentCore {
     // 같은 값이지만(resolveConversation 은 채널로 먼저 찾는다) 오리진 메시지로 찾아온 대화에서는
     // 갈릴 수 있고, 그때 다른 키를 쓰면 막으려던 병렬 실행이 그대로 돌아온다.
     if (sessionCmd === "compact") {
-      this.enqueue(this.turnChains, hint.discordChannelId, () => this.compactSession(conv.id, hint.userId, conv.discordChannelId));
+      const barrier = this.pushBarrier(hint.discordChannelId); // /새세션 과 같은 이유
+      this.enqueue(this.turnChains, hint.discordChannelId, async () => {
+        this.dropBarrier(hint.discordChannelId, barrier);
+        await this.compactSession(conv.id, hint.userId, conv.discordChannelId);
+      });
       return;
     }
 
@@ -411,7 +484,149 @@ export class AgentCore {
     if (this.inFlight.has(hint.discordChannelId)) {
       this.bus.publish({ type: "progress", channel: "discord", channelRef: hint.discordChannelId, text: QUEUED_LINE, ts: this.now(), kind: "notice" });
     }
-    this.enqueue(this.turnChains, hint.discordChannelId, () => this.runConversationTurn(conv.id, hint.userId, hint.role as "owner" | "allowed", text, messageId, images, files, rejectedFiles, hint.displayName));
+    // 대기열에 넣고 턴 체인에 차례를 건다(빠른 개선 2차 §3.5·§3.6). 실제 본문은 차례가 왔을 때 대기열 항목에서 읽는다 — 그 사이의
+    // 수정이 반영되고, 바로 뒤에 같은 사람이 보낸 메시지가 함께 묶인다.
+    this.queueOf(hint.discordChannelId).push({
+      kind: "message", convId: conv.id, messageId, discordMessageId: hint.discordMessageId, userId: hint.userId,
+      role: hint.role as "owner" | "allowed", text, images, files, rejectedFiles, displayName: hint.displayName,
+    });
+    this.enqueue(this.turnChains, hint.discordChannelId, () => this.runQueuedTurn(hint.discordChannelId, messageId));
+  }
+
+  private queueOf(channelRef: string): QueueEntry[] {
+    let q = this.queues.get(channelRef);
+    if (!q) {
+      q = [];
+      this.queues.set(channelRef, q);
+    }
+    return q;
+  }
+
+  private pushBarrier(channelRef: string): number {
+    const id = ++this.barrierSeq;
+    this.queueOf(channelRef).push({ kind: "barrier", id });
+    return id;
+  }
+
+  // 경계 작업의 차례가 오면 그 경계를 뺀다. 그 앞의 항목은 이미 다 빠졌다(턴 체인이 대기열과 같은 순서로 돈다).
+  private dropBarrier(channelRef: string, id: number): void {
+    const q = this.queues.get(channelRef);
+    if (!q) return;
+    const idx = q.findIndex((e) => e.kind === "barrier" && e.id === id);
+    if (idx >= 0) q.splice(idx, 1);
+    if (q.length === 0) this.queues.delete(channelRef);
+  }
+
+  // 메시지 턴의 차례(빠른 개선 2차 §3.6). 앞 턴에 묶여 이미 처리된 메시지면 할 일 없이 turn_merged 만 내 어댑터의 반응 순번 하나를
+  // 닫는다. 아니면 대기열에서 자기 항목을 꺼내고, 바로 뒤에 이어지는 같은 사람(같은 대화)의 메시지를 함께 꺼내 한 턴으로 돌린다.
+  // 다른 사람의 메시지나 경계가 나오면 거기서 멈춘다. 묶는 것은 "이 턴이 시작되기 전에 이미 도착한" 메시지뿐이다 — 도는 중인 턴에
+  // 끼워 넣지는 않는다(조향은 범위 밖).
+  private async runQueuedTurn(channelRef: string, messageId: number): Promise<void> {
+    if (this.absorbed.delete(messageId)) {
+      this.bus.publish({ type: "turn_merged", channel: "discord", channelRef, ts: this.now() });
+      return;
+    }
+    const q = this.queues.get(channelRef) ?? [];
+    const idx = q.findIndex((e) => e.kind === "message" && e.messageId === messageId);
+    if (idx < 0) {
+      console.error(`[core] 대기열에 없는 메시지 턴 — 채널 ${channelRef}, 메시지 ${messageId}`);
+      return;
+    }
+    const head = q.splice(idx, 1)[0] as QueuedMessage;
+    const group: QueuedMessage[] = [head];
+    while (q.length > 0) {
+      const next = q[0];
+      if (next.kind !== "message" || next.userId !== head.userId || next.convId !== head.convId) break;
+      q.shift();
+      group.push(next);
+      this.absorbed.add(next.messageId);
+    }
+    if (q.length === 0) this.queues.delete(channelRef);
+    // 지금부터 이 메시지들은 "이미 시작한" 것이다 — 고치면 반영되지 않았다고 알린다(applyEdit).
+    for (const g of group) this.started.set(g.discordMessageId, { channelRef, userId: g.userId, noticed: false });
+    const m = mergeQueuedMessages(group);
+    try {
+      await this.runConversationTurn(head.convId, head.userId, head.role, m.text, head.messageId, m.images, m.files, m.rejectedFiles, head.displayName, {
+        extraMessageIds: group.slice(1).map((g) => g.messageId),
+        triggerId: head.discordMessageId,
+      });
+    } finally {
+      for (const g of group) this.started.delete(g.discordMessageId);
+    }
+  }
+
+  // 메시지 수정(빠른 개선 2차 §3.5). 아직 시작하지 않은 메시지면 대기열 항목과 기록을 고친다. 이미 시작한 턴의 메시지면 반영되지
+  // 않았다고 한 번 알린다. 끝난 메시지·다른 사람이 낸 수정은 무시한다. 알림은 턴을 끝내지 않는 side_notice 다.
+  private async applyEdit(e: UserMessageEditEvent): Promise<void> {
+    const entry = this.queues.get(e.channelRef)?.find((x): x is QueuedMessage => x.kind === "message" && x.discordMessageId === e.discordMessageId);
+    if (entry) {
+      if (entry.userId !== e.userId) return;
+      entry.text = e.text;
+      try {
+        await this.repos.messages.updateContent(entry.messageId, buildImageMarker(e.text, entry.images));
+      } catch (err) {
+        console.error("[core] 수정 기록 실패 — 처리에는 고친 내용을 씁니다:", err);
+      }
+      return;
+    }
+    const s = this.started.get(e.discordMessageId);
+    if (!s || s.channelRef !== e.channelRef || s.userId !== e.userId || s.noticed) return;
+    s.noticed = true;
+    this.sideNotice(e.channelRef, EDIT_TOO_LATE);
+  }
+
+  // 턴을 끝내지 않는 안내 한 줄(bus.ts 의 SideNoticeEvent). 즉시 명령의 답이 전부 이것으로 나간다 — 어댑터가 그 명령에 반응을
+  // 달지 않고 순번에 넣지 않으므로(isInstantCommand), assistant_message 로 보내면 진행 중인 다른 턴의 순번을 엉뚱하게 닫는다.
+  private sideNotice(channelRef: string, text: string, warn = false): void {
+    this.bus.publish({ type: "side_notice", channel: "discord", channelRef, text, ts: this.now(), ...(warn ? { warn: true as const } : {}) });
+  }
+
+  // 운영자 예약어(빠른 개선 2차 §1). 처리했으면 true. 모델을 부르지 않고, 대화 행·메시지도 만들지 않는다.
+  private async handleInstantCommand(hint: ConversationHint, text: string): Promise<boolean> {
+    if (parseStatusCommand(text)) {
+      let body = STATUS_UNAVAILABLE;
+      try {
+        if (this.runtimeInfo) body = formatRuntimeInfo(this.runtimeInfo());
+      } catch (err) {
+        console.error("[core] /상태 조회 실패:", err);
+      }
+      this.sideNotice(hint.discordChannelId, body);
+      return true;
+    }
+    const access = parseAccessCommand(text);
+    if (access) {
+      await this.applyAccessCommand(hint.discordChannelId, hint.userId, access);
+      return true;
+    }
+    return false;
+  }
+
+  // /차단·/허용. 판정은 역할이 아니라 운영자 신원(DISCORD_OWNER_ID)으로 한다 — 코어의 다른 특권 판정과 같은 규칙이다(역할은
+  // 바뀔 수 있다). 결과 문구에는 대상을 멘션으로 쓰지 않는다: 차단 안내가 차단된 사람을 부르면 안 된다. 표시 이름은 그 사람이
+  // 스스로 정하는 값이라 멘션·마크다운으로 쓰일 문자를 지우고 줄인다.
+  private async applyAccessCommand(channelRef: string, actorId: string, cmd: AccessCommand): Promise<void> {
+    if (actorId !== this.ownerId) return this.sideNotice(channelRef, ACCESS_OWNER_ONLY, true);
+    if (cmd.userId === null) return this.sideNotice(channelRef, ACCESS_NEED_TARGET, true);
+    if (cmd.userId === this.ownerId) return this.sideNotice(channelRef, ACCESS_NOT_SELF, true);
+    const role: Role = cmd.action === "block" ? "blocked" : "allowed";
+    try {
+      await this.repos.users.upsert(cmd.userId, { role });
+    } catch (err) {
+      console.error("[core] 접근 변경 실패:", err);
+      return this.sideNotice(channelRef, ACCESS_FAILED, true);
+    }
+    console.log(`[core] 접근 변경 — ${cmd.userId} → ${role} (운영자 예약어)`);
+    let name: string | undefined;
+    try {
+      name = (await this.repos.users.displayNames())[cmd.userId];
+    } catch {
+      /* 이름은 표시용이다 — 못 읽어도 숫자 ID 로 알린다 */
+    }
+    const clean = name?.replace(/[<>@`*_~|[\]\r\n]/g, " ").replace(/\s+/g, " ").trim().slice(0, 32);
+    const who = clean ? `${clean}(${cmd.userId})` : cmd.userId;
+    this.sideNotice(channelRef, role === "blocked"
+      ? `${who} 님을 차단했어요 — 이제 이 사람의 메시지에는 답하지 않아요.`
+      : `${who} 님을 허용했어요 — 이제 저를 부를 수 있어요.`);
   }
 
   // 정기 게시 예약어(/대회·/개발뉴스)를 즉시 실행한다. 스케줄의 lastRun 은 건드리지 않는다 —
@@ -543,7 +758,15 @@ export class AgentCore {
     }
   }
 
-  private async runConversationTurn(convId: number, userId: string, role: "owner" | "allowed", text: string, messageId: number, images: ImageRef[] = [], files: FileRef[] = [], rejectedFiles: string[] = [], displayName?: string): Promise<void> {
+  // batch(빠른 개선 2차 §3.5·§3.6): extraMessageIds 는 이 턴에 묶여 함께 처리되는 뒤 메시지들(컨텍스트 블록에서 빼고, 끝나면 함께
+  // 처리 완료로 표시한다), triggerId 는 이 턴을 시작시킨 디스코드 메시지(종료 이벤트에 실어, 어댑터가 완료 알림을 그 사람에게만 보내게).
+  private async runConversationTurn(
+    convId: number, userId: string, role: "owner" | "allowed", text: string, messageId: number,
+    images: ImageRef[] = [], files: FileRef[] = [], rejectedFiles: string[] = [], displayName?: string,
+    batch: { extraMessageIds?: number[]; triggerId?: string } = {},
+  ): Promise<void> {
+    const extraMessageIds = batch.extraMessageIds ?? [];
+    const triggerId = batch.triggerId;
     // N2: 이 턴의 취소 손잡이. try 밖에 두는 이유는 finally 가 등록을 지우고, 예외 갈래가 "멈춘 것인가"를 봐야 해서다.
     let flight: InFlightTurn | undefined;
     let flightKey: string | undefined;
@@ -565,7 +788,7 @@ export class AgentCore {
           const windowMs = this.config.llmTokenWindowMs ?? 5 * 60 * 60 * 1000;
           const used = await this.repos.llmUsage.sumTokensForUserSince(userId, this.now() - windowMs);
           if (used >= tokenCap) {
-            await this.notify(conv, "지금은 공유 구독의 사용량이 이번 창에서 가득 찼어요. 잠시 뒤 다시 시도해 주세요.");
+            await this.notify(conv, "지금은 공유 구독의 사용량이 이번 창에서 가득 찼어요. 잠시 뒤 다시 시도해 주세요.", triggerId);
             return;
           }
         }
@@ -575,7 +798,7 @@ export class AgentCore {
           ownerReserve: 0, isOwner: false, windowMs: HOUR_MS,
         });
         if (!reserved) {
-          await this.notify(conv, "구독 한도 보호를 위해 잠시 쉬고 있어요. 1시간 안에 다시 시도해 주세요.");
+          await this.notify(conv, "구독 한도 보호를 위해 잠시 쉬고 있어요. 1시간 안에 다시 시도해 주세요.", triggerId);
           return;
         }
       }
@@ -598,7 +821,7 @@ export class AgentCore {
       if (conv.sessionId && this.now() - conv.lastActiveTs < this.idleMs()) {
         resume = conv.sessionId;
       } else {
-        prompt = `${await buildContextBlock(this.repos, conv, messageId)}\n\n---\n\n${who} 메시지: ${text}`;
+        prompt = `${await buildContextBlock(this.repos, conv, [messageId, ...extraMessageIds])}\n\n---\n\n${who} 메시지: ${text}`;
         // 이 메시지가 새 세션 윈도우의 시작 → 요약 범위(from_message_id) 기준점으로 기록한다.
         await this.repos.conversations.setFirstMessageId(conv.id, messageId);
         if (conv.isPrivate && conv.primaryUserId === this.ownerId) {
@@ -728,7 +951,7 @@ export class AgentCore {
           // 재시도 쪽 prompt 에서만 마커가 조용히 사라진다. savedFiles/failedFiles 는 위에서 이미
           // 받아오기가 끝난 값이라 재조회 없이 그대로 재사용한다(파일을 다시 받아오지 않는다).
           const retryPrompt = buildFileMarker(
-            `${await buildContextBlock(this.repos, fresh, messageId)}\n\n---\n\n${who} 메시지: ${text}`,
+            `${await buildContextBlock(this.repos, fresh, [messageId, ...extraMessageIds])}\n\n---\n\n${who} 메시지: ${text}`,
             savedFiles, failedFiles,
           );
           await this.repos.conversations.setFirstMessageId(conv.id, messageId);
@@ -749,7 +972,7 @@ export class AgentCore {
       // N2: 사람이 멈춘 턴. 오류 안내가 아니라 멈췄다는 안내로 끝내고, 그때까지의 세션을 저장해 다음 턴이 이어받게 한다.
       // 멈춤이 완료와 엇갈려 결과가 이미 성공이면(실행기가 그렇게 돌려준다) 아래 성공 경로로 간다.
       if (result.cancelled) {
-        await this.finishCancelled(conv, result.sessionId);
+        await this.finishCancelled(conv, result.sessionId, triggerId);
         return;
       }
 
@@ -776,21 +999,23 @@ export class AgentCore {
         // 구독 인증 실패는 다른 실패와 갈라서 다룬다(빠른 개선 1.1) — 시킨 사람이 할 수 있는 일이 없고, 고칠 사람은
         // 소유자다. 원문을 그대로 보여주는 대신 상황을 말하고 소유자에게 알린다.
         if (isAuthFailure(result.text)) {
-          await this.handleAuthFailure(conv, isOwner, result.text);
+          await this.handleAuthFailure(conv, isOwner, result.text, triggerId);
           return;
         }
-        await this.notify(conv, `비서 처리 중 오류가 있었어요: ${result.text}`);
+        // 원문 대신 상황을 말한다(빠른 개선 2차 §3.3) — 원문은 봇 로그에 남기고, 소유자 DM 에서만 덧붙인다.
+        console.warn(`[core] 턴 실패 — 대화 ${conv.id}: ${result.text.slice(0, 500)}`);
+        await this.notify(conv, describeTurnFailure(result.text, { showRaw: isOwner && conv.isPrivate }), triggerId);
         return;
       }
       if (result.text.trim().length === 0) {
         // 성공했지만 최종 텍스트가 비어 있음(도구만 호출하고 끝낸 경우 등). 빈 메시지는 저장/발행하지 않는다.
-        await this.notify(conv, "이번엔 드릴 답을 만들지 못했어요. 다시 한 번 말씀해 주세요.");
+        await this.notify(conv, "이번엔 드릴 답을 만들지 못했어요. 다시 한 번 말씀해 주세요.", triggerId);
         return;
       }
 
       await this.repos.messages.insert({ conversationId: conv.id, ts: this.now(), role: "assistant", content: result.text });
       await this.repos.conversations.setSession(conv.id, result.sessionId ?? conv.sessionId, this.now());
-      this.bus.publish({ type: "assistant_message", channel: "discord", channelRef: conv.discordChannelId, text: result.text, ts: this.now() });
+      this.bus.publish({ type: "assistant_message", channel: "discord", channelRef: conv.discordChannelId, text: result.text, ts: this.now(), ...(triggerId !== undefined ? { triggerId } : {}) });
     } catch (err) {
       // 예외(SDK 프로세스 오류·인증 throw 등)도 종료 이벤트를 반드시 발행해야 한다. 그러지 않으면
       // 어댑터의 finishStatus 가 불려지지 않아 그 채널의 상태 메시지·반응이 유령으로 남고,
@@ -803,13 +1028,21 @@ export class AgentCore {
         // 인증 실패는 SDK 가 결과 대신 던지는 경우도 있다(봇 자기 세션 경로) — 결과 갈래와 같은 안내·경보로 바꾼다.
         // 멈춘 뒤의 예외(세션 없음 재시도 도중 중단 등)는 오류가 아니라 취소의 결과다.
         const raw = err instanceof Error ? err.message : String(err);
-        if (aborted) await this.finishCancelled(conv, undefined);
-        else if (isAuthFailure(raw)) await this.handleAuthFailure(conv, userId === this.ownerId, raw);
-        else await this.notify(conv, "비서 처리 중 예기치 못한 오류가 발생했어요. 잠시 후 다시 시도해 주세요.");
+        if (aborted) await this.finishCancelled(conv, undefined, triggerId);
+        else if (isAuthFailure(raw)) await this.handleAuthFailure(conv, userId === this.ownerId, raw, triggerId);
+        else await this.notify(conv, "비서 처리 중 예기치 못한 오류가 발생했어요. 잠시 후 다시 시도해 주세요.", triggerId);
       }
     } finally {
       this.releaseFlight(flightKey, flight);
-      await this.repos.messages.markProcessed(messageId);
+      // 메시지마다 따로 시도한다(2026-11-25 리뷰) — 앞 메시지의 표시가 실패해도 묶인 메시지들이 미처리로 남아 재시작 때(recoverPending)
+      // 이미 답한 말에 하나씩 또 답하는 일을 줄인다.
+      for (const id of [messageId, ...extraMessageIds]) {
+        try {
+          await this.repos.messages.markProcessed(id);
+        } catch (err) {
+          console.error(`[core] 처리 완료 표시 실패 — 메시지 ${id}:`, err);
+        }
+      }
     }
   }
 
@@ -822,7 +1055,7 @@ export class AgentCore {
   // 멈춘 턴의 마무리(N2). 세션이 열린 뒤에 멈췄으면 그 세션을 저장한다 — 다음 턴이 그 자리에서 이어받는다(실패 턴의
   // 세션 보존, 2026-09-17 과 같은 원리). 열리기 전에 멈췄으면 이전 세션을 그대로 둔다. 기록에 system 행을 남겨, 새 세션의
   // 컨텍스트 블록에도 "여기서 멈췄다"가 보이게 한다. 진행 표시는 어댑터가 접힌 기록으로 남긴다(N1) — 그것이 "어디까지 했나"다.
-  private async finishCancelled(conv: Conversation, sessionId: string | undefined): Promise<void> {
+  private async finishCancelled(conv: Conversation, sessionId: string | undefined, triggerId?: string): Promise<void> {
     // 기록이 실패해도 종료 이벤트는 반드시 낸다(2026-11-25 리뷰) — 안 내면 어댑터의 상태 메시지가 중지 버튼을 단 채 남고
     // 반응 순번이 어긋난다. 세션을 못 저장한 대가는 다음 턴이 직전 세션으로 돌아가는 것뿐이다.
     try {
@@ -831,7 +1064,7 @@ export class AgentCore {
     } catch (err) {
       console.error("[core] 취소 기록 실패 — 안내는 그대로 냅니다:", err);
     }
-    this.bus.publish({ type: "assistant_message", channel: "discord", channelRef: conv.discordChannelId, text: CANCELLED_NOTICE, ts: this.now() });
+    this.bus.publish({ type: "assistant_message", channel: "discord", channelRef: conv.discordChannelId, text: CANCELLED_NOTICE, ts: this.now(), ...(triggerId !== undefined ? { triggerId } : {}) });
   }
 
   // 부팅 시 미처리 사용자 메시지를 그 대화 문맥으로 재개한다(크래시 복구).
@@ -907,7 +1140,12 @@ export class AgentCore {
   async closeIdleConversations(): Promise<void> {
     const cutoff = this.now() - this.idleMs();
     for (const conv of await this.repos.conversations.listActiveIdle(cutoff)) {
-      this.enqueue(this.turnChains, conv.discordChannelId, () => this.summarizeAndClose(conv.id));
+      // 대기열 경계(빠른 개선 2차 §3.6) — 요약·닫기를 사이에 둔 메시지가 한 턴으로 묶이지 않게.
+      const barrier = this.pushBarrier(conv.discordChannelId);
+      this.enqueue(this.turnChains, conv.discordChannelId, async () => {
+        this.dropBarrier(conv.discordChannelId, barrier);
+        await this.summarizeAndClose(conv.id);
+      });
     }
   }
 
@@ -1177,7 +1415,8 @@ export class AgentCore {
     }
   }
 
-  private async notify(conv: Conversation, text: string): Promise<void> {
+  // triggerId: 대화 턴의 종료 안내일 때 그 턴을 시작시킨 메시지(bus.ts 의 SystemNoticeEvent 주석 — 완료 알림을 그 사람에게만).
+  private async notify(conv: Conversation, text: string, triggerId?: string): Promise<void> {
     // 안내는 기록이 실패해도 나간다(2026-11-25 리뷰) — 이 함수가 내는 system_notice 는 대개 그 턴의 종료 이벤트라, 기록
     // 실패(DB 장애 등)로 던지면 어댑터의 진행 표시가 닫히지 않고 반응 순번이 어긋난다. 장애 중일수록 사람에게 알리는 쪽이 먼저다.
     try {
@@ -1185,15 +1424,15 @@ export class AgentCore {
     } catch (err) {
       console.error("[core] 안내 기록 실패 — 안내는 그대로 냅니다:", err);
     }
-    this.bus.publish({ type: "system_notice", channel: "discord", channelRef: conv.discordChannelId, text, ts: this.now() });
+    this.bus.publish({ type: "system_notice", channel: "discord", channelRef: conv.discordChannelId, text, ts: this.now(), ...(triggerId !== undefined ? { triggerId } : {}) });
   }
 
   // 구독 인증 실패(빠른 개선 1.1, 2026-11-25 설계): 그 턴의 대화에는 상황 안내(턴의 끝 — notify)를, 소유자 DM 에는 조치가
   // 담긴 경보를 보낸다. 경보는 턴을 끝내지 않는 side_notice 다 — 소유자가 DM 에서 다른 작업을 돌리는 중이어도 그 진행
   // 상태를 닫지 않는다(bus.ts 의 SideNoticeEvent). 소유자 자신의 DM 에서 난 실패는 그 자리 안내가 곧 경보다.
   // 경보 실패는 삼킨다 — 이미 실패한 턴의 안내까지 막으면 안 된다.
-  private async handleAuthFailure(conv: Conversation, isOwner: boolean, raw: string): Promise<void> {
-    await this.notify(conv, authFailureUserNotice(isOwner, raw));
+  private async handleAuthFailure(conv: Conversation, isOwner: boolean, raw: string, triggerId?: string): Promise<void> {
+    await this.notify(conv, authFailureUserNotice(isOwner, raw), triggerId);
     const now = this.now();
     if (conv.isPrivate && conv.primaryUserId === this.ownerId) {
       this.lastAuthAlertAt = now;

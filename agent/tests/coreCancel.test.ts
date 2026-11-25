@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { setupCore, flush, threadHint, say } from "./helpers/coreSetup.js";
 import type { AgentEvent } from "../src/events/bus.js";
 import type { TurnRequest, TurnResult } from "../src/core/agent.js";
+import { describeTurnFailure } from "../src/core/failureText.js";
 
 // N2 작업 취소(2026-11-25 설계 §3): /취소·버튼 → 코어의 requestCancel → 진행 중 턴의 AbortSignal.
 
@@ -197,7 +198,7 @@ describe("종료 이벤트의 안전(2026-11-25 리뷰)", () => {
     say(f.bus, threadHint("guest", "th-n2", "allowed"), "긴 작업");
     await flush();
     await f.core.drain();
-    expect(f.eventsIn("th-n2", "system_notice").map(text)).toEqual(["비서 처리 중 오류가 있었어요: (에이전트 오류: error_max_turns)"]);
+    expect(f.eventsIn("th-n2", "system_notice").map(text)).toEqual([describeTurnFailure("(에이전트 오류: error_max_turns)", { showRaw: false })]);
   });
 
   it("도구 결과 진행 이벤트는 기록용 줄(record)을 따로 싣는다 — 진행 중 표시에는 요약이, 기록에는 요약 없이", async () => {

@@ -24,7 +24,8 @@ import { WorkersRepo } from "./store/workersRepo.js";
 import { SettingsRepo } from "./store/settingsRepo.js";
 import { IntrospectRepo } from "./store/introspectRepo.js";
 import { AgentCore } from "./core/core.js";
-import { makeRunAgentTurn } from "./core/agent.js";
+import { makeRunAgentTurn, buildRuntimeInfo } from "./core/agent.js";
+import { DEFAULT_MAX_TURNS } from "./core/profiles.js";
 import { DigestRunner, DIGEST_TOPICS, type DigestTopic } from "./core/digest.js";
 import { decideMissingAlerts, type SeenState } from "./core/staleWorker.js";
 import { PrTracker } from "./core/prTracker.js";
@@ -237,7 +238,11 @@ async function main() {
   // 연결돼 있는가"를 반영한다(agent.ts 의 resolveTurnWorker 와 같은 판정, 같은 hub 인스턴스).
   // registry(Task 7): resolveTurnWorker 가 hub.isConnected 를 부르기 전에 실제 workerId 를
   // 찾는 데 쓴다 — repos.workers 를 makeRunAgentTurn 과 동일하게 그대로 넘긴다.
-  const core = new AgentCore({ bus, config, runTurn, repos, agentCwd, hub, registry: repos.workers, digest });
+  // 예약어 /상태(빠른 개선 2차 §1)는 runtime_info 와 같은 재료로 만든다 — 소유자 턴은 하네스로 가서 그 도구가 없다.
+  const runtimeInfo = () => buildRuntimeInfo({
+    model: config.model, deployTarget: config.deployTarget, maxTurns: config.sessionMaxTurns ?? DEFAULT_MAX_TURNS, botVersion, workers: hub.workersInfo(),
+  });
+  const core = new AgentCore({ bus, config, runTurn, repos, agentCwd, hub, registry: repos.workers, digest, runtimeInfo });
   core.start();
 
   const discord = new DiscordAdapter({ bus, config, users, conversations });

@@ -8,7 +8,7 @@ import type { UsersRepo, Role } from "../store/usersRepo.js";
 import type { ConversationsRepo } from "../store/conversationsRepo.js";
 import { filterImageAttachments, type ImageRef } from "../core/images.js";
 import { filterFileAttachments, type FileRef } from "../core/attachments.js";
-import { isChannelCommand, isReservedCommand, parseCancelCommand } from "../core/commands.js";
+import { isChannelCommand, isReservedCommand, parseCancelCommand, isInstantCommand } from "../core/commands.js";
 
 // 줄바꿈 단위 분할(펜스를 모른다). 펜스가 없는 본문은 이 결과가 그대로 나간다 — chunkMessage 가 펜스를 다룰 때도
 // 자르는 일 자체는 이 함수가 하고, 그 위에서 펜스만 닫고 다시 연다.
@@ -134,11 +134,50 @@ export const SEND_EMPTY_FALLBACK = "이번엔 드릴 답을 만들지 못했어�
 export const DM_DECLINED_NOTICE =
   "DM 으로는 답하지 않아요. 동아리 서버 채널에서 저를 불러 주세요 — 제가 하는 일은 동아리 작업이라 다들 보이는 곳에 남아야 하거든요.";
 
+// 클라이언트 기본 멘션(빠른 개선 2차 §2, 2026-11-25). 예전엔 답 본문이 멘션 제한 없이 나가, 답장 인용·웹 페이지·파일
+// 내용에 심긴 지시로 모델이 @everyone 을 쓰면 봇 역할에 그 권한이 있는 서버에서 전원이 울렸다(진행 표시는 같은 날 막았다).
+// 본문에 쓰인 멘션은 아무도 울리지 않는다 — 처음엔 사람 멘션을 남겼지만, 주입된 지시로 모델이 <@id> 를 수십 번 써 한 사람을
+// 도배할 수 있어 그것도 막았다(같은 날 리뷰). 봇이 의도해서 부르는 곳은 긴 작업 완료 알림 하나뿐이고, 그 조각만 그 사람을 지정해
+// 울린다(send 의 allowedMentions.users). 클라이언트 기본값이라 앞으로 더할 전송도 따로 기억할 필요 없이 같은 규칙을 탄다.
+// repliedUser 는 봇이 사람 메시지에 답장(reply)할 때 그 사람을 부르는 것이라 남긴다(예: 일반 채널의 /취소 안내).
+export const DEFAULT_ALLOWED_MENTIONS: { parse: never[]; repliedUser: boolean } = { parse: [], repliedUser: true };
+
+// 긴 답은 파일로(빠른 개선 2차 §3.2). 메시지 다섯 개 이상이 연달아 쏟아지면 스레드가 읽히지 않는다 — 앞부분 미리보기 한 개와
+// 전문 첨부로 바꾼다. 미리보기도 chunkMessage 로 잘라 코드블록 경계를 지킨다.
+export const INLINE_MAX_CHUNKS = 4;
+const FILE_PREVIEW_MAX = 1500;
+export const LONG_ANSWER_FILE_NAME = "answer.md";
+
+export type SendPlan = { chunks: string[]; file?: { name: string; content: string } };
+
 // 텍스트를 디스코드 상한에 맞춰 나눈다. send() 는 이 결과를 그대로 실행만 한다 —
-// 판단을 여기로 몰아야 디스코드 채널 없이 테스트할 수 있다.
-export function planSend(text: string): { chunks: string[] } {
-  return { chunks: text.length > 0 ? chunkMessage(text) : [] };
+// 판단을 여기로 몰아야 디스코드 채널 없이 테스트할 수 있다. mentionUserId 가 있으면(긴 작업 완료 알림) 첫 조각 앞에 그
+// 사람의 멘션을 붙인다 — 접두 몫만큼 모든 조각을 짧게 잘라 2000자 상한을 지킨다. 없으면 예전과 바이트 단위로 같다.
+// allowFile:false 는 파일로 바꾸지 않는 계획이다 — 첨부가 거부됐을 때 send() 가 일반 메시지로 되돌아가는 데 쓴다.
+export function planSend(text: string, opts: { mentionUserId?: string; allowFile?: boolean } = {}): SendPlan {
+  if (text.length === 0) return { chunks: [] };
+  const prefix = opts.mentionUserId !== undefined ? `<@${opts.mentionUserId}> ` : "";
+  const chunks = chunkMessage(text, 2000 - prefix.length);
+  if (opts.allowFile !== false && chunks.length > INLINE_MAX_CHUNKS) {
+    const preview = chunkMessage(text, FILE_PREVIEW_MAX)[0];
+    const note = `\n\n(답이 길어서(${[...text].length}자) 전문은 파일로 붙였어요.)`;
+    return { chunks: [`${prefix}${preview}${note}`], file: { name: LONG_ANSWER_FILE_NAME, content: text } };
+  }
+  return { chunks: prefix.length > 0 ? [`${prefix}${chunks[0]}`, ...chunks.slice(1)] : chunks };
 }
+
+// 긴 작업이 끝나면 시킨 사람을 부른다(빠른 개선 2차 §3.1). 디스코드 스레드 알림은 사람마다 설정이 달라, 13분짜리 작업을
+// 시키고 자리를 뜨면 끝난 줄 모를 수 있었다. 기준은 시킨 메시지가 온 때부터다 — 대기열에서 기다린 시간도 기다린 시간이다.
+// DM 은 원래 알림이 가므로 부르지 않는다. 답장(reply)이 아니라 멘션인 이유는 send() 주석 참고.
+export const LONG_TURN_PING_MS = 2 * 60_000;
+
+export function decideCompletionPing(o: { startedAt: number | undefined; now: number; isDM: boolean }): boolean {
+  return o.startedAt !== undefined && !o.isDM && o.now - o.startedAt >= LONG_TURN_PING_MS;
+}
+
+// finishStatus 가 채우고 그 뒤의 전송이 읽는 한 턴짜리 그릇. 두 작업이 서로 다른 체인(상태·전송)에서 돌기 때문에 값을 이렇게
+// 넘긴다 — 전송은 상태 정리(finishStatus)가 끝난 뒤에만 돌므로(enqueueSendAfter) 읽는 시점에는 이미 채워져 있다.
+type CompletionPing = { userId?: string };
 
 // ── 순수 라우팅 결정 (테스트 용이) ──────────────────────────────────────────
 // 인입 메시지 + 발화자 role + 이 채널에 대화 행 존재여부 → 무엇을 할지.
@@ -147,6 +186,8 @@ export type Incoming = {
   // 빠른 개선 1.3: 봇의 메시지에 대한 답장(핑이 켜진 답장 — mentions.repliedUser 가 봇). 직접 멘션과 같이 "부르는
   // 것"으로 본다. 선택 필드인 이유는 이 값을 모르는 호출측(기존 테스트 픽스처 등)이 지금처럼 동작하게 하기 위해서다.
   repliesToBot?: boolean;
+  // 봇 전용 채널(BOT_CHANNEL_IDS, 빠른 개선 2차 §3.4)의 스레드 밖 메시지인가. 그 채널에서는 멘션 없이 말해도 부른 것으로 본다.
+  inBotChannel?: boolean;
   guildId?: string; parentChannelId?: string; content: string; messageId: string;
   images: ImageRef[];
   files: FileRef[];
@@ -190,6 +231,8 @@ export function decideRoute(i: Incoming, role: Role, hasConversation: boolean): 
   // 쓰려면 봇을 멘션해 스레드를 연 뒤 그 안에서 쳐야 했다 — 뉴스가 스레드에 갇혀 밖에서 안 보였다.
   // 대화를 만들지 않는 경로로 통과시킨다(commandOnly 힌트). 문자열 비교라 LLM 턴 비용은 없다.
   if (isChannelCommand(i.content)) return { kind: "channel-command" };
+  // 봇 전용 채널: 멘션 없이도 부른 것으로 본다. 예약어 판정 뒤에 두어 /help 같은 채널 명령은 지금처럼 스레드를 만들지 않는다.
+  if (i.inBotChannel === true) return { kind: "thread-create" };
   return { kind: "ignore" };
 }
 
@@ -356,6 +399,9 @@ export class DiscordAdapter {
   // 완료되도록 강제한다(sendChains/statusChains 와 같은 패턴).
   private inboundChains = new Map<string, Promise<void>>();
   private progressState = new Map<string, ProgressState>();
+  // 반응을 단 원본 메시지 → 그때 시각(긴 작업 완료 알림, §3.1). pendingTriggers 배열의 모양을 바꾸지 않으려고 따로 둔다 —
+  // 메시지가 순번에서 빠지면 함께 잊힌다(WeakMap).
+  private triggerStartedAt = new WeakMap<object, number>();
 
   constructor(deps: { bus: EventBus; config: Config; users: UsersRepo; conversations: ConversationsRepo }) {
     this.bus = deps.bus;
@@ -370,12 +416,17 @@ export class DiscordAdapter {
         GatewayIntentBits.MessageContent,  // 내용 읽기
       ],
       partials: [Partials.Channel], // DM 수신에 필요
+      allowedMentions: DEFAULT_ALLOWED_MENTIONS,
     });
   }
 
   async start(): Promise<void> {
     this.client.on("messageCreate", (message: Message) => {
       this.enqueueInbound(message.channelId, () => this.onMessage(message));
+    });
+    // 메시지 수정(빠른 개선 2차 §3.5). 처음 받을 때와 같은 인입 체인에 싣는다 — 같은 채널에서 원 메시지보다 먼저 처리되지 않게.
+    this.client.on("messageUpdate", (oldMessage, newMessage) => {
+      this.enqueueInbound(newMessage.channelId, () => this.onMessageEdit(oldMessage, newMessage as Message));
     });
     // 중지 버튼(N2). 인입 체인에 싣지 않는다 — 멈춤은 그 채널의 다른 처리를 기다리지 않고 바로 닿아야 한다.
     this.client.on("interactionCreate", (interaction: Interaction) => {
@@ -398,12 +449,14 @@ export class DiscordAdapter {
       this.enqueueStatus(e.channelRef, () => this.handleProgress(e.channelRef, e.text, e.kind, e.record));
     });
     this.bus.subscribe("assistant_message", (e) => {
-      const statusDone = this.enqueueStatus(e.channelRef, () => this.finishStatus(e.channelRef));
-      this.enqueueSendAfter(e.channelRef, statusDone, e.text);
+      const ping: CompletionPing = {};
+      const statusDone = this.enqueueStatus(e.channelRef, () => this.finishStatus(e.channelRef, ping, e.triggerId));
+      this.enqueueSendAfter(e.channelRef, statusDone, e.text, ping);
     });
     this.bus.subscribe("system_notice", (e) => {
-      const statusDone = this.enqueueStatus(e.channelRef, () => this.finishStatus(e.channelRef));
-      this.enqueueSendAfter(e.channelRef, statusDone, `⚠️ ${e.text}`);
+      const ping: CompletionPing = {};
+      const statusDone = this.enqueueStatus(e.channelRef, () => this.finishStatus(e.channelRef, ping, e.triggerId));
+      this.enqueueSendAfter(e.channelRef, statusDone, `⚠️ ${e.text}`, ping);
     });
     // 파일 반환(2026-09-05): 첨부는 턴 도중 도구 호출(send_file)로 나가는 부수 전송이다 — finishStatus 를
     // 타면(상태 메시지 삭제·⏳→✅) 아직 진행 중인 턴이 끝난 것처럼 보이고, 뒤에 올 답변 본문이 그 ⏳ 를
@@ -415,6 +468,14 @@ export class DiscordAdapter {
     // 턴을 끝내지 않는 알림(bus.ts 의 SideNoticeEvent). 상태 체인은 건드리지 않고 전송 체인 순서만 지킨다.
     this.bus.subscribe("side_notice", (e) => {
       this.enqueueSendAfter(e.channelRef, Promise.resolve(), e.warn ? `⚠️ ${e.text}` : e.text);
+    });
+    // 묶인 메시지의 순번(빠른 개선 2차 §3.6, bus.ts 의 TurnMergedEvent). 상태 메시지는 묶인 턴의 종료 이벤트가 이미 정리했다 — 여기서는
+    // 순번 하나만 꺼내 ✅ 로 바꾼다. 상태 체인에 실어 그 종료 이벤트의 정리 뒤에 돌게 한다.
+    this.bus.subscribe("turn_merged", (e) => {
+      void this.enqueueStatus(e.channelRef, async () => {
+        const trigger = this.progressState.get(e.channelRef)?.pendingTriggers.shift();
+        if (trigger) await this.markTriggerDone(trigger);
+      });
     });
   }
 
@@ -428,6 +489,15 @@ export class DiscordAdapter {
     const { images, files, rejected: rejectedFiles } = sortAttachments(
       [...message.attachments.values()].map((a) => ({ url: a.url, contentType: a.contentType, name: a.name, size: a.size })),
     );
+    // 봇 자신의 멘션을 뺀 본문(빠른 개선 1.3). 라우팅·스레드 이름·프롬프트가 모두 이 값을 본다 — 그래서
+    // "@아사히 /새세션" 처럼 멘션과 함께 친 예약어도 이제 예약어로 인식된다.
+    const content = stripBotMention(message.content, bot.id);
+    // 봇 전용 채널(§3.4)에서 멘션 없이 부른 것으로 볼 메시지인가. 시스템 메시지(고정 알림·스레드 시작 알림·부스트 — 작성자가
+    // 그 일을 한 사람으로 찍힌다)와 본문·첨부가 없는 메시지(전달·스티커)는 아니다(2026-11-25 리뷰): 고정 알림 하나가 스레드 생성
+    // 실패 → 채널 자체를 대화로 채택하는 폴백(createThreadHint)으로 이어져, 그 채널 전체가 영구히 한 대화가 될 수 있었다.
+    const inBotChannel = !isThread && message.system !== true
+      && (content.trim().length > 0 || images.length > 0 || files.length > 0)
+      && (this.config.botChannelIds ?? []).includes(message.channelId);
     const incoming: Incoming = {
       userId: message.author.id,
       channelId: message.channelId,
@@ -436,11 +506,10 @@ export class DiscordAdapter {
       mentionsBot: detectBotMention(message.mentions, bot),
       // 핑을 끈 답장은 부르는 것으로 보지 않는다(detectReplyToBot 주석) — 그런 답장은 지금처럼 멘션해야 부른다.
       repliesToBot: detectReplyToBot(message.mentions, bot.id),
+      inBotChannel,
       guildId: message.guildId ?? undefined,
       parentChannelId: isThread ? message.channel.parentId ?? undefined : undefined,
-      // 봇 자신의 멘션을 뺀 본문(빠른 개선 1.3). 라우팅·스레드 이름·프롬프트가 모두 이 값을 본다 — 그래서
-      // "@아사히 /새세션" 처럼 멘션과 함께 친 예약어도 이제 예약어로 인식된다.
-      content: stripBotMention(message.content, bot.id),
+      content,
       messageId: message.id,
       images,
       files,
@@ -493,25 +562,23 @@ export class DiscordAdapter {
       await message.reply(CANCEL_WHERE_NOTICE).catch(() => {});
       return;
     }
+    // 즉시 명령(/취소 와 운영자 예약어 /상태·/차단·/허용 — commands.ts 의 isInstantCommand, 빠른 개선 2차 §1)은 턴을 시작하지
+    // 않는다: 반응·타이핑·순번 없이 코어로만 보내고, 코어는 side_notice 로 답한다. 일반 채널에서 멘션과 함께 쳐도 스레드를 만들지
+    // 않고 그 채널의 채널 명령으로 보낸다 — 그 자리에서 끝나는 명령이라 "/상태" 라는 이름의 빈 스레드만 남는다.
+    const instant = isInstantCommand(incoming.content);
+    const route: typeof decision = instant && decision.kind === "thread-create" ? { kind: "channel-command" } : decision;
 
     // 타이핑 표시(있으면). 스레드 생성 전 원 채널에.
-    if (!isCancel && "sendTyping" in message.channel) {
+    if (!instant && "sendTyping" in message.channel) {
       void message.channel.sendTyping().catch(() => {});
     }
 
-    const hint = await this.resolveHint(decision, incoming, role, message, displayName, existing?.primaryUserId);
+    const hint = await this.resolveHint(route, incoming, role, message, displayName, existing?.primaryUserId);
     if (!hint) return; // 폴백조차 불가하면 조용히 종료(로그는 resolveHint 내부에서)
 
-    // 답장이면 대상 메시지를 문맥으로 앞에 붙인다(빠른 개선 1.3). 예약어에는 붙이지 않는다 — 코어는 예약어를
-    // 정확히 일치할 때만 알아보므로, 앞에 무엇이 붙으면 그 메시지가 평범한 대화 턴이 된다.
-    // 전달(forward)된 메시지도 reference 를 갖지만 다른 채널의 글이다 — 같은 채널의 답장(Default)만 인용한다.
-    const isReply = message.reference?.messageId !== undefined
-      && (message.reference.type ?? MessageReferenceType.Default) === MessageReferenceType.Default;
-    const text = isReply && !isReservedCommand(incoming.content)
-      ? await this.withReplyQuote(message, incoming.content, bot.id)
-      : incoming.content;
+    const text = await this.composeText(message, incoming.content, bot.id);
 
-    if (!isCancel) this.beginTurn(hint.discordChannelId, message);
+    if (!instant) this.beginTurn(hint.discordChannelId, message);
 
     this.bus.publish({
       type: "user_message",
@@ -536,6 +603,41 @@ export class DiscordAdapter {
     if (role !== "owner" && role !== "allowed") return;
     if (!interaction.channelId) return;
     this.bus.publish({ type: "cancel_request", channel: "discord", channelRef: interaction.channelId, userId: interaction.user.id, ts: Date.now() });
+  }
+
+  // 코어로 보낼 본문(봇 멘션을 뺀 content 에서). 답장이면 대상 메시지를 문맥으로 앞에 붙인다(빠른 개선 1.3). 예약어에는 붙이지 않는다 —
+  // 코어는 예약어를 정확히 일치할 때만 알아보므로, 앞에 무엇이 붙으면 그 메시지가 평범한 대화 턴이 된다. 전달(forward)된 메시지도
+  // reference 를 갖지만 다른 채널의 글이다 — 같은 채널의 답장(Default)만 인용한다. 새 메시지(onMessage)와 고친 메시지(onMessageEdit)가
+  // 같은 규칙을 타야 고친 본문이 처음 본문과 같은 모양이 된다.
+  private async composeText(message: Message, content: string, botId: string): Promise<string> {
+    const isReply = message.reference?.messageId !== undefined
+      && (message.reference.type ?? MessageReferenceType.Default) === MessageReferenceType.Default;
+    return isReply && !isReservedCommand(content) ? await this.withReplyQuote(message, content, botId) : content;
+  }
+
+  // 메시지 수정(빠른 개선 2차 §3.5). 아직 끝나지 않은 턴의 메시지(반응 순번에 있는 것)를 고쳤을 때만 코어로 보낸다 — 아직 시작 전이면
+  // 고친 내용으로 처리되고, 이미 시작했으면 코어가 반영되지 않았다고 알린다. 내용이 그대로인 갱신(링크 미리보기가 붙는 등)과, 캐시에
+  // 없어 이전 내용을 모르는 메시지는 거른다. 예약어로 바꾼 수정은 무시한다 — 이미 대화 턴으로 받은 메시지를 명령으로 되돌릴 수 없다.
+  private async onMessageEdit(oldMessage: { partial?: boolean; content?: string | null }, newMessage: Message): Promise<void> {
+    if (newMessage.author?.bot) return;
+    const bot = this.client.user;
+    if (!bot) return;
+    if (oldMessage.partial === true) return;
+    // 봇 멘션을 뺀 본문끼리 견준다 — 멘션만 넣거나 뺀 수정은 코어가 받는 본문이 같으므로 수정이 아니다(2026-11-25 리뷰: 도는 턴에
+    // 엉뚱한 "반영 안 됨" 안내가 나갔다).
+    const content = stripBotMention(newMessage.content ?? "", bot.id);
+    if (stripBotMention(oldMessage.content ?? "", bot.id) === content) return;
+    let channelRef: string | null = null;
+    for (const [ref, state] of this.progressState) {
+      if (state.pendingTriggers.some((m) => m.id === newMessage.id)) {
+        channelRef = ref;
+        break;
+      }
+    }
+    if (channelRef === null) return;
+    if (isReservedCommand(content)) return;
+    const text = await this.composeText(newMessage, content, bot.id);
+    this.bus.publish({ type: "user_message_edit", channel: "discord", channelRef, discordMessageId: newMessage.id, userId: newMessage.author.id, text, ts: Date.now() });
   }
 
   // 답장 대상을 한 번 읽어 본문 앞에 붙인다. 대상이 지워졌거나 읽을 권한이 없으면 문맥 없이 그대로 간다 — 부가
@@ -640,10 +742,10 @@ export class DiscordAdapter {
   // prev/next 를 읽고 쓰는 부분이 완전히 동기라서(그 사이 await 이 없다), 같은 channelRef 에 대해
   // 이 메서드가 호출되는 순서(= 이벤트가 publish 되는 순서)가 그대로 sendChains 에 이어붙는
   // 순서가 된다 — 답장이 뒤바뀌지 않는 근거가 이것이다.
-  private enqueueSendAfter(channelRef: string, wait: Promise<void>, text: string): void {
+  private enqueueSendAfter(channelRef: string, wait: Promise<void>, text: string, ping?: CompletionPing): void {
     const prev = this.sendChains.get(channelRef) ?? Promise.resolve();
     const next = Promise.all([prev, wait])
-      .then(() => this.send(channelRef, text))
+      .then(() => this.send(channelRef, text, ping?.userId !== undefined ? { mentionUserId: ping.userId } : {}))
       .catch(() => {});
     this.sendChains.set(channelRef, next);
   }
@@ -695,6 +797,7 @@ export class DiscordAdapter {
   private beginTurn(channelRef: string, message: Message): void {
     const state = this.getProgressState(channelRef);
     state.pendingTriggers.push(message);
+    this.triggerStartedAt.set(message, Date.now());
     void message.react(PROCESSING_REACTION).catch((err) => console.error("[discord] 반응 추가 실패:", err));
   }
 
@@ -752,7 +855,10 @@ export class DiscordAdapter {
   // 정리(N1-b): 도구를 한 번이라도 쓴 턴은 지우지 않고 접힌 기록으로 바꾼다(formatProgressRecord). 버튼 같은
   // 구성요소는 함께 걷는다 — 끝난 턴의 버튼이 남으면 누를 수 있는 것처럼 보인다. 도구 없이 끝난 턴(짧은 대화가
   // 대부분이다)은 남길 것이 없으므로 예전처럼 지운다.
-  private async finishStatus(channelRef: string): Promise<void> {
+  // triggerId(2026-11-25 리뷰): 이 종료 이벤트를 낸 턴을 시작시킨 메시지. 반응 순번은 지금처럼 맨 앞을 꺼내지만, 완료 알림은
+  // 꺼낸 메시지가 바로 그 메시지일 때만 보낸다 — 대화 안 /help 처럼 턴 체인 밖에서 순번을 먼저 꺼내는 이벤트가 끼면 순번이
+  // 어긋나는데(설계 §4), 그때 엉뚱한 사람을 부르지 않게. triggerId 가 없는 이벤트는 부르지 않는다.
+  private async finishStatus(channelRef: string, ping?: CompletionPing, triggerId?: string): Promise<void> {
     const state = this.progressState.get(channelRef);
     if (state) {
       if (state.editTimer) {
@@ -783,6 +889,18 @@ export class DiscordAdapter {
     }
     const trigger = state?.pendingTriggers.shift() ?? null;
     if (!trigger) return;
+    // 긴 작업이었으면 이 턴의 답(뒤따르는 전송)이 시킨 사람을 부르게 한다(§3.1).
+    const author = trigger.author?.id;
+    if (ping && author !== undefined && triggerId !== undefined && trigger.id === triggerId && decideCompletionPing({
+      startedAt: this.triggerStartedAt.get(trigger), now: Date.now(), isDM: trigger.channel?.type === ChannelType.DM,
+    })) {
+      ping.userId = author;
+    }
+    await this.markTriggerDone(trigger);
+  }
+
+  // 순번에서 꺼낸 원본 메시지의 반응을 처리중→완료로 바꾼다. finishStatus 와, 묶인 메시지의 순번을 닫는 turn_merged 가 함께 쓴다.
+  private async markTriggerDone(trigger: Message): Promise<void> {
     try {
       // reaction.remove() 는 그 반응의 모든 사용자를 지우며 MANAGE_MESSAGES 를 요구하고 DM 에서 불가능하다.
       // users.remove()(인자 없으면 봇 자신 → .../@me) 는 자기 반응만 지우므로 권한 없이도, DM 에서도 동작한다.
@@ -830,19 +948,35 @@ export class DiscordAdapter {
     }
   }
 
-  private async send(channelRef: string, text: string): Promise<void> {
+  // 완료 알림을 답장(reply)이 아니라 첫 조각 앞의 멘션으로 하는 이유: 일반 채널에서 불러 스레드를 새로 연 턴은 원 메시지가 부모
+  // 채널에 있어, 거기에 답장하면 답이 스레드 밖으로 나간다. 멘션은 클라이언트 기본값(DEFAULT_ALLOWED_MENTIONS — 사람만)으로 울린다.
+  private async send(channelRef: string, text: string, opts: { mentionUserId?: string } = {}): Promise<void> {
     try {
       const channel = await this.client.channels.fetch(channelRef);
       if (!channel || !channel.isSendable()) return;
-      const plan = planSend(text);
+      let plan = planSend(text, opts);
       if (plan.chunks.length === 0) {
         // 본문이 없다. 조용히 넘어가면 완료 반응만 달리고 답이 없는 상태가 된다.
         console.error(`[discord] 보낼 내용이 없어 폴백으로 대체 — 채널 ${channelRef}`);
         await channel.send(SEND_EMPTY_FALLBACK);
         return;
       }
-      for (const chunk of plan.chunks) {
-        await channel.send(chunk);
+      // 완료 알림 조각만 그 사람을 지정해 울린다 — 클라이언트 기본값(DEFAULT_ALLOWED_MENTIONS)은 본문의 멘션을 아무도 울리지 않는다.
+      const ping = opts.mentionUserId !== undefined ? { allowedMentions: { users: [opts.mentionUserId] } } : {};
+      if (plan.file) {
+        try {
+          await channel.send({ content: plan.chunks[0], files: [{ attachment: Buffer.from(plan.file.content, "utf8"), name: plan.file.name }], ...ping });
+          return;
+        } catch (err) {
+          // 첨부가 거부되면(그 채널에 파일 첨부 권한이 없는 등) 답 전체를 잃지 않게 일반 메시지로 나눠 보낸다(2026-11-25 리뷰) —
+          // 예전엔 일반 답에 첨부 권한이 필요 없었다. sendFile 의 실패 안내와 같은 방어선이다.
+          console.error(`[discord] 긴 답 첨부 실패 — 일반 메시지로 나눠 보냅니다(채널 ${channelRef}):`, err);
+          plan = planSend(text, { ...opts, allowFile: false });
+        }
+      }
+      for (const [i, chunk] of plan.chunks.entries()) {
+        if (i === 0 && opts.mentionUserId !== undefined) await channel.send({ content: chunk, ...ping });
+        else await channel.send(chunk);
       }
     } catch (err) {
       console.error("[discord] 전송 실패:", err);

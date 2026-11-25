@@ -32,8 +32,11 @@ export type ConversationHint = {
 // 사유 텍스트 그대로 나른다 — core.ts 가 이 값을 failedFiles 의 초기값으로 얹어야 거절된
 // 첨부가 조용히 사라지지 않는다(최종 리뷰 Important).
 export type UserMessageEvent = { type: "user_message"; channel: ChannelKind; channelRef: string; text: string; ts: number; hint?: ConversationHint; images?: ImageRef[]; files?: FileRef[]; rejectedFiles?: string[] };
-export type AssistantMessageEvent = { type: "assistant_message"; channel: ChannelKind; channelRef: string; text: string; ts: number };
-export type SystemNoticeEvent = { type: "system_notice"; channel: ChannelKind; channelRef: string; text: string; ts: number };
+// triggerId(빠른 개선 2차, 2026-11-25 리뷰): 이 종료 이벤트를 낸 턴을 시작시킨 디스코드 메시지 id. 어댑터는 반응 순번을 지금처럼
+// 맨 앞부터 꺼내되, 꺼낸 메시지가 이 값과 같을 때만 긴 작업 완료 알림을 보낸다 — 순번이 어긋난 때(대화 안 /help 등) 엉뚱한 사람을
+// 부르지 않게. 대화 턴(runConversationTurn)의 종료 이벤트만 싣고, 나머지는 비워 둔다(그러면 알림이 없다).
+export type AssistantMessageEvent = { type: "assistant_message"; channel: ChannelKind; channelRef: string; text: string; ts: number; triggerId?: string };
+export type SystemNoticeEvent = { type: "system_notice"; channel: ChannelKind; channelRef: string; text: string; ts: number; triggerId?: string };
 // 턴 처리 중 진행 상황(도구 호출/결과/답변 시작 등)을 알리는 이벤트(2B). 실제 표시(전송·편집)는 어댑터 쪽 책임.
 // kind(2026-11-25, N1): 그 줄이 무엇에서 나왔는가. 어댑터가 머리줄의 단계 수(tool 의 개수)를 세고, 끝난 뒤 기록에서
 // 최종 답의 첫 문장인 마지막 note 를 빼려면 줄의 종류를 알아야 한다. notice 는 진행 중 턴에 덧붙이는 안내(도중에 온
@@ -56,7 +59,16 @@ export type SideNoticeEvent = { type: "side_notice"; channel: ChannelKind; chann
 // requestCancel 이 받는다 — 예약어 /취소 는 user_message 로 와서 코어의 ingest 가 같은 함수로 보낸다. 권한 판정(시킨
 // 사람·소유자)은 코어가 한다. 어댑터는 그 클릭이 등록된 사람의 것인지만 거른다.
 export type CancelRequestEvent = { type: "cancel_request"; channel: ChannelKind; channelRef: string; userId: string; ts: number };
-export type AgentEvent = UserMessageEvent | AssistantMessageEvent | SystemNoticeEvent | ProgressEvent | AssistantFileEvent | SideNoticeEvent | CancelRequestEvent;
+// 사용자가 아직 끝나지 않은 턴의 메시지를 고쳤다(빠른 개선 2차 §3.5, 2026-11-25). 어댑터가 messageUpdate 에서 내용이 실제로 바뀐
+// 경우, 그리고 그 메시지가 반응 순번(아직 끝나지 않은 턴)에 있을 때만 낸다. text 는 처음 받을 때와 같이 만든 본문이다(봇 멘션 제거·
+// 답장 인용). 코어는 아직 시작하지 않은 메시지면 고친 내용으로 처리하고, 이미 시작한 턴의 것이면 반영되지 않았다고 알린다.
+export type UserMessageEditEvent = { type: "user_message_edit"; channel: ChannelKind; channelRef: string; discordMessageId: string; userId: string; text: string; ts: number };
+// 대기 중이던 메시지가 앞 턴에 묶여 처리됐다(빠른 개선 2차 §3.6). 어댑터는 메시지마다 👀 를 달았으므로 그 몫의 순번도 닫아야 한다 —
+// 이 이벤트는 상태 메시지를 건드리지 않고 순번 하나만 ✅ 로 바꾼다. 묶인 턴의 종료 이벤트(답) 뒤에, 묶인 메시지 수만큼 차례로 온다.
+export type TurnMergedEvent = { type: "turn_merged"; channel: ChannelKind; channelRef: string; ts: number };
+export type AgentEvent =
+  | UserMessageEvent | AssistantMessageEvent | SystemNoticeEvent | ProgressEvent | AssistantFileEvent | SideNoticeEvent | CancelRequestEvent
+  | UserMessageEditEvent | TurnMergedEvent;
 
 type Handler = (e: AgentEvent) => void | Promise<void>;
 

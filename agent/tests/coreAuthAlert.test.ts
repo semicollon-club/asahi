@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { setupCore, flush, dmHint, threadHint, say } from "./helpers/coreSetup.js";
 import { AUTH_ALERT_COOLDOWN_MS } from "../src/core/authFailure.js";
+import { describeTurnFailure } from "../src/core/failureText.js";
 
 // 빠른 개선 1.1(2026-11-25 설계): 구독 인증 실패를 소유자 DM 에 알린다. 2026-11-25 의 실제 문구로 재현한다.
 const REVOKED = "Claude Code returned an error result: Failed to authenticate. API Error: 401 OAuth access token has been revoked.";
@@ -83,7 +84,8 @@ describe("인증 실패 — 결과(ok:false) 갈래", () => {
     await flush(); await f.core.drain();
 
     const toGuest = f.eventsIn("th-x", "system_notice").map((e) => ("text" in e ? e.text : ""));
-    expect(toGuest).toEqual(["비서 처리 중 오류가 있었어요: (에이전트 오류: error_max_turns)"]);
+    // 빠른 개선 2차 §3.3: 인증 실패가 아닌 실패는 원문 대신 상황별 문장이다(failureText.ts).
+    expect(toGuest).toEqual([describeTurnFailure("(에이전트 오류: error_max_turns)", { showRaw: false })]);
     expect(f.eventsIn("dm-owner")).toHaveLength(0);
   });
 });
